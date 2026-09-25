@@ -1,4 +1,3 @@
-// Package metadata owns the supported local GitHub Action metadata model.
 package metadata
 
 import (
@@ -9,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -85,19 +85,21 @@ type CompositeStep struct {
 	Env              map[string]string `yaml:"env"`
 	If               string            `yaml:"if"`
 	With             map[string]string `yaml:"with"`
+	ContinueOnError  bool              `yaml:"continue-on-error"`
 }
 
 // Runtime identifies one supported action execution model.
 type Runtime string
+
+const runtimeNode20Declaration = "node20"
+
+var dockerImagePattern = regexp.MustCompile(`^(?:(?:[a-z0-9]+(?:[._-][a-z0-9]+)*|\[[0-9a-f:]+\])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$`)
 
 const (
 	// MaxNestedActionDepth bounds local action expansion in both compilation and execution.
 	MaxNestedActionDepth = 10
 	// RuntimeNode16 executes a JavaScript action with managed Node 16.
 	RuntimeNode16 Runtime = "node16"
-	// RuntimeNode20 identifies the accepted node20 action declaration. Matching
-	// GitHub-hosted runners, Runtime maps it to the managed Node 24 runtime.
-	RuntimeNode20 Runtime = "node20"
 	// RuntimeNode24 executes a JavaScript action with managed Node 24.
 	RuntimeNode24 Runtime = "node24"
 	// RuntimeComposite executes a composite action.
@@ -152,7 +154,15 @@ func Load(root, path string) (Metadata, error) {
 
 	metadata := Metadata{Path: actionPath}
 	var document yaml.Node
-	if err := yaml.Unmarshal(source, &document); err != nil {
+	documentDecoder := yaml.NewDecoder(bytes.NewReader(source))
+	if err := documentDecoder.Decode(&document); err != nil {
+		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
+	}
+	var trailing any
+	if err := documentDecoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return Metadata{}, fmt.Errorf("parse action metadata %q: multiple YAML documents", metadataPath)
+		}
 		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
 	}
 	if err := rejectCompositeControls(metadataPath, &document); err != nil {
@@ -161,16 +171,27 @@ func Load(root, path string) (Metadata, error) {
 	if err := validateCompositeSteps(metadataPath, &document); err != nil {
 		return Metadata{}, err
 	}
+	if err := validateDockerArgs(metadataPath, &document); err != nil {
+		return Metadata{}, err
+	}
+	if discardTopLevelEnv(&document) {
+		var validated struct {
+			Metadata `yaml:",inline"`
+			Env      yaml.Node `yaml:"env"`
+		}
+		validator := yaml.NewDecoder(bytes.NewReader(source))
+		validator.KnownFields(true)
+		if err := validator.Decode(&validated); err != nil {
+			return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
+		}
+		source, err = yaml.Marshal(&document)
+		if err != nil {
+			return Metadata{}, fmt.Errorf("parse action metadata %q: discard top-level env: %w", metadataPath, err)
+		}
+	}
 	decoder := yaml.NewDecoder(bytes.NewReader(source))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&metadata); err != nil {
-		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return Metadata{}, fmt.Errorf("parse action metadata %q: multiple YAML documents", metadataPath)
-		}
 		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
 	}
 	if metadata.Runs.Using == "" {
@@ -195,6 +216,50 @@ func Load(root, path string) (Metadata, error) {
 		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
 	}
 	return metadata, nil
+}
+
+func validateDockerArgs(path string, document *yaml.Node) error {
+	var resolved struct {
+		Runs map[string]any `yaml:"runs"`
+	}
+	if err := document.Decode(&resolved); err != nil {
+		return nil // The strict metadata decoder reports malformed values.
+	}
+	if resolved.Runs["using"] != string(RuntimeDocker) {
+		return nil
+	}
+	value, exists := resolved.Runs["args"]
+	if !exists {
+		return nil
+	}
+	args, ok := value.([]any)
+	if !ok {
+		return fmt.Errorf("parse action metadata %q: docker runs.args must be a string array", path)
+	}
+	for i, argument := range args {
+		if _, ok := argument.(string); !ok {
+			return fmt.Errorf("parse action metadata %q: docker runs.args item %d must be a string", path, i+1)
+		}
+	}
+	return nil
+}
+
+func discardTopLevelEnv(document *yaml.Node) bool {
+	root := document
+	if root.Kind == yaml.DocumentNode && len(root.Content) != 0 {
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != "env" {
+			continue
+		}
+		root.Content = append(root.Content[:i], root.Content[i+2:]...)
+		return true
+	}
+	return false
 }
 
 func rejectCompositeControls(path string, document *yaml.Node) error {
@@ -309,7 +374,7 @@ func (metadata Metadata) Runtime() (Runtime, error) {
 	switch metadata.Runs.Using {
 	case string(RuntimeNode16):
 		return RuntimeNode16, nil
-	case string(RuntimeNode20):
+	case runtimeNode20Declaration:
 		return RuntimeNode24, nil
 	case string(RuntimeNode24):
 		return RuntimeNode24, nil
@@ -322,6 +387,23 @@ func (metadata Metadata) Runtime() (Runtime, error) {
 	}
 }
 
+// DockerImageReference returns the image reference from a prebuilt Docker
+// action declaration. Dockerfile actions and invalid declarations return
+// false.
+func DockerImageReference(image string) (string, bool) {
+	reference, ok := strings.CutPrefix(image, "docker://")
+	if !ok || !ValidDockerImageReference(reference) {
+		return "", false
+	}
+	return reference, true
+}
+
+// ValidDockerImageReference reports whether image is a supported literal
+// Docker image reference.
+func ValidDockerImageReference(image string) bool {
+	return len(image) <= 512 && dockerImagePattern.MatchString(image)
+}
+
 // ValidateEntrypoints confines JavaScript lifecycle programs to the verified
 // source tree and requires each declared entry point to be a regular file.
 // Remote actions may share repository-level build output across action
@@ -329,13 +411,18 @@ func (metadata Metadata) Runtime() (Runtime, error) {
 // Callers should invoke this after Runtime.
 func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
 	if runtime == RuntimeDocker {
-		if metadata.Runs.Image != "Dockerfile" {
-			return fmt.Errorf("docker action requires exact runs.image %q", "Dockerfile")
-		}
-		if metadata.Runs.Main != "" || metadata.Runs.Entrypoint != "" || len(metadata.Runs.Args) != 0 ||
-			metadata.Runs.Pre != "" || metadata.Runs.PreIf != "" || metadata.Runs.PreEntrypoint != "" ||
+		if metadata.Runs.Main != "" || metadata.Runs.Pre != "" || metadata.Runs.PreIf != "" || metadata.Runs.PreEntrypoint != "" ||
 			metadata.Runs.Post != "" || metadata.Runs.PostIf != "" || metadata.Runs.PostEntrypoint != "" {
-			return fmt.Errorf("docker action may not declare entrypoint, arguments, or pre/post lifecycle")
+			return fmt.Errorf("docker action may not declare pre/post lifecycle")
+		}
+		if metadata.Runs.Image != "Dockerfile" {
+			if _, ok := DockerImageReference(metadata.Runs.Image); !ok {
+				return fmt.Errorf("docker action requires runs.image %q or a valid docker:// image reference", "Dockerfile")
+			}
+			return nil
+		}
+		if metadata.Runs.Entrypoint != "" {
+			return fmt.Errorf("dockerfile action may not declare an entrypoint")
 		}
 		dockerfile := filepath.Join(metadata.Path, "Dockerfile")
 		info, err := os.Lstat(dockerfile)
@@ -347,7 +434,7 @@ func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
 		}
 		return nil
 	}
-	if runtime != RuntimeNode16 && runtime != RuntimeNode20 && runtime != RuntimeNode24 {
+	if runtime != RuntimeNode16 && runtime != RuntimeNode24 {
 		return nil
 	}
 	if metadata.Runs.Main == "" {

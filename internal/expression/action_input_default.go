@@ -1,27 +1,26 @@
 // Action input default validation and evaluation with GitHub's loose
 // coercion semantics. Deliberately separate from the strict condition
 // family in condition.go.
+
 package expression
 
 import (
-	"encoding/json"
 	"fmt"
-	"math/big"
-	"reflect"
 	"strings"
 
 	"github.com/rhysd/actionlint"
 )
 
-// ValidateActionInputDefault verifies the restricted compound expression
-// surface supported only while evaluating action metadata input defaults.
-func ValidateActionInputDefault(template string) error {
-	referencesJobStatus, err := ReferencesJobStatus(template)
+// validateActionInputDefaultTemplate verifies the restricted compound
+// expression surface supported only while evaluating action metadata input
+// defaults.
+func validateActionInputDefaultTemplate(template string) error {
+	referencesJobStatus, err := templateReferencesJobStatus(template)
 	if err != nil {
 		return err
 	}
 	if referencesJobStatus {
-		root, path, err := ReferencePath(template)
+		root, path, err := staticReferencePath(template)
 		if err != nil || !isJobStatusReference(root, path) {
 			return fmt.Errorf("action input default job.status must be one direct expression")
 		}
@@ -30,15 +29,18 @@ func ValidateActionInputDefault(template string) error {
 }
 
 func validateActionInputDefaultNode(node actionlint.ExprNode) error {
-	switch node := node.(type) {
-	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
-		return nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, path, err := referencePath(node)
-		if err != nil {
-			return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
-		}
+	validator := newSemanticValidator(actionInputDefaultSurface)
+	validator.validateReference = func(node actionlint.ExprNode, root string, path []string) error {
 		if isJobStatusReference(root, path) {
+			return nil
+		}
+		if isJobCheckRunIDReference(root, path) {
+			return nil
+		}
+		if isRunnerTempReference(root, path) {
+			return fmt.Errorf("action input defaults cannot reference runner.temp")
+		}
+		if isDirectRunnerDebug(node, root, path) {
 			return nil
 		}
 		kind := classifyRuntimeReference(root, path)
@@ -49,244 +51,153 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
 		}
 		return nil
-	case *actionlint.LogicalOpNode:
-		if err := validateActionInputDefaultNode(node.Left); err != nil {
-			return err
-		}
-		return validateActionInputDefaultNode(node.Right)
-	case *actionlint.CompareOpNode:
-		if !node.Kind.IsEqualityOp() {
-			return fmt.Errorf("action input default comparison %s is unsupported", node.Kind)
-		}
-		if err := validateActionInputDefaultNode(node.Left); err != nil {
-			return err
-		}
-		return validateActionInputDefaultNode(node.Right)
-	case *actionlint.FuncCallNode:
-		if !strings.EqualFold(node.Callee, "toJSON") || len(node.Args) != 1 {
-			return fmt.Errorf("action input default function %q is unsupported", node.Callee)
-		}
-		root, path, err := referencePath(node.Args[0])
-		if err != nil || !strings.EqualFold(root, "matrix") || len(path) != 0 {
-			return fmt.Errorf("action input default toJSON requires the complete matrix context")
-		}
-		return nil
-	default:
-		return fmt.Errorf("action input default expression is unsupported")
 	}
+	validator.referenceError = func(err error) error {
+		return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
+	}
+	validator.validateAccess = func(access actionlint.ExprNode) error {
+		if !isGitHubEventAccess(access) {
+			root, path, err := referencePath(access)
+			if err != nil {
+				return validator.referenceError(err)
+			}
+			return validator.validateReference(access, root, path)
+		}
+		switch access := access.(type) {
+		case *actionlint.ObjectDerefNode:
+			return validator.validate(access.Receiver)
+		case *actionlint.IndexAccessNode:
+			if err := validator.validate(access.Operand); err != nil {
+				return err
+			}
+			return validator.validate(access.Index)
+		case *actionlint.ArrayDerefNode:
+			return validator.validate(access.Receiver)
+		default:
+			return nil
+		}
+	}
+	validator.validateCompare = func(kind actionlint.CompareOpNodeKind) error {
+		return nil
+	}
+	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
+	validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
+		if strings.EqualFold(node.Callee, "toJSON") && len(node.Args) == 1 {
+			root, path, err := referencePath(node.Args[0])
+			if err == nil && strings.EqualFold(root, "matrix") && len(path) == 0 {
+				return nil
+			}
+		}
+		if recognized, err := validatePureFunction(validator, node); recognized {
+			return err
+		}
+		return fmt.Errorf("action input default function %q is unsupported", node.Callee)
+	}
+	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("action input default expression is unsupported") }
+	return validator.validate(node)
 }
 
-// EvaluateActionInputDefault substitutes the restricted compound expressions
+// evaluateActionInputDefault substitutes the restricted compound expressions
 // supported only in action metadata input defaults.
-func EvaluateActionInputDefault(template string, context Context) (string, error) {
+func evaluateActionInputDefault(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateActionInputDefaultNode)
 }
 
-// ActionInputDefaultRequiresGitHubToken reports whether a metadata default can
-// reach github.token for the event provider. Defaults involving any other
-// runtime value fail closed because those values are not known during
-// compilation.
-func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, error) {
-	referencesToken, err := ReferencesGitHubToken(template)
+func isDirectRunnerDebug(node actionlint.ExprNode, root string, path []string) bool {
+	_, direct := node.(*actionlint.ObjectDerefNode)
+	return direct && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug")
+}
+
+func isJobCheckRunIDReference(root string, path []string) bool {
+	return strings.EqualFold(root, "job") && len(path) == 1 && strings.EqualFold(path[0], "check_run_id")
+}
+
+func isRunnerTempReference(root string, path []string) bool {
+	return strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "temp")
+}
+
+// actionInputDefaultRequiresGitHubToken reports whether a metadata default can
+// reach github.token for the event provider. A token branch guarded by an
+// unknown runtime value requires the token because that value is not known
+// during compilation.
+func actionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, error) {
+	referencesToken, err := templateReferencesGitHubToken(template)
 	if err != nil || !referencesToken {
 		return referencesToken, err
 	}
-	onlyKnownReferences := true
+	requiresToken := false
 	err = visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
-		actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {
-			if !entering || !onlyKnownReferences {
-				return
-			}
-			switch node.(type) {
-			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-			default:
-				return
-			}
-			root, path, referenceErr := referencePath(node)
-			if referenceErr != nil {
-				onlyKnownReferences = false
-				return
-			}
-			if len(path) == 0 {
-				switch parent := parent.(type) {
-				case *actionlint.ObjectDerefNode:
-					if parent.Receiver == node {
-						return
-					}
-				case *actionlint.IndexAccessNode:
-					if parent.Operand == node {
-						return
-					}
-				}
-			}
-			onlyKnownReferences = strings.EqualFold(root, "github") && len(path) == 1 &&
-				(strings.EqualFold(path[0], "server_url") || strings.EqualFold(path[0], "token"))
+		analysis, analysisErr := analyzeActionInputDefault(expression, map[string]any{
+			"github.server_url": serverURL,
+			"job.check_run_id":  "",
 		})
+		if analysisErr != nil {
+			// Runtime-dependent evaluation failures previously fell back to
+			// conservative authority. Preserve that behavior while the
+			// exhaustive reference pass above continues to own validation.
+			requiresToken = true
+			return nil
+		}
+		requiresToken = requiresToken || analysis.Effects.GitHubToken != 0
 		return nil
 	})
-	if err != nil {
-		return false, err
-	}
-	if !onlyKnownReferences {
-		return true, nil
-	}
-	_, err = EvaluateActionInputDefault(template, Context{GitHub: map[string]any{"server_url": serverURL}})
-	return err != nil, nil
+	return requiresToken, err
 }
 
 func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (any, error) {
-	switch node := node.(type) {
-	case *actionlint.NullNode:
-		return nil, nil
-	case *actionlint.BoolNode:
-		return node.Value, nil
-	case *actionlint.IntNode:
-		return node.Value, nil
-	case *actionlint.FloatNode:
-		return node.Value, nil
-	case *actionlint.StringNode:
-		return node.Value, nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, path, err := referencePath(node)
-		if err != nil {
-			return nil, err
-		}
+	if err := validateActionInputDefaultNode(node); err != nil {
+		return nil, err
+	}
+	root, path, err := referencePath(node)
+	if err == nil && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug") && !isDirectRunnerDebug(node, root, path) {
+		return nil, fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+	}
+	evaluator := newSemanticEvaluator(actionInputDefaultSurface)
+	evaluator.resolve = func(root string, path []string) (any, error) {
 		if isJobStatusReference(root, path) {
 			if context.JobStatus == "" {
 				return nil, fmt.Errorf("expression references unavailable job.status")
 			}
 			return context.JobStatus, nil
 		}
-		return resolveRuntimeReference(root, path, context)
-	case *actionlint.LogicalOpNode:
-		left, err := evaluateActionInputDefaultNode(node.Left, context)
-		if err != nil {
-			return nil, err
+		if isJobCheckRunIDReference(root, path) {
+			// Buildkite creates no GitHub check run. GitHub documents this
+			// property as unavailable on GitHub Enterprise Server; unavailable
+			// properties interpolate as an empty string.
+			return "", nil
 		}
-		switch node.Kind {
-		case actionlint.LogicalOpNodeKindAnd:
-			if !actionInputDefaultTruthy(left) {
-				return left, nil
+		if isRunnerTempReference(root, path) {
+			return nil, fmt.Errorf("action input defaults cannot reference runner.temp")
+		}
+		if strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug") {
+			return "false", nil
+		}
+		return resolveRuntimeReferenceWithMissingMembers(root, path, context)
+	}
+	evaluator.resolveRoot = func(root string) (any, error) { return resolveStepRuntimeRoot(root, context) }
+	evaluator.truthy = githubTruthy
+	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
+		return githubCompare(kind, left, right)
+	}
+	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("action input default expression is unsupported") }
+	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
+		return fmt.Errorf("action input default logical operator %s is unsupported", kind)
+	}
+	evaluator.call = func(evaluator *semanticEvaluator, node *actionlint.FuncCallNode) (any, error) {
+		if strings.EqualFold(node.Callee, "toJSON") && len(node.Args) == 1 {
+			root, path, err := referencePath(node.Args[0])
+			if err == nil && strings.EqualFold(root, "matrix") && len(path) == 0 {
+				value, err := encodeExpressionJSON(context.Matrix)
+				if err != nil {
+					return nil, fmt.Errorf("encode action input default matrix as JSON: %w", err)
+				}
+				return value, nil
 			}
-			return evaluateActionInputDefaultNode(node.Right, context)
-		case actionlint.LogicalOpNodeKindOr:
-			if actionInputDefaultTruthy(left) {
-				return left, nil
-			}
-			return evaluateActionInputDefaultNode(node.Right, context)
-		default:
-			return nil, fmt.Errorf("action input default logical operator %s is unsupported", node.Kind)
 		}
-	case *actionlint.CompareOpNode:
-		left, err := evaluateActionInputDefaultNode(node.Left, context)
-		if err != nil {
-			return nil, err
+		if value, recognized, err := evaluatePureFunction(evaluator, node); recognized {
+			return value, err
 		}
-		right, err := evaluateActionInputDefaultNode(node.Right, context)
-		if err != nil {
-			return nil, err
-		}
-		equal := actionInputDefaultEqual(left, right)
-		switch node.Kind {
-		case actionlint.CompareOpNodeKindEq:
-			return equal, nil
-		case actionlint.CompareOpNodeKindNotEq:
-			return !equal, nil
-		default:
-			return nil, fmt.Errorf("action input default comparison %s is unsupported", node.Kind)
-		}
-	case *actionlint.FuncCallNode:
-		if !strings.EqualFold(node.Callee, "toJSON") || len(node.Args) != 1 {
-			return nil, fmt.Errorf("action input default function %q is unsupported", node.Callee)
-		}
-		root, path, err := referencePath(node.Args[0])
-		if err != nil || !strings.EqualFold(root, "matrix") || len(path) != 0 {
-			return nil, fmt.Errorf("action input default toJSON requires the complete matrix context")
-		}
-		value, err := json.MarshalIndent(context.Matrix, "", "  ")
-		if err != nil {
-			return nil, fmt.Errorf("encode action input default matrix as JSON: %w", err)
-		}
-		return string(value), nil
-	default:
-		return nil, fmt.Errorf("action input default expression is unsupported")
+		return nil, fmt.Errorf("action input default function %q is unsupported", node.Callee)
 	}
-}
-
-// The actionInputDefault* helpers are the loose coercion family that mirrors
-// GitHub's expression semantics for action input defaults: nil and empty
-// strings coerce to zero, booleans coerce to numbers, and same-typed
-// aggregates compare by identity. Runtime conditions deliberately use the
-// strict condition* family instead; keep the two separate.
-func actionInputDefaultTruthy(value any) bool {
-	switch value := value.(type) {
-	case nil:
-		return false
-	case bool:
-		return value
-	case string:
-		return value != ""
-	}
-	if number, ok := conditionNumber(value); ok {
-		return number.Sign() != 0
-	}
-	return true
-}
-
-func actionInputDefaultEqual(left, right any) bool {
-	if left == nil && right == nil {
-		return true
-	}
-	if leftNumber, leftOK := conditionNumber(left); leftOK {
-		if rightNumber, rightOK := conditionNumber(right); rightOK {
-			return leftNumber.Cmp(rightNumber) == 0
-		}
-	}
-	switch left := left.(type) {
-	case string:
-		if right, ok := right.(string); ok {
-			return strings.EqualFold(left, right)
-		}
-	case bool:
-		if right, ok := right.(bool); ok {
-			return left == right
-		}
-	}
-	if left != nil && right != nil && reflect.TypeOf(left) == reflect.TypeOf(right) {
-		leftValue, rightValue := reflect.ValueOf(left), reflect.ValueOf(right)
-		switch leftValue.Kind() {
-		case reflect.Map, reflect.Pointer, reflect.Slice:
-			return leftValue.Pointer() == rightValue.Pointer()
-		}
-	}
-	leftNumber, leftOK := actionInputDefaultNumber(left)
-	rightNumber, rightOK := actionInputDefaultNumber(right)
-	return leftOK && rightOK && leftNumber.Cmp(rightNumber) == 0
-}
-
-func actionInputDefaultNumber(value any) (*big.Rat, bool) {
-	switch value := value.(type) {
-	case nil:
-		return new(big.Rat), true
-	case bool:
-		if value {
-			return big.NewRat(1, 1), true
-		}
-		return new(big.Rat), true
-	case string:
-		if strings.TrimSpace(value) == "" {
-			return new(big.Rat), true
-		}
-		decoded, err := decodeJSONValue(value)
-		if err != nil {
-			return nil, false
-		}
-		number, ok := decoded.(json.Number)
-		if !ok {
-			return nil, false
-		}
-		return conditionNumber(number)
-	default:
-		return conditionNumber(value)
-	}
+	return evaluator.evaluate(node)
 }

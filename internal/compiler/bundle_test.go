@@ -2,18 +2,21 @@ package compiler
 
 import (
 	"bytes"
-	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -39,6 +42,16 @@ func TestCompileBundleGoldenAndDeterministic(t *testing.T) {
 	}
 	producer := first.IR.Jobs[0].Key
 	for i, artifact := range first.Plans {
+		encoded, err := plan.Encode(artifact.Job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(artifact.Contents, encoded) {
+			t.Fatalf("plan %d retained bytes differ from its final job", i)
+		}
+		if digest := fmt.Sprintf("sha256:%x", sha256.Sum256(artifact.Contents)); artifact.Digest != digest {
+			t.Fatalf("plan %d digest = %q, want %q", i, artifact.Digest, digest)
+		}
 		if artifact.Path != ".buildkite-gha/plans/"+strings.TrimPrefix(artifact.Digest, "sha256:")+".json" {
 			t.Fatalf("plan %d path = %q", i, artifact.Path)
 		}
@@ -47,6 +60,9 @@ func TestCompileBundleGoldenAndDeterministic(t *testing.T) {
 		}
 		if i > 0 && !reflect.DeepEqual(artifact.Job.Dependencies, []string{producer}) {
 			t.Fatalf("consumer dependencies = %#v, want %q", artifact.Job.Dependencies, producer)
+		}
+		if i > 0 && !reflect.DeepEqual(artifact.Job.NeedSources["producer"], []plan.NeedSource{{StepKey: producer, PlanDigest: first.Plans[0].Digest}}) {
+			t.Fatalf("consumer prerequisite does not identify the emitted producer plan: %#v", artifact.Job.NeedSources)
 		}
 	}
 	wantPipeline := readFile(t, filepath.Join("testdata", "shell.pipeline.golden.yml"))
@@ -59,7 +75,54 @@ func TestCompileBundleGoldenAndDeterministic(t *testing.T) {
 	}
 }
 
-func TestCompileBundleDoesNotActivateValidatedRuntimeMatrixWithoutFencing(t *testing.T) {
+func TestCompileBundleGeneratesDeterministicPipelineForResolvedContainerImage(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [node:24, node:25]
+    container:
+      image: ${{ matrix.image }}
+      volumes: [cache:/cache:ro, /anonymous, /srv/data:/data]
+      options: --privileged --label "description=two words"
+    steps: [{run: true}]
+`)
+	event := readFile(t, smokePath("events", "push.json"))
+	first, err := CompileBundle("containers.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := CompileBundle("containers.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) || len(first.Plans) != 2 || len(first.Pipeline) == 0 {
+		t.Fatalf("container bundle was not deterministic: %#v", first)
+	}
+	for i, image := range []string{"node:24", "node:25"} {
+		container := first.Plans[i].Job.Container
+		if container == nil || container.Image != image || !slices.Equal(container.Volumes, []string{"cache:/cache:ro", "/anonymous", "/srv/data:/data"}) || container.Options != `--privileged --label "description=two words"` || bytes.Contains(first.Plans[i].Contents, []byte("${{")) {
+			t.Fatalf("plan %d container = %#v", i, first.Plans[i].Job.Container)
+		}
+	}
+}
+
+func TestCompileBundleRejectsRunnerCacheForJobContainer(t *testing.T) {
+	options := defaultOptions()
+	options.Runners.Labels = nil
+	options.Runners.Targets = map[string]RunnerTarget{
+		"ubuntu-latest": {Platform: PlatformLinuxAMD64, Cache: &CacheVolume{Paths: []string{"/home/runner/.cache"}}},
+	}
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: node:24\n    steps: [{run: true}]\n")
+	_, err := CompileBundleWithOptions("containers.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err == nil || !strings.Contains(err.Error(), "runner cache volumes are unsupported for jobs with a container") {
+		t.Fatalf("CompileBundleWithOptions() error = %v, want runner cache container rejection", err)
+	}
+}
+
+func TestCompileBundleDefersRuntimeMatrixWithoutSingleWorkflowPipeline(t *testing.T) {
 	source := []byte(`on: push
 jobs:
   producer:
@@ -81,21 +144,31 @@ jobs:
       - run: echo "${{ matrix.steps }}"
 `)
 	bundle, err := CompileBundle("runtime-matrix.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "continuation upload is disabled") {
+	if err != nil {
 		t.Fatalf("CompileBundle() error = %v", err)
 	}
-	if len(bundle.Plans) != 0 || len(bundle.Pipeline) != 0 {
-		t.Fatalf("unsafe runtime matrix produced %d plans and %d pipeline bytes", len(bundle.Plans), len(bundle.Pipeline))
+	// Only the producer is planned now; the consumer's plans are built by the
+	// continuation once the producer output exists.
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Workflow.LogicalJobID != "producer" {
+		t.Fatalf("plans = %#v", bundle.Plans)
 	}
 	if len(bundle.IR.Jobs) != 1 || bundle.IR.Jobs[0].LogicalJobID != "producer" {
-		t.Fatalf("partial safe IR jobs = %#v", bundle.IR.Jobs)
+		t.Fatalf("static IR jobs = %#v", bundle.IR.Jobs)
+	}
+	if len(bundle.IR.Continuations) != 1 || bundle.IR.Continuations[0].StepKey != "gha-generated-matrix" || strings.Join(bundle.IR.Continuations[0].Jobs, ",") != "generated" {
+		t.Fatalf("continuations = %#v", bundle.IR.Continuations)
+	}
+	// A single-workflow pipeline would silently omit the deferred jobs, so
+	// only the aggregate upload emits one.
+	if len(bundle.Pipeline) != 0 || len(bundle.GeneratedWorkflow.Jobs) != 1 || !bundle.Processing.PipelineGenerated {
+		t.Fatalf("pipeline = %q, generated jobs = %#v, processing = %#v", bundle.Pipeline, bundle.GeneratedWorkflow.Jobs, bundle.Processing)
 	}
 }
 
 func TestBundlePlansPermitAdmissionBeforePipelineGeneration(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
 	options := defaultOptions()
-	bundle, err := CompileBundlePlansContext(context.Background(), path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, options)
+	bundle, err := CompileBundlePlansContext(t.Context(), path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,6 +179,199 @@ func TestBundlePlansPermitAdmissionBeforePipelineGeneration(t *testing.T) {
 	failed, err := GenerateBundlePipeline(bundle, testDistributionDigest, "gha-importer", options)
 	if err == nil || len(failed.Pipeline) != 0 || len(failed.Plans) != 3 {
 		t.Fatalf("pipeline generation = %d bytes, %d plans, %v", len(failed.Pipeline), len(failed.Plans), err)
+	}
+}
+
+func TestCompileBundlePlansKeepsOnlyJobsOutsideFailedActionDependencyClosure(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "partial.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte(`on: push
+jobs:
+  independent:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.value.outputs.result }}
+    steps:
+      - id: value
+        run: echo "result=safe" >> "$GITHUB_OUTPUT"
+  broken:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/missing
+  blocked:
+    needs: broken
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundlePlansContext(t.Context(), workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err == nil {
+		t.Fatal("CompileBundlePlansContext() unexpectedly succeeded")
+	}
+	if len(bundle.IR.Jobs) != 3 || len(bundle.Plans) != 1 || bundle.Plans[0].Job.Workflow.LogicalJobID != "independent" || len(bundle.Plans[0].Job.Dependencies) != 0 || bundle.Plans[0].Job.Outputs["value"] != "${{ steps.value.outputs.result }}" {
+		t.Fatalf("partial bundle = jobs %#v, plans %#v", bundle.IR.Jobs, bundle.Plans)
+	}
+	generated, err := GeneratePlannedWorkflow(bundle, defaultOptions())
+	if err != nil || len(generated.Jobs) != 1 || generated.Jobs[0].Key != bundle.Plans[0].Job.Target.StepKey {
+		t.Fatalf("GeneratePlannedWorkflow() = %#v, %v", generated, err)
+	}
+
+	unsafe := bundle
+	unsafe.IR.Jobs = append([]JobInstance(nil), bundle.IR.Jobs...)
+	for i := range unsafe.IR.Jobs {
+		if unsafe.IR.Jobs[i].Key == generated.Jobs[0].Key {
+			unsafe.IR.Jobs[i].Needs = []string{"gha-broken"}
+		}
+	}
+	if _, err := GeneratePlannedWorkflow(unsafe, defaultOptions()); err == nil || !strings.Contains(err.Error(), "without a plan") {
+		t.Fatalf("GeneratePlannedWorkflow() unsafe dependency error = %v", err)
+	}
+}
+
+func TestCompileBundlePlansKeepsJobsOutsideFailedExpressionDependencyClosure(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "partial.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte(`on: push
+jobs:
+  independent:
+    runs-on: ubuntu-latest
+    steps: [{run: echo safe}]
+  broken:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: cmd
+        run: echo unsupported
+  blocked:
+    needs: broken
+    runs-on: ubuntu-latest
+    steps: [{run: echo blocked}]
+`)
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundlePlansContext(t.Context(), workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err == nil || !strings.Contains(err.Error(), "shell") {
+		t.Fatalf("CompileBundlePlansContext() error = %v, want shell failure", err)
+	}
+	if len(bundle.IR.Jobs) != 3 || len(bundle.Plans) != 1 || bundle.Plans[0].Job.Workflow.LogicalJobID != "independent" {
+		t.Fatalf("partial bundle = jobs %#v, plans %#v", bundle.IR.Jobs, bundle.Plans)
+	}
+}
+
+func TestCompileBundlePlansOwnsMatrixInstanceOutcomes(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "matrix.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        shell: [bash, cmd]
+    runs-on: ubuntu-latest
+    steps:
+      - shell: ${{ matrix.shell }}
+        run: echo test
+`)
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundlePlansContext(t.Context(), workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err == nil {
+		t.Fatal("CompileBundlePlansContext() unexpectedly succeeded")
+	}
+	var planned, failed int
+	for _, instance := range bundle.IR.Jobs {
+		switch bundle.JobOutcomes[instance.Key] {
+		case JobPlanned:
+			planned++
+		case JobFailed:
+			failed++
+		default:
+			t.Fatalf("matrix instance %q outcome = %q", instance.Key, bundle.JobOutcomes[instance.Key])
+		}
+	}
+	if planned != 1 || failed != 1 || len(bundle.Plans) != 1 {
+		t.Fatalf("matrix outcomes = %#v, plans = %d", bundle.JobOutcomes, len(bundle.Plans))
+	}
+}
+
+func TestCompileBundlePlansCombinesStageFailuresWithoutBlockingIndependentJob(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "stages.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte(`on: push
+jobs:
+  safe:
+    runs-on: ubuntu-latest
+    steps: [{run: echo safe}]
+  bad-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: cmd
+        run: echo bad
+  bad-action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/missing
+`)
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundlePlansContext(t.Context(), workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err == nil || !strings.Contains(err.Error(), "shell") || !strings.Contains(err.Error(), `action "./.github/actions/missing"`) {
+		t.Fatalf("CompileBundlePlansContext() error = %v", err)
+	}
+	counts := map[JobOutcome]int{}
+	for _, outcome := range bundle.JobOutcomes {
+		counts[outcome]++
+	}
+	if counts[JobPlanned] != 1 || counts[JobFailed] != 2 || len(bundle.Plans) != 1 {
+		t.Fatalf("stage outcomes = %#v, plans = %d", bundle.JobOutcomes, len(bundle.Plans))
+	}
+}
+
+func TestCompileBundlePlansKeepsJobsOutsideFailedEnvironmentDependencyClosure(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "partial.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte(`on: push
+jobs:
+  independent:
+    runs-on: ubuntu-latest
+    steps: [{run: echo safe}]
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps: [{run: echo deploy}]
+  blocked:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps: [{run: echo blocked}]
+`)
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundlePlansContext(t.Context(), workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err == nil || !strings.Contains(err.Error(), "environment") {
+		t.Fatalf("CompileBundlePlansContext() error = %v, want environment failure", err)
+	}
+	if !bundle.IR.JobGraphComplete || len(bundle.IR.Jobs) != 3 || len(bundle.Plans) != 1 || bundle.Plans[0].Job.Workflow.LogicalJobID != "independent" {
+		t.Fatalf("partial bundle = jobs %#v, plans %#v", bundle.IR.Jobs, bundle.Plans)
 	}
 }
 
@@ -177,6 +443,36 @@ jobs:
 	}
 }
 
+func TestCompileBundleCarriesExpressionJobContinueOnError(t *testing.T) {
+	workflow := []byte(`on: push
+jobs:
+  build:
+    strategy:
+      matrix:
+        experimental: [false, true]
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ strategy.fail-fast && matrix.experimental }}
+    steps:
+      - run: exit 1
+`)
+	bundle, err := CompileBundle("workflow.yml", workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("compiled plans = %d, want two matrix jobs", len(bundle.Plans))
+	}
+	for i, want := range []bool{false, true} {
+		control := bundle.Plans[i].Job.Program.Job.ContinueOnError
+		if control.Expression != nil || control.Literal != want {
+			t.Fatalf("plan %d continue-on-error = %#v, want literal %t", i, control, want)
+		}
+		if bundle.Plans[i].Job.ContinueOnError != want {
+			t.Fatalf("plan %d soft-fail reservation = %t, want %t", i, bundle.Plans[i].Job.ContinueOnError, want)
+		}
+	}
+}
+
 func TestCompileBundlePreservesRuntimeImagePolicy(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
@@ -197,6 +493,44 @@ func TestCompileBundlePreservesRuntimeImagePolicy(t *testing.T) {
 	}
 	if len(document.Steps) != 1 || document.Steps[0].Image != image || !strings.Contains(document.Steps[0].Command, "--hosted-tool-cache") {
 		t.Fatalf("runtime image pipeline = %#v", document.Steps)
+	}
+}
+
+func TestCompileBundleKeepsNativeHostSeparateFromJobContainer(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: alpine:3.21\n    steps:\n      - run: true\n")
+	for _, toolCache := range []bool{false, true} {
+		options := defaultOptions()
+		// A general fallback image must not be applied to a tag-selected host.
+		options.RuntimeImage = "registry.example.com/fallback@sha256:" + strings.Repeat("b", 64)
+		options.Runners = RunnerPolicy{Targets: map[string]RunnerTarget{"ubuntu-latest": {
+			Queue: "native-linux", Platform: PlatformLinuxAMD64,
+			Agents: map[string]string{"nsc-gha-image": "ubuntu-24.04", "provider.setting": "opaque: value"}, ToolCache: &toolCache,
+		}}, UntrustedQueues: []string{"native-linux"}}
+		bundle, err := CompileBundleWithOptions("workflow.yml", workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document struct {
+			Steps []struct {
+				Image   string            `yaml:"image"`
+				Agents  map[string]string `yaml:"agents"`
+				Command string            `yaml:"command"`
+			} `yaml:"steps"`
+		}
+		if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
+			t.Fatal(err)
+		}
+		if len(document.Steps) != 1 {
+			t.Fatalf("steps = %#v", document.Steps)
+		}
+		step := document.Steps[0]
+		wantAgents := map[string]string{"queue": "native-linux", "nsc-gha-image": "ubuntu-24.04", "provider.setting": "opaque: value"}
+		if step.Image != "" || !reflect.DeepEqual(step.Agents, wantAgents) || strings.Contains(step.Command, "--hosted-tool-cache") != toolCache || strings.Contains(step.Command, "/opt/hostedtoolcache") != toolCache {
+			t.Fatalf("native step = %#v", step)
+		}
+		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.ExecutionJob().Container == nil || bundle.Plans[0].Job.ExecutionJob().Container.Image.Source != "alpine:3.21" {
+			t.Fatalf("job container was lost: %#v", bundle.Plans)
+		}
 	}
 }
 
@@ -286,7 +620,7 @@ jobs:
 	if linux.Agents["queue"] != "linux" || linux.Image != image || !strings.Contains(linux.Command, strings.TrimPrefix(linuxDigest, "sha256:")) || !strings.Contains(linux.Command, "--hosted-tool-cache") {
 		t.Fatalf("Linux step = %#v", linux)
 	}
-	if macos.Agents["queue"] != "macos" || macos.Image != "" || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) || strings.Contains(macos.Command, "--hosted-tool-cache") || strings.Contains(macos.Command, "/opt/hostedtoolcache") {
+	if macos.Agents["queue"] != "macos" || macos.Image != "" || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) || !strings.Contains(macos.Command, "--hosted-tool-cache") || strings.Contains(macos.Command, "/opt/hostedtoolcache") {
 		t.Fatalf("macOS step = %#v", macos)
 	}
 }
@@ -299,6 +633,7 @@ func TestCompileBundleRejectsDockerOnDarwin(t *testing.T) {
 	}
 	actionRoot := filepath.Join(workspace, ".github", "actions")
 	writeAction(t, actionRoot, "docker", "runs:\n  using: docker\n  image: Dockerfile\n")
+	writeAction(t, actionRoot, "prebuilt", "runs:\n  using: docker\n  image: docker://alpine:3.20\n")
 	writeAction(t, actionRoot, "composite", "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/docker\n")
 	options := Options{
 		EventTrust: EventUntrusted,
@@ -323,8 +658,10 @@ func TestCompileBundleRejectsDockerOnDarwin(t *testing.T) {
 		{name: "job container", runsOn: "macos-15", workload: "    container: node:24\n    steps:\n      - run: true\n", reject: true},
 		{name: "service container", runsOn: "macos-15", workload: "    services:\n      redis:\n        image: redis:7\n    steps:\n      - run: true\n", reject: true},
 		{name: "Dockerfile action", runsOn: "macos-15", workload: "    steps:\n      - uses: ./.github/actions/docker\n", reject: true},
+		{name: "prebuilt Docker action", runsOn: "macos-15", workload: "    steps:\n      - uses: ./.github/actions/prebuilt\n", reject: true},
 		{name: "transitive Dockerfile action", runsOn: "macos-15", workload: "    steps:\n      - uses: ./.github/actions/composite\n", reject: true},
 		{name: "Linux Dockerfile action", runsOn: "ubuntu-latest", workload: "    steps:\n      - uses: ./.github/actions/docker\n"},
+		{name: "Linux prebuilt Docker action", runsOn: "ubuntu-latest", workload: "    steps:\n      - uses: ./.github/actions/prebuilt\n"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -383,6 +720,56 @@ func TestCompileBundleNamespacesMaxParallelConcurrency(t *testing.T) {
 	}
 }
 
+func TestCompileBundlePreservesStaticExpressionMatrixFanOutAndFanIn(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  build:
+    strategy:
+      max-parallel: 1
+      matrix:
+        os: ${{ fromJSON(vars.OSES) }}
+        exclude: ${{ fromJSON(vars.EXCLUDE) }}
+        include: ${{ fromJSON(vars.INCLUDE) }}
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  finish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	options := defaultOptions()
+	options.Vars.Repository = map[string]string{
+		"OSES":    `["linux","darwin"]`,
+		"EXCLUDE": `[{"os":"darwin"}]`,
+		"INCLUDE": `[{"os":"linux","arch":"amd64"},{"os":"darwin","arch":"arm64"}]`,
+	}
+	bundle, err := CompileBundleWithOptions("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 3 || len(bundle.GeneratedWorkflow.Jobs) != 3 {
+		t.Fatalf("bundle jobs = plans %d, pipeline %d; want two matrix instances and fan-in", len(bundle.Plans), len(bundle.GeneratedWorkflow.Jobs))
+	}
+	wantMatrices := []map[string]any{
+		{"arch": "amd64", "os": "linux"},
+		{"arch": "arm64", "os": "darwin"},
+	}
+	for i, want := range wantMatrices {
+		if !reflect.DeepEqual(bundle.Plans[i].Job.Matrix, want) {
+			t.Fatalf("plan matrix %d = %#v, want %#v", i, bundle.Plans[i].Job.Matrix, want)
+		}
+		generated := bundle.GeneratedWorkflow.Jobs[i]
+		if generated.Concurrency != 1 || generated.ConcurrencyGroup == "" {
+			t.Fatalf("pipeline max-parallel job %d = concurrency %d, group %q", i, generated.Concurrency, generated.ConcurrencyGroup)
+		}
+	}
+	wantDependencies := []string{bundle.Plans[0].Job.Target.StepKey, bundle.Plans[1].Job.Target.StepKey}
+	sort.Strings(wantDependencies)
+	if !reflect.DeepEqual(bundle.Plans[2].Job.Dependencies, wantDependencies) || !reflect.DeepEqual(bundle.GeneratedWorkflow.Jobs[2].Dependencies, wantDependencies) {
+		t.Fatalf("fan-in = plan %#v, pipeline %#v; want %#v", bundle.Plans[2].Job.Dependencies, bundle.GeneratedWorkflow.Jobs[2].Dependencies, wantDependencies)
+	}
+}
+
 func TestCompileBundleUsesJobIDsForUniqueCheckLabels(t *testing.T) {
 	source := []byte("on: push\njobs:\n  alpha:\n    name: Test\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n  beta:\n    name: Test\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n  matrix:\n    name: Test\n    strategy:\n      matrix:\n        shard: [one, two, 1, '1']\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 	bundle, err := CompileBundleWithOptions("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", defaultOptions())
@@ -404,8 +791,8 @@ func TestCompileBundleCompilesSmokeCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(workflows) != 12 {
-		t.Fatalf("smoke workflows = %d, want 12", len(workflows))
+	if len(workflows) != 13 {
+		t.Fatalf("smoke workflows = %d, want 13", len(workflows))
 	}
 	event := readFile(t, smokePath("events", "push.json"))
 	for _, path := range workflows {
@@ -526,6 +913,78 @@ func TestCompileBundleRetainsGitHubHeadRefWithoutPayload(t *testing.T) {
 	}
 }
 
+func TestCompileBundleFoldsGitHubRefScalarsForConcurrencyAndRunnerSelection(t *testing.T) {
+	source := []byte(`on: [push, pull_request]
+concurrency: ${{ github.ref_type }}-${{ github.ref_name }}-${{ github.base_ref }}
+jobs:
+  test:
+    if: github.ref_type == 'branch' && (github.base_ref == '' || github.base_ref == 'trunk') && github.ref_name
+    runs-on: ${{ format('runner-{0}-{1}', github.ref_type, github.base_ref || github.ref_name) }}
+    steps: [{run: true}]
+`)
+	pullRequest := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha-smoke",
+  "payload": {"pull_request": {"base": {"ref": "trunk"}}}
+}`)
+	tests := []struct {
+		name, concurrency, label, queue string
+		event                           []byte
+	}{
+		{name: "push", event: pushEvent(t), concurrency: "branch-main-", label: "runner-branch-main", queue: "push-linux"},
+		{name: "pull request", event: pullRequest, concurrency: "branch-42/merge-trunk", label: "runner-branch-trunk", queue: "pr-linux"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bundle, err := CompileBundleWithOptions("refs.yml", source, test.event, "0.0.0-test", testDistributionDigest, "gha-importer", Options{
+				EventTrust: EventTrusted,
+				Runners: RunnerPolicy{Labels: map[string]string{
+					"runner-branch-main":  "push-linux",
+					"runner-branch-trunk": "pr-linux",
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bundle.IR.Workflow.ConcurrencyGroup != test.concurrency || len(bundle.IR.Jobs) != 1 || bundle.IR.Jobs[0].Queue != test.queue || bundle.IR.Jobs[0].RunsOn[0] != test.label {
+				t.Fatalf("folded bundle = concurrency %q, jobs %#v", bundle.IR.Workflow.ConcurrencyGroup, bundle.IR.Jobs)
+			}
+			if strings.Contains(bundle.IR.Jobs[0].If, "github.") || bytes.Contains(bundle.Plans[0].Contents, []byte("github.ref_")) || bytes.Contains(bundle.Plans[0].Contents, []byte("github.base_ref")) {
+				t.Fatalf("compile-time GitHub ref scalar reached emitted plan: %s", bundle.Plans[0].Contents)
+			}
+		})
+	}
+}
+
+func TestCompileBundleAppliesRunnerPolicyAfterGitHubRefScalarResolution(t *testing.T) {
+	source := []byte(`on: pull_request
+jobs:
+  test:
+    runs-on: runner-${{ github.ref_type }}-${{ github.base_ref }}
+    steps: [{run: true}]
+`)
+	event := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha-smoke",
+  "payload": {"pull_request": {"base": {"ref": "trunk"}}}
+}`)
+	_, err := CompileBundleWithOptions("refs.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer", Options{
+		EventTrust: EventTrusted,
+		Runners:    RunnerPolicy{Labels: map[string]string{"runner-branch-main": "linux"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), `runner label "runner-branch-trunk" is not mapped by policy`) {
+		t.Fatalf("CompileBundleWithOptions() error = %v, want resolved-label policy rejection", err)
+	}
+}
+
 func TestCompileBundleTranslatesWorkflowAndJobConcurrency(t *testing.T) {
 	source := []byte(`name: Deployment
 on: push
@@ -556,7 +1015,10 @@ jobs:
 	if bundle.IR.Workflow.ConcurrencyGroup != "Deployment-refs/heads/main" || len(bundle.IR.Jobs) != 4 {
 		t.Fatalf("concurrency IR = workflow %q jobs %#v", bundle.IR.Workflow.ConcurrencyGroup, bundle.IR.Jobs)
 	}
-	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || bundle.IR.Warnings[0].Line != 5 || bundle.IR.Warnings[0].Column != 23 {
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0] != (Warning{
+		Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: 5, Column: 23,
+		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+	}) {
 		t.Fatalf("concurrency warnings = %#v", bundle.IR.Warnings)
 	}
 	repository := bundle.IR.Event.Repository
@@ -593,11 +1055,11 @@ jobs:
 		t.Fatalf("pipeline steps = %#v\n%s", document.Steps, bundle.Pipeline)
 	}
 	wantWorkflowGroup := buildkiteConcurrencyGroup(repository, bundle.IR.Workflow.ConcurrencyGroup)
-	if document.Steps[0].Concurrency != 1 || document.Steps[0].ConcurrencyGroup != wantWorkflowGroup || document.Steps[5].Concurrency != 1 || document.Steps[5].ConcurrencyGroup != wantWorkflowGroup {
-		t.Fatalf("workflow gate groups = %#v / %#v, want %q", document.Steps[0], document.Steps[5], wantWorkflowGroup)
+	if document.Steps[0].Concurrency != 1 || document.Steps[0].ConcurrencyGroup != wantWorkflowGroup || document.Steps[1].Concurrency != 1 || document.Steps[1].ConcurrencyGroup != wantWorkflowGroup {
+		t.Fatalf("workflow gate groups = %#v / %#v, want %q", document.Steps[0], document.Steps[1], wantWorkflowGroup)
 	}
 	openKey := document.Steps[0].Key
-	for _, step := range document.Steps[1:5] {
+	for _, step := range document.Steps[2:6] {
 		if step.Concurrency != 1 || step.ConcurrencyGroup != wantJobGroups[step.Key] {
 			t.Fatalf("generated job concurrency = %#v, want %q", step, wantJobGroups[step.Key])
 		}
@@ -605,12 +1067,12 @@ jobs:
 			t.Fatalf("generated job gate dependency = %#v", step.DependsOn)
 		}
 	}
-	if len(document.Steps[5].DependsOn) != 5 {
-		t.Fatalf("closing gate dependencies = %#v", document.Steps[5].DependsOn)
+	if len(document.Steps[1].DependsOn) != 5 {
+		t.Fatalf("closing gate dependencies = %#v", document.Steps[1].DependsOn)
 	}
-	for _, dependency := range document.Steps[5].DependsOn[1:] {
+	for _, dependency := range document.Steps[1].DependsOn[1:] {
 		if !dependency.AllowFailure {
-			t.Fatalf("closing gate dependency is strict: %#v", document.Steps[5].DependsOn)
+			t.Fatalf("closing gate dependency is strict: %#v", document.Steps[1].DependsOn)
 		}
 	}
 }
@@ -747,6 +1209,27 @@ func TestCanonicalWorkflowNameIsRepositoryRelative(t *testing.T) {
 	}
 }
 
+func TestJobPlansCarryEffectiveWorkflowName(t *testing.T) {
+	event := readFile(t, smokePath("events", "push.json"))
+	tests := []struct {
+		name   string
+		path   string
+		source []byte
+		want   string
+	}{
+		{name: "declared name", path: ".github/workflows/ci.yml", source: []byte("name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"), want: "CI"},
+		{name: "path fallback", path: ".github/workflows/ci.yml", source: []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"), want: ".github/workflows/ci.yml"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plans, err := compileUntrustedPlans(test.path, test.source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "hosted")
+			if err != nil || len(plans) != 1 || plans[0].Workflow.Name != test.want {
+				t.Fatalf("compiled plans = %#v, %v, want workflow name %q", plans, err, test.want)
+			}
+		})
+	}
+}
+
 func TestCompileResolvesReusableJobConcurrencyInputs(t *testing.T) {
 	repository := t.TempDir()
 	writeWorkflow(t, repository, "reusable.yml", `on:
@@ -777,10 +1260,92 @@ jobs:
 	}
 }
 
-func TestCompileRejectsCalledWorkflowConcurrency(t *testing.T) {
+func TestCompileWrapsNestedReusableWorkflowMatricesInConcurrencyGates(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "inner.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+concurrency: inner-${{ inputs.target }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    concurrency: job-${{ inputs.target }}
+    steps: [{run: true}]
+  test:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	writeWorkflow(t, repository, "outer.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+concurrency: outer-${{ inputs.target }}
+jobs:
+  inner:
+    uses: ./.github/workflows/inner.yml
+    with:
+      target: ${{ inputs.target }}
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+concurrency: root
+jobs:
+  call:
+    strategy:
+      matrix:
+        target: [production, staging]
+    uses: ./.github/workflows/outer.yml
+    with:
+      target: ${{ matrix.target }}
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Jobs) != 4 || len(bundle.Plans) != 4 {
+		t.Fatalf("compiled jobs/plans = %d/%d, want 4/4", len(bundle.IR.Jobs), len(bundle.Plans))
+	}
+	gateIDs := make(map[string]string)
+	for i, job := range bundle.IR.Jobs {
+		if len(job.ConcurrencyGates) != 2 {
+			t.Fatalf("job %q gates = %#v, want nested gates", job.Key, job.ConcurrencyGates)
+		}
+		target := job.Inputs["target"].(string)
+		if job.ConcurrencyGates[0].Group != "outer-"+target || job.ConcurrencyGates[1].Group != "inner-"+target {
+			t.Fatalf("job %q gates = %#v, want target %q", job.Key, job.ConcurrencyGates, target)
+		}
+		if strings.HasSuffix(job.LogicalJobID, ".build") && job.ConcurrencyGroup != "job-"+target {
+			t.Fatalf("job %q concurrency = %q, want target %q", job.Key, job.ConcurrencyGroup, target)
+		}
+		for _, gate := range job.ConcurrencyGates {
+			if group, exists := gateIDs[gate.ID]; exists && group != gate.Group {
+				t.Fatalf("gate %q has groups %q and %q", gate.ID, group, gate.Group)
+			}
+			gateIDs[gate.ID] = gate.Group
+		}
+		if bytes.Contains(bundle.Plans[i].Contents, []byte("workflow_concurrency_gates")) {
+			t.Fatalf("job %q plan contains pipeline-only concurrency metadata", job.Key)
+		}
+	}
+	if len(gateIDs) != 4 {
+		t.Fatalf("reusable concurrency gates = %#v, want two per matrix call", gateIDs)
+	}
+	if count := bytes.Count(bundle.Pipeline, []byte("concurrency_group:")); count != 12 {
+		t.Fatalf("pipeline concurrency steps = %d, want root, reusable gate, and job groups\n%s", count, bundle.Pipeline)
+	}
+	firstPipeline := append([]byte(nil), bundle.Pipeline...)
+	second, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil || !bytes.Equal(firstPipeline, second.Pipeline) {
+		t.Fatalf("recompiled pipeline is not deterministic: %v", err)
+	}
+}
+
+func TestCompileWarnsWhenCalledWorkflowRequestsCancellation(t *testing.T) {
 	repository := t.TempDir()
 	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
-concurrency: reusable
+concurrency:
+  group: reusable
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -791,21 +1356,514 @@ jobs:
   call:
     uses: ./.github/workflows/reusable.yml
 `)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0] != (Warning{
+		Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: 4, Column: 11, Job: "call",
+		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+	}) {
+		t.Fatalf("called workflow warnings = %#v", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileRejectsDeferredReusableWorkflowConcurrencyInput(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+concurrency: deploy-${{ inputs.target }}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.target.outputs.value }}
+    steps:
+      - id: target
+        run: echo value=production >> "$GITHUB_OUTPUT"
+  call:
+    needs: prepare
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: ${{ needs.prepare.outputs.target }}
+`)
 	_, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "workflow concurrency in a called reusable workflow is unsupported") {
-		t.Fatalf("CompileBundle() error = %v, want called workflow concurrency rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "concurrency group cannot be resolved at compile time") {
+		t.Fatalf("CompileBundle() error = %v, want deferred concurrency rejection", err)
+	}
+}
+
+func TestCompileReusableWorkflowConcurrencyWithPrerequisite(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  approve:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  call:
+    needs: approve
+    uses: ./.github/workflows/reusable.yml
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Warnings) != 2 || bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_CONCURRENCY_QUEUED_BEFORE_PREREQUISITES" || bundle.IR.Warnings[1].Code != "W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION" {
+		t.Fatalf("warnings = %#v", bundle.IR.Warnings)
+	}
+	if count := bytes.Count(bundle.Pipeline, []byte("Start reusable-workflow concurrency")); count != 1 {
+		t.Fatalf("pipeline gates = %d, want 1\n%s", count, bundle.Pipeline)
+	}
+}
+
+func TestCompileKeepsCalledWorkflowConcurrencyBehindCallCondition(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "build.yml", `on: workflow_call
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "ci.yml", `name: CI
+on: [push, pull_request]
+jobs:
+  python-runtime:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/build.yml
+`)
+	pullRequest := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha-smoke",
+  "payload": {"pull_request": {"base": {"ref": "main"}}}
+}`)
+	cancellation := Warning{
+		Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: 6, Column: 11, Job: "python-runtime",
+		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+	}
+	tests := []struct {
+		name, condition, group string
+		event                  []byte
+		warnings               []Warning
+	}{
+		{name: "condition true keeps the gate", event: pullRequest, condition: "true", group: "CI-refs/pull/42/merge", warnings: []Warning{cancellation}},
+		{name: "condition false omits the gate", event: pushEvent(t), condition: "false"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bundle, err := CompileBundle(caller, readFile(t, caller), test.event, "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.IR.Jobs) != 2 {
+				t.Fatalf("compiled jobs = %#v, want both called jobs", bundle.IR.Jobs)
+			}
+			for _, job := range bundle.IR.Jobs {
+				if len(job.CallGuards) != 1 || job.CallGuards[0].Condition != test.condition {
+					t.Fatalf("job %q call guards = %#v, want condition %q", job.Key, job.CallGuards, test.condition)
+				}
+				switch {
+				case test.group == "" && len(job.ConcurrencyGates) != 0:
+					t.Fatalf("job %q gates = %#v, want none for a call that never runs", job.Key, job.ConcurrencyGates)
+				case test.group != "" && (len(job.ConcurrencyGates) != 1 || job.ConcurrencyGates[0].Group != test.group):
+					t.Fatalf("job %q gates = %#v, want group %q", job.Key, job.ConcurrencyGates, test.group)
+				}
+			}
+			if gated := bytes.Contains(bundle.Pipeline, []byte("Start reusable-workflow concurrency")); gated != (test.group != "") {
+				t.Fatalf("pipeline gate emitted = %t, want %t\n%s", gated, test.group != "", bundle.Pipeline)
+			}
+			if !reflect.DeepEqual(bundle.IR.Warnings, test.warnings) {
+				t.Fatalf("warnings = %#v, want %#v", bundle.IR.Warnings, test.warnings)
+			}
+		})
+	}
+}
+
+func TestCompileOmitsCalledWorkflowConcurrencyGateForLiteralFalseCall(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    if: false
+    uses: ./.github/workflows/reusable.yml
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Jobs) != 1 || len(bundle.IR.Jobs[0].ConcurrencyGates) != 0 || bundle.IR.Jobs[0].CallGuards[0].Condition != "false" {
+		t.Fatalf("compiled jobs = %#v, want an ungated job that skips at runtime", bundle.IR.Jobs)
+	}
+	if len(bundle.IR.Warnings) != 0 || bytes.Contains(bundle.Pipeline, []byte("concurrency_group:")) {
+		t.Fatalf("warnings = %#v, pipeline:\n%s", bundle.IR.Warnings, bundle.Pipeline)
+	}
+}
+
+func TestCompileWarnsWhenRuntimeCallConditionKeepsCalledWorkflowConcurrency(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "deploy.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+concurrency:
+  group: deploy-${{ inputs.target }}
+  cancel-in-progress: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  deploy:
+    if: vars.DEPLOY == 'true'
+    strategy:
+      matrix:
+        target: [production, staging]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      target: ${{ matrix.target }}
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Jobs) != 2 {
+		t.Fatalf("compiled jobs = %#v, want one per matrix target", bundle.IR.Jobs)
+	}
+	for _, job := range bundle.IR.Jobs {
+		target := job.Inputs["target"].(string)
+		if len(job.ConcurrencyGates) != 1 || job.ConcurrencyGates[0].Group != "deploy-"+target {
+			t.Fatalf("job %q gates = %#v, want the called-workflow gate", job.Key, job.ConcurrencyGates)
+		}
+		if len(job.CallGuards) != 1 || job.CallGuards[0].Condition != "(vars.deploy == 'true')" {
+			t.Fatalf("job %q call guards = %#v, want the residual vars condition", job.Key, job.CallGuards)
+		}
+	}
+	want := []Warning{
+		{
+			Code: "W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION", Line: 8, Column: 11, Job: "deploy",
+			Message: `The call condition depends on runtime values, so Buildkite enters the concurrency group of reusable workflow "./.github/workflows/deploy.yml" before it knows whether the call runs. When the condition is false, the skipped jobs still wait for the group and hold it until they finish. GitHub never enters the group for a skipped call. Write the condition with github, inputs, or event values only, which resolve during compilation, if the wait matters.`,
+		},
+		{
+			Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: 8, Column: 11, Job: "deploy",
+			Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+		},
+	}
+	if !reflect.DeepEqual(bundle.IR.Warnings, want) {
+		t.Fatalf("warnings = %#v, want one of each per call site", bundle.IR.Warnings)
+	}
+	if count := bytes.Count(bundle.Pipeline, []byte("Start reusable-workflow concurrency")); count != 2 {
+		t.Fatalf("pipeline reusable gates = %d, want one per matrix target\n%s", count, bundle.Pipeline)
+	}
+}
+
+func TestCompileInheritsCallConditionForNestedCalledWorkflowConcurrency(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "middle.yml", `on: workflow_call
+jobs:
+  nested:
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	tests := []struct {
+		name, condition string
+		gated           bool
+		warnings        int
+	}{
+		{name: "known true", condition: "github.ref == 'refs/heads/main'", gated: true},
+		{name: "known false", condition: "github.ref == 'refs/heads/release'", gated: false},
+		{name: "runtime", condition: "vars.DEPLOY == 'true'", gated: true, warnings: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			caller := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    if: "+test.condition+"\n    uses: ./.github/workflows/middle.yml\n")
+			bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.IR.Jobs) != 1 || (len(bundle.IR.Jobs[0].ConcurrencyGates) != 0) != test.gated {
+				t.Fatalf("compiled jobs = %#v, want gated %t", bundle.IR.Jobs, test.gated)
+			}
+			if len(bundle.IR.Warnings) != test.warnings {
+				t.Fatalf("warnings = %#v, want %d", bundle.IR.Warnings, test.warnings)
+			}
+			if test.warnings == 1 && (bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION" || bundle.IR.Warnings[0].Line != 5 || bundle.IR.Warnings[0].Job != "nested") {
+				t.Fatalf("warning = %#v, want the root call position and the nested call job", bundle.IR.Warnings[0])
+			}
+		})
+	}
+}
+
+func TestCompileKeepsEnclosingGateWhenNestedCallConditionIsFalse(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "inner.yml", `on: workflow_call
+concurrency: inner
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	writeWorkflow(t, repository, "outer.yml", `on: workflow_call
+concurrency: outer
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  inner:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/inner.yml
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/outer.yml
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Jobs) != 2 {
+		t.Fatalf("compiled jobs = %#v, want both flattened jobs", bundle.IR.Jobs)
+	}
+	for _, job := range bundle.IR.Jobs {
+		if len(job.ConcurrencyGates) != 1 || job.ConcurrencyGates[0].Group != "outer" {
+			t.Fatalf("job %q gates = %#v, want only the enclosing gate", job.Key, job.ConcurrencyGates)
+		}
+	}
+	if count := bytes.Count(bundle.Pipeline, []byte("Start reusable-workflow concurrency")); count != 1 {
+		t.Fatalf("pipeline reusable gates = %d, want the outer gate only\n%s", count, bundle.Pipeline)
+	}
+}
+
+func TestCompileOmitsFalseReusableWorkflowConcurrencyWithPrerequisite(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  call:
+    if: false
+    needs: prepare
+    uses: ./.github/workflows/reusable.yml
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(bundle.Pipeline, []byte("Start reusable-workflow concurrency")) || len(bundle.IR.Warnings) != 0 {
+		t.Fatalf("false call must omit gates and concurrency warnings: %#v\n%s", bundle.IR.Warnings, bundle.Pipeline)
+	}
+}
+
+func TestCompileReusableConcurrencyPrerequisiteGroups(t *testing.T) {
+	for _, test := range []struct {
+		name, group, concurrency, wantError string
+	}{
+		{name: "disjoint", group: "prepare", concurrency: "${{ matrix.group }}"},
+		{name: "same group ignoring case", group: "DEPLOY", concurrency: "${{ matrix.group }}", wantError: "shares group with prerequisite job"},
+		{name: "unknown", group: "prepare", concurrency: "${{ needs.seed.outputs.group }}", wantError: "concurrency group cannot be resolved at compile time"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+			caller := writeWorkflow(t, repository, "caller.yml", fmt.Sprintf(`on: push
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  prepare:
+    needs: seed
+    strategy:
+      matrix:
+        group: [other, '%s']
+    concurrency: %s
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  approve:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  call:
+    needs: approve
+    uses: ./.github/workflows/reusable.yml
+`, test.group, test.concurrency))
+			_, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("CompileBundle() error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestCompileNestedReusableConcurrencyPrerequisites(t *testing.T) {
+	for _, group := range []string{"prepare", "DEPLOY"} {
+		t.Run(group, func(t *testing.T) {
+			repository := t.TempDir()
+			writeWorkflow(t, repository, "prepare.yml", fmt.Sprintf(`on: workflow_call
+concurrency: %s
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`, group))
+			writeWorkflow(t, repository, "outer.yml", `on: workflow_call
+jobs:
+  inner:
+    uses: ./.github/workflows/prepare.yml
+`)
+			writeWorkflow(t, repository, "deploy.yml", `on: workflow_call
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+			caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    uses: ./.github/workflows/outer.yml
+  call:
+    needs: prepare
+    uses: ./.github/workflows/deploy.yml
+`)
+			bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if group == "DEPLOY" {
+				if err == nil || !strings.Contains(err.Error(), "shares group with prerequisite gate") {
+					t.Fatalf("CompileBundle() error = %v, want nested prerequisite overlap rejection", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count := bytes.Count(bundle.Pipeline, []byte("Start reusable-workflow concurrency")); count != 2 {
+				t.Fatalf("pipeline gates = %d, want 2\n%s", count, bundle.Pipeline)
+			}
+		})
+	}
+}
+
+func TestCompileGuardedMatrixReusableConcurrencyPrerequisites(t *testing.T) {
+	for _, condition := range []string{"true", "vars.DEPLOY == 'true'", "always()"} {
+		t.Run(condition, func(t *testing.T) {
+			repository := t.TempDir()
+			writeWorkflow(t, repository, "deploy.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+concurrency: deploy-${{ inputs.target }}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+			caller := writeWorkflow(t, repository, "caller.yml", fmt.Sprintf(`on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps: [{run: false}]
+  call:
+    if: %s
+    needs: prepare
+    strategy:
+      matrix:
+        target: [staging, production]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      target: ${{ matrix.target }}
+`, condition))
+			bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			counts := make(map[string]int)
+			for _, warning := range bundle.IR.Warnings {
+				counts[warning.Code]++
+			}
+			if counts["W_REUSABLE_WORKFLOW_CONCURRENCY_QUEUED_BEFORE_PREREQUISITES"] != 1 {
+				t.Fatalf("prerequisite warning must be deduplicated: %#v", counts)
+			}
+			if condition == "vars.DEPLOY == 'true'" && counts["W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION"] != 1 {
+				t.Fatalf("runtime guard warning missing: %#v", counts)
+			}
+			if count := bytes.Count(bundle.Pipeline, []byte("Start reusable-workflow concurrency")); count != 2 {
+				t.Fatalf("pipeline gates = %d, want 2\n%s", count, bundle.Pipeline)
+			}
+		})
 	}
 }
 
 func TestCompileBundleDeclaresSecretCapabilityAndNames(t *testing.T) {
-	source := []byte("name: secrets\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets['deploy_token'] }}\n    steps:\n      - run: echo \\\"${{ secrets.CANARY }}\\\"\n")
+	source := []byte("name: secrets\non: push\nenv:\n  FALLBACK: ${{ 'public' || secrets.WORKFLOW_ENV }}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets['deploy_token'] }}\n    steps:\n      - run: echo \\\"${{ secrets.CANARY }}\\\"\n")
 	event := readFile(t, smokePath("events", "push.json"))
 	bundle, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
 		t.Fatal(err)
 	}
 	job := bundle.Plans[0].Job
-	if !reflect.DeepEqual(job.RequiredSecrets, []string{"CANARY", "DEPLOY_TOKEN"}) || !reflect.DeepEqual(job.RequiredCapabilities, []string{"secrets"}) {
+	// Ordinary secrets remain exhaustively inventoried, even in an unreachable fallback.
+	if !reflect.DeepEqual(job.RequiredSecrets, []string{"CANARY", "DEPLOY_TOKEN", "WORKFLOW_ENV"}) || !reflect.DeepEqual(job.RequiredCapabilities, []string{"secrets"}) || job.GitHubToken != nil {
 		t.Fatalf("secret boundary = names %#v capabilities %#v", job.RequiredSecrets, job.RequiredCapabilities)
 	}
 }
@@ -897,35 +1955,324 @@ func TestCompileBundleGitHubTokenUsesRestrictedDefaultPermissions(t *testing.T) 
 	}
 }
 
-func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
-	for _, permissions := range []string{"permissions: {}\n", "permissions:\n  contents: none\n"} {
-		source := []byte("on: push\n" + permissions + "jobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
-		_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
-		if err == nil || !strings.Contains(err.Error(), "references secrets.GITHUB_TOKEN but has no effective permissions") {
-			t.Fatalf("CompileBundle() error = %v, want empty permission rejection", err)
-		}
+func TestCompileBundleGitHubTokenExpandsTopLevelAllPermissions(t *testing.T) {
+	for _, access := range []string{"read", "write"} {
+		t.Run(access, func(t *testing.T) {
+			source := []byte("on: push\npermissions: " + access + "-all\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+			bundle, err := CompileBundle(".github/workflows/workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{
+				"actions": access, "artifact_metadata": access, "attestations": access, "checks": access, "contents": access,
+				"deployments": access, "discussions": access, "issues": access, "packages": access, "pages": access,
+				"pull_requests": access, "security_events": access, "statuses": access,
+			}
+			if token := bundle.Plans[0].Job.GitHubToken; token == nil || !reflect.DeepEqual(token.Permissions, want) {
+				t.Fatalf("%s-all GitHub workflow token = %#v, want %#v", access, token, want)
+			}
+		})
 	}
 }
 
-func TestCompileBundleJobPermissionsReplaceWorkflowPermissions(t *testing.T) {
-	source := []byte(`on: push
+func TestCompileBundleReusableWorkflowTokensUseRootPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: write
+  id-token: write
+  issues: read
+jobs:
+  direct:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+  delegated:
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
 permissions:
   contents: read
 jobs:
   token:
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps: [{run: true}]
 `)
-	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := bundle.Plans[0].Job.GitHubToken.Permissions; !reflect.DeepEqual(got, map[string]string{"pull_requests": "write"}) {
-		t.Fatalf("effective job permissions = %#v", got)
+	wantPermissions := map[string]string{"contents": "write", "issues": "read"}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d, want direct and reusable jobs", len(bundle.Plans))
+	}
+	for _, artifact := range bundle.Plans {
+		if artifact.Job.GitHubToken == nil || artifact.Job.GitHubToken.Workflow != "caller.yml" || !reflect.DeepEqual(artifact.Job.GitHubToken.Permissions, wantPermissions) {
+			t.Fatalf("job %q token = %#v, want caller policy and permissions %#v", artifact.Job.Workflow.LogicalJobID, artifact.Job.GitHubToken, wantPermissions)
+		}
+		wantIDTokenPermission := ""
+		if artifact.Job.Workflow.LogicalJobID == "direct" {
+			wantIDTokenPermission = "write"
+		}
+		if artifact.Job.IDTokenPermission != wantIDTokenPermission {
+			t.Fatalf("job %q id-token permission = %q, want %q", artifact.Job.Workflow.LogicalJobID, artifact.Job.IDTokenPermission, wantIDTokenPermission)
+		}
+	}
+	if len(bundle.IR.Warnings) != 2 || bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS" || bundle.IR.Warnings[1].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" {
+		t.Fatalf("warnings = %#v, want reusable workflow and job permission warnings", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleReusableWorkflowTokensUseRootReadAllPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", "on: push\npermissions: read-all\njobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n")
+	writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\npermissions:\n  contents: read\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token := bundle.Plans[0].Job.GitHubToken; token == nil || len(token.Permissions) != 13 || token.Permissions["contents"] != "read" || token.Permissions["artifact_metadata"] != "read" {
+		t.Fatalf("reusable read-all GitHub workflow token = %#v", token)
+	}
+	for _, excluded := range []string{"id_token", "models", "repository_projects", "code_quality", "metadata", "vulnerability_alerts"} {
+		if _, ok := bundle.Plans[0].Job.GitHubToken.Permissions[excluded]; ok {
+			t.Errorf("reusable read-all token included excluded scope %q", excluded)
+		}
+	}
+}
+
+func TestCompileBundleReusableWorkflowTokenWarningRequiresNarrowedRepositoryPermissions(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		callerPermissions string
+		calleePermissions string
+		calleeStep        string
+		wantToken         bool
+	}{
+		{
+			name:              "identical repository permissions",
+			callerPermissions: "  contents: read\n",
+			calleePermissions: "  contents: read\n",
+			calleeStep:        "      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n",
+			wantToken:         true,
+		},
+		{
+			name:              "tokenless narrowed permissions",
+			callerPermissions: "  contents: write\n",
+			calleePermissions: "  contents: read\n",
+			calleeStep:        "      - run: echo tokenless\n",
+		},
+		{
+			name:              "id-token-only difference",
+			callerPermissions: "  contents: read\n  id-token: write\n",
+			calleePermissions: "  contents: read\n",
+			calleeStep:        "      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n",
+			wantToken:         true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			caller := writeWorkflow(t, repository, "caller.yml", "on: push\npermissions:\n"+test.callerPermissions+"jobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n")
+			writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\npermissions:\n"+test.calleePermissions+"jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"+test.calleeStep)
+
+			bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.IR.Warnings) != 0 {
+				t.Fatalf("warnings = %#v, want none", bundle.IR.Warnings)
+			}
+			if got := bundle.Plans[0].Job.GitHubToken != nil; got != test.wantToken {
+				t.Fatalf("called job has token = %t, want %t", got, test.wantToken)
+			}
+			if bundle.Plans[0].Job.IDTokenPermission != "" {
+				t.Fatalf("called job id-token permission = %q, want narrowed permission", bundle.Plans[0].Job.IDTokenPermission)
+			}
+		})
+	}
+}
+
+func TestCompileBundleNestedReusableWorkflowTokenWarning(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: write
+jobs:
+  delegated:
+    uses: ./.github/workflows/middle.yml
+`)
+	writeWorkflow(t, repository, "middle.yml", `on: workflow_call
+permissions:
+  contents: read
+jobs:
+  delegated:
+    uses: ./.github/workflows/leaf.yml
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on: workflow_call
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ secrets.GITHUB_TOKEN }}'
+`)
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS" || bundle.IR.Warnings[0].Line != 6 {
+		t.Fatalf("warnings = %#v, want nested reusable workflow token warning at the top-level call", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
+	for _, test := range []struct {
+		reference         string
+		want              string
+		workflowEnv       bool
+		serviceCredential bool
+	}{
+		{reference: "secrets.GITHUB_TOKEN", want: "references secrets.GITHUB_TOKEN"},
+		{reference: "secrets.GITHUB_TOKEN || 'fallback'", want: "references secrets.GITHUB_TOKEN", workflowEnv: true},
+		{reference: "secrets.GITHUB_TOKEN || 'fallback'", want: "references secrets.GITHUB_TOKEN", serviceCredential: true},
+		{reference: "github.token", want: "references github.token"},
+		{reference: "toJSON(github)", want: "references github.token"},
+	} {
+		for _, permissions := range []string{"permissions: {}\n", "permissions:\n  contents: none\n"} {
+			source := []byte("on: push\n" + permissions + "jobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ " + test.reference + " }}'\n")
+			if test.workflowEnv {
+				source = []byte("on: push\n" + permissions + "env:\n  TOKEN: ${{ " + test.reference + " }}\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+			}
+			if test.serviceCredential {
+				source = []byte("on: push\n" + permissions + "jobs:\n  token:\n    runs-on: ubuntu-latest\n    services:\n      private:\n        image: registry.example.test/app:1\n        credentials:\n          username: user\n          password: ${{ " + test.reference + " }}\n    steps: [{run: true}]\n")
+			}
+			_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err == nil || !strings.Contains(err.Error(), test.want+" but has no effective permissions") {
+				t.Fatalf("CompileBundle() error = %v, want empty permission rejection for %s", err, test.reference)
+			}
+		}
+	}
+}
+
+func TestCompileBundleGitHubTokenIgnoresJobPermissions(t *testing.T) {
+	for _, test := range []struct {
+		name, jobPermissions, idToken string
+	}{
+		{name: "narrower", jobPermissions: "    permissions:\n      contents: read\n"},
+		{name: "broader", jobPermissions: "    permissions:\n      pull-requests: write\n"},
+		{name: "empty", jobPermissions: "    permissions: {}\n"},
+		{name: "none", jobPermissions: "    permissions:\n      contents: none\n"},
+		{name: "ID token", jobPermissions: "    permissions:\n      contents: read\n      id-token: write\n", idToken: "write"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte(`on: push
+permissions:
+  contents: write
+  issues: read
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [1, 2]
+` + test.jobPermissions + `    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+`)
+			bundle, err := CompileBundle(".github/workflows/workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := bundle.Plans[0].Job
+			if len(bundle.Plans) != 2 || job.GitHubToken == nil || !reflect.DeepEqual(job.GitHubToken.Permissions, map[string]string{"contents": "write", "issues": "read"}) {
+				t.Fatalf("GITHUB_TOKEN = %#v, want workflow permissions", job.GitHubToken)
+			}
+			if job.IDTokenPermission != test.idToken {
+				t.Fatalf("ID token permission = %q, want %q", job.IDTokenPermission, test.idToken)
+			}
+			if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" ||
+				bundle.IR.Warnings[0].Path != "./.github/workflows/workflow.yml" || bundle.IR.Warnings[0].Job != "token" ||
+				bundle.IR.Warnings[0].Message != "Job-level permissions are ignored for GITHUB_TOKEN. The top-level workflow permissions apply instead. This job's token has contents: write, issues: read. Move this job's permissions block to the workflow top level. If you need per-job permissions, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it." {
+				t.Fatalf("warnings = %#v, want ignored job permissions warning", bundle.IR.Warnings)
+			}
+		})
+	}
+}
+
+func TestCompileBundleGitHubTokenWarnsForIgnoredReusableCallPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  delegated:
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+`)
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Plans[0].Job.IDTokenPermission != "write" {
+		t.Fatalf("called job id-token permission = %q, want job-level permission", bundle.Plans[0].Job.IDTokenPermission)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" || bundle.IR.Warnings[0].Line != 10 {
+		t.Fatalf("warnings = %#v, want ignored reusable call permissions warning", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleGitHubTokenWarnsForIgnoredNestedReusableCallPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  delegated:
+    uses: ./.github/workflows/middle.yml
+`)
+	writeWorkflow(t, repository, "middle.yml", `on: workflow_call
+jobs:
+  delegated:
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+`)
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" || bundle.IR.Warnings[0].Line != 6 {
+		t.Fatalf("warnings = %#v, want ignored nested reusable call permissions warning", bundle.IR.Warnings)
 	}
 }
 
@@ -952,6 +2299,398 @@ func TestCompileBundleRejectsDynamicSecretIndex(t *testing.T) {
 	_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err == nil || !strings.Contains(err.Error(), "expression index must be a string literal") {
 		t.Fatalf("CompileBundle() error = %v, want dynamic secret index rejection", err)
+	}
+}
+
+func TestCompileBundleScansRetainedExpressionsForAuthority(t *testing.T) {
+	source := []byte(`on: push
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ${{ secrets.NAME_SECRET }}
+        run: echo '${{ contains(ToJson(GitHub), '"event"') }}'
+`)
+	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := bundle.Plans[0].Job
+	if !reflect.DeepEqual(job.RequiredSecrets, []string{"NAME_SECRET"}) {
+		t.Fatalf("retained field secrets = %#v", job.RequiredSecrets)
+	}
+	if job.GitHubToken == nil || !job.HasCapability("provider-token-write") {
+		t.Fatalf("toJSON(github) authority = %#v, capabilities %#v", job.GitHubToken, job.RequiredCapabilities)
+	}
+	if !job.Event.PayloadArtifact || bundle.EventArtifact == nil {
+		t.Fatal("toJSON(github) did not retain the event payload")
+	}
+	if bundle.Plans[0].Authorization.GitHubTokenSecretReference {
+		t.Fatal("toJSON(github) was reported as a secrets.GITHUB_TOKEN reference")
+	}
+}
+
+func TestCompileBundleRejectsToJSONGitHubOutsideStepRuntimeFields(t *testing.T) {
+	source := []byte(`on: push
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_CONTEXT: ${{ toJSON(github) }}
+    steps:
+      - run: true
+`)
+	_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "github reference must name one static property") {
+		t.Fatalf("CompileBundle() error = %v, want job-level toJSON(github) rejection", err)
+	}
+}
+
+func TestCompileBundleReducesRetainedGitHubEventPayload(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "event.yml", `on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      JOB_SHA: ${{ github.event.pull_request.head.sha }}
+    defaults:
+      run:
+        shell: ${{ github.event.shell }}
+        working-directory: ${{ github.event.directory }}
+    steps:
+      - name: Head ${{ github.event.pull_request.head.sha }}
+        run: echo '${{ github.event.pull_request.head.sha }}' '${{ github.event.missing }}' '${{ github.event.action }}' '${{ github.event.pull_request.head.sha == steps.previous.outputs.sha }}'
+        continue-on-error: ${{ github.event.allow_failure && steps.previous.outcome == 'failure' }}
+        timeout-minutes: ${{ github.event.timeout }}
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: ${{ github.event.shell }}
+        working-directory: ${{ github.event.directory }}
+      - uses: ./event-action
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+`)
+	writeAction(t, repository, "event-action", `name: event action
+inputs:
+  ref:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	event := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "octocat",
+  "payload": {"action": "opened", "allow_failure": true, "timeout": 7, "shell": "bash", "directory": ".", "pull_request": {"head": {"sha": "2222222222222222222222222222222222222222"}}}
+}`)
+	bundle, err := CompileBundle(path, readFile(t, path), event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := bundle.Plans[0].Job
+	if job.Event.PayloadArtifact {
+		t.Fatal("fully reduced event expressions retained the event payload")
+	}
+	if job.Env["JOB_SHA"] != "2222222222222222222222222222222222222222" || job.DefaultShell != "bash" || job.DefaultWorkingDirectory != "." {
+		t.Fatalf("job templates were not reduced: env = %#v, shell = %q, working-directory = %q", job.Env, job.DefaultShell, job.DefaultWorkingDirectory)
+	}
+	step := job.Program.Job.Steps[0]
+	if step.Name.Source != "Head 2222222222222222222222222222222222222222" || testBindingSources(step.Env)["HEAD_SHA"] != "2222222222222222222222222222222222222222" || step.Run.Shell.Source != "bash" || step.Run.WorkingDirectory.Source != "." {
+		t.Fatalf("step templates were not reduced: %#v", step)
+	}
+	if step.ContinueOnError.Expression.Source != "${{ (true && (steps.previous.outcome == 'failure')) }}" || step.TimeoutMinutes.Expression.Source != "${{ 7 }}" {
+		t.Fatalf("typed step expressions were not reduced: %#v", step)
+	}
+	if want := "echo '2222222222222222222222222222222222222222' '' 'opened' '${{ ('2222222222222222222222222222222222222222' == steps.previous.outputs.sha) }}'"; step.Run.Command.Source != want {
+		t.Fatalf("command = %q, want %q", step.Run.Command.Source, want)
+	}
+	if got := testBindingSources(job.Program.Job.Steps[1].Invocation.With)["ref"]; got != "2222222222222222222222222222222222222222" {
+		t.Fatalf("action input = %q", got)
+	}
+}
+
+func TestCompileBundleRejectsEventValueExpressionInjection(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ github.event.value }}'
+`)
+	event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"value": "${{ secrets.ADMIN }}"}
+}`)
+	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "result contains expression syntax") {
+		t.Fatalf("CompileBundle() error = %v, want expression injection rejection", err)
+	}
+}
+
+func TestCompileBundlePreservesFoldedStepControlTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		control string
+		value   string
+	}{
+		{name: "boolean string", control: "continue-on-error", value: `"yes please"`},
+		{name: "numeric string", control: "timeout-minutes", value: `"10"`},
+		{name: "null", control: "timeout-minutes", value: `null`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        " + test.control + ": ${{ github.event.value }}\n")
+			event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"value": ` + test.value + `}
+}`)
+			if _, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer"); err == nil {
+				t.Fatal("CompileBundle() accepted a folded value with the wrong type")
+			} else {
+				for _, detail := range []string{"workflow.yml:6:9", test.control} {
+					if !strings.Contains(err.Error(), detail) {
+						t.Fatalf("CompileBundle() error = %v, want location detail %q", err, detail)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestCompileBundleDoesNotReduceEventExpressionsInActionReferences(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ${{ github.event.action_ref }}
+`)
+	event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"action_ref": "owner/action@1111111111111111111111111111111111111111"}
+}`)
+	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "github.event cannot select an action reference") {
+		t.Fatalf("CompileBundle() error = %v, want static action reference rejection", err)
+	}
+}
+
+func TestCompileBundleRetainsEventPayloadOnlyForJobsThatNeedIt(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  whole-event:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ toJSON(github.event) }}'
+  scalar-event:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ github.event.action }}'
+`)
+	event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"action": "opened", "commits": [{"id": "2222222222222222222222222222222222222222"}]}
+}`)
+	bundle, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(bundle.Plans))
+	}
+	jobs := map[string]plan.Job{}
+	for _, artifact := range bundle.Plans {
+		jobs[artifact.Job.Workflow.LogicalJobID] = artifact.Job
+	}
+	if !jobs["whole-event"].Event.PayloadArtifact || bundle.EventArtifact == nil || !strings.Contains(jobs["whole-event"].Program.Job.Steps[0].Run.Command.Source, "github.event") {
+		t.Fatalf("whole-event plan did not retain its runtime payload: %#v", jobs["whole-event"])
+	}
+	if jobs["scalar-event"].Event.PayloadArtifact || jobs["scalar-event"].Program.Job.Steps[0].Run.Command.Source != "echo 'opened'" {
+		t.Fatalf("scalar-event plan retained an unnecessary payload: %#v", jobs["scalar-event"])
+	}
+	if bundle.EventArtifact.Path != ".buildkite-gha/events/"+strings.TrimPrefix(bundle.EventArtifact.Digest, "sha256:")+".json" || !bytes.Contains(bundle.EventArtifact.Contents, []byte(`"commits"`)) {
+		t.Fatalf("event artifact = %#v", bundle.EventArtifact)
+	}
+	for _, artifact := range bundle.Plans {
+		if bytes.Contains(artifact.Contents, []byte(`"commits"`)) {
+			t.Fatalf("plan %q embedded the event payload", artifact.Path)
+		}
+	}
+	options := DefaultOptions()
+	options.EventFile = true
+	withFile, err := CompileBundleWithOptions("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withFile.EventArtifact == nil || !bytes.Equal(withFile.EventArtifact.Contents, bundle.EventArtifact.Contents) {
+		t.Fatal("event file transport did not retain the complete original payload")
+	}
+	for _, artifact := range withFile.Plans {
+		decoded, err := plan.Decode(artifact.Contents)
+		if err != nil || !decoded.Event.PayloadFile || !decoded.Event.PayloadArtifact || decoded.Event.Payload != nil {
+			t.Fatalf("event file plan = %#v, %v", decoded.Event, err)
+		}
+		if len(decoded.RequiredSecrets) != 0 || decoded.GitHubToken != nil {
+			t.Fatal("event file granted credential authority")
+		}
+	}
+}
+
+func TestCompileBundleEventPayloadAuthorityFollowsReducedProgramReachability(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  false-job:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ toJSON(github.event) }}'
+  false-step:
+    runs-on: ubuntu-latest
+    steps:
+      - if: false
+        run: echo '${{ toJSON(github.event) }}'
+  unknown-step:
+    runs-on: ubuntu-latest
+    steps:
+      - if: env.RUNTIME == 'yes'
+        run: echo '${{ toJSON(github.event) }}'
+  condition-event:
+    runs-on: ubuntu-latest
+    steps:
+      - id: selector
+        run: echo selector
+      - if: github.event[steps.selector.outputs.key]
+        run: echo condition
+  control-event:
+    runs-on: ubuntu-latest
+    steps:
+      - id: selector
+        run: echo selector
+      - run: echo control
+        continue-on-error: ${{ github.event[steps.selector.outputs.boolean_key] }}
+        timeout-minutes: ${{ github.event[steps.selector.outputs.number_key] }}
+`)
+	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPayload := map[string]bool{
+		"false-job": false, "false-step": false, "unknown-step": true, "condition-event": true, "control-event": true,
+	}
+	if len(bundle.Plans) != len(wantPayload) {
+		t.Fatalf("plans = %d, want %d", len(bundle.Plans), len(wantPayload))
+	}
+	jobs := make(map[string]plan.Job, len(bundle.Plans))
+	for _, artifact := range bundle.Plans {
+		job := artifact.Job
+		jobs[job.Workflow.LogicalJobID] = job
+		if job.Event.PayloadArtifact != wantPayload[job.Workflow.LogicalJobID] {
+			t.Errorf("job %q payload artifact = %v, want %v", job.Workflow.LogicalJobID, job.Event.PayloadArtifact, wantPayload[job.Workflow.LogicalJobID])
+		}
+	}
+	control := jobs["control-event"].Program.Job.Steps[1]
+	if !strings.Contains(control.ContinueOnError.Expression.Source, "github.event") || !strings.Contains(control.TimeoutMinutes.Expression.Source, "github.event") {
+		t.Fatalf("dynamic event controls were not preserved: %#v", control)
+	}
+}
+
+func TestCompileBundleReducesEventExpressionsAfterMatrixExpansion(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        part: [one, two]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ format('{0}-{1}', github.event.ref, matrix.part) }}
+`)
+	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(bundle.Plans))
+	}
+	for _, artifact := range bundle.Plans {
+		part := artifact.Job.Matrix["part"]
+		if want := fmt.Sprintf("echo refs/heads/main-%s", part); artifact.Job.Program.Job.Steps[0].Run.Command.Source != want {
+			t.Errorf("matrix %v command = %q, want %q", part, artifact.Job.Program.Job.Steps[0].Run.Command.Source, want)
+		}
+	}
+}
+
+func TestCompileBundleReducesEventExpressionsInReusableWorkflowJobs(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ github.event.ref }}
+`)
+	bundle, err := CompileBundle(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Program.Job.Steps[0].Run.Command.Source != "echo refs/heads/main" {
+		t.Fatalf("reusable-workflow plan = %#v", bundle.Plans)
+	}
+}
+
+func TestRequiredSecretsDoesNotInterpretConditionLiteralsAsTemplates(t *testing.T) {
+	instance := JobInstance{If: "'${{ github.token }} ${{ secrets.DEPLOY }} ${{ github.event.action }}' == runner.os"}
+	secrets, _, _, referencesToken, _, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, nil, false, "https://github.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets) != 0 || referencesToken {
+		t.Fatalf("condition literal granted secret authority: %#v, token = %v", secrets, referencesToken)
+	}
+}
+
+func TestRequiredSecretsNarrowsTokenAuthorityByKnownServerURL(t *testing.T) {
+	instance := JobInstance{Steps: []workflow.Step{{Kind: "run", Run: "${{ github.server_url == 'https://github.com' && github.token || '' }}"}}}
+	workflowProgram := lowerWorkflowProgram(instance)
+	for _, test := range []struct {
+		name      string
+		serverURL string
+		wantToken bool
+	}{
+		{name: "GitHub", serverURL: "https://github.com", wantToken: true},
+		{name: "non-GitHub provider", serverURL: "https://origin.cursor.com"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, _, token, _, err := requiredSecrets(workflowProgram, instance.secretAuthority, nil, nil, false, test.serverURL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if token != test.wantToken {
+				t.Fatalf("github.token authority = %v, want %v", token, test.wantToken)
+			}
+		})
 	}
 }
 

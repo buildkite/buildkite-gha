@@ -101,7 +101,7 @@
       "properties": {
         "level": {"enum": ["error", "warning"]},
         "code": {"type": "string", "pattern": "^[EW]_[A-Z0-9_]+$"},
-        "category": {"enum": ["syntax", "compatibility", "action-resolution", "environment", "admission"]},
+        "category": {"enum": ["syntax", "compatibility", "action-resolution", "environment", "admission", "context"]},
         "stage": {"$ref": "#/$defs/stageID"},
         "message": {"type": "string", "minLength": 1, "maxLength": 16384},
         "detail": {"type": "string", "minLength": 1, "maxLength": 16384},

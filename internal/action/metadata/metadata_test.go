@@ -1,9 +1,11 @@
 package metadata
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -64,9 +66,9 @@ func TestValidateDockerEntrypoints(t *testing.T) {
 		ok     bool
 	}{
 		{name: "exact Dockerfile", ok: true},
-		{name: "non Dockerfile image", mutate: func(m *Metadata) { m.Runs.Image = "docker://alpine" }},
+		{name: "invalid image", mutate: func(m *Metadata) { m.Runs.Image = "alpine" }},
 		{name: "entrypoint", mutate: func(m *Metadata) { m.Runs.Entrypoint = "main.sh" }},
-		{name: "args", mutate: func(m *Metadata) { m.Runs.Args = []string{"x"} }},
+		{name: "args", mutate: func(m *Metadata) { m.Runs.Args = []string{"", " --flag "} }, ok: true},
 		{name: "main", mutate: func(m *Metadata) { m.Runs.Main = "main.sh" }},
 		{name: "pre", mutate: func(m *Metadata) { m.Runs.Pre = "pre.sh" }},
 		{name: "pre condition", mutate: func(m *Metadata) { m.Runs.PreIf = "always()" }},
@@ -109,7 +111,148 @@ func TestValidateDockerEntrypoints(t *testing.T) {
 	}
 }
 
+func TestValidatePrebuiltDockerImage(t *testing.T) {
+	tests := []struct {
+		name       string
+		image      string
+		entrypoint string
+		ok         bool
+	}{
+		{name: "tag", image: "docker://alpine:3.20", ok: true},
+		{name: "digest", image: "docker://busybox@sha256:" + strings.Repeat("a", 64), ok: true},
+		{name: "registry port", image: "docker://registry.example.test:5000/team/action:v1", entrypoint: "/entrypoint.sh", ok: true},
+		{name: "missing prefix", image: "alpine:3.20"},
+		{name: "empty reference", image: "docker://"},
+		{name: "tag expression", image: "docker://alpine:${{ inputs.tag }}"},
+		{name: "invalid digest", image: "docker://busybox@sha256:abc"},
+		{name: "uppercase repository", image: "docker://Owner/action:v1"},
+		{name: "too long", image: "docker://" + strings.Repeat("a", 513)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := Metadata{Runs: Runs{Using: "docker", Image: test.image, Entrypoint: test.entrypoint}}
+			err := m.ValidateEntrypoints(RuntimeDocker)
+			if (err == nil) != test.ok {
+				t.Fatalf("ValidateEntrypoints() error = %v, want success %v", err, test.ok)
+			}
+		})
+	}
+}
+
+func TestLoadDockerArgsRequiresStringSequence(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args string
+		ok   bool
+	}{
+		{name: "ordered strings", args: "[first, '', '  ', '--privileged']", ok: true},
+		{name: "empty sequence", args: "[]", ok: true},
+		{name: "scalar", args: "value"},
+		{name: "number", args: "[1]"},
+		{name: "mapping", args: "{name: value}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeAction(t, root, "Dockerfile", "FROM scratch\n")
+			writeAction(t, root, "action.yml", "runs:\n  using: docker\n  image: Dockerfile\n  args: "+test.args+"\n")
+			action, err := Load(root, ".")
+			if (err == nil) != test.ok {
+				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
+			}
+			if test.ok && test.name == "ordered strings" {
+				want := []string{"first", "", "  ", "--privileged"}
+				if !slices.Equal(action.Runs.Args, want) {
+					t.Fatalf("runs.args = %#v, want %#v", action.Runs.Args, want)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadDockerArgsResolvesAliasesBeforeStringValidation(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		metadata string
+		ok       bool
+	}{
+		{name: "aliased runtime strings", ok: true, metadata: `name: &runtime docker
+runs:
+  using: *runtime
+  image: Dockerfile
+  args: [first, ""]
+`},
+		{name: "aliased runtime number", metadata: `name: &runtime docker
+runs:
+  using: *runtime
+  image: Dockerfile
+  args: [1]
+`},
+		{name: "merged runtime boolean", metadata: `runs:
+  <<: &defaults
+    using: docker
+    image: Dockerfile
+  args: [true]
+`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeAction(t, root, "Dockerfile", "FROM scratch\n")
+			writeAction(t, root, "action.yml", test.metadata)
+			_, err := Load(root, ".")
+			if (err == nil) != test.ok {
+				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
+			}
+		})
+	}
+}
+
 func TestLoadIsStrictAndConfined(t *testing.T) {
+	t.Run("softprops top-level env is inert", func(t *testing.T) {
+		root := t.TempDir()
+		writeAction(t, root, "action.yml", `name: GH Release
+description: Github Action for creating Github Releases
+author: softprops
+inputs:
+  token:
+    description: Authorized GitHub token or PAT
+    required: false
+    default: ${{ github.token }}
+env:
+  GITHUB_TOKEN: "As provided by Github Actions"
+runs:
+  using: node24
+  main: dist/index.js
+`)
+		action, err := Load(root, ".")
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(action)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), "As provided by Github Actions") || action.Runs.Env != nil {
+			t.Fatalf("Load() retained top-level env: %s", encoded)
+		}
+		if token := action.Inputs["token"].Default; token == nil || *token != "${{ github.token }}" {
+			t.Fatalf("Load() token input default = %v, want retained input authority", token)
+		}
+	})
+
+	t.Run("top-level env accepts arbitrary YAML values", func(t *testing.T) {
+		for _, value := range []string{
+			"placeholder",
+			"[GITHUB_TOKEN, {nested: true}]",
+			"{GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}', nested: {token: value}}",
+		} {
+			root := t.TempDir()
+			writeAction(t, root, "action.yml", "env: "+value+"\nruns:\n  using: node24\n  main: dist/index.js\n")
+			if _, err := Load(root, "."); err != nil {
+				t.Fatalf("Load() env %q error = %v", value, err)
+			}
+		}
+	})
+
 	t.Run("official declarative fields", func(t *testing.T) {
 		root := t.TempDir()
 		writeAction(t, root, "action.yml", "name: Setup tool\ndescription: Installs a tool\ndeprecationMessage: Use setup-tool v2 instead\nauthor: GitHub\ninputs:\n  version:\n    deprecationMessage: Use version-file instead\n    type: string\nbranding:\n  icon: package\n  color: blue\nruns:\n  using: node24\n  main: dist/index.js\n")
@@ -156,17 +299,25 @@ func TestLoadIsStrictAndConfined(t *testing.T) {
 
 	t.Run("unknown field", func(t *testing.T) {
 		root := t.TempDir()
-		writeAction(t, root, "action.yml", "unexpected: true\nruns:\n  using: node24\n")
-		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "field unexpected not found") {
+		writeAction(t, root, "action.yml", "env:\n  GITHUB_TOKEN: ignored\nunexpected: true\nruns:\n  using: node24\n")
+		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "line 3: field unexpected not found") {
 			t.Fatalf("Load() error = %v, want unknown field rejection", err)
 		}
 	})
 
 	t.Run("unknown nested field", func(t *testing.T) {
 		root := t.TempDir()
-		writeAction(t, root, "action.yml", "branding:\n  unexpected: true\nruns:\n  using: node24\n")
-		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "field unexpected not found") {
+		writeAction(t, root, "action.yml", "env:\n  GITHUB_TOKEN: ignored\nbranding:\n  unexpected: true\nruns:\n  using: node24\n")
+		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "line 4: field unexpected not found") {
 			t.Fatalf("Load() error = %v, want nested unknown field rejection", err)
+		}
+	})
+
+	t.Run("malformed top-level env", func(t *testing.T) {
+		root := t.TempDir()
+		writeAction(t, root, "action.yml", "env: [unterminated\nruns:\n  using: node24\n")
+		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "parse action metadata") {
+			t.Fatalf("Load() error = %v, want malformed YAML rejection", err)
 		}
 	})
 
@@ -220,6 +371,18 @@ func TestLoadRejectsCompositeControlsWithLocation(t *testing.T) {
 				t.Fatalf("Load() error = %v, want %q", err, want)
 			}
 		})
+	}
+}
+
+func TestLoadAcceptsCompositeContinueOnError(t *testing.T) {
+	root := t.TempDir()
+	writeAction(t, root, "action.yml", "runs:\n  using: composite\n  steps:\n    - run: exit 1\n      shell: sh\n      continue-on-error: true\n")
+	action, err := Load(root, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !action.Runs.Steps[0].ContinueOnError {
+		t.Fatal("Load() did not retain composite continue-on-error")
 	}
 }
 

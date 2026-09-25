@@ -1,8 +1,10 @@
 // Condition validation and strict runtime condition evaluation. The
-// condition* value helpers fail closed on mixed-type comparisons.
+// condition* value helpers reject mixed-type comparisons.
+
 package expression
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -12,16 +14,15 @@ import (
 // ConditionContext contains the runtime values available while evaluating a
 // job or step condition.
 type ConditionContext struct {
-	Inputs       map[string]string
-	Needs        map[string]map[string]string
-	NeedResults  map[string]string
+	Inputs       map[string]any
+	Needs        map[string]NeedStatus
 	Steps        map[string]StepStatus
 	Env          map[string]string
 	Vars         map[string]string
 	Matrix       map[string]any
 	GitHub       map[string]any
 	Runner       map[string]string
-	Services     map[string]map[string]string
+	Services     map[string]ServiceContext
 	Failure      bool
 	Cancelled    bool
 	Unsuccessful bool
@@ -37,83 +38,106 @@ const (
 	JobCondition ConditionScope = iota
 	// StepCondition is evaluated while a job is running.
 	StepCondition
+	// CallCondition is evaluated in the caller scope before a local reusable
+	// workflow's flattened jobs are allowed to start.
+	CallCondition
+	// actionLifecycleCondition is evaluated for action pre-if and post-if
+	// metadata. It has its own context policy and no implicit success guard.
+	actionLifecycleCondition
 )
 
-// ValidateCondition verifies that a job or step condition uses only expression
-// syntax, functions, and contexts implemented by the corresponding runtime
-// phase. Runtime-dependent values are not evaluated.
-func ValidateCondition(source string, scope ConditionScope) error {
-	return validateCondition(source, scope, nil, false)
+// validateCallCondition verifies the caller-only runtime surface of a local
+// reusable-workflow call condition.
+func validateCallCondition(source string) error {
+	return validateCondition(source, CallCondition)
 }
 
-// ValidateConditionWithMatrix additionally verifies references and operand
-// types against one concrete, statically expanded matrix instance.
-func ValidateConditionWithMatrix(source string, scope ConditionScope, matrix map[string]any) error {
-	return validateCondition(source, scope, matrix, true)
+// validateCompileCallCondition verifies every branch of a call condition
+// before event-backed values are reduced by the compiler.
+func validateCompileCallCondition(source string, context CompileContext) error {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return conditionBlocker(source, err)
+	}
+	return conditionBlocker(source, validateCompileConditionNode(node, CallCondition, context, nil))
 }
 
-// ValidateCompileConditionWithMatrix verifies every branch of an event-backed
+// validateActionLifecycleCondition verifies an action pre-if or post-if
+// expression without resolving runtime-dependent values.
+func validateActionLifecycleCondition(source string) error {
+	if err := validateLifecycleDelimiters(source); err != nil {
+		return err
+	}
+	return validateCondition(source, actionLifecycleCondition)
+}
+
+func validateLifecycleDelimiters(source string) error {
+	condition := strings.TrimSpace(source)
+	if strings.HasPrefix(condition, "${{") != strings.HasSuffix(condition, "}}") {
+		return fmt.Errorf("parse condition: mismatched expression delimiters")
+	}
+	return nil
+}
+
+// validateCompileConditionWithMatrix verifies every branch of an event-backed
 // condition before compile-time evaluation can short-circuit it. It admits the
 // union of compile-time and runtime condition references, while retaining the
 // concrete matrix type checks used by runtime validation.
-func ValidateCompileConditionWithMatrix(source string, scope ConditionScope, context CompileContext, matrix map[string]any) error {
+func validateCompileConditionWithMatrix(source string, scope ConditionScope, context CompileContext, matrix map[string]any) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
-		return err
+		return conditionBlocker(source, err)
 	}
 	context.Matrix = matrix
-	return validateCompileConditionNode(node, scope, context, matrix)
+	return conditionBlocker(source, validateCompileConditionNode(node, scope, context, matrix))
 }
 
-func validateCondition(source string, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
+func validateCondition(source string, scope ConditionScope) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
-		return err
+		return conditionBlocker(source, err)
 	}
-	return validateConditionNode(node, scope, matrix, matrixKnown)
+	return conditionBlocker(source, validateConditionNode(node, scope))
 }
 
-func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
-	switch node := node.(type) {
-	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
+type conditionBlockerError struct {
+	detail string
+	err    error
+}
+
+func (e *conditionBlockerError) Error() string { return e.err.Error() }
+func (e *conditionBlockerError) Unwrap() error { return e.err }
+func (e *conditionBlockerError) CompatibilityBlocker() (string, string) {
+	return "expression", e.detail
+}
+
+func conditionBlocker(source string, err error) error {
+	if err == nil {
 		return nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, path, err := referencePath(node)
-		if err != nil {
-			return err
-		}
-		if matrixKnown && strings.EqualFold(root, "matrix") && len(path) == 1 {
-			if _, ok := conditionMatrixValue(matrix, path[0]); !ok {
-				return fmt.Errorf("condition reference %q is unavailable in this matrix instance", root+"."+path[0])
-			}
-		}
+	}
+	var blocker *conditionBlockerError
+	if errors.As(err, &blocker) {
+		return err
+	}
+	return &conditionBlockerError{detail: strings.TrimSpace(source), err: err}
+}
+
+func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error {
+	validator := newSemanticValidator(conditionSurface)
+	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		return validateConditionReference(root, path, scope)
-	case *actionlint.NotOpNode:
-		return validateConditionNode(node.Operand, scope, matrix, matrixKnown)
-	case *actionlint.LogicalOpNode:
-		if err := validateConditionNode(node.Left, scope, matrix, matrixKnown); err != nil {
-			return err
-		}
-		return validateConditionNode(node.Right, scope, matrix, matrixKnown)
-	case *actionlint.CompareOpNode:
-		if !node.Kind.IsEqualityOp() {
-			return fmt.Errorf("condition comparison %s is unsupported", node.Kind)
-		}
-		if err := validateConditionNode(node.Left, scope, matrix, matrixKnown); err != nil {
-			return err
-		}
-		if err := validateConditionNode(node.Right, scope, matrix, matrixKnown); err != nil {
-			return err
-		}
-		left, right := conditionOperandCategory(node.Left, matrix), conditionOperandCategory(node.Right, matrix)
-		if left == "unsupported" || right == "unsupported" {
-			return fmt.Errorf("condition equality uses an unsupported matrix value type")
-		}
-		if left != "unknown" && right != "unknown" && left != right {
-			return fmt.Errorf("condition equality compares incompatible %s and %s operands", left, right)
-		}
+	}
+	validator.validateAccess = func(node actionlint.ExprNode) error {
+		return validateConditionAccessNode(&validator, node, scope)
+	}
+	validator.validateCompare = func(kind actionlint.CompareOpNodeKind) error {
 		return nil
-	case *actionlint.FuncCallNode:
+	}
+	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
+	validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
+		if recognized, err := validatePureFunction(validator, node); recognized {
+			return err
+		}
 		switch strings.ToLower(node.Callee) {
 		case "always", "success", "failure", "cancelled":
 			if len(node.Args) != 0 {
@@ -121,14 +145,14 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 			}
 			return nil
 		case "hashfiles":
-			if scope != StepCondition {
+			if scope != StepCondition && scope != actionLifecycleCondition {
 				return fmt.Errorf("condition function %q is unavailable in job conditions", node.Callee)
 			}
 			if len(node.Args) == 0 || len(node.Args) > 255 {
 				return fmt.Errorf("condition function %q requires 1 to 255 arguments", node.Callee)
 			}
 			for _, argument := range node.Args {
-				if err := validateHashFilesArgument(argument, scope, matrix, matrixKnown); err != nil {
+				if err := validateHashFilesArgument(argument, scope); err != nil {
 					return err
 				}
 			}
@@ -136,71 +160,49 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 		default:
 			return fmt.Errorf("condition function %q is unsupported", node.Callee)
 		}
-	default:
-		return fmt.Errorf("unsupported condition expression")
 	}
+	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported condition expression") }
+	return validator.validate(node)
 }
 
 func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope, context CompileContext, matrix map[string]any) error {
-	switch node := node.(type) {
-	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
-		return nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, path, err := referencePath(node)
-		if err != nil {
-			return err
-		}
+	validator := newSemanticValidator(conditionSurface)
+	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if strings.EqualFold(root, "github") && len(path) != 0 {
 			if strings.EqualFold(path[0], "event") {
 				return nil
 			}
 			switch strings.ToLower(path[0]) {
-			case "actor", "event_name", "ref", "repository", "repository_owner", "sha", "workflow":
+			case "actor", "base_ref", "event_name", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow", "workflow_ref", "workflow_sha":
 				if len(path) == 1 {
 					return nil
 				}
 			}
 		}
-		if strings.EqualFold(root, "matrix") && len(path) == 1 {
-			if _, ok := conditionMatrixValue(matrix, path[0]); !ok {
-				return fmt.Errorf("condition reference %q is unavailable in this matrix instance", root+"."+path[0])
-			}
-		}
 		return validateConditionReference(root, path, scope)
-	case *actionlint.NotOpNode:
-		return validateCompileConditionNode(node.Operand, scope, context, matrix)
-	case *actionlint.LogicalOpNode:
-		if err := validateCompileConditionNode(node.Left, scope, context, matrix); err != nil {
-			return err
+	}
+	validator.validateAccess = func(node actionlint.ExprNode) error {
+		root := referenceRoot(node)
+		if strings.EqualFold(root, "github") || strings.EqualFold(root, "event") || strings.EqualFold(root, "vars") || strings.EqualFold(root, "matrix") {
+			return validateCompileAccessNode(&validator, node)
 		}
-		return validateCompileConditionNode(node.Right, scope, context, matrix)
-	case *actionlint.CompareOpNode:
-		if !node.Kind.IsEqualityOp() {
-			return fmt.Errorf("condition comparison %s is unsupported", node.Kind)
-		}
-		if err := validateCompileConditionNode(node.Left, scope, context, matrix); err != nil {
-			return err
-		}
-		if err := validateCompileConditionNode(node.Right, scope, context, matrix); err != nil {
-			return err
-		}
-		left := compileConditionOperandCategory(node.Left, context, matrix)
-		right := compileConditionOperandCategory(node.Right, context, matrix)
-		if left == "unsupported" || right == "unsupported" {
-			return fmt.Errorf("condition equality uses an unsupported matrix value type")
-		}
-		if left != "unknown" && right != "unknown" && left != right {
-			return fmt.Errorf("condition equality compares incompatible %s and %s operands", left, right)
-		}
+		return validateConditionAccessNode(&validator, node, scope)
+	}
+	validator.validateCompare = func(kind actionlint.CompareOpNodeKind) error {
 		return nil
-	case *actionlint.FuncCallNode:
+	}
+	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
+	validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
+		if recognized, err := validatePureFunction(validator, node); recognized {
+			return err
+		}
 		switch {
 		case (strings.EqualFold(node.Callee, "always") || strings.EqualFold(node.Callee, "success") || strings.EqualFold(node.Callee, "failure") || strings.EqualFold(node.Callee, "cancelled")) && len(node.Args) == 0:
 			return nil
 		case strings.EqualFold(node.Callee, "fromJSON") && len(node.Args) == 1,
 			(strings.EqualFold(node.Callee, "startsWith") || strings.EqualFold(node.Callee, "contains") || strings.EqualFold(node.Callee, "endsWith")) && len(node.Args) == 2:
 			for _, argument := range node.Args {
-				if err := validateCompileConditionNode(argument, scope, context, matrix); err != nil {
+				if err := validator.validate(argument); err != nil {
 					return err
 				}
 			}
@@ -211,7 +213,7 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 				return fmt.Errorf("condition function %q requires 1 to 255 arguments", node.Callee)
 			}
 			for _, argument := range node.Args {
-				if err := validateHashFilesArgument(argument, scope, matrix, true); err != nil {
+				if err := validateHashFilesArgument(argument, scope); err != nil {
 					return err
 				}
 			}
@@ -219,77 +221,9 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 		default:
 			return fmt.Errorf("condition function %q is unsupported", node.Callee)
 		}
-	default:
-		return fmt.Errorf("unsupported condition expression")
 	}
-}
-
-func compileConditionOperandCategory(node actionlint.ExprNode, context CompileContext, matrix map[string]any) string {
-	if value, err := evaluateCompileNode(node, context); err == nil {
-		return conditionValueCategory(value)
-	}
-	root, _, err := referencePath(node)
-	if err == nil && strings.EqualFold(root, "github") {
-		return "unknown"
-	}
-	return conditionOperandCategory(node, matrix)
-}
-
-func conditionOperandCategory(node actionlint.ExprNode, matrix map[string]any) string {
-	switch node := node.(type) {
-	case *actionlint.NullNode:
-		return "null"
-	case *actionlint.BoolNode, *actionlint.NotOpNode, *actionlint.LogicalOpNode, *actionlint.CompareOpNode:
-		return "boolean"
-	case *actionlint.FuncCallNode:
-		if strings.EqualFold(node.Callee, "hashFiles") {
-			return "string"
-		}
-		return "boolean"
-	case *actionlint.IntNode, *actionlint.FloatNode:
-		return "number"
-	case *actionlint.StringNode:
-		return "string"
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, path, err := referencePath(node)
-		if err != nil {
-			return "unknown"
-		}
-		if !strings.EqualFold(root, "matrix") {
-			return "string"
-		}
-		if len(path) == 1 {
-			if value, ok := conditionMatrixValue(matrix, path[0]); ok {
-				return conditionValueCategory(value)
-			}
-		}
-	}
-	return "unknown"
-}
-
-func conditionMatrixValue(matrix map[string]any, target string) (any, bool) {
-	for name, value := range matrix {
-		if strings.EqualFold(name, target) {
-			return value, true
-		}
-	}
-	return nil, false
-}
-
-func conditionValueCategory(value any) string {
-	if _, ok := conditionNumber(value); ok {
-		return "number"
-	}
-	switch value.(type) {
-	case nil:
-		return "null"
-	case bool:
-		return "boolean"
-	case string:
-		return "string"
-	default:
-		return "unsupported"
-	}
+	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported condition expression") }
+	return validator.validate(node)
 }
 
 func validateConditionReference(root string, path []string, scope ConditionScope) error {
@@ -297,30 +231,67 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 	if len(path) != 0 {
 		reference += "." + strings.Join(path, ".")
 	}
+	if scope == actionLifecycleCondition {
+		switch strings.ToLower(root) {
+		case "env", "github", "inputs", "job", "matrix", "runner", "steps":
+		default:
+			return fmt.Errorf("lifecycle condition context %q is unsupported", root)
+		}
+	}
+	if scope == CallCondition {
+		switch strings.ToLower(root) {
+		case "github", "vars", "inputs", "needs":
+		default:
+			return fmt.Errorf("reusable-workflow call condition context %q is unsupported", root)
+		}
+	}
 	switch strings.ToLower(root) {
 	case "runner":
-		if len(path) == 1 && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch")) {
-			return nil
-		}
-		return fmt.Errorf("condition reference %q is unsupported; expected runner.os or runner.arch", reference)
-	case "github":
 		if len(path) == 1 {
-			switch strings.ToLower(path[0]) {
-			case "actor", "event_name", "head_ref", "ref", "repository", "sha":
+			if strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") {
+				return nil
+			}
+			if strings.EqualFold(path[0], "temp") && scope != JobCondition && scope != CallCondition {
 				return nil
 			}
 		}
-		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are actor, event_name, head_ref, ref, repository, and sha", reference)
+		if scope == JobCondition {
+			return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, or runner.environment", reference)
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, runner.environment, or runner.temp", reference)
+	case "github":
+		if len(path) >= 1 && strings.EqualFold(path[0], "event") {
+			return nil
+		}
+		if len(path) == 1 {
+			switch strings.ToLower(path[0]) {
+			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow_ref", "workflow_sha":
+				return nil
+			}
+		}
+		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are actor, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, sha, workflow_ref, and workflow_sha", reference)
 	case "needs":
 		if len(path) == 2 && strings.EqualFold(path[1], "result") || len(path) == 3 && strings.EqualFold(path[1], "outputs") {
 			return nil
 		}
 		return fmt.Errorf("condition reference %q is unsupported; expected needs.<job>.result or needs.<job>.outputs.<name>", reference)
-	case "vars", "matrix":
+	case "vars":
 		if len(path) == 1 {
 			return nil
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected %s.<name>", reference, strings.ToLower(root))
+		return fmt.Errorf("condition reference %q is unsupported; expected vars.<name>", reference)
+	case "inputs":
+		if len(path) == 1 {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected inputs.<name>", reference)
+	case "matrix":
+		// Matrix values may be objects or arrays, so nested references such
+		// as matrix.config.os are valid.
+		if len(path) >= 1 {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected matrix.<name>", reference)
 	case "steps":
 		if scope == JobCondition {
 			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
@@ -341,50 +312,135 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 		if scope == JobCondition {
 			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
 		}
-		if len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports") {
+		if len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports") || len(path) == 3 && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")) {
 			return nil
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected job.services.<service>.ports[<port>]", reference)
+		return fmt.Errorf("condition reference %q is unsupported; expected job.services.<service>.id, job.services.<service>.network, or job.services.<service>.ports[<port>]", reference)
 	default:
 		return fmt.Errorf("condition context %q is unsupported", root)
 	}
 }
 
-// EvaluateActionLifecycleCondition evaluates an action pre-if or post-if
-// condition against the supplied lifecycle state. The accepted grammar is
-// deliberately narrower than general conditions: exactly one bare status
-// function with optional ${{ }} delimiters. An empty condition is
-// unconditionally true (unlike general conditions, which apply the implicit
-// success guard), failure() means unsuccessful and not cancelled, and any
-// other expression fails closed with an error.
-func EvaluateActionLifecycleCondition(value string, unsuccessful, cancelled bool) (bool, error) {
-	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, "${{") && strings.HasSuffix(value, "}}") {
-		value = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "${{"), "}}"))
+func validateConditionAccessNode(validator *semanticValidator, node actionlint.ExprNode, scope ConditionScope) error {
+	root := strings.ToLower(referenceRoot(node))
+	if scope == actionLifecycleCondition {
+		switch root {
+		case "env", "github", "inputs", "job", "matrix", "runner", "steps":
+		default:
+			return fmt.Errorf("lifecycle condition context %q is unsupported", root)
+		}
+		if _, whole := node.(*actionlint.VariableNode); whole {
+			return fmt.Errorf("whole lifecycle condition context %q is unsupported", root)
+		}
+		staticRoot, path, err := referencePath(node)
+		if err != nil {
+			if root == "github" && isGitHubEventAccess(node) {
+				var validationErr error
+				actionlint.VisitExprNode(node, func(candidate, _ actionlint.ExprNode, entering bool) {
+					if !entering || validationErr != nil {
+						return
+					}
+					if index, ok := candidate.(*actionlint.IndexAccessNode); ok {
+						validationErr = validator.validate(index.Index)
+					}
+				})
+				return validationErr
+			}
+			return fmt.Errorf("dynamic lifecycle condition access is unsupported")
+		}
+		return validateConditionReference(staticRoot, path, scope)
 	}
-	switch strings.ToLower(value) {
-	case "", "always()":
-		return true, nil
-	case "success()":
-		return !unsuccessful && !cancelled, nil
-	case "failure()":
-		return unsuccessful && !cancelled, nil
-	case "cancelled()":
-		return cancelled, nil
+	switch root {
+	case "":
+		switch node := node.(type) {
+		case *actionlint.ObjectDerefNode:
+			return validator.validate(node.Receiver)
+		case *actionlint.ArrayDerefNode:
+			return validator.validate(node.Receiver)
+		case *actionlint.IndexAccessNode:
+			if err := validator.validate(node.Operand); err != nil {
+				return err
+			}
+			return validator.validate(node.Index)
+		}
+		return fmt.Errorf("unsupported condition access expression")
+	case "matrix", "needs":
+	case "vars":
+		if _, whole := node.(*actionlint.VariableNode); whole {
+			return fmt.Errorf("whole condition context %q is unsupported", root)
+		}
+	case "inputs":
+		if _, whole := node.(*actionlint.VariableNode); whole {
+			return fmt.Errorf("whole condition context %q is unsupported", root)
+		}
+	case "steps":
+		if scope == JobCondition {
+			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
+		}
+	case "env":
+		if scope == JobCondition {
+			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
+		}
+		if _, whole := node.(*actionlint.VariableNode); whole {
+			return fmt.Errorf("whole condition context %q is unsupported", root)
+		}
+	case "github":
+		if !isGitHubEventAccess(node) {
+			return fmt.Errorf("dynamic or whole github access is unsupported")
+		}
 	default:
-		return false, fmt.Errorf("condition %q is unsupported", value)
+		return fmt.Errorf("condition context %q is unsupported", root)
 	}
+	var validationErr error
+	actionlint.VisitExprNode(node, func(candidate, _ actionlint.ExprNode, entering bool) {
+		if !entering || validationErr != nil {
+			return
+		}
+		if index, ok := candidate.(*actionlint.IndexAccessNode); ok {
+			validationErr = validator.validate(index.Index)
+		}
+	})
+	return validationErr
 }
 
-// EvaluateCondition evaluates a job or step condition. Unsupported syntax and
-// unavailable values fail closed with an error.
-func EvaluateCondition(source string, context ConditionContext) (bool, error) {
+// evaluateActionLifecycleCondition evaluates action pre-if or post-if
+// metadata. Empty conditions are unconditionally true and, unlike workflow
+// step conditions, lifecycle conditions have no implicit success guard.
+func evaluateActionLifecycleCondition(source string, context ConditionContext) (bool, error) {
+	if err := validateLifecycleDelimiters(source); err != nil {
+		return false, err
+	}
+	node, empty, err := parseCondition(source)
+	if err != nil {
+		return false, err
+	}
+	if empty {
+		return true, nil
+	}
+	// Validate before evaluation so short-circuiting cannot hide an
+	// unsupported context or function in an unselected branch.
+	if err := validateConditionNode(node, actionLifecycleCondition); err != nil {
+		return false, err
+	}
+	value, err := evaluateConditionNode(node, context)
+	if err != nil {
+		return false, err
+	}
+	return githubTruthy(value), nil
+}
+
+// evaluateConditionLegacy evaluates a job or step condition. Unsupported syntax and
+// unavailable values return an error.
+func evaluateConditionLegacy(source string, context ConditionContext) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil {
 		return false, err
 	}
 	if empty {
 		return !context.Unsuccessful && !context.Cancelled, nil
+	}
+	if err := validateConditionNode(node, StepCondition); err != nil {
+		return false, err
 	}
 	if !containsStatusFunction(node) && (context.Unsuccessful || context.Cancelled) {
 		return false, nil
@@ -393,73 +449,39 @@ func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	result := conditionTruthy(value)
+	result := githubTruthy(value)
 	return result, nil
 }
 
 func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (any, error) {
-	switch node := node.(type) {
-	case *actionlint.NullNode:
-		return nil, nil
-	case *actionlint.BoolNode:
-		return node.Value, nil
-	case *actionlint.IntNode:
-		return node.Value, nil
-	case *actionlint.FloatNode:
-		return node.Value, nil
-	case *actionlint.StringNode:
-		return node.Value, nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, path, err := referencePath(node)
-		if err != nil {
-			return nil, err
-		}
+	evaluator := newSemanticEvaluator(conditionSurface)
+	rootValues := make(map[string]any)
+	evaluator.resolve = func(root string, path []string) (any, error) {
 		return resolveConditionReference(root, path, context)
-	case *actionlint.NotOpNode:
-		value, err := evaluateConditionNode(node.Operand, context)
-		if err != nil {
-			return nil, err
+	}
+	evaluator.resolveRoot = func(root string) (any, error) {
+		key := strings.ToLower(root)
+		if value, ok := rootValues[key]; ok {
+			return value, nil
 		}
-		return !conditionTruthy(value), nil
-	case *actionlint.LogicalOpNode:
-		left, err := evaluateConditionNode(node.Left, context)
-		if err != nil {
-			return nil, err
+		value, err := resolveConditionRoot(root, context)
+		if err == nil {
+			rootValues[key] = value
 		}
-		leftBool := conditionTruthy(left)
-		if node.Kind == actionlint.LogicalOpNodeKindAnd && !leftBool {
-			return false, nil
+		return value, err
+	}
+	evaluator.truthy = githubTruthy
+	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
+		return githubCompare(kind, left, right)
+	}
+	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported condition expression") }
+	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
+		return fmt.Errorf("condition logical operator %s is unsupported", kind)
+	}
+	evaluator.call = func(_ *semanticEvaluator, node *actionlint.FuncCallNode) (any, error) {
+		if value, recognized, err := evaluatePureFunction(&evaluator, node); recognized {
+			return value, err
 		}
-		if node.Kind == actionlint.LogicalOpNodeKindOr && leftBool {
-			return true, nil
-		}
-		right, err := evaluateConditionNode(node.Right, context)
-		if err != nil {
-			return nil, err
-		}
-		return conditionTruthy(right), nil
-	case *actionlint.CompareOpNode:
-		left, err := evaluateConditionNode(node.Left, context)
-		if err != nil {
-			return nil, err
-		}
-		right, err := evaluateConditionNode(node.Right, context)
-		if err != nil {
-			return nil, err
-		}
-		equal, err := conditionEqual(left, right)
-		if err != nil {
-			return nil, err
-		}
-		switch node.Kind {
-		case actionlint.CompareOpNodeKindEq:
-			return equal, nil
-		case actionlint.CompareOpNodeKindNotEq:
-			return !equal, nil
-		default:
-			return nil, fmt.Errorf("condition comparison %s is unsupported", node.Kind)
-		}
-	case *actionlint.FuncCallNode:
 		switch strings.ToLower(node.Callee) {
 		case "always":
 			if len(node.Args) != 0 {
@@ -495,17 +517,58 @@ func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (
 		default:
 			return nil, fmt.Errorf("condition function %q is unsupported", node.Callee)
 		}
+	}
+	return evaluator.evaluate(node)
+}
+
+func resolveConditionRoot(root string, context ConditionContext) (any, error) {
+	switch strings.ToLower(root) {
+	case "matrix":
+		if context.Matrix == nil {
+			return nil, fmt.Errorf("condition context %q is unavailable", root)
+		}
+		return context.Matrix, nil
+	case "vars":
+		return context.Vars, nil
+	case "inputs":
+		if context.Inputs == nil {
+			return nil, fmt.Errorf("condition context %q is unavailable", root)
+		}
+		return context.Inputs, nil
+	case "env":
+		return context.Env, nil
+	case "needs":
+		needs := make(map[string]any)
+		for name, status := range context.Needs {
+			needs[name] = map[string]any{"outputs": status.Outputs, "result": status.Result}
+		}
+		return needs, nil
+	case "steps":
+		steps := make(map[string]any)
+		for name, step := range context.Steps {
+			steps[name] = map[string]any{"outputs": step.Outputs, "outcome": step.Outcome, "conclusion": step.Conclusion}
+		}
+		return steps, nil
+	case "github":
+		event, found, err := objectValue(context.GitHub, "event")
+		if err != nil {
+			return nil, err
+		}
+		if !found || event == nil {
+			return nil, fmt.Errorf("condition requires an event payload that is unavailable in this job plan")
+		}
+		return context.GitHub, nil
 	default:
-		return nil, fmt.Errorf("unsupported condition expression")
+		return nil, fmt.Errorf("condition context %q is unsupported", root)
 	}
 }
 
-func validateHashFilesArgument(node actionlint.ExprNode, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
+func validateHashFilesArgument(node actionlint.ExprNode, scope ConditionScope) error {
 	switch node.(type) {
 	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
 		return nil
 	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		return validateConditionNode(node, scope, matrix, matrixKnown)
+		return validateConditionNode(node, scope)
 	default:
 		return fmt.Errorf("condition function %q arguments must be literals or direct context references", "hashFiles")
 	}
@@ -542,31 +605,68 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		}
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return resolveServicePort(context.Services, path[1], path[3], "condition")
+	case len(path) == 3 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")):
+		return resolveServiceValue(context.Services, path[1], path[2], "condition")
 	case strings.EqualFold(root, "github"):
+		if len(path) >= 1 && strings.EqualFold(path[0], "event") {
+			event, found, err := objectValue(context.GitHub, path[0])
+			if err != nil {
+				return nil, err
+			}
+			if !found || event == nil {
+				return nil, fmt.Errorf("condition requires an event payload that is unavailable in this job plan")
+			}
+		}
 		if value, ok := lookupRuntimeValue(context.GitHub, path); ok {
 			return value, nil
 		}
+		if context.GitHub == nil {
+			break
+		}
+		return nil, nil
 	case len(path) == 1 && strings.EqualFold(root, "inputs") && context.Inputs != nil:
-		return findString(context.Inputs, path[0]), nil
+		value, found, err := objectValue(context.Inputs, path[0])
+		if err != nil || found {
+			return value, err
+		}
+		return nil, nil
 	case len(path) == 1 && strings.EqualFold(root, "env"):
 		return findString(context.Env, path[0]), nil
 	case len(path) == 1 && strings.EqualFold(root, "vars"):
 		return findString(context.Vars, path[0]), nil
-	case len(path) == 1 && strings.EqualFold(root, "matrix"):
+	case len(path) >= 1 && strings.EqualFold(root, "matrix"):
 		for name, value := range context.Matrix {
 			if strings.EqualFold(name, path[0]) {
+				// Nested references such as matrix.config.os walk into
+				// object-valued matrix entries; a missing or non-object
+				// segment yields null, matching GitHub.
+				for _, part := range path[1:] {
+					var (
+						ok  bool
+						err error
+					)
+					value, ok, err = objectValue(value, part)
+					if err != nil {
+						return nil, err
+					}
+					if !ok {
+						return nil, nil
+					}
+				}
 				return value, nil
 			}
 		}
+		if context.Matrix == nil {
+			break
+		}
+		return nil, nil
 	case len(path) == 2 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "result"):
-		for name, result := range context.NeedResults {
-			if strings.EqualFold(name, path[0]) {
-				return result, nil
-			}
+		if status, ok := findNeedStatus(context.Needs, path[0]); ok {
+			return status.Result, nil
 		}
 	case len(path) == 3 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "outputs"):
-		if outputs, ok := findOutputs(context.Needs, path[0]); ok {
-			return findString(outputs, path[2]), nil
+		if status, ok := findNeedStatus(context.Needs, path[0]); ok {
+			return findString(status.Outputs, path[2]), nil
 		}
 	case len(path) == 2 && strings.EqualFold(root, "steps"):
 		for name, step := range context.Steps {
@@ -588,53 +688,4 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		}
 	}
 	return nil, fmt.Errorf("condition references unavailable value %s.%s", root, strings.Join(path, "."))
-}
-
-// The condition* helpers are the strict evaluation family used by runtime
-// conditions: mixed-type equality is an error rather than a coercion, so
-// unsupported comparisons fail closed instead of silently converting. The
-// actionInputDefault* family implements GitHub's loose coercion for action
-// input defaults; the two families are deliberately separate and must not
-// be unified.
-func conditionTruthy(value any) bool {
-	switch value := value.(type) {
-	case nil:
-		return false
-	case bool:
-		return value
-	case string:
-		return value != ""
-	}
-	number, ok := conditionNumber(value)
-	return ok && number.Sign() != 0
-}
-
-func conditionEqual(left, right any) (bool, error) {
-	if leftNumber, ok := conditionNumber(left); ok {
-		rightNumber, ok := conditionNumber(right)
-		if !ok {
-			return false, fmt.Errorf("mixed-type condition equality is unsupported")
-		}
-		return leftNumber.Cmp(rightNumber) == 0, nil
-	}
-	switch left := left.(type) {
-	case nil:
-		if right != nil {
-			return false, fmt.Errorf("mixed-type condition equality is unsupported")
-		}
-		return true, nil
-	case string:
-		right, ok := right.(string)
-		if !ok {
-			return false, fmt.Errorf("mixed-type condition equality is unsupported")
-		}
-		return strings.EqualFold(left, right), nil
-	case bool:
-		right, ok := right.(bool)
-		if !ok {
-			return false, fmt.Errorf("mixed-type condition equality is unsupported")
-		}
-		return left == right, nil
-	}
-	return false, fmt.Errorf("mixed-type condition equality is unsupported")
 }

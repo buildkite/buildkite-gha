@@ -203,7 +203,7 @@ func TestPrepareSecretsMigrationDiscoversAndRenders(t *testing.T) {
 
 func TestRejectExistingBuildkiteSecretsBeforeWorkflowGeneration(t *testing.T) {
 	runner := &migrationTestRunner{results: []migrationCommandResult{{output: []byte(`[{"key":"API_KEY"},{"key":"OTHER"}]`)}}}
-	err := rejectExistingBuildkiteSecrets(context.Background(), runner, "acme", testMigrationCluster, []string{"API_KEY", "DEPLOY_TOKEN"})
+	err := rejectExistingBuildkiteSecrets(t.Context(), runner, "acme", testMigrationCluster, []string{"API_KEY", "DEPLOY_TOKEN"})
 	if err == nil || !strings.Contains(err.Error(), "API_KEY") || !strings.Contains(err.Error(), "will not be overwritten") {
 		t.Fatalf("rejectExistingBuildkiteSecrets() error = %v", err)
 	}
@@ -227,7 +227,7 @@ func TestRejectExistingBuildkiteSecretsPaginates(t *testing.T) {
 		{output: encodedFirstPage},
 		{output: []byte(`[{"key":"API_KEY"}]`)},
 	}}
-	err = rejectExistingBuildkiteSecrets(context.Background(), runner, "acme", testMigrationCluster, []string{"API_KEY"})
+	err = rejectExistingBuildkiteSecrets(t.Context(), runner, "acme", testMigrationCluster, []string{"API_KEY"})
 	if err == nil || !strings.Contains(err.Error(), "API_KEY") || len(runner.commands) != 2 || !strings.Contains(strings.Join(runner.commands[1].args, " "), "page=2") {
 		t.Fatalf("rejectExistingBuildkiteSecrets() error/commands = %v/%#v", err, runner.commands)
 	}
@@ -395,7 +395,7 @@ func TestRunSecretsMigrationPinsCommittedWorkflowCreatesGrantAndDispatches(t *te
 		{},
 	}}
 	var stdout bytes.Buffer
-	if err := runSecretsMigration(context.Background(), workflowPath, &stdout, runner); err != nil {
+	if err := runSecretsMigration(t.Context(), workflowPath, &stdout, runner); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.commands) != 5 || runner.commands[1].name != "gh" || !strings.Contains(strings.Join(runner.commands[2].args, " "), "migrate%23secrets.yml?ref="+testMigrationCommit) {

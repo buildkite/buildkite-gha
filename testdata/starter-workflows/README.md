@@ -30,6 +30,9 @@ whether a template currently passes:
 | `rubyonrails` | PostgreSQL service container and a second lint job. |
 | `swift` | macOS runner and native Swift toolchain. |
 
+The CMake case is disabled by default because its matrix requires a Windows
+runner. Passing its case ID explicitly runs it.
+
 Run the networked compile and production-profile scans with:
 
 ```sh
@@ -38,12 +41,12 @@ mise run corpus:starter-profile
 mise run corpus:starter-profile -- go cmake-multi-platform swift
 ```
 
-Each command prints every result, reports a passing/blocked summary, and exits
-non-zero while any template misses its target state. The profile scan resolves
-public actions and applies the `hosted` admission policy, but neither
-mode executes action or project code. Mutable action tags remain as declared by
-the official template, so profile results are observational and runtime proof
-must retain immutable resolved action locks.
+Each command prints every result, reports passing, blocked, and disabled cases,
+and exits non-zero while any enabled template misses its target state. The
+profile scan resolves public actions and applies the `hosted` admission policy,
+but neither mode executes action or project code. Mutable action tags remain as
+declared by the official template, so profile results are observational and
+runtime proof must retain immutable resolved action locks.
 
 Buildkite runs the profile scan as a soft-failing step and publishes the result
 as an annotation. Both corpus commands are opt-in; `mise run check` remains

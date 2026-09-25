@@ -1,0 +1,7 @@
+name: Compatibility gap - remote reusable workflows
+on: push
+jobs:
+  probe:
+    uses: buildkite/buildkite-gha/.github/workflows/example-reusable-package.yml@ef121d3d0f33b5b5532028de9398f6a0fe1f0b39
+    with:
+      package: ./internal/compiler

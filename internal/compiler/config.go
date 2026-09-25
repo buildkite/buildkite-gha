@@ -3,9 +3,14 @@ package compiler
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 var queuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
@@ -17,8 +22,9 @@ var stepKeyNamespacePattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
 type OperatingSystem string
 
 const (
-	OperatingSystemLinux  OperatingSystem = "linux"
-	OperatingSystemDarwin OperatingSystem = "darwin"
+	OperatingSystemLinux   OperatingSystem = "linux"
+	OperatingSystemDarwin  OperatingSystem = "darwin"
+	OperatingSystemWindows OperatingSystem = "windows"
 )
 
 // Architecture identifies one supported workflow host architecture.
@@ -36,8 +42,9 @@ type Platform struct {
 }
 
 var (
-	PlatformLinuxAMD64  = Platform{OS: OperatingSystemLinux, Arch: ArchitectureAMD64}
-	PlatformDarwinARM64 = Platform{OS: OperatingSystemDarwin, Arch: ArchitectureARM64}
+	PlatformLinuxAMD64   = Platform{OS: OperatingSystemLinux, Arch: ArchitectureAMD64}
+	PlatformDarwinARM64  = Platform{OS: OperatingSystemDarwin, Arch: ArchitectureARM64}
+	PlatformWindowsAMD64 = Platform{OS: OperatingSystemWindows, Arch: ArchitectureAMD64}
 )
 
 func (platform Platform) String() string {
@@ -51,6 +58,8 @@ func ParsePlatform(value string) (Platform, error) {
 		return PlatformLinuxAMD64, nil
 	case PlatformDarwinARM64.String():
 		return PlatformDarwinARM64, nil
+	case PlatformWindowsAMD64.String():
+		return PlatformWindowsAMD64, nil
 	default:
 		return Platform{}, fmt.Errorf("unsupported runtime platform %q", value)
 	}
@@ -69,27 +78,86 @@ const (
 	EventUntrusted EventTrust = "untrusted"
 )
 
-// VariableSources are explicit non-secret inputs to the vars context.
-// Precedence is Bridge < Provider < Buildkite, so the build-specific snapshot
-// wins over repository defaults without reading arbitrary process environment.
+// VariableSources are the GitHub Actions configuration variables known before
+// any job's environment applies: organization variables, then repository
+// variables, which override them. They form the vars context of compile-time
+// fields and jobs.<id>.if, and every job plan carries them as its
+// organization_vars and repository_vars scopes. Environment variables come
+// from Options.EnvironmentSource per job. Inside a Buildkite job, upload and
+// compile fill these scopes from the job-scoped Agent API; an empty source
+// leaves undefined names evaluating as empty strings.
 type VariableSources struct {
-	Bridge    map[string]string
-	Provider  map[string]string
-	Buildkite map[string]string
+	Organization map[string]string
+	Repository   map[string]string
+	// Resolved reports that a variable source answered for the event
+	// repository, so an empty scope means the repository defines no variable
+	// rather than that no source was consulted. Compile-time fields resolve a
+	// name no scope defines to an empty string only when Resolved is true;
+	// without a source, such as compile outside a Buildkite job, the
+	// reference fails to compile. Runner-evaluated positions never need this
+	// distinction: their vars context is the job plan's scopes.
+	Resolved bool
 }
 
+// CompileTimeVars is the vars context of compile-time fields: repository over
+// organization variables. It is nil when no source resolved the scopes and a
+// non-nil, possibly empty, map when one did.
+func (sources VariableSources) CompileTimeVars() map[string]string {
+	merged := plan.MergeVars(sources.Organization, sources.Repository)
+	if merged == nil && sources.Resolved {
+		merged = map[string]string{}
+	}
+	return merged
+}
+
+// CacheVolume is one Buildkite Hosted cache volume attached to a runner target.
+type CacheVolume = buildkitepipeline.CacheVolume
+
 // RunnerTarget atomically selects one Buildkite queue, execution platform, and
-// optional immutable runtime image.
+// optional immutable runtime image or opaque agent tags, and cache volume.
 type RunnerTarget struct {
 	Queue    string
 	Platform Platform
 	Image    string
+	Agents   map[string]string
+	// ToolCache overrides legacy image/platform-based tool-cache enablement.
+	// Nil preserves the behavior of existing mappings and older backends.
+	ToolCache *bool
+	Cache     *CacheVolume
 }
+
+// RunnerSelector maps one complete runs-on selector to a target without
+// changing how any of its individual labels resolve in other selectors.
+type RunnerSelector struct {
+	Labels []string
+	Target RunnerTarget
+}
+
+// RunnerRejection records that the Buildkite Agent API refused one complete
+// runs-on selector. Code is server-owned and open-ended; Message is the
+// server's explanation and never quotes runner labels.
+type RunnerRejection struct {
+	Labels  []string
+	Code    string
+	Message string
+}
+
+// Agent API rejection codes the compiler renders with dedicated guidance.
+// Unknown codes render the server message with generic mapping guidance.
+const (
+	RunnerRejectionIncompatibleLabels = "incompatible_labels"
+	RunnerRejectionMissingQueue       = "missing_queue"
+	RunnerRejectionNoCluster          = "no_cluster"
+	RunnerRejectionUnmappedLabels     = "unmapped_labels"
+)
 
 // RunnerPolicy maps every accepted runner label to a Buildkite queue and
 // execution platform. An empty Linux queue uses Buildkite's default agent
 // targeting. Darwin always requires an explicit queue. Multi-label targets are
-// accepted only when every label maps to the same complete target. Untrusted
+// resolved by Selectors first, refused by Rejections second, then accepted
+// only when every label maps to the same complete target. A Rejection wins
+// over per-label presets so a server-side cause such as a missing hosted
+// queue is reported instead of a target that cannot be scheduled. Untrusted
 // events are additionally restricted to UntrustedQueues unless the default is
 // explicitly allowed.
 type RunnerPolicy struct {
@@ -97,6 +165,8 @@ type RunnerPolicy struct {
 	// compiler callers. New multi-platform policy should use Targets.
 	Labels                     map[string]string
 	Targets                    map[string]RunnerTarget
+	Selectors                  []RunnerSelector
+	Rejections                 []RunnerRejection
 	UntrustedQueues            []string
 	AllowUntrustedDefaultQueue bool
 }
@@ -107,6 +177,23 @@ type Options struct {
 	Vars       VariableSources
 	Runners    RunnerPolicy
 	EventTrust EventTrust
+	OIDC       *plan.OIDCConfiguration
+	// EventFile exposes the supplied payload through GITHUB_EVENT_PATH in every
+	// generated job. Set only for webhook or explicit snapshot input, not an
+	// event synthesized from the Buildkite environment. This grants no authority.
+	EventFile bool
+	// RepositorySource resolves repositories used by static remote
+	// reusable-workflow calls. Callers should share one memoized source for the
+	// complete validate, compile, and upload operation.
+	RepositorySource RepositorySource
+	// WorkflowSource is the candidate GitHub identity of local workflow input,
+	// separate from event identity. Self-repository references use it only after
+	// fetching the exact workflow file and matching its supplied bytes.
+	WorkflowSource *WorkflowSourceReference
+	// EnvironmentSource resolves GitHub deployment environments declared by
+	// workflow jobs. Compilation of a workflow that declares an environment
+	// fails without one.
+	EnvironmentSource EnvironmentSource
 	// ResolveActions enables immutable remote action locking independently of
 	// event trust. Workspace-local actions are always locked without network
 	// access. ActionSource is required only when a workflow uses remote actions.
@@ -126,6 +213,31 @@ type Options struct {
 	// workflows are compiled into one Buildkite pipeline. Empty preserves the
 	// legacy single-workflow keys.
 	StepKeyNamespace string
+	// RuntimeMatrixRows supplies, per consumer job ID, the matrix rows that a
+	// producer job output resolved to at run time. Callers validate the rows
+	// with ExpandRuntimeMatrixOutput first. A consumer without rows becomes a
+	// continuation: it and every job depending on it are compiled later by a
+	// deferred pipeline upload instead of failing compilation.
+	RuntimeMatrixRows map[string][]map[string]any
+	// RuntimeRunsOnOutputs supplies verified output data only to runs-on.
+	RuntimeRunsOnOutputs map[string]string
+	// RuntimeMatrixSkipped names roots with verified non-success producers.
+	// Their complete forward closures have no executable plans. Each root
+	// must also have an entry in RuntimeMatrixRows, with no rows.
+	RuntimeMatrixSkipped map[string]bool
+	// RuntimeSchedulingOutputs supplies the same verified producer manifest's
+	// outputs, scoped to its matrix consumer and scheduling expressions only.
+	RuntimeSchedulingOutputs map[string]map[string]string
+	// RuntimeSchedulingBuildID isolates output-derived max-parallel limits to
+	// one build; different runs must not change each other's matrix limit.
+	RuntimeSchedulingBuildID string
+	// RuntimeMatrixActionLocks pins remote actions to the commits an earlier
+	// compilation resolved, as RuntimeContinuation.ActionLocks records
+	// them. A deferred upload sets it so the jobs it expands use exactly the
+	// action revisions the initial compilation admitted, even when a mutable
+	// ref such as a tag moved in between. Refs the locks do not cover resolve
+	// as usual.
+	RuntimeMatrixActionLocks []plan.ActionLock
 }
 
 func defaultOptions() Options {
@@ -142,6 +254,10 @@ func defaultOptions() Options {
 	}
 }
 
+// DefaultOptions returns the options used by convenience compiler entry
+// points. Callers may add a RepositorySource before compilation.
+func DefaultOptions() Options { return defaultOptions() }
+
 func (options Options) validate() error {
 	if options.EventTrust != EventTrusted && options.EventTrust != EventUntrusted {
 		return fmt.Errorf("event trust must be %q or %q", EventTrusted, EventUntrusted)
@@ -152,7 +268,7 @@ func (options Options) validate() error {
 	if options.StepKeyNamespace != "" && !stepKeyNamespacePattern.MatchString(options.StepKeyNamespace) {
 		return fmt.Errorf("step key namespace %q must be 16 lowercase hexadecimal characters", options.StepKeyNamespace)
 	}
-	if len(options.Runners.Labels) == 0 && len(options.Runners.Targets) == 0 {
+	if len(options.Runners.Labels) == 0 && len(options.Runners.Targets) == 0 && len(options.Runners.Selectors) == 0 {
 		return fmt.Errorf("runner policy requires at least one label mapping")
 	}
 	labels := make(map[string]RunnerTarget, len(options.Runners.Labels)+len(options.Runners.Targets))
@@ -164,6 +280,32 @@ func (options Options) validate() error {
 	for label, target := range options.Runners.Targets {
 		if err := validateRunnerTarget(labels, label, target); err != nil {
 			return err
+		}
+	}
+	selectors := make(map[string]RunnerTarget, len(options.Runners.Selectors))
+	for _, selector := range options.Runners.Selectors {
+		key, err := runnerSelectorKey(selector.Labels)
+		if err != nil {
+			return err
+		}
+		if err := validateRunnerTarget(make(map[string]RunnerTarget), strings.Join(selector.Labels, ", "), selector.Target); err != nil {
+			return err
+		}
+		if existing, ok := selectors[key]; ok && !RunnerTargetsEqual(existing, selector.Target) {
+			return fmt.Errorf("runner selector has conflicting target mappings")
+		}
+		selectors[key] = selector.Target
+	}
+	for _, rejection := range options.Runners.Rejections {
+		key, err := runnerSelectorKey(rejection.Labels)
+		if err != nil {
+			return err
+		}
+		if _, ok := selectors[key]; ok {
+			return fmt.Errorf("runner selector is both resolved and rejected")
+		}
+		if strings.TrimSpace(rejection.Code) == "" || strings.TrimSpace(rejection.Message) == "" {
+			return fmt.Errorf("runner rejection requires a code and message")
 		}
 	}
 	for _, queue := range options.Runners.UntrustedQueues {
@@ -183,9 +325,8 @@ func (options Options) validate() error {
 		name   string
 		values map[string]string
 	}{
-		{name: "bridge", values: options.Vars.Bridge},
-		{name: "provider", values: options.Vars.Provider},
-		{name: "buildkite", values: options.Vars.Buildkite},
+		{name: "organization", values: options.Vars.Organization},
+		{name: "repository", values: options.Vars.Repository},
 	} {
 		sourceName, source := varsSource.name, varsSource.values
 		names := make(map[string]string, len(source))
@@ -213,34 +354,47 @@ func validateRunnerTarget(labels map[string]RunnerTarget, label string, target R
 	if err := target.Platform.validate(); err != nil {
 		return fmt.Errorf("runner label %q: %w", label, err)
 	}
-	if target.Platform == PlatformDarwinARM64 && target.Queue == "" {
-		return fmt.Errorf("runner label %q targets darwin/arm64 without an explicit queue", label)
+	if target.Platform != PlatformLinuxAMD64 && target.Queue == "" {
+		return fmt.Errorf("runner label %q targets %s without an explicit queue", label, target.Platform)
 	}
 	if target.Image != "" && !runtimeImagePattern.MatchString(target.Image) {
 		return fmt.Errorf("runner label %q has invalid immutable runtime image %q", label, target.Image)
 	}
-	if target.Platform == PlatformDarwinARM64 && target.Image != "" {
-		return fmt.Errorf("runner label %q cannot select a runtime image on darwin/arm64", label)
+	if target.Platform != PlatformLinuxAMD64 && target.Image != "" {
+		return fmt.Errorf("runner label %q cannot select a runtime image on %s", label, target.Platform)
+	}
+	if err := buildkitepipeline.ValidateRunnerAgents(target.Platform.String(), target.Image, target.Agents); err != nil {
+		return fmt.Errorf("runner label %q: %w", label, err)
+	}
+	if target.Cache != nil {
+		if target.Platform == PlatformWindowsAMD64 {
+			return fmt.Errorf("runner label %q cannot select cache volumes on windows/amd64", label)
+		}
+		if err := buildkitepipeline.ValidateCacheVolume(*target.Cache); err != nil {
+			return fmt.Errorf("runner label %q has invalid cache configuration: %w", label, err)
+		}
 	}
 	normalized := strings.ToLower(strings.TrimSpace(label))
-	if existing, ok := labels[normalized]; ok && existing != target {
+	if existing, ok := labels[normalized]; ok && !RunnerTargetsEqual(existing, target) {
 		return fmt.Errorf("runner label %q has conflicting target mappings", label)
 	}
 	labels[normalized] = target
 	return nil
 }
 
-func (sources VariableSources) snapshot() map[string]string {
-	vars := make(map[string]string, len(sources.Bridge)+len(sources.Provider)+len(sources.Buildkite))
-	for _, source := range []map[string]string{sources.Bridge, sources.Provider, sources.Buildkite} {
-		for name, value := range source {
-			vars[strings.ToUpper(name)] = value
+// RunnerTargetsEqual reports whether two complete runner mappings are equivalent.
+func RunnerTargetsEqual(first, second RunnerTarget) bool {
+	if first.Queue != second.Queue || first.Platform != second.Platform || first.Image != second.Image || !maps.Equal(first.Agents, second.Agents) {
+		return false
+	}
+	if first.ToolCache == nil || second.ToolCache == nil {
+		if first.ToolCache != second.ToolCache {
+			return false
 		}
+	} else if *first.ToolCache != *second.ToolCache {
+		return false
 	}
-	if len(vars) == 0 {
-		return nil
-	}
-	return vars
+	return cachesEqual(first.Cache, second.Cache)
 }
 
 // Every runs-on rejection reason a processing report may render. Resolved
@@ -255,13 +409,17 @@ const (
 	reasonConflictingTarget = "labels resolve to conflicting targets"
 	reasonUntrustedDefault  = "untrusted event cannot use Buildkite default agent targeting"
 	reasonUntrustedQueue    = "untrusted event cannot target the resolved queue"
+	reasonServerRejected    = "runner selector was rejected by the Buildkite Agent API"
 )
 
 // runnerPolicyRejection pairs a rejected runs-on resolution with its reason.
 // Reports may render reason but never the detailed error, which quotes the
-// resolved label.
+// resolved label. server is set when the Agent API refused the selector; its
+// message is server-authored and safe to render.
 type runnerPolicyRejection struct {
 	reason string
+	label  string
+	server *RunnerRejection
 	err    error
 }
 
@@ -272,30 +430,65 @@ func rejectRunner(reason, format string, args ...any) error {
 	return &runnerPolicyRejection{reason: reason, err: fmt.Errorf(format, args...)}
 }
 
+func rejectRunnerLabel(reason, label, format string, args ...any) error {
+	return &runnerPolicyRejection{reason: reason, label: label, err: fmt.Errorf(format, args...)}
+}
+
+func rejectRunnerByServer(rejection RunnerRejection) error {
+	return &runnerPolicyRejection{
+		reason: reasonServerRejected, server: &rejection,
+		err: fmt.Errorf("runner selector %q was rejected by the Buildkite Agent API (%s): %s", strings.Join(rejection.Labels, ", "), rejection.Code, rejection.Message),
+	}
+}
+
+// Resolve returns the target selected by labels under this policy and trust
+// boundary.
+func (policy RunnerPolicy) Resolve(labels []string, trust EventTrust) (RunnerTarget, error) {
+	return policy.resolve(labels, trust)
+}
+
 func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTarget, error) {
 	if len(labels) == 0 {
 		return RunnerTarget{}, rejectRunner(reasonNoLabels, reasonNoLabels)
 	}
-	var target RunnerTarget
-	resolved := false
+	normalizedLabels := make([]string, len(labels))
 	seen := make(map[string]struct{}, len(labels))
-	for _, label := range labels {
+	for i, label := range labels {
 		normalized := strings.ToLower(strings.TrimSpace(label))
 		if _, duplicate := seen[normalized]; duplicate {
-			return RunnerTarget{}, rejectRunner(reasonDuplicateLabel, "runs-on contains duplicate runner label %q", label)
+			return RunnerTarget{}, rejectRunnerLabel(reasonDuplicateLabel, label, "runs-on contains duplicate runner label %q", label)
 		}
 		seen[normalized] = struct{}{}
-		if unsupportedOS(normalized) {
-			return RunnerTarget{}, rejectRunner(reasonUnsupportedOS, "unsupported operating system runner label %q", label)
+		normalizedLabels[i] = normalized
+	}
+	selectorKey, _ := runnerSelectorKey(normalizedLabels)
+	for _, selector := range policy.Selectors {
+		key, err := runnerSelectorKey(selector.Labels)
+		if err == nil && key == selectorKey {
+			return policy.enforceRunnerTrust(selector.Target, trust)
 		}
-		mapped, ok := policy.Targets[normalized]
-		if !ok {
-			for configured, candidate := range policy.Targets {
-				if strings.ToLower(strings.TrimSpace(configured)) == normalized {
-					mapped, ok = candidate, true
-					break
-				}
-			}
+	}
+	for _, rejection := range policy.Rejections {
+		key, err := runnerSelectorKey(rejection.Labels)
+		if err != nil || key != selectorKey {
+			continue
+		}
+		// Preserve local Windows guidance unless this policy explicitly opts in.
+		unmappedWindows := slices.ContainsFunc(normalizedLabels, func(label string) bool {
+			_, mapped := policy.mappedTarget(label)
+			return unsupportedOS(label) && !mapped
+		})
+		if !unmappedWindows {
+			return RunnerTarget{}, rejectRunnerByServer(rejection)
+		}
+	}
+	var target RunnerTarget
+	resolved := false
+	for i, label := range labels {
+		normalized := normalizedLabels[i]
+		mapped, ok := policy.mappedTarget(normalized)
+		if unsupportedOS(normalized) && !ok {
+			return RunnerTarget{}, rejectRunnerLabel(reasonUnsupportedOS, label, "unsupported operating system runner label %q", label)
 		}
 		if !ok {
 			if queue, exists := policy.Labels[normalized]; exists {
@@ -310,10 +503,12 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 			}
 		}
 		if !ok {
-			return RunnerTarget{}, rejectRunner(reasonUnmappedLabel, "runner label %q is not mapped by policy", label)
+			return RunnerTarget{}, rejectRunnerLabel(reasonUnmappedLabel, label, "runner label %q is not mapped by policy", label)
 		}
-		if resolved && target != mapped {
-			if target.Platform == mapped.Platform && target.Image == mapped.Image {
+		if resolved && !RunnerTargetsEqual(target, mapped) {
+			withoutQueue := mapped
+			withoutQueue.Queue = target.Queue
+			if target.Queue != mapped.Queue && RunnerTargetsEqual(target, withoutQueue) {
 				return RunnerTarget{}, rejectRunner(reasonConflictingQueues, "runner labels resolve to conflicting queues %q and %q", target.Queue, mapped.Queue)
 			}
 			return RunnerTarget{}, rejectRunner(reasonConflictingTarget, "runner labels resolve to conflicting targets %q and %q", targetDescription(target), targetDescription(mapped))
@@ -321,6 +516,22 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 		target = mapped
 		resolved = true
 	}
+	return policy.enforceRunnerTrust(target, trust)
+}
+
+func (policy RunnerPolicy) mappedTarget(label string) (RunnerTarget, bool) {
+	if target, ok := policy.Targets[label]; ok {
+		return target, true
+	}
+	for configured, target := range policy.Targets {
+		if strings.ToLower(strings.TrimSpace(configured)) == label {
+			return target, true
+		}
+	}
+	return RunnerTarget{}, false
+}
+
+func (policy RunnerPolicy) enforceRunnerTrust(target RunnerTarget, trust EventTrust) (RunnerTarget, error) {
 	if trust == EventUntrusted && target.Queue == "" && !policy.AllowUntrustedDefaultQueue {
 		return RunnerTarget{}, rejectRunner(reasonUntrustedDefault, reasonUntrustedDefault)
 	}
@@ -330,6 +541,26 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 		return RunnerTarget{}, rejectRunner(reasonUntrustedQueue, "untrusted event cannot target queue %q; allowed queues: %s", target.Queue, strings.Join(allowlist, ", "))
 	}
 	return target, nil
+}
+
+func runnerSelectorKey(labels []string) (string, error) {
+	if len(labels) == 0 {
+		return "", fmt.Errorf("runner selector must contain at least one label")
+	}
+	normalized := make([]string, len(labels))
+	seen := make(map[string]bool, len(labels))
+	for i, label := range labels {
+		normalized[i] = strings.ToLower(strings.TrimSpace(label))
+		if normalized[i] == "" {
+			return "", fmt.Errorf("runner selector labels must be non-empty")
+		}
+		if seen[normalized[i]] {
+			return "", fmt.Errorf("runner selector contains duplicate label %q", label)
+		}
+		seen[normalized[i]] = true
+	}
+	sort.Strings(normalized)
+	return strings.Join(normalized, "\x00"), nil
 }
 
 // runnerRejectionDiagnostic renders a rejected runs-on resolution. Callers
@@ -352,9 +583,18 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 	case reasonDuplicateLabel:
 		return "runs-on contains a duplicate runner label. Remove duplicate labels from runs-on.", ""
 	case reasonUnsupportedOS:
-		return fmt.Sprintf("Runner label%s requires Windows, which is unsupported. Use a Linux or macOS runner label.", label), detail
+		linuxGuidance := `If this job can run on Linux, change runs-on to "ubuntu-latest".`
+		if label != "" {
+			linuxGuidance = fmt.Sprintf(`If this job can run on Linux, change%s to "ubuntu-latest".`, label)
+		}
+		return "Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. " + linuxGuidance + " If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.", ""
 	case reasonUnmappedLabel:
 		return fmt.Sprintf("Runner label%s has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.", label), detail
+	case reasonServerRejected:
+		if rejection.server != nil {
+			return serverRunnerRejectionDiagnostic(*rejection.server, label, detail)
+		}
+		return "Runner target is unsupported. Use a configured Linux or macOS runner target.", detail
 	case reasonConflictingQueues, reasonConflictingTarget:
 		return "runs-on labels map to conflicting runner targets. Use labels that map to one runner target.", detail
 	case reasonUntrustedDefault:
@@ -369,6 +609,48 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 	default:
 		return "Runner target is unsupported. Use a configured Linux or macOS runner target.", detail
 	}
+}
+
+// serverRunnerRejectionDiagnostic renders an Agent API rejection. The server
+// message is rendered verbatim because it names the cause the workflow author
+// cannot see locally, such as the cluster and the missing hosted queue. Codes
+// whose message already carries a remedy add no local guidance; unknown codes
+// keep the generic mapping guidance so newer servers degrade gracefully.
+func serverRunnerRejectionDiagnostic(rejection RunnerRejection, label, supportedDetail string) (message, detail string) {
+	subject := "the runs-on labels"
+	if label != "" {
+		subject = "runner label" + label
+	}
+	message = fmt.Sprintf("Buildkite could not resolve %s. ", subject)
+	switch rejection.Code {
+	case RunnerRejectionMissingQueue, RunnerRejectionNoCluster:
+		// The server message may end with a documentation URL; leave it intact.
+		return message + strings.Join(strings.Fields(rejection.Message), " "), ""
+	case RunnerRejectionIncompatibleLabels:
+		return message + sentence(rejection.Message) + " Change runs-on to a Linux or macOS runner label that Buildkite hosted agents support.", supportedDetail
+	default:
+		return message + sentence(rejection.Message) + " Configure a mapping for this selector or use a mapped runner label.", supportedDetail
+	}
+}
+
+// sentence normalizes server prose so local guidance can follow it.
+func sentence(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" || strings.HasSuffix(text, ".") || strings.HasSuffix(text, "!") || strings.HasSuffix(text, "?") {
+		return text
+	}
+	return text + "."
+}
+
+func runnerRejectionBlockerDetail(err error, reportableLabels []string) string {
+	var rejection *runnerPolicyRejection
+	if errors.As(err, &rejection) && rejection.label != "" && slices.Contains(reportableLabels, rejection.label) {
+		return rejection.label
+	}
+	if len(reportableLabels) == 1 {
+		return reportableLabels[0]
+	}
+	return ""
 }
 
 func (policy RunnerPolicy) supportedLabels() []string {
@@ -395,14 +677,25 @@ func targetDescription(target RunnerTarget) string {
 	if target.Image != "" {
 		description += "#" + target.Image
 	}
+	for _, key := range slices.Sorted(maps.Keys(target.Agents)) {
+		description += "#agents." + key + "=" + target.Agents[key]
+	}
+	if target.ToolCache != nil {
+		description += fmt.Sprintf("#tool_cache=%t", *target.ToolCache)
+	}
+	if target.Cache != nil {
+		description += "#cache=" + target.Cache.Name + ":" + target.Cache.Size + ":" + strings.Join(target.Cache.Paths, ",")
+	}
 	return description
 }
 
-func contains(values []string, wanted string) bool {
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
+func cachesEqual(first, second *CacheVolume) bool {
+	if first == nil || second == nil {
+		return first == nil && second == nil
 	}
-	return false
+	return first.Name == second.Name && first.Size == second.Size && slices.Equal(first.Paths, second.Paths)
+}
+
+func contains(values []string, wanted string) bool {
+	return slices.Contains(values, wanted)
 }

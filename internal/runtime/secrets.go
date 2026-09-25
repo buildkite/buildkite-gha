@@ -20,6 +20,21 @@ type SecretResolver interface {
 	ResolveSecret(context.Context, string) (string, error)
 }
 
+// SecretResolutionError identifies a plan-declared secret that could not be
+// retrieved.
+type SecretResolutionError struct {
+	Name string
+	Err  error
+}
+
+func (e *SecretResolutionError) Error() string {
+	return fmt.Sprintf("resolve secret %q: %v", e.Name, e.Err)
+}
+
+func (e *SecretResolutionError) Unwrap() error {
+	return e.Err
+}
+
 // Redactor registers a secret with the log sink before any step can run.
 type Redactor interface {
 	AddRedaction(context.Context, string) error
@@ -105,7 +120,7 @@ func (r AgentSecrets) ResolveSecret(ctx context.Context, name string) (string, e
 	command.Stdout = &output
 	command.Stderr = io.Discard
 	if err := command.Run(); err != nil {
-		return "", errors.New("buildkite Agent secret request failed")
+		return "", errors.New("secret is unavailable; it may not exist, this job may not have access, or the Buildkite secret service may be temporarily unavailable")
 	}
 	if output.exceeded {
 		return "", fmt.Errorf("buildkite Agent secret response exceeds %d bytes", maxSecretBytes)

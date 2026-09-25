@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -45,7 +46,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 		t.Fatalf("schema = %q", manifest.Schema)
 	}
 
-	wantOrder := []string{"smoke-shell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "smoke-artifact-multi-prefix", "example-basic", "example-artifacts", "example-advanced", "plugin-demo-cache", "public-actions", "dockerfile-action", "container-runtime", "summary-annotation", "workflow-command-annotations", "upload-artifact", "cache-v6", "cache-v5", "cache-v2-compatibility", "cache-v2-admission", "unsupported-job-container", "unsupported-service-container"}
+	wantOrder := []string{"smoke-shell", "smoke-powershell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "smoke-artifact-multi-prefix", "example-basic", "example-artifacts", "example-advanced", "plugin-demo-cache", "public-actions", "dockerfile-action", "container-runtime", "summary-annotation", "workflow-command-annotations", "hash-files", "upload-artifact", "cache-v6", "cache-v5", "cache-v2-compatibility", "cache-v2-admission", "unsupported-job-container", "unsupported-service-container"}
 	if len(manifest.Fixtures) != len(wantOrder) {
 		t.Fatalf("fixtures = %d, want %d", len(manifest.Fixtures), len(wantOrder))
 	}
@@ -87,7 +88,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 	}
 
 	var checkedIn []string
-	for _, pattern := range []string{".github/workflows/example-basic.yml", ".github/workflows/example-artifacts.yml", ".github/workflows/example-advanced.yml", "testdata/smoke/.github/workflows/*.yml", "testdata/plugin-demo/.github/workflows/cache.yml", "testdata/public-actions/.github/workflows/*.yml", "testdata/dockerfile-action/.github/workflows/*.yml.tmpl", "testdata/container-runtime/.github/workflows/*.yml", "testdata/unsupported/.github/workflows/*.yml"} {
+	for _, pattern := range []string{".github/workflows/example-basic.yml", ".github/workflows/example-artifacts.yml", ".github/workflows/example-advanced.yml", "testdata/smoke/.github/workflows/*.yml", "testdata/compatibility-gaps/.github/workflows/other-shells.yml", "testdata/plugin-demo/.github/workflows/cache.yml", "testdata/public-actions/.github/workflows/*.yml", "testdata/dockerfile-action/.github/workflows/*.yml.tmpl", "testdata/container-runtime/.github/workflows/*.yml", "testdata/unsupported/.github/workflows/*.yml"} {
 		matches, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(pattern)))
 		if err != nil {
 			t.Fatal(err)
@@ -129,10 +130,5 @@ func TestProductionPluginActionWorkflowCompilesDeterministically(t *testing.T) {
 }
 
 func slicesContain(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }

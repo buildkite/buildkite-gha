@@ -1,4 +1,3 @@
-// Package source fetches immutable, public GitHub Action source archives.
 package source
 
 import (
@@ -16,50 +15,91 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/git"
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
 	defaultAPI      = "https://api.github.com"
 	defaultCodeload = "https://codeload.github.com"
 	manifestName    = "manifest-v1.json"
+	mutableRefTTL   = time.Hour
+	// UnsupportedContainerActionReason explains the supported alternative to docker:// actions.
+	UnsupportedContainerActionReason = "docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step"
 )
 
 var (
 	ownerRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`)
-	repoRE  = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?$`)
-	shaRE   = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	repoRE  = regexp.MustCompile(`^(?:[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?|\.[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,97}[A-Za-z0-9])?)$`)
 )
 
-// Reference is a parsed remote action reference.
-type Reference struct{ Owner, Repository, Path, Ref, Raw string }
+// Reference is a parsed remote repository reference. RepositoryRoot asks a
+// RepositorySource to materialize the complete tree while retaining Path as
+// the exact requested resource for authorization and cache isolation.
+type Reference struct {
+	Owner, Repository, Path, Ref, Raw string
+	RepositoryRoot                    bool
+	authorizationRef                  string
+}
 
 // Resolved pins a requested reference to an immutable commit.
 type Resolved struct {
 	Reference    Reference
 	Commit       string
 	SourceDigest string
+	// ExecutablePaths is authenticated by the caller's source lock. Nil uses
+	// filesystem modes; an empty non-nil list declares no executable files.
+	// The store uses it only on hosts that cannot preserve Unix modes.
+	ExecutablePaths []string
 }
 
-// Materialized identifies the immutable repository tree and selected action.
+// Materialized identifies the immutable repository tree and selected source.
 type Materialized struct {
 	RepositoryRoot string
 	ActionRoot     string
 	SourceDigest   string
+	lease          *materializedLease
+}
+
+// Release marks the materialized tree as no longer in use. Callers must
+// release persistent-cache entries after reading them.
+func (m Materialized) Release() {
+	if m.lease != nil {
+		m.lease.release()
+	}
+}
+
+// Retain acquires another lease for a memoized materialization.
+func (m Materialized) Retain(ctx context.Context) (Materialized, error) {
+	if m.lease == nil {
+		return m, nil
+	}
+	return m.lease.retain(ctx)
 }
 
 // Parse parses owner/repository[/path]@ref.
 func Parse(raw string) (Reference, error) {
-	if len(raw) == 0 || len(raw) > 2048 || !utf8.ValidString(raw) || strings.ContainsAny(raw, "\\?#") || strings.Contains(raw, "${{") || hasControl(raw) {
+	if len(raw) == 0 || len(raw) > 2048 || !utf8.ValidString(raw) || hasControl(raw) {
+		return Reference{}, fmt.Errorf("invalid action reference")
+	}
+	if strings.HasPrefix(strings.ToLower(raw), "docker://") {
+		return Reference{}, errors.New(UnsupportedContainerActionReason)
+	}
+	if strings.ContainsAny(raw, "\\?#") || strings.Contains(raw, "${{") {
 		return Reference{}, fmt.Errorf("invalid action reference")
 	}
 	at := strings.LastIndexByte(raw, '@')
@@ -67,7 +107,7 @@ func Parse(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("action reference must contain owner/repository@ref")
 	}
 	left, ref := raw[:at], raw[at+1:]
-	if len(ref) > 1024 || strings.HasPrefix(left, "./") || strings.HasPrefix(left, "/") || strings.HasPrefix(strings.ToLower(left), "docker://") {
+	if len(ref) > 1024 || strings.HasPrefix(left, "./") || strings.HasPrefix(left, "/") {
 		return Reference{}, fmt.Errorf("invalid action reference")
 	}
 	parts := strings.Split(left, "/")
@@ -80,6 +120,28 @@ func Parse(raw string) (Reference, error) {
 		}
 	}
 	return Reference{Owner: parts[0], Repository: parts[1], Path: strings.Join(parts[2:], "/"), Ref: ref, Raw: raw}, nil
+}
+
+// PinReference replaces a mutable ref with an immutable commit while retaining
+// the originally requested ref for repository-source authorization.
+func PinReference(ref Reference, commit string) (Reference, error) {
+	if !git.ValidObjectID(commit) {
+		return Reference{}, fmt.Errorf("commit must be lower-case full SHA")
+	}
+	raw := ref.Owner + "/" + ref.Repository
+	if ref.Path != "" {
+		raw += "/" + ref.Path
+	}
+	pinned, err := Parse(raw + "@" + commit)
+	if err != nil {
+		return Reference{}, err
+	}
+	pinned.RepositoryRoot = ref.RepositoryRoot
+	pinned.authorizationRef = ref.Ref
+	if ref.authorizationRef != "" {
+		pinned.authorizationRef = ref.authorizationRef
+	}
+	return pinned, nil
 }
 
 func hasControl(s string) bool {
@@ -111,6 +173,13 @@ type config struct {
 	codeload                            *url.URL
 	finalHosts                          map[string]bool
 	credential                          *actionSourceCredential
+	git                                 string
+	gitTestArgs                         []string
+	gitTestRemoteBase                   string
+	mutableRefs                         *mutableRefCache
+	resolutionSnapshot                  *actionResolutionSnapshot
+	cacheMaxBytes                       int64
+	userAgent                           string
 	maxCompressed, maxExpanded, maxFile int64
 	maxEntries                          int
 	maxPath, maxSegment                 int
@@ -119,12 +188,20 @@ type config struct {
 func defaults() config {
 	api, _ := url.Parse(defaultAPI)
 	codeload, _ := url.Parse(defaultCodeload)
-	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
+	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, userAgent: useragent.FromVersion(""), maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
 }
 
 // Option configures trusted process-level limits or test endpoints. Options must
 // never be populated from workflow input.
 type Option func(*config) error
+
+// WithUserAgentVersion identifies the buildkite-gha client making requests.
+func WithUserAgentVersion(version string) Option {
+	return func(c *config) error {
+		c.userAgent = useragent.FromVersion(version)
+		return nil
+	}
+}
 
 // WithGitHubActionSourceTokenProvider authenticates mutable-ref API requests using a
 // credential provisioned at the first such request and cached for this client.
@@ -136,6 +213,36 @@ func WithGitHubActionSourceTokenProvider(repository string, provider func(contex
 			return fmt.Errorf("invalid GitHub action source credential provider")
 		}
 		c.credential = &actionSourceCredential{repository: strings.ToLower(repository), provider: provider}
+		return nil
+	}
+}
+
+// WithGitHubAPITokenProvider authenticates public action resolution without a
+// repository-scoped token exception. It is intended for explicit local tools.
+func WithGitHubAPITokenProvider(provider func(context.Context) (string, error)) Option {
+	return func(c *config) error {
+		if provider == nil {
+			return fmt.Errorf("invalid GitHub API credential provider")
+		}
+		c.credential = &actionSourceCredential{provider: provider}
+		return nil
+	}
+}
+
+// WithGitRepositorySource enables Git fallback for references explicitly
+// marked RepositoryRoot. Git inherits the process's trusted credential
+// helpers and environment. Other references remain on the public source path,
+// so this option cannot grant private action access.
+func WithGitRepositorySource(executable string) Option {
+	return func(c *config) error {
+		if executable == "" || !filepath.IsAbs(executable) {
+			return fmt.Errorf("git repository source requires an absolute Git executable")
+		}
+		info, err := os.Stat(executable)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+			return fmt.Errorf("git repository source executable is not an executable regular file")
+		}
+		c.git = executable
 		return nil
 	}
 }
@@ -197,8 +304,20 @@ func WithLimits(compressed, expanded, perFile int64, entries int) Option {
 	}
 }
 
-// Resolver resolves public GitHub references, optionally using a credential
-// only for GitHub API requests. Requests discard the client's cookie jar.
+// WithCacheMaxBytes bounds the immutable action-source cache. A materialized
+// entry remains protected from eviction until its lease is released.
+func WithCacheMaxBytes(maxBytes int64) Option {
+	return func(c *config) error {
+		if maxBytes <= 0 {
+			return fmt.Errorf("cache maximum bytes must be positive")
+		}
+		c.cacheMaxBytes = maxBytes
+		return nil
+	}
+}
+
+// Resolver resolves GitHub references, optionally using credentials only for
+// GitHub API requests. Requests discard the client's cookie jar.
 type Resolver struct {
 	client *http.Client
 	cfg    config
@@ -211,6 +330,11 @@ func NewResolver(client *http.Client, opts ...Option) (*Resolver, error) {
 	}
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	if c.mutableRefs == nil && c.resolutionSnapshot == nil && c.api.String() == defaultAPI {
+		if root, cacheErr := os.UserCacheDir(); cacheErr == nil {
+			c.mutableRefs, _ = newMutableRefCache(filepath.Join(root, "buildkite-gha", "action-ref-resolutions", "v1"), mutableRefTTL)
+		}
 	}
 	return &Resolver{client, c}, nil
 }
@@ -230,18 +354,73 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 	if err != nil {
 		return Resolved{}, err
 	}
+	parsed.RepositoryRoot = ref.RepositoryRoot
+	parsed.authorizationRef = ref.authorizationRef
 	ref = parsed
-	if shaRE.MatchString(ref.Ref) {
+	if git.ValidObjectID(ref.Ref) {
 		return Resolved{Reference: ref, Commit: ref.Ref}, nil
 	}
+	if r.cfg.resolutionSnapshot != nil {
+		return r.cfg.resolutionSnapshot.resolve(ctx, ref, r.resolveMutable)
+	}
+	if r.cfg.mutableRefs != nil && !r.gitRepositorySource(ref) {
+		return r.cfg.mutableRefs.resolve(ctx, ref, r.resolveMutable)
+	}
+	return r.resolveMutable(ctx, ref)
+}
+
+// gitRepositorySource reports whether ref may be served by the Git fallback.
+// Those refs skip the cross-operation mutable-ref cache: Materialize fetches
+// the ref again and rejects a commit the cache pinned before the branch moved,
+// so a stale entry would fail every later operation until it expired. The
+// per-operation repository-source memoizer still pins one commit per upload.
+func (r *Resolver) gitRepositorySource(ref Reference) bool {
+	return ref.RepositoryRoot && r.cfg.git != ""
+}
+
+// gitFallbackError reports whether an anonymous GitHub API failure leaves a
+// repository-root reference to the Git repository source. Not-found, denied,
+// and rate-limited responses all leave repository access undecided: the event
+// repository never receives the action-source token, so its shared anonymous
+// quota can run out while the importer's own Git credentials still authorize
+// the fetch. Other errors, and every error when the Git source is disabled,
+// are returned unchanged.
+func gitFallbackError(err error) bool {
+	var notPublic *NotPublicError
+	var rateLimited *RateLimitError
+	return errors.As(err, &notPublic) || errors.As(err, &rateLimited)
+}
+
+// ResolutionSnapshotID identifies the immutable mutable-ref generation.
+func (r *Resolver) ResolutionSnapshotID() string {
+	if r == nil || r.cfg.resolutionSnapshot == nil {
+		return ""
+	}
+	return r.cfg.resolutionSnapshot.generation
+}
+
+func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved, error) {
 	if err := r.cfg.credential.provision(ctx); err != nil {
 		return Resolved{}, err
 	}
 	if r.cfg.credential != nil && r.cfg.credential.token != "" {
 		if err := ensurePublic(ctx, r.client, r.cfg, ref); err != nil {
-			return Resolved{}, err
+			if !gitFallbackError(err) || !r.gitRepositorySource(ref) {
+				return Resolved{}, err
+			}
+			return resolveWithGit(ctx, r.cfg, ref)
 		}
 	}
+	resolved, err := r.resolveMutableViaAPI(ctx, ref)
+	if gitFallbackError(err) && r.gitRepositorySource(ref) {
+		return resolveWithGit(ctx, r.cfg, ref)
+	}
+	return resolved, err
+}
+
+// resolveMutableViaAPI resolves a tag, branch, or commit-ish through the
+// GitHub API, trying tag and branch refs before the commits endpoint.
+func (r *Resolver) resolveMutableViaAPI(ctx context.Context, ref Reference) (Resolved, error) {
 	for _, kind := range []string{"tags", "heads"} {
 		var v struct {
 			Object struct {
@@ -271,14 +450,14 @@ func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, 
 	if err := r.get(ctx, repoParts(ref, "commits", ref.Ref), &v); err != nil {
 		return Resolved{}, err
 	}
-	if !shaRE.MatchString(v.SHA) {
+	if !git.ValidObjectID(v.SHA) {
 		return Resolved{}, fmt.Errorf("GitHub returned malformed commit SHA")
 	}
 	return Resolved{Reference: ref, Commit: v.SHA}, nil
 }
 func (r *Resolver) peel(ctx context.Context, ref Reference, typ, sha string) (string, error) {
-	for i := 0; i < 5; i++ {
-		if !shaRE.MatchString(sha) {
+	for range 5 {
+		if !git.ValidObjectID(sha) {
 			return "", fmt.Errorf("GitHub returned malformed object SHA")
 		}
 		if typ == "commit" {
@@ -305,13 +484,14 @@ func repoParts(r Reference, suffix ...string) []string {
 }
 func apiURL(base *url.URL, parts ...string) *url.URL {
 	u := *base
-	decoded := strings.TrimSuffix(base.Path, "/")
+	var decoded strings.Builder
+	decoded.WriteString(strings.TrimSuffix(base.Path, "/"))
 	escaped := strings.TrimSuffix(base.EscapedPath(), "/")
 	for _, part := range parts {
-		decoded += "/" + part
+		decoded.WriteString("/" + part)
 		escaped += "/" + url.PathEscape(part)
 	}
-	u.Path, u.RawPath = decoded, escaped
+	u.Path, u.RawPath = decoded.String(), escaped
 	return &u
 }
 func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
@@ -323,7 +503,7 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	if err != nil {
 		return err
 	}
-	setAPIHeaders(req, actionSourceToken(cfg, parts))
+	setAPIHeaders(req, actionSourceToken(cfg, parts), cfg.userAgent)
 	c := *client
 	c.Jar = nil
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -340,11 +520,14 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	if len(body) > 1<<20 {
 		return fmt.Errorf("GitHub API response too large")
 	}
-	if resp.StatusCode == 404 {
+	if resp.StatusCode == http.StatusNotFound {
 		return &NotPublicError{}
 	}
 	if rate := rateLimitError(resp, body); rate != nil {
 		return rate
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return &NotPublicError{}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
@@ -379,8 +562,359 @@ func actionSourceToken(cfg config, parts []string) string {
 	}
 	return cfg.credential.token
 }
+
+func resolveWithGit(ctx context.Context, cfg config, ref Reference) (Resolved, error) {
+	repository, cleanup, err := fetchWithGit(ctx, cfg, ref, ref.Ref)
+	if err != nil {
+		return Resolved{}, err
+	}
+	defer cleanup()
+	commit, err := gitCommit(ctx, cfg.git, repository)
+	if err != nil {
+		return Resolved{}, err
+	}
+	return Resolved{Reference: ref, Commit: commit}, nil
+}
+
+func fetchWithGit(ctx context.Context, cfg config, ref Reference, requestedRef string) (string, func(), error) {
+	cleanup := func() {}
+	if !ref.RepositoryRoot || cfg.git == "" {
+		return "", cleanup, &NotPublicError{}
+	}
+	// The requested value is passed to git fetch as a refspec. check-ref-format
+	// below rejects the other refspec metacharacters (":", "^", "*", and a
+	// leading "-") but accepts a leading "+", which git fetch would strip as the
+	// force marker and then fetch the remaining ref instead of the literal name.
+	if strings.HasPrefix(requestedRef, "+") {
+		return "", cleanup, &NotPublicError{}
+	}
+	if err := runGit(ctx, cfg.git, "", io.Discard, "check-ref-format", "--allow-onelevel", requestedRef); err != nil {
+		if ctx.Err() != nil {
+			return "", cleanup, ctx.Err()
+		}
+		return "", cleanup, &NotPublicError{}
+	}
+	root, err := os.MkdirTemp("", "buildkite-gha-repository-source-")
+	if err != nil {
+		return "", cleanup, fmt.Errorf("create Git repository source: %w", err)
+	}
+	cleanup = func() { _ = os.RemoveAll(root) }
+	repository := filepath.Join(root, "repository.git")
+	// An empty --template stops Git from copying the importer's init template
+	// (GIT_TEMPLATE_DIR or init.templateDir) into the private repository. A
+	// template can carry refs/replace entries, objects, grafts, and alternates
+	// that would substitute content for the pinned commit.
+	if err := runGit(ctx, cfg.git, "", io.Discard, "init", "--bare", "--quiet", "--template=", repository); err != nil {
+		cleanup()
+		if ctx.Err() != nil {
+			return "", func() {}, ctx.Err()
+		}
+		return "", func() {}, fmt.Errorf("initialize Git repository source")
+	}
+	boundedEnvironment, err := boundedGitEnvironment(ctx, cfg.git, root, cfg.maxCompressed)
+	if err != nil {
+		cleanup()
+		if ctx.Err() != nil {
+			return "", func() {}, ctx.Err()
+		}
+		return "", func() {}, fmt.Errorf("configure bounded Git repository source")
+	}
+	remoteBase := "https://github.com/"
+	if cfg.gitTestRemoteBase != "" {
+		remoteBase = cfg.gitTestRemoteBase
+	}
+	remote := remoteBase + ref.Owner + "/" + ref.Repository + ".git"
+	// Inherited url.<base>.insteadOf rewrites could send the request, and the
+	// credential helper lookup, to another host. Expand the URL without
+	// contacting the remote and refuse any rewrite. The rewritten URL is not
+	// reported because it may embed credentials.
+	var expanded bytes.Buffer
+	if err := runGit(ctx, cfg.git, repository, &expanded, "ls-remote", "--get-url", "--", remote); err != nil || strings.TrimSpace(expanded.String()) != remote {
+		cleanup()
+		if ctx.Err() != nil {
+			return "", func() {}, ctx.Err()
+		}
+		return "", func() {}, fmt.Errorf("git repository source URL is rewritten by inherited Git configuration")
+	}
+	refs := []string{"refs/tags/" + requestedRef, "refs/heads/" + requestedRef, requestedRef}
+	fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	fetched := false
+	for _, candidate := range refs {
+		limitError := &containsWriter{needle: []byte("pack exceeds maximum allowed size")}
+		// cfg.gitTestArgs follows gitBaseArgs so tests can reopen the file
+		// transport for local fixtures; production configurations leave it and
+		// cfg.gitTestRemoteBase empty.
+		fetchArgs := append(append(append([]string{}, cfg.gitTestArgs...), gitRemoteArgs(remote)...),
+			"-c", "fetch.unpackLimit=1", "fetch", "--quiet", "--force", "--no-tags", "--depth=1", "--no-recurse-submodules", "--no-auto-maintenance", "--", remote, candidate)
+		err = runGitEnvironment(fetchCtx, cfg.git, repository, io.Discard, limitError, boundedEnvironment, fetchArgs...)
+		if err == nil {
+			fetched = true
+			break
+		}
+		if limitError.found {
+			cleanup()
+			return "", func() {}, fmt.Errorf("git repository source exceeds compressed size limit")
+		}
+		if fetchCtx.Err() != nil {
+			cleanup()
+			if ctx.Err() != nil {
+				return "", func() {}, ctx.Err()
+			}
+			return "", func() {}, fmt.Errorf("fetch Git repository source: %w", fetchCtx.Err())
+		}
+	}
+	if !fetched {
+		cleanup()
+		return "", func() {}, &NotPublicError{}
+	}
+	if err := gitObjectLimit(repository, cfg.maxCompressed); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return repository, cleanup, nil
+}
+
+func gitCommit(ctx context.Context, executable, repository string) (string, error) {
+	var output bytes.Buffer
+	if err := runGit(ctx, executable, repository, &output, "rev-parse", "--verify", "FETCH_HEAD^{commit}"); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", &NotPublicError{}
+	}
+	commit := strings.TrimSpace(output.String())
+	if !git.ValidObjectID(commit) {
+		return "", fmt.Errorf("git returned malformed commit SHA")
+	}
+	return commit, nil
+}
+
+func gitObjectLimit(repository string, limit int64) error {
+	var total int64
+	err := filepath.WalkDir(filepath.Join(repository, "objects"), func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		if total > limit {
+			return fmt.Errorf("git repository source exceeds compressed size limit")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// Git fetch does not expose the pack plumbing's max-input-size option. Its
+// internal Git commands use GIT_EXEC_PATH, so replace only that dispatcher in
+// a private mirror of Git's trusted executable directory.
+const boundedGitWrapper = `#!/bin/sh
+if [ "$1" = index-pack ] || [ "$1" = unpack-objects ]; then
+	subcommand=$1
+	shift
+	exec "$BUILDKITE_GHA_GIT_EXECUTABLE" "$subcommand" "--max-input-size=$BUILDKITE_GHA_GIT_MAX_INPUT_SIZE" "$@"
+fi
+if [ "$1" = --shallow-file ] && { [ "$3" = index-pack ] || [ "$3" = unpack-objects ]; }; then
+	global_option=$1
+	global_value=$2
+	subcommand=$3
+	shift 3
+	exec "$BUILDKITE_GHA_GIT_EXECUTABLE" "$global_option" "$global_value" "$subcommand" "--max-input-size=$BUILDKITE_GHA_GIT_MAX_INPUT_SIZE" "$@"
+fi
+exec "$BUILDKITE_GHA_GIT_EXECUTABLE" "$@"
+`
+
+func boundedGitEnvironment(ctx context.Context, executable, root string, limit int64) ([]string, error) {
+	var output bytes.Buffer
+	if err := runGit(ctx, executable, "", &output, "--exec-path"); err != nil {
+		return nil, err
+	}
+	execPath := strings.TrimSpace(output.String())
+	if !filepath.IsAbs(execPath) || hasControl(execPath) {
+		return nil, fmt.Errorf("git returned invalid executable path")
+	}
+	entries, err := os.ReadDir(execPath)
+	if err != nil {
+		return nil, err
+	}
+	boundedExecPath := filepath.Join(root, "git-exec")
+	if err := os.Mkdir(boundedExecPath, 0o700); err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.Name() == "git" {
+			continue
+		}
+		if err := os.Symlink(filepath.Join(execPath, entry.Name()), filepath.Join(boundedExecPath, entry.Name())); err != nil {
+			return nil, err
+		}
+	}
+	if err := os.WriteFile(filepath.Join(boundedExecPath, "git"), []byte(boundedGitWrapper), 0o700); err != nil {
+		return nil, err
+	}
+	environment := gitEnvironment()
+	filtered := environment[:0]
+	for _, value := range environment {
+		if strings.HasPrefix(value, "BUILDKITE_GHA_GIT_EXECUTABLE=") ||
+			strings.HasPrefix(value, "BUILDKITE_GHA_GIT_MAX_INPUT_SIZE=") ||
+			strings.HasPrefix(value, "LC_ALL=") ||
+			strings.HasPrefix(value, "LANGUAGE=") {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	return append(filtered,
+		"GIT_EXEC_PATH="+boundedExecPath,
+		"BUILDKITE_GHA_GIT_EXECUTABLE="+executable,
+		"BUILDKITE_GHA_GIT_MAX_INPUT_SIZE="+strconv.FormatInt(limit, 10),
+		"LC_ALL=C",
+	), nil
+}
+
+type containsWriter struct {
+	needle []byte
+	tail   []byte
+	found  bool
+}
+
+func (w *containsWriter) Write(p []byte) (int, error) {
+	combined := make([]byte, 0, len(w.tail)+len(p))
+	combined = append(combined, w.tail...)
+	combined = append(combined, p...)
+	if bytes.Contains(combined, w.needle) {
+		w.found = true
+	}
+	keep := len(w.needle) - 1
+	if keep > len(combined) {
+		keep = len(combined)
+	}
+	w.tail = append(w.tail[:0], combined[len(combined)-keep:]...)
+	return len(p), nil
+}
+
+func runGit(ctx context.Context, executable, repository string, stdout io.Writer, args ...string) error {
+	return runGitEnvironment(ctx, executable, repository, stdout, io.Discard, gitEnvironment(), args...)
+}
+
+// gitBaseArgs pins every Git invocation to the same boundary as the verified
+// checkout adapter: hooks and askpass programs are disabled, only HTTPS may reach the network so an
+// inherited URL rewrite cannot select another transport, redirects are not
+// followed so credentials stay with the requested host, received objects are
+// checked, replace refs never substitute objects for the pinned commit, and the
+// credential helper receives the repository path so Buildkite authorizes the
+// exact repository. Inherited http.extraHeader values are dropped and no
+// http.cookieFile is read, so a token stored as a header or cookie cannot
+// reach a repository the helper did not authorize. Credential helpers
+// themselves are inherited from the importer's Git configuration; nothing here
+// supplies or captures one.
+func gitBaseArgs() []string {
+	return []string{
+		"--no-replace-objects",
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.askPass=",
+		"-c", "credential.interactive=false",
+		"-c", "credential.useHttpPath=true",
+		"-c", "http.extraHeader=",
+		"-c", "http.cookieFile=", "-c", "http.saveCookies=false",
+		"-c", "http.followRedirects=false",
+		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
+		"-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true",
+	}
+}
+
+// gitRemoteArgs pins the settings Git resolves per URL for the exact remote
+// being fetched. Inherited http.<url>.* and credential.<url>.* keys take
+// precedence over the generic keys in gitBaseArgs; an exact-URL command-line
+// value is the longest possible match and, on a tie, the last one applied. An
+// empty extraHeader value resets the list Git collected from inherited
+// configuration and an empty cookieFile reads no cookies, so only the
+// credential helper can attach credentials.
+func gitRemoteArgs(remote string) []string {
+	return []string{
+		"-c", "http." + remote + ".followRedirects=false",
+		"-c", "http." + remote + ".sslVerify=true",
+		"-c", "http." + remote + ".extraHeader=",
+		"-c", "http." + remote + ".cookieFile=", "-c", "http." + remote + ".saveCookies=false",
+		"-c", "credential." + remote + ".useHttpPath=true",
+	}
+}
+
+func runGitEnvironment(ctx context.Context, executable, repository string, stdout, stderr io.Writer, environment []string, args ...string) error {
+	base := gitBaseArgs()
+	if repository != "" {
+		base = append(base, "-C", repository)
+	}
+	cmd := exec.CommandContext(ctx, executable, append(base, args...)...)
+	cmd.Env = environment
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
+}
+
+// gitEnvironment inherits the importer's environment, including the settings
+// that locate its credential helpers, but removes variables that would prompt
+// (including askpass programs), trace credentials, override the transport policy set through -c, replace
+// Git's own programs, or redirect the private repository. GIT_SSL_NO_VERIFY
+// and GIT_ALLOW_PROTOCOL take precedence over any http.* or protocol.*
+// configuration, the GIT_CONFIG_* variables inject configuration that is not
+// visible on the command line, GIT_EXEC_PATH selects the directory Git runs
+// remote helpers such as git-remote-https from, GIT_TEMPLATE_DIR seeds new
+// repositories with the importer's refs and objects, and the GIT_DIR family
+// points every command at another repository than the one created for the
+// fetch. boundedGitEnvironment discovers Git's compiled-in executable directory
+// with this environment and sets GIT_EXEC_PATH to its private mirror for the
+// fetch.
+func gitEnvironment() []string {
+	environment := os.Environ()
+	filtered := environment[:0]
+	for _, value := range environment {
+		if strings.HasPrefix(value, "GIT_EXEC_PATH=") ||
+			strings.HasPrefix(value, "GIT_TEMPLATE_DIR=") ||
+			strings.HasPrefix(value, "GIT_DIR=") ||
+			strings.HasPrefix(value, "GIT_COMMON_DIR=") ||
+			strings.HasPrefix(value, "GIT_WORK_TREE=") ||
+			strings.HasPrefix(value, "GIT_OBJECT_DIRECTORY=") ||
+			strings.HasPrefix(value, "GIT_ALTERNATE_OBJECT_DIRECTORIES=") ||
+			strings.HasPrefix(value, "GIT_INDEX_FILE=") ||
+			strings.HasPrefix(value, "GIT_NAMESPACE=") ||
+			strings.HasPrefix(value, "GIT_TERMINAL_PROMPT=") ||
+			strings.HasPrefix(value, "GIT_ASKPASS=") ||
+			strings.HasPrefix(value, "SSH_ASKPASS=") ||
+			strings.HasPrefix(value, "GCM_INTERACTIVE=") ||
+			strings.HasPrefix(value, "GIT_TRACE=") ||
+			strings.HasPrefix(value, "GIT_TRACE_") ||
+			strings.HasPrefix(value, "GIT_CURL_VERBOSE=") ||
+			strings.HasPrefix(value, "GCM_TRACE=") ||
+			strings.HasPrefix(value, "GCM_TRACE_") ||
+			strings.HasPrefix(value, "GIT_SSL_NO_VERIFY=") ||
+			strings.HasPrefix(value, "GIT_ALLOW_PROTOCOL=") ||
+			strings.HasPrefix(value, "GIT_PROTOCOL_FROM_USER=") ||
+			strings.HasPrefix(value, "GIT_CONFIG_PARAMETERS=") ||
+			strings.HasPrefix(value, "GIT_CONFIG_COUNT=") ||
+			strings.HasPrefix(value, "GIT_CONFIG_KEY_") ||
+			strings.HasPrefix(value, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	// Git consults GIT_ASKPASS, then core.askPass, then SSH_ASKPASS, and runs
+	// the first one set. An empty GIT_ASKPASS ends that search without a
+	// program, so the checkout adapter's setting is mirrored here and a denied
+	// repository fails instead of running or blocking on a prompt program.
+	return append(filtered, "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "GCM_INTERACTIVE=never")
+}
 func rateLimitError(resp *http.Response, body []byte) error {
-	if resp.StatusCode != 429 && (resp.StatusCode != 403 || (resp.Header.Get("X-RateLimit-Remaining") != "0" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {
+	if resp.StatusCode != http.StatusTooManyRequests && (resp.StatusCode != http.StatusForbidden || (resp.Header.Get("X-RateLimit-Remaining") != "0" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {
 		return nil
 	}
 	var reset time.Time
@@ -393,13 +927,13 @@ func rateLimitError(resp *http.Response, body []byte) error {
 	}
 	return &RateLimitError{reset}
 }
-func setAPIHeaders(r *http.Request, token string) {
+func setAPIHeaders(r *http.Request, token, userAgent string) {
 	r.Header.Del("Authorization")
 	r.Header.Del("Cookie")
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
-	r.Header.Set("User-Agent", "buildkite-gha-action-source/1")
+	r.Header.Set("User-Agent", userAgent)
 	r.Header.Set("Accept", "application/vnd.github+json")
 	r.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 }
@@ -408,12 +942,17 @@ func setAPIHeaders(r *http.Request, token string) {
 // caches them in an existing real directory. A Store must not be shared by
 // mutually untrusted processes writing the same cache root.
 type Store struct {
-	root   string
-	client *http.Client
-	cfg    config
+	root     string
+	client   *http.Client
+	cfg      config
+	pressure atomic.Bool
 }
 
 func NewStore(root string, client *http.Client, opts ...Option) (*Store, error) {
+	return NewStoreContext(context.Background(), root, client, opts...)
+}
+
+func NewStoreContext(ctx context.Context, root string, client *http.Client, opts ...Option) (*Store, error) {
 	c, e := makeConfig(opts)
 	if e != nil {
 		return nil, e
@@ -440,58 +979,115 @@ func NewStore(root string, client *http.Client, opts ...Option) (*Store, error) 
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Minute}
 	}
-	return &Store{root, client, c}, nil
+	store := &Store{root: root, client: client, cfg: c}
+	if c.cacheMaxBytes > 0 {
+		if err := store.maintain(ctx); err != nil {
+			return nil, fmt.Errorf("maintain action source cache: %w", err)
+		}
+	}
+	return store, nil
 }
 
-// Materialize returns the verified repository and selected action identity.
+// Materialize returns the verified repository and selected source identity.
 func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialized, error) {
-	if !shaRE.MatchString(resolved.Commit) {
+	if !git.ValidObjectID(resolved.Commit) {
 		return Materialized{}, fmt.Errorf("commit must be lower-case full SHA")
+	}
+	if resolved.ExecutablePaths != nil && resolved.SourceDigest == "" {
+		return Materialized{}, fmt.Errorf("executable paths require a source digest")
 	}
 	parsed, err := Parse(resolved.Reference.Raw)
 	if err != nil {
 		return Materialized{}, err
 	}
+	parsed.RepositoryRoot = resolved.Reference.RepositoryRoot
+	parsed.authorizationRef = resolved.Reference.authorizationRef
 	resolved.Reference = parsed
+	selectedPath := parsed.Path
+	if parsed.RepositoryRoot {
+		selectedPath = ""
+	}
 	base := filepath.Join(s.root, strings.ToLower(parsed.Owner), strings.ToLower(parsed.Repository), resolved.Commit)
 	tree := filepath.Join(base, "tree")
+	parent := filepath.Dir(base)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return Materialized{}, err
+	}
+	entryLock, err := lockActionCache(ctx, base+".lock", actionCacheLockShared, false)
+	if err != nil {
+		return Materialized{}, err
+	}
 	m, verifyErr := s.verify(base, resolved)
 	if verifyErr == nil {
-		return materialized(tree, parsed.Path, m.Digest)
+		if err := s.authorizeCachedRepository(ctx, resolved.Reference, m); err != nil {
+			entryLock.unlock()
+			return Materialized{}, err
+		}
+		s.touch(base)
+		return s.materializedLease(ctx, entryLock, resolved, tree, selectedPath, m.Digest)
 	}
 	if _, statErr := os.Stat(base); statErr == nil {
 		// The initial verification may have raced a publisher between its
 		// manifest and tree operations. Once base exists, verify the complete
 		// publication again before treating it as corrupt.
 		if m, retryErr := s.verify(base, resolved); retryErr == nil {
-			return materialized(tree, parsed.Path, m.Digest)
+			if err := s.authorizeCachedRepository(ctx, resolved.Reference, m); err != nil {
+				entryLock.unlock()
+				return Materialized{}, err
+			}
+			s.touch(base)
+			return s.materializedLease(ctx, entryLock, resolved, tree, selectedPath, m.Digest)
 		}
+		entryLock.unlock()
 		return Materialized{}, fmt.Errorf("verify action source cache: %w", verifyErr)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
+		entryLock.unlock()
 		return Materialized{}, fmt.Errorf("stat action source cache: %w", statErr)
 	}
+	entryLock.unlock()
 	if err := ctx.Err(); err != nil {
 		return Materialized{}, err
 	}
-	parent := filepath.Dir(base)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return Materialized{}, err
-	}
-	tmp, err := os.MkdirTemp(parent, ".partial-")
+	entryLock, cached, err := s.lockMissingEntry(ctx, base, tree, selectedPath, resolved)
 	if err != nil {
 		return Materialized{}, err
 	}
-	defer func() { _ = os.RemoveAll(tmp) }()
-	if err = s.downloadExtract(ctx, resolved, filepath.Join(tmp, "tree")); err != nil {
-		return Materialized{}, err
+	if cached != nil {
+		return *cached, nil
 	}
-	if _, err = selected(filepath.Join(tmp, "tree"), parsed.Path); err != nil {
-		return Materialized{}, err
+	defer func() {
+		if entryLock != nil {
+			entryLock.unlock()
+		}
+	}()
+	if m, verifyErr = s.verify(base, resolved); verifyErr == nil {
+		if err := s.authorizeCachedRepository(ctx, resolved.Reference, m); err != nil {
+			return Materialized{}, err
+		}
+		exclusive := entryLock
+		entryLock = nil
+		return s.reacquireMaterializedLease(ctx, exclusive, resolved, base, tree, selectedPath)
 	}
-	m, err = buildManifest(filepath.Join(tmp, "tree"), s.cfg, parsed, resolved.Commit)
+	tmp, partialLock, err := s.createPartial(ctx, parent)
 	if err != nil {
 		return Materialized{}, err
 	}
+	defer func() {
+		partialLock.unlock()
+		_ = os.RemoveAll(tmp)
+	}()
+	authenticated, err := s.downloadExtract(ctx, resolved, filepath.Join(tmp, "tree"))
+	if err != nil {
+		return Materialized{}, err
+	}
+	if _, err = selected(filepath.Join(tmp, "tree"), selectedPath); err != nil {
+		return Materialized{}, err
+	}
+	m, err = buildResolvedManifest(filepath.Join(tmp, "tree"), s.cfg, parsed, resolved)
+	if err != nil {
+		return Materialized{}, err
+	}
+	m.Authenticated = authenticated
 	if resolved.SourceDigest != "" && resolved.SourceDigest != m.Digest {
 		return Materialized{}, fmt.Errorf("source digest mismatch: expected %s, got %s", resolved.SourceDigest, m.Digest)
 	}
@@ -499,14 +1095,63 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if err = os.WriteFile(filepath.Join(tmp, manifestName), data, 0o644); err != nil {
 		return Materialized{}, err
 	}
-	if err = os.Rename(tmp, base); err != nil {
+	if err = s.publishCacheEntry(ctx, tmp, base, partialLock); err != nil {
 		m, verifyErr = s.verify(base, resolved)
 		if verifyErr != nil {
 			return Materialized{}, fmt.Errorf("publish cache: %w (existing cache invalid: %v)", err, verifyErr)
 		}
 	}
-	return materialized(tree, parsed.Path, m.Digest)
+	exclusive := entryLock
+	entryLock = nil
+	return s.reacquireMaterializedLease(ctx, exclusive, resolved, base, tree, selectedPath)
 }
+
+func (s *Store) lockMissingEntry(ctx context.Context, base, tree, actionPath string, resolved Resolved) (*actionCacheLock, *Materialized, error) {
+	for {
+		exclusive, err := lockActionCache(ctx, base+".lock", actionCacheLockExclusive, true)
+		if err == nil {
+			return exclusive, nil, nil
+		}
+		if !errors.Is(err, errActionCacheLockUnavailable) {
+			return nil, nil, err
+		}
+		shared, sharedErr := lockActionCache(ctx, base+".lock", actionCacheLockShared, true)
+		if sharedErr == nil {
+			m, verifyErr := s.verify(base, resolved)
+			if verifyErr == nil {
+				if authErr := s.authorizeCachedRepository(ctx, resolved.Reference, m); authErr != nil {
+					shared.unlock()
+					return nil, nil, authErr
+				}
+				s.touch(base)
+				materialized, leaseErr := s.materializedLease(ctx, shared, resolved, tree, actionPath, m.Digest)
+				return nil, &materialized, leaseErr
+			}
+			shared.unlock()
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func (s *Store) reacquireMaterializedLease(ctx context.Context, exclusive *actionCacheLock, resolved Resolved, base, tree, actionPath string) (Materialized, error) {
+	exclusive.unlock()
+	shared, err := lockActionCache(ctx, base+".lock", actionCacheLockShared, false)
+	if err != nil {
+		return Materialized{}, err
+	}
+	m, err := s.verify(base, resolved)
+	if err != nil {
+		shared.unlock()
+		return s.Materialize(ctx, resolved)
+	}
+	s.touch(base)
+	return s.materializedLease(ctx, shared, resolved, tree, actionPath, m.Digest)
+}
+
 func materialized(tree, p, digest string) (Materialized, error) {
 	action, err := selected(tree, p)
 	if err != nil {
@@ -530,18 +1175,98 @@ func selected(tree, p string) (string, error) {
 	return dst, nil
 }
 
-func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) error {
+func (s *Store) authorizeCachedRepository(ctx context.Context, ref Reference, m manifest) error {
+	if !m.Authenticated {
+		return nil
+	}
+	if !ref.RepositoryRoot || s.cfg.git == "" {
+		return &NotPublicError{}
+	}
+	requestedRef := ref.Ref
+	if ref.authorizationRef != "" {
+		requestedRef = ref.authorizationRef
+	}
+	repository, cleanup, err := fetchWithGit(ctx, s.cfg, ref, requestedRef)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	commit, err := gitCommit(ctx, s.cfg.git, repository)
+	if err != nil {
+		return err
+	}
+	if commit != m.Commit {
+		return fmt.Errorf("repository source changed while resolving immutable commit")
+	}
+	return nil
+}
+
+func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) (bool, error) {
 	u := apiURL(s.cfg.codeload, r.Reference.Owner, r.Reference.Repository, "tar.gz", r.Commit)
 	if !validArchiveURL(u, s.cfg.finalHosts) {
-		return fmt.Errorf("archive URL denied")
+		return false, fmt.Errorf("archive URL denied")
 	}
+	err := s.downloadArchive(ctx, u, dst)
+	if !gitFallbackError(err) || !r.Reference.RepositoryRoot || s.cfg.git == "" {
+		return false, err
+	}
+	if err := s.extractGitRepository(ctx, r, dst); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) extractGitRepository(ctx context.Context, resolved Resolved, dst string) error {
+	requestedRef := resolved.Reference.Ref
+	if resolved.Reference.authorizationRef != "" {
+		requestedRef = resolved.Reference.authorizationRef
+	}
+	repository, cleanup, err := fetchWithGit(ctx, s.cfg, resolved.Reference, requestedRef)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	commit, err := gitCommit(ctx, s.cfg.git, repository)
+	if err != nil {
+		return err
+	}
+	if commit != resolved.Commit {
+		return fmt.Errorf("repository source changed while resolving immutable commit")
+	}
+	args := append(gitBaseArgs(), "-C", repository, "archive", "--format=tar", "--prefix=repository/", commit)
+	cmd := exec.CommandContext(ctx, s.cfg.git, args...)
+	cmd.Env = gitEnvironment()
+	cmd.Stderr = io.Discard
+	archive, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("open Git repository archive")
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start Git repository archive")
+	}
+	extractErr := extractTar(archive, dst, s.cfg)
+	_ = archive.Close()
+	waitErr := cmd.Wait()
+	if extractErr != nil {
+		return extractErr
+	}
+	if waitErr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("archive Git repository source")
+	}
+	return nil
+}
+
+func (s *Store) downloadArchive(ctx context.Context, u *url.URL, dst string) error {
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if e != nil {
 		return e
 	}
 	req.Header.Del("Authorization")
 	req.Header.Del("Cookie")
-	req.Header.Set("User-Agent", "buildkite-gha-action-source/1")
+	req.Header.Set("User-Agent", s.cfg.userAgent)
 	c := *s.client
 	c.Jar = nil
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -553,6 +1278,7 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) err
 		}
 		req.Header.Del("Authorization")
 		req.Header.Del("Cookie")
+		req.Header.Set("User-Agent", s.cfg.userAgent)
 		return nil
 	}
 	resp, e := c.Do(req)
@@ -563,10 +1289,10 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) err
 	if !validArchiveURL(resp.Request.URL, s.cfg.finalHosts) {
 		return fmt.Errorf("archive final URL denied")
 	}
-	if resp.StatusCode == 404 {
+	if resp.StatusCode == http.StatusNotFound {
 		return &NotPublicError{}
 	}
-	if resp.StatusCode == 403 || resp.StatusCode == 429 {
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if readErr != nil {
 			return fmt.Errorf("read archive error response: %w", readErr)
@@ -574,6 +1300,9 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) err
 		if rate := rateLimitError(resp, body); rate != nil {
 			return rate
 		}
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return &NotPublicError{}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("archive returned HTTP %d", resp.StatusCode)
@@ -608,12 +1337,13 @@ func validArchiveURL(u *url.URL, allowed map[string]bool) bool {
 }
 
 type manifest struct {
-	Schema     string         `json:"schema"`
-	Owner      string         `json:"owner"`
-	Repository string         `json:"repository"`
-	Commit     string         `json:"commit"`
-	Files      []manifestFile `json:"files"`
-	Digest     string         `json:"digest"`
+	Schema        string         `json:"schema"`
+	Owner         string         `json:"owner"`
+	Repository    string         `json:"repository"`
+	Commit        string         `json:"commit"`
+	Files         []manifestFile `json:"files"`
+	Digest        string         `json:"digest"`
+	Authenticated bool           `json:"authenticated,omitempty"`
 }
 type manifestFile struct {
 	Path   string `json:"path"`
@@ -624,16 +1354,32 @@ type manifestFile struct {
 
 // DigestTree returns the canonical source digest for a local action directory.
 // It uses the same bounded manifest and file-mode model as immutable remote
-// action source. Symlinks and other special files fail closed.
+// action source. It rejects symlinks and other special files.
 func DigestTree(root string) (string, error) {
-	info, err := os.Stat(root)
+	return DigestTreeWithExecutablePaths(root, nil)
+}
+
+// DigestTreeAndExecutablePaths returns the canonical digest and sorted relative
+// paths whose executable bits contribute to it. An empty list is non-nil.
+func DigestTreeAndExecutablePaths(root string) (string, []string, error) {
+	m, err := buildManifestFiles(root, defaults(), Reference{}, "", true, nil)
 	if err != nil {
-		return "", fmt.Errorf("stat action source tree: %w", err)
+		return "", nil, fmt.Errorf("digest action source tree: %w", err)
 	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("action source tree is not a directory")
+	paths := []string{}
+	for _, file := range m.Files {
+		if file.Mode == 0o755 {
+			paths = append(paths, file.Path)
+		}
 	}
-	m, err := buildManifestFiles(root, defaults(), Reference{}, "", true)
+	return m.Digest, paths, nil
+}
+
+// DigestTreeWithExecutablePaths calculates a tree digest using executable-mode
+// provenance authenticated by the caller. Nil uses filesystem modes; an empty
+// non-nil list declares no executable files. Every path must name a regular file.
+func DigestTreeWithExecutablePaths(root string, executablePaths []string) (string, error) {
+	m, err := buildManifestFiles(root, defaults(), Reference{}, "", true, executablePaths)
 	if err != nil {
 		return "", fmt.Errorf("digest action source tree: %w", err)
 	}
@@ -641,13 +1387,43 @@ func DigestTree(root string) (string, error) {
 }
 
 func buildManifest(root string, c config, ref Reference, commit string) (manifest, error) {
-	return buildManifestFiles(root, c, ref, commit, false)
+	return buildManifestFiles(root, c, ref, commit, false, nil)
 }
 
-func buildManifestFiles(root string, c config, ref Reference, commit string, excludeGitMetadata bool) (manifest, error) {
+func buildResolvedManifest(root string, c config, ref Reference, resolved Resolved) (manifest, error) {
+	var executablePaths []string
+	if runtime.GOOS == "windows" {
+		executablePaths = resolved.ExecutablePaths
+	}
+	return buildManifestFiles(root, c, ref, resolved.Commit, false, executablePaths)
+}
+
+func buildManifestFiles(root string, c config, ref Reference, commit string, excludeGitMetadata bool, executablePaths []string) (manifest, error) {
 	m := manifest{Schema: "buildkite-gha-action-source/v1", Owner: strings.ToLower(ref.Owner), Repository: strings.ToLower(ref.Repository), Commit: commit}
+	info, err := os.Stat(root)
+	if err != nil {
+		return m, fmt.Errorf("stat action source tree: %w", err)
+	}
+	if !info.IsDir() {
+		return m, fmt.Errorf("action source tree is not a directory")
+	}
+	if len(executablePaths) > c.maxEntries {
+		return m, fmt.Errorf("too many executable paths")
+	}
+	executable := make(map[string]bool, len(executablePaths))
+	for i, p := range executablePaths {
+		if len(p) > c.maxPath || !utf8.ValidString(p) || hasControl(p) || strings.Contains(p, "\\") || i > 0 && executablePaths[i-1] >= p {
+			return m, fmt.Errorf("invalid executable path list")
+		}
+		for segment := range strings.SplitSeq(p, "/") {
+			if segment == "" || segment == "." || segment == ".." || len(segment) > c.maxSegment {
+				return m, fmt.Errorf("invalid executable path list")
+			}
+		}
+		executable[p] = true
+	}
 	var total int64
-	err := filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
+	err = filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
 		if e != nil {
 			return e
 		}
@@ -684,14 +1460,18 @@ func buildManifestFiles(root string, c config, ref Reference, commit string, exc
 			return e
 		}
 		mode := uint32(0o644)
-		if st.Mode().Perm()&0o111 != 0 {
+		if executablePaths != nil && executable[rel] || executablePaths == nil && st.Mode().Perm()&0o111 != 0 {
 			mode = 0o755
 		}
+		delete(executable, rel)
 		m.Files = append(m.Files, manifestFile{Path: rel, Size: st.Size(), SHA256: hex.EncodeToString(h.Sum(nil)), Mode: mode})
 		return nil
 	})
 	if err != nil {
 		return m, err
+	}
+	if len(executable) != 0 {
+		return m, fmt.Errorf("executable path does not name a source file")
 	}
 	sort.Slice(m.Files, func(i, j int) bool { return m.Files[i].Path < m.Files[j].Path })
 	b, _ := json.Marshal(m.Files)
@@ -710,7 +1490,8 @@ func (s *Store) verify(base string, resolved Resolved) (manifest, error) {
 	if dec.Decode(&want) != nil || dec.Decode(&struct{}{}) != io.EOF {
 		return manifest{}, fmt.Errorf("invalid manifest")
 	}
-	got, e := buildManifest(filepath.Join(base, "tree"), s.cfg, resolved.Reference, resolved.Commit)
+	got, e := buildResolvedManifest(filepath.Join(base, "tree"), s.cfg, resolved.Reference, resolved)
+	got.Authenticated = want.Authenticated
 	if e != nil || !reflect.DeepEqual(got, want) {
 		return manifest{}, fmt.Errorf("cache verification failed")
 	}
@@ -740,6 +1521,9 @@ func extractTar(r io.Reader, dst string, c config) error {
 		}
 		if e != nil {
 			return fmt.Errorf("read archive: %w", e)
+		}
+		if !utf8.ValidString(h.Name) || !utf8.ValidString(h.Linkname) {
+			return fmt.Errorf("archive contains invalid UTF-8 metadata")
 		}
 		if h.Typeflag == tar.TypeXGlobalHeader {
 			// archive/tar still exposes legacy xattrs separately from PAX records.
@@ -816,11 +1600,12 @@ func extractTar(r io.Reader, dst string, c config) error {
 				if e == nil {
 					n, ce := io.CopyN(f, tr, h.Size)
 					cl := f.Close()
-					if ce != nil || n != h.Size {
+					switch {
+					case ce != nil || n != h.Size:
 						e = fmt.Errorf("short archive file")
-					} else if cl != nil {
+					case cl != nil:
 						e = cl
-					} else {
+					default:
 						mode := os.FileMode(0o644)
 						if h.Mode&0o100 != 0 {
 							mode = 0o755
@@ -869,7 +1654,7 @@ func omittedSymlinkTarget(name, linkname string, size int64, c config) (string, 
 	if target == "." || target == ".." || strings.HasPrefix(target, "../") {
 		return "", fmt.Errorf("archive symlink target escapes root")
 	}
-	for _, part := range strings.Split(target, "/") {
+	for part := range strings.SplitSeq(target, "/") {
 		if part == "" || part == "." || part == ".." || len(part) > c.maxSegment {
 			return "", fmt.Errorf("unsafe archive symlink target")
 		}

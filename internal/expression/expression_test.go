@@ -2,6 +2,8 @@ package expression
 
 import (
 	"encoding/json"
+	"errors"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -48,6 +50,24 @@ func TestReferencePathOwnsOnlyOneStaticReference(t *testing.T) {
 	} {
 		if _, _, err := ReferencePath(source); err == nil {
 			t.Fatalf("ReferencePath(%q) succeeded, want static-reference rejection", source)
+		}
+	}
+}
+
+func TestDirectSecretReferenceAcceptsOnlyOneStaticSecret(t *testing.T) {
+	for _, source := range []string{"${{ secrets.SOURCE }}", "${{ secrets['source'] }}"} {
+		name, err := DirectSecretReference(source)
+		if err != nil || name != "SOURCE" {
+			t.Fatalf("DirectSecretReference(%q) = %q, %v", source, name, err)
+		}
+	}
+	for _, source := range []string{
+		"literal", "${{ secrets.SOURCE }}-suffix", "${{ secrets[inputs.name] }}",
+		"${{ needs.build.outputs.secret }}", "${{ vars.SECRET }}", "${{ env.SECRET }}",
+		"${{ inputs.secret }}", "${{ github.token }}", "${{ secrets.SOURCE || secrets.OTHER }}",
+	} {
+		if _, err := DirectSecretReference(source); err == nil {
+			t.Fatalf("DirectSecretReference(%q) succeeded", source)
 		}
 	}
 }
@@ -109,7 +129,7 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		"prefix-${{ github.actor }}-${{ matrix.version }}",
 	} {
 		t.Run(template, func(t *testing.T) {
-			if err := validateRuntimeTemplate(template); err != nil {
+			if err := ValidateRuntimeTemplate(template); err != nil {
 				t.Fatalf("validateRuntimeTemplate(%q) error = %v", template, err)
 			}
 		})
@@ -127,7 +147,7 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		{template: "${{ true || }}", want: "invalid expression"},
 	} {
 		t.Run(test.template, func(t *testing.T) {
-			err := validateRuntimeTemplate(test.template)
+			err := ValidateRuntimeTemplate(test.template)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("validateRuntimeTemplate(%q) error = %v, want %q", test.template, err, test.want)
 			}
@@ -135,39 +155,185 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 	}
 }
 
+func TestDockerActionArgsUseOnlyInputs(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+		want     string
+		invalid  bool
+	}{
+		{name: "literal", template: " --flag=$value; ", want: " --flag=$value; "},
+		{name: "property", template: "prefix-${{ inputs.Name }}-suffix", want: "prefix-value-suffix"},
+		{name: "literal index", template: "${{ inputs['name'] }}", want: "value"},
+		{name: "computed input", template: "${{ inputs[format('{0}', 'name')] }}", want: "value"},
+		{name: "dynamic input", template: "${{ inputs[env.name] }}", invalid: true},
+		{name: "nested input", template: "${{ inputs.name.value }}", invalid: true},
+		{name: "other context", template: "${{ secrets.token }}", invalid: true},
+		{name: "provided", template: "${{ inputs.name || 'fallback' }}", want: "value"},
+		{name: "fallback", template: "${{ inputs.missing || 'fallback' }}", want: "fallback"},
+		{name: "function", template: "${{ format('--{0}', inputs.name) }}", want: "--value"},
+		{name: "lazy function", template: "${{ inputs.name || fromJSON('invalid') }}", want: "value"},
+		{name: "unreachable secret", template: "${{ 'safe' || secrets.token }}", invalid: true},
+		{name: "unreachable token", template: "${{ 'safe' || github.token }}", invalid: true},
+		{name: "unavailable function", template: "${{ 'safe' || hashFiles('**') }}", invalid: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateDockerActionArg(test.template)
+			if test.invalid {
+				if err == nil {
+					t.Fatalf("ValidateDockerActionArg(%q) succeeded", test.template)
+				}
+				if _, evalErr := EvaluateDockerActionArg(test.template, map[string]string{"name": "value"}); evalErr == nil {
+					t.Fatalf("EvaluateDockerActionArg(%q) succeeded", test.template)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := EvaluateDockerActionArg(test.template, map[string]string{"name": "value"})
+			if err != nil || got != test.want {
+				t.Fatalf("EvaluateDockerActionArg(%q) = %q, %v; want %q", test.template, got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T) {
-	runner := map[string]string{"os": "macOS", "arch": "ARM64"}
+	runner := map[string]string{"os": "macOS", "arch": "ARM64", "temp": "/runner/temp"}
 	if got, err := Evaluate("${{ runner.os }}/${{ RUNNER.ARCH }}", Context{Runner: runner}); err != nil || got != "macOS/ARM64" {
 		t.Fatalf("Evaluate() = %q, %v", got, err)
 	}
+	if got, err := EvaluateStep("${{ runner.temp }}", Context{Runner: runner}); err != nil || got != "/runner/temp" {
+		t.Fatalf("EvaluateStep() runner.temp = %q, %v", got, err)
+	}
 	if got, err := EvaluateCondition("runner.os == 'macOS' && runner.arch == 'ARM64'", ConditionContext{Runner: runner}); err != nil || !got {
 		t.Fatalf("EvaluateCondition() = %v, %v", got, err)
+	}
+	if err := ValidateCondition("runner.temp != ''", StepCondition); err != nil {
+		t.Fatalf("ValidateCondition() step runner.temp = %v", err)
+	}
+	if err := ValidateCondition("runner.temp != ''", JobCondition); err == nil {
+		t.Fatal("ValidateCondition() accepted runner.temp before job setup")
 	}
 	if got, err := EvaluateActionInputDefault("${{ runner.os == 'macOS' && runner.arch || 'X64' }}", Context{Runner: runner}); err != nil || got != "ARM64" {
 		t.Fatalf("EvaluateActionInputDefault() = %q, %v", got, err)
 	}
 	for _, reference := range []string{"runner.name", "runner.os.extra", "runner"} {
-		if err := validateRuntimeTemplate("${{ " + reference + " }}"); err == nil {
+		if err := ValidateRuntimeTemplate("${{ " + reference + " }}"); err == nil {
 			t.Errorf("validateRuntimeTemplate(%q) unexpectedly succeeded", reference)
 		}
+	}
+}
+
+func TestRunnerEnvironmentIsAvailableOnEveryRuntimeSurface(t *testing.T) {
+	runner := map[string]string{"os": "Linux", "arch": "X64", "environment": "self-hosted"}
+	if got, err := Evaluate("${{ runner.environment }}", Context{Runner: runner}); err != nil || got != "self-hosted" {
+		t.Fatalf("Evaluate() = %q, %v", got, err)
+	}
+	if got, err := EvaluateStep("${{ RUNNER.Environment }}", Context{Runner: runner}); err != nil || got != "self-hosted" {
+		t.Fatalf("EvaluateStep() = %q, %v", got, err)
+	}
+	for _, test := range []struct {
+		condition string
+		want      bool
+	}{
+		{"runner.environment == 'self-hosted'", true},
+		{"runner.environment == 'github-hosted'", false},
+		{"runner.environment != 'github-hosted' && runner.os == 'Linux'", true},
+	} {
+		if got, err := EvaluateCondition(test.condition, ConditionContext{Runner: runner}); err != nil || got != test.want {
+			t.Fatalf("EvaluateCondition(%q) = %v, %v; want %v", test.condition, got, err, test.want)
+		}
+	}
+	for _, scope := range []ConditionScope{JobCondition, StepCondition} {
+		if err := ValidateCondition("runner.environment == 'github-hosted'", scope); err != nil {
+			t.Fatalf("ValidateCondition() scope %v runner.environment = %v", scope, err)
+		}
+	}
+	if err := ValidateCondition("runner.name == 'x'", StepCondition); err == nil || !strings.Contains(err.Error(), "runner.environment") {
+		t.Fatalf("ValidateCondition() runner.name error = %v, want the supported list to name runner.environment", err)
+	}
+	if got, err := EvaluateActionInputDefault("${{ runner.environment == 'github-hosted' && 'hosted' || 'self' }}", Context{Runner: runner}); err != nil || got != "self" {
+		t.Fatalf("EvaluateActionInputDefault() = %q, %v", got, err)
+	}
+	if _, err := Evaluate("${{ runner.environment }}", Context{Runner: map[string]string{"os": "Linux"}}); err == nil {
+		t.Fatal("Evaluate() resolved runner.environment without a runner context value")
 	}
 }
 
 func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *testing.T) {
 	for _, template := range []string{
 		"${{ github.server_url == 'https://github.com' && github.token || '' }}",
+		"${{ runner.debug }}",
+		"${{ runner.debug == '1' }}",
 		"${{ job.status }}",
+		"${{ job.check_run_id }}",
+		"${{ job['check_run_id'] }}",
+		"${{ job.check_run_id || 'unavailable' }}",
 		"${{ toJSON(matrix) }}",
+		"${{ github.event[inputs.field] || 'fallback' }}",
+		"${{ toJSON(github.event.*.name) }}",
 		"${{ true && 'quoted }} braces' || '' }}",
+		"${{ 1 > 0 }}",
 	} {
 		if err := ValidateActionInputDefault(template); err != nil {
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ toJSON(matrix.value) }}", "${{ 1 > 0 }}", "${{ github[env.NAME] }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ github.event[secrets.FIELD] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job[env.NAME] }}", "${{ job.check_run_id.extra }}", "${{ job.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
+	}
+	if _, err := EvaluateActionInputDefault("${{ runner.temp || '' }}", Context{Runner: map[string]string{"temp": "/runner/temp"}}); err == nil {
+		t.Fatal("EvaluateActionInputDefault() accepted runner.temp")
+	}
+}
+
+func TestEvaluateActionInputDefaultSupportsDynamicEventAccess(t *testing.T) {
+	context := Context{
+		GitHub: map[string]any{"event": map[string]any{"action": "opened"}},
+		Inputs: map[string]string{"field": "action"},
+	}
+	got, err := EvaluateActionInputDefault("${{ github.event[inputs.field] }}", context)
+	if err != nil || got != "opened" {
+		t.Fatalf("EvaluateActionInputDefault() = %q, %v, want opened", got, err)
+	}
+}
+
+func TestEvaluateActionInputDefaultTreatsRunnerDebugAsFalse(t *testing.T) {
+	for _, test := range []struct {
+		template string
+		want     string
+	}{
+		{template: "${{ runner.debug }}", want: "false"},
+		{template: "${{ runner.debug == '1' }}", want: "false"},
+	} {
+		got, err := EvaluateActionInputDefault(test.template, Context{})
+		if err != nil || got != test.want {
+			t.Errorf("EvaluateActionInputDefault(%q) = %q, %v; want %q", test.template, got, err, test.want)
+		}
+	}
+}
+
+func TestRunnerDebugRemainsUnavailableOutsideActionInputDefaults(t *testing.T) {
+	template := "${{ runner.debug }}"
+	if err := ValidateRuntimeTemplate(template); err == nil {
+		t.Fatal("ValidateRuntimeTemplate() accepted runner.debug")
+	}
+	if _, err := Evaluate(template, Context{}); err == nil {
+		t.Fatal("Evaluate() accepted runner.debug")
+	}
+	if _, err := EvaluateStep(template, Context{}); err == nil {
+		t.Fatal("EvaluateStep() accepted runner.debug")
+	}
+	if _, err := EvaluateCondition("runner.debug", ConditionContext{}); err == nil {
+		t.Fatal("EvaluateCondition() accepted runner.debug")
+	}
+	if _, err := EvaluateActionLifecycleCondition("runner.debug", ConditionContext{}); err == nil {
+		t.Fatal("EvaluateActionLifecycleCondition() accepted runner.debug")
 	}
 }
 
@@ -215,7 +381,9 @@ func TestActionInputDefaultRequiresGitHubTokenUsesProviderServerURL(t *testing.T
 		{name: "Origin skips GitHub.com token", template: "${{ github.server_url == 'https://github.com' && github.token || '' }}", serverURL: "https://origin.cursor.com"},
 		{name: "Origin reaches reverse guard", template: "${{ github.server_url != 'https://github.com' && github.token || '' }}", serverURL: "https://origin.cursor.com", want: true},
 		{name: "literal false skips token", template: "${{ false && github.token || '' }}", serverURL: "https://origin.cursor.com"},
-		{name: "unknown guard fails closed", template: "${{ inputs.use_token && github.token || '' }}", serverURL: "https://origin.cursor.com", want: true},
+		{name: "unavailable check run skips token", template: "${{ job.check_run_id && github.token || '' }}", serverURL: "https://github.com"},
+		{name: "indexed unavailable check run skips token", template: "${{ job['check_run_id'] && github.token || '' }}", serverURL: "https://github.com"},
+		{name: "unknown guard requires token", template: "${{ inputs.use_token && github.token || '' }}", serverURL: "https://origin.cursor.com", want: true},
 		{name: "no token reference", template: "${{ github.server_url }}", serverURL: "https://origin.cursor.com"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -249,6 +417,29 @@ func TestEvaluateActionInputDefaultSupportsJobStatus(t *testing.T) {
 	}
 }
 
+func TestEvaluateActionInputDefaultTreatsJobCheckRunIDAsUnavailable(t *testing.T) {
+	for _, test := range []struct {
+		template string
+		want     string
+	}{
+		{template: "${{ job.check_run_id }}", want: ""},
+		{template: "${{ job['check_run_id'] }}", want: ""},
+		{template: "${{ JOB.CHECK_RUN_ID || 'unavailable' }}", want: "unavailable"},
+		{template: "id-${{ job.check_run_id }}", want: "id-"},
+	} {
+		got, err := EvaluateActionInputDefault(test.template, Context{})
+		if err != nil || got != test.want {
+			t.Errorf("EvaluateActionInputDefault(%q) = %q, %v; want %q", test.template, got, err, test.want)
+		}
+	}
+	if err := ValidateRuntimeTemplate("${{ job.check_run_id }}"); err == nil {
+		t.Fatal("ValidateRuntimeTemplate() accepted action-default-only job.check_run_id")
+	}
+	if _, err := Evaluate("${{ job.check_run_id }}", Context{}); err == nil {
+		t.Fatal("Evaluate() accepted action-default-only job.check_run_id")
+	}
+}
+
 func TestEvaluateActionInputDefaultSupportsMatrixJSON(t *testing.T) {
 	got, err := EvaluateActionInputDefault("${{ toJSON(matrix) }}", Context{Matrix: map[string]any{"scala": "2.13", "jdk": 17}})
 	if err != nil {
@@ -268,13 +459,33 @@ func TestEvaluateActionInputDefaultMatchesGitHubEqualityAndTemplateBoundaries(t 
 		want     string
 	}{
 		{name: "quoted closing delimiter", template: "${{ true && 'quoted }} braces' || '' }}", want: "quoted }} braces"},
-		{name: "numeric string", template: "${{ matrix.version == '20' && 'yes' || 'no' }}", context: Context{Matrix: map[string]any{"version": 20}}, want: "yes"},
+		{name: "matrix numeric string", template: "${{ matrix.version == '20' && 'yes' || 'no' }}", context: Context{Matrix: map[string]any{"version": 20}}, want: "yes"},
 		{name: "null and zero", template: "${{ null == 0 && 'yes' || 'no' }}", want: "yes"},
 		{name: "false and zero", template: "${{ false == 0 && 'yes' || 'no' }}", want: "yes"},
 		{name: "empty string and zero", template: "${{ '' == 0 && 'yes' || 'no' }}", want: "yes"},
+		{name: "numeric string", template: "${{ '12' == 12 && 'yes' || 'no' }}", want: "yes"},
+		{name: "same-type strings are not numerically coerced", template: "${{ '01' == '1' && 'yes' || 'no' }}", want: "no"},
+		{name: "case-insensitive string equality", template: "${{ 'Release' == 'release' && 'yes' || 'no' }}", want: "yes"},
 		{name: "not equal", template: "${{ 'not-a-number' != 0 && 'yes' || 'no' }}", want: "yes"},
+		{name: "ordered numeric strings", template: "${{ '12' > 2 && 'yes' || 'no' }}", want: "yes"},
+		{name: "case-insensitive string ordering", template: "${{ 'Beta' > 'alpha' && 'yes' || 'no' }}", want: "yes"},
+		{name: "NaN ordering is false", template: "${{ 'not-a-number' > 0 && 'yes' || 'no' }}", want: "no"},
 		{name: "falsy zero", template: "${{ 0 && 'yes' || 'no' }}", want: "no"},
+		{name: "and returns selected operand", template: "${{ 'left' && 'right' }}", want: "right"},
+		{name: "or returns selected operand", template: "${{ '' || 'fallback' }}", want: "fallback"},
 		{name: "truthy short circuit", template: "${{ 'fallback' || github.missing }}", want: "fallback"},
+		{name: "falsy short circuit", template: "${{ false && github.missing || 'fallback' }}", want: "fallback"},
+		{name: "missing member is null", template: "${{ matrix.missing == null && 'yes' || 'no' }}", context: Context{Matrix: map[string]any{}}, want: "yes"},
+		{name: "primitive string conversion", template: "${{ startsWith(123, '12') }}", want: "true"},
+		{name: "format", template: "${{ format('{0}-{1}', 'release', 2) }}", want: "release-2"},
+		{name: "JSON number formatting", template: "${{ format('{0}', fromJSON('1e2')) }}", want: "100"},
+		{name: "JSON exponent formatting", template: "${{ format('{0}', fromJSON('1e20')) }}", want: "1E+20"},
+		{name: "JSON negative zero formatting", template: "${{ format('{0}', fromJSON('-0')) }}", want: "0"},
+		{name: "array membership", template: "${{ contains(fromJSON('[\"push\",2]'), 2) }}", want: "true"},
+		{name: "join", template: "${{ join(fromJSON('[\"one\",2]'), '-') }}", want: "one-2"},
+		{name: "lazy empty join separator", template: "${{ join(fromJSON('[]'), fromJSON('bad')) }}", want: ""},
+		{name: "lazy single join separator", template: "${{ join(fromJSON('[\"one\"]'), fromJSON('bad')) }}", want: "one"},
+		{name: "lazy case", template: "${{ case(true, 'selected', github.missing) }}", want: "selected"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := EvaluateActionInputDefault(test.template, test.context)
@@ -288,12 +499,10 @@ func TestEvaluateActionInputDefaultMatchesGitHubEqualityAndTemplateBoundaries(t 
 func TestEvaluateIsSinglePass(t *testing.T) {
 	literal := "literal ${{ matrix.secret }} and ${{"
 	context := Context{
-		Inputs:       map[string]string{"value": literal},
-		Matrix:       map[string]any{"value": literal, "secret": "reevaluated", "number": json.Number("1e3")},
-		Steps:        map[string]map[string]string{"producer": {"value": literal}},
-		StepStatuses: map[string]StepStatus{"producer": {Outcome: "failure", Conclusion: "success"}},
-		Needs:        map[string]map[string]string{"producer": {"value": literal}},
-		NeedResults:  map[string]string{"producer": "success"},
+		Inputs: map[string]string{"value": literal},
+		Matrix: map[string]any{"value": literal, "secret": "reevaluated", "number": json.Number("1e3")},
+		Steps:  map[string]StepStatus{"producer": {Outcome: "failure", Conclusion: "success", Outputs: map[string]string{"value": literal}}},
+		Needs:  map[string]NeedStatus{"producer": {Outputs: map[string]string{"value": literal}, Result: "success"}},
 	}
 	tests := map[string]string{
 		"${{ inputs.value }}":                 literal,
@@ -303,7 +512,7 @@ func TestEvaluateIsSinglePass(t *testing.T) {
 		"${{ steps.Producer.conclusion }}":    "success",
 		"${{ needs.Producer.outputs.value }}": literal,
 		"${{ needs.Producer.result }}":        "success",
-		"${{ matrix.number }}":                "1e3",
+		"${{ matrix.number }}":                "1000",
 		"before ${{ inputs.value }} after":    "before " + literal + " after",
 	}
 	for template, want := range tests {
@@ -339,8 +548,8 @@ func TestEvaluateSupportsStaticIndexReferences(t *testing.T) {
 	}
 }
 
-func TestServicePortIsTheOnlyRuntimeJobExpression(t *testing.T) {
-	services := map[string]map[string]string{"redis": {"6379": "49152"}}
+func TestServiceRuntimeContext(t *testing.T) {
+	services := map[string]ServiceContext{"redis": {ID: "container-id", Network: "job-network", Ports: map[string]string{"6379": "49152"}}}
 	context := Context{Services: services, Env: map[string]string{"PORT": "6379"}}
 	for _, reference := range []string{"job.services.redis.ports[6379]", "JOB.Services.REDIS.Ports[6379]", "job.services.REDIS.ports['6379']"} {
 		got, err := Evaluate("${{ "+reference+" }}", context)
@@ -348,8 +557,28 @@ func TestServicePortIsTheOnlyRuntimeJobExpression(t *testing.T) {
 			t.Fatalf("Evaluate(%q) = %q, %v", reference, got, err)
 		}
 	}
+	for reference, want := range map[string]string{"job.services.redis.id": "container-id", "job.services.redis.network": "job-network"} {
+		got, err := Evaluate("${{ "+reference+" }}", context)
+		if err != nil || got != want {
+			t.Fatalf("Evaluate(%q) = %q, %v; want %q", reference, got, err, want)
+		}
+	}
+	for template, want := range map[string]string{
+		"${{ job.services['redis'].id }}":                      "container-id",
+		"${{ format('{0}', job.services.redis.ports[6379]) }}": "49152",
+	} {
+		if got, err := EvaluateStep(template, context); err != nil || got != want {
+			t.Fatalf("EvaluateStep(%q) = %q, %v; want %q", template, got, err, want)
+		}
+	}
+	if _, err := EvaluateStep("${{ job.services[env.NAME].id }}", context); err == nil {
+		t.Fatal("EvaluateStep() accepted dynamic service access")
+	}
 	if got, err := EvaluateCondition("job.services.Redis.ports[6379] == '49152'", ConditionContext{Services: services}); err != nil || !got {
 		t.Fatalf("service condition = %v, %v", got, err)
+	}
+	if got, err := EvaluateCondition("job.services.redis.id == 'container-id' && job.services.redis.network == 'job-network'", ConditionContext{Services: services}); err != nil || !got {
+		t.Fatalf("service identity condition = %v, %v", got, err)
 	}
 	for _, reference := range []string{"job.services.missing.ports[6379]", "job.services.redis.ports[1234]", "job.services.redis.ports[env.PORT]", "job.status"} {
 		if _, err := Evaluate("${{ "+reference+" }}", context); err == nil {
@@ -397,6 +626,7 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 		{name: "bracket", template: "prefix-${{ github['TOKEN'] }}", want: true},
 		{name: "compound", template: "${{ github.token || '' }}", want: true},
 		{name: "other GitHub value", template: "${{ github.actor }}"},
+		{name: "serialized GitHub value", template: "${{ toJSON(github.actor) }}"},
 		{name: "plain", template: "github.token"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -406,11 +636,41 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 			}
 		})
 	}
+	for _, template := range []string{"${{ toJSON(github) }}", "${{ ToJson(GitHub) }}"} {
+		if got, err := ReferencesStepGitHubToken(template); err != nil || !got {
+			t.Fatalf("ReferencesStepGitHubToken(%q) = %v, %v, want true", template, got, err)
+		}
+		if got, err := ReferencesCompositeStepGitHubToken(template); err != nil || got {
+			t.Fatalf("ReferencesCompositeStepGitHubToken(%q) = %v, %v, want false", template, got, err)
+		}
+		if _, err := ReferencesGitHubToken(template); err == nil || !strings.Contains(err.Error(), "must name one static property") {
+			t.Fatalf("ReferencesGitHubToken(%q) error = %v, want non-step rejection", template, err)
+		}
+	}
+	if got, err := ReferencesCompositeStepGitHubToken("${{ toJSON(github) }}-${{ github.token }}"); err != nil || !got {
+		t.Fatalf("ReferencesCompositeStepGitHubToken() direct token = %v, %v, want true", got, err)
+	}
 	if _, err := ReferencesGitHubToken("${{ github[env.NAME] }}"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
 		t.Fatalf("ReferencesGitHubToken() dynamic index error = %v", err)
 	}
 	if _, err := ReferencesGitHubToken("${{ github.token.extra }}"); err == nil || !strings.Contains(err.Error(), "must name exactly github.token") {
 		t.Fatalf("ReferencesGitHubToken() token dereference error = %v", err)
+	}
+	for _, template := range []string{
+		"${{ github }}",
+		"${{ github.* }}",
+		"${{ toJSON(github.*) }}",
+		"${{ format('{0}', github) }}",
+	} {
+		if _, err := ReferencesGitHubToken(template); err == nil || !strings.Contains(err.Error(), "must name one static property") {
+			t.Fatalf("ReferencesGitHubToken(%q) error = %v, want static-property rejection", template, err)
+		}
+	}
+	if got, err := ReferencesGitHubToken("${{ github.event.*.token }}"); err != nil || got {
+		t.Fatalf("ReferencesGitHubToken() event payload projection = %v, %v, want false", got, err)
+	}
+	if _, err := ReferencesStepGitHubToken("${{ toJSON(github[env.NAME]) }}"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
+		t.Fatalf("ReferencesStepGitHubToken() serialized dynamic index error = %v", err)
 	}
 }
 
@@ -424,6 +684,40 @@ func TestConditionUsesContextSupportsOptionalDelimiters(t *testing.T) {
 	usesInputs, err := ConditionUsesContext("github.ref", "inputs")
 	if err != nil || usesInputs {
 		t.Fatalf("ConditionUsesContext(github.ref) = %v, %v, want false", usesInputs, err)
+	}
+}
+
+func TestTemplateUsesContextSupportsIndexedAccess(t *testing.T) {
+	for _, template := range []string{"${{ inputs.enabled }}", "prefix-${{ inputs['enabled'] }}", "${{ inputs[env.KEY] }}"} {
+		usesInputs, err := TemplateUsesContext(template, "inputs")
+		if err != nil || !usesInputs {
+			t.Fatalf("TemplateUsesContext(%q) = %v, %v, want true", template, usesInputs, err)
+		}
+	}
+	usesInputs, err := TemplateUsesContext("${{ github.ref }}", "inputs")
+	if err != nil || usesInputs {
+		t.Fatalf("TemplateUsesContext(github.ref) = %v, %v, want false", usesInputs, err)
+	}
+}
+
+func TestStaticContextReferencesExcludeRuntimeComputedAccess(t *testing.T) {
+	for _, source := range []string{"${{ inputs.enabled }}", "${{ inputs['enabled'] }}", "inputs.enabled"} {
+		var usesInputs bool
+		var err error
+		if strings.HasPrefix(source, "inputs") {
+			usesInputs, err = ConditionUsesStaticContextReference(source, "inputs")
+		} else {
+			usesInputs, err = TemplateUsesStaticContextReference(source, "inputs")
+		}
+		if err != nil || !usesInputs {
+			t.Fatalf("static context reference %q = %v, %v, want true", source, usesInputs, err)
+		}
+	}
+	for _, source := range []string{"${{ inputs[env.KEY] }}", "${{ inputs.* }}"} {
+		usesInputs, err := TemplateUsesStaticContextReference(source, "inputs")
+		if err != nil || usesInputs {
+			t.Fatalf("runtime context reference %q = %v, %v, want false", source, usesInputs, err)
+		}
 	}
 }
 
@@ -445,11 +739,16 @@ func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
 		},
 		{name: "github head ref in job", source: "github.head_ref != ''", scope: JobCondition},
 		{name: "github head ref in step", source: "github.head_ref != ''", scope: StepCondition},
+		{name: "GitHub runtime event identity in job", source: "github.repository_owner && github.ref_name && github.ref_type && github.base_ref", scope: JobCondition},
+		{name: "GitHub runtime event identity in step", source: "github.repository_owner && github.ref_name && github.ref_type && github.base_ref", scope: StepCondition},
 		{name: "compatible booleans", source: "success() == true", scope: JobCondition},
 		{name: "compatible strings", source: "vars.ENABLED == 'true'", scope: JobCondition},
 		{name: "compatible integer and float", source: "1 == 1.0", scope: JobCondition},
 		{name: "runtime-dependent matrix value", source: "matrix.enabled == true", scope: JobCondition},
 		{name: "runner identity", source: "runner.os == 'Linux' && runner.arch == 'X64'", scope: JobCondition},
+		{name: "ordered comparison", source: "matrix.count > 1", scope: JobCondition},
+		{name: "string and boolean equality", source: "vars.ENABLED == true", scope: JobCondition},
+		{name: "boolean and number equality", source: "success() != 1", scope: JobCondition},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := ValidateCondition(test.source, test.scope); err != nil {
@@ -468,18 +767,12 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 	}{
 		{name: "hashFiles needs a pattern", source: "hashFiles()", scope: StepCondition, want: `condition function "hashFiles" requires 1 to 255 arguments`},
 		{name: "hashFiles unavailable in jobs", source: "hashFiles('go.sum')", scope: JobCondition, want: `condition function "hashFiles" is unavailable in job conditions`},
-		{name: "unsupported function", source: "contains('a', 'b')", scope: StepCondition, want: `condition function "contains" is unsupported`},
 		{name: "function arguments", source: "always(true)", scope: StepCondition, want: `condition function "always" arguments are unsupported`},
-		{name: "ordered comparison", source: "matrix.count > 1", scope: JobCondition, want: "condition comparison > is unsupported"},
-		{name: "runtime event payload", source: "github.event.pull_request.draft", scope: JobCondition, want: `condition reference "github.event.pull_request.draft" is unavailable at runtime`},
 		{name: "unsupported github property", source: "github.run_id", scope: StepCondition, want: `condition reference "github.run_id" is unavailable at runtime`},
 		{name: "step context in job", source: "steps.build.outcome", scope: JobCondition, want: `condition context "steps" is unavailable in job conditions`},
 		{name: "environment in job", source: "env.ENABLED", scope: JobCondition, want: `condition context "env" is unavailable in job conditions`},
 		{name: "unsupported context", source: "secrets.TOKEN", scope: StepCondition, want: `condition context "secrets" is unsupported`},
 		{name: "unsupported need shape", source: "needs.build.status", scope: JobCondition, want: `expected needs.<job>.result`},
-		{name: "dynamic index", source: "steps[env.STEP].outcome", scope: StepCondition, want: "expression index must be a string literal"},
-		{name: "string and boolean equality", source: "vars.ENABLED == true", scope: JobCondition, want: "condition equality compares incompatible string and boolean operands"},
-		{name: "boolean and number equality", source: "success() != 1", scope: JobCondition, want: "condition equality compares incompatible boolean and number operands"},
 		{name: "malformed", source: "${{ github.ref == }}", scope: JobCondition, want: "parse condition"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -487,7 +780,31 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("ValidateCondition() error = %v, want %q", err, test.want)
 			}
+			var blocker interface {
+				CompatibilityBlocker() (string, string)
+			}
+			if !errors.As(err, &blocker) {
+				t.Fatalf("ValidateCondition() error has no compatibility blocker: %v", err)
+			}
+			if kind, detail := blocker.CompatibilityBlocker(); kind != "expression" || detail != test.source {
+				t.Fatalf("compatibility blocker = %q / %q", kind, detail)
+			}
 		})
+	}
+}
+
+func TestValidateCallConditionUsesCallerOnlySurface(t *testing.T) {
+	if err := ValidateCallCondition("always() && github.ref && vars.FLAG && inputs.enabled && needs.prepare.outputs.ready"); err != nil {
+		t.Fatalf("ValidateCallCondition() error = %v", err)
+	}
+	for _, source := range []string{"matrix.os", "strategy.job-index", "secrets.TOKEN", "env.FLAG", "runner.os", "steps.test.outcome", "job.services.redis.id", "hashFiles('**')"} {
+		if err := ValidateCallCondition(source); err == nil {
+			t.Errorf("ValidateCallCondition(%q) accepted unavailable surface", source)
+		}
+	}
+	context := CompileContext{GitHub: map[string]any{"ref": "refs/heads/main"}, Vars: map[string]string{"FLAG": "true"}, Inputs: map[string]any{"enabled": true}}
+	if err := ValidateCompileCallCondition("github.ref == 'refs/heads/main' && vars.FLAG && inputs.enabled && needs.prepare.result == 'success'", context); err != nil {
+		t.Fatalf("ValidateCompileCallCondition() error = %v", err)
 	}
 }
 
@@ -505,8 +822,8 @@ func TestHashFilesIsLimitedToStepRuntimeExpressions(t *testing.T) {
 	if _, err := Evaluate("${{ hashFiles('*.go') }}", context); err == nil || !strings.Contains(err.Error(), "unsupported expression reference") {
 		t.Fatalf("Evaluate() hashFiles error = %v", err)
 	}
-	if _, err := EvaluateStep("${{ contains('a', 'b') }}", context); err == nil || !strings.Contains(err.Error(), "unsupported expression reference") {
-		t.Fatalf("EvaluateStep() contains error = %v", err)
+	if got, err := EvaluateStep("${{ contains('abc', 'B') }}", context); err != nil || got != "true" {
+		t.Fatalf("EvaluateStep() contains = %q, %v", got, err)
 	}
 
 	condition := ConditionContext{HashFiles: hash}
@@ -515,6 +832,263 @@ func TestHashFilesIsLimitedToStepRuntimeExpressions(t *testing.T) {
 	}
 	if err := ValidateCondition("hashFiles('*.go') != ''", StepCondition); err != nil {
 		t.Fatalf("ValidateCondition() = %v", err)
+	}
+}
+
+func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
+	context := Context{
+		Matrix: map[string]any{"os": "linux", "versions": []any{1, 2}},
+		Vars:   map[string]string{"PREFIX": "release"},
+		Env:    map[string]string{"KEY": "os"},
+		Steps:  map[string]StepStatus{"build": {Outcome: "success", Conclusion: "success", Outputs: map[string]string{"image": "app:v1"}}},
+	}
+	template := "${{ format('{0}-{1}-{2}', vars.PREFIX, matrix[env.KEY], join(matrix.versions, '.')) }}:${{ matrix.missing || steps.build.outputs.image }}"
+	got, err := EvaluateStep(template, context)
+	if err != nil || got != "release-linux-1.2:app:v1" {
+		t.Fatalf("EvaluateStep() = %q, %v", got, err)
+	}
+	for _, template := range []string{
+		"${{ secrets[env.KEY] }}",
+		"${{ github[env.KEY] }}",
+		"${{ false && secrets[env.KEY] || '' }}",
+		"${{ steps[env.KEY].outputs.image }}",
+		"${{ toJSON(needs.*) }}",
+		"${{ matrix[steps[env.KEY].outputs.image] || 'fallback' }}",
+		"${{ matrix[toJSON(needs[env.KEY])] }}",
+	} {
+		if _, err := EvaluateStep(template, context); err == nil {
+			t.Errorf("EvaluateStep(%q) allowed prohibited access", template)
+		}
+	}
+	if _, err := EvaluateStep("${{ github.token || '' }}", context); err == nil || !strings.Contains(err.Error(), `unavailable github value "token"`) {
+		t.Fatalf("EvaluateStep() github.token error = %v", err)
+	}
+	if _, err := EvaluateStep("${{ steps['missing'].outputs.value }}", context); err == nil || !strings.Contains(err.Error(), `unavailable step "missing"`) {
+		t.Fatalf("EvaluateStep() indexed missing step error = %v", err)
+	}
+	if _, err := Evaluate("${{ contains('abc', 'a') }}", context); err == nil {
+		t.Fatal("Evaluate() broadened general runtime interpolation")
+	}
+	if got, err := EvaluateStep(`${{ join(fromJSON('[{"name":"bug"},{"name":"help"}]').*.name, ',') }}`, context); err != nil || got != "bug,help" {
+		t.Fatalf("EvaluateStep() function projection = %q, %v", got, err)
+	}
+	for _, template := range []string{`${{ fromJSON('["a","b"]') }}`, `${{ fromJSON('{"a":1}') }}`} {
+		if _, err := EvaluateStep(template, context); err == nil || !strings.Contains(err.Error(), "want a scalar") {
+			t.Errorf("EvaluateStep(%q) error = %v, want scalar rejection", template, err)
+		}
+	}
+}
+
+func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
+	context := Context{GitHub: map[string]any{
+		"action_path":       "/workspace/actions/composite",
+		"action_ref":        "v2",
+		"action_repository": "owner/action",
+		"base_ref":          "main",
+		"job":               "build",
+		"ref_name":          "feature",
+		"ref_type":          "branch",
+		"repository_owner":  "buildkite",
+		"run_attempt":       "2",
+		"run_id":            "0198c0c5-2e0f-7c68-8b0c-2e0f7c688b0c",
+		"run_number":        "512",
+		"token":             "ghs_scoped_token",
+		"workflow":          "CI",
+		"workspace":         "/workspace",
+		"event":             map[string]any{"action": "opened", "pull_request": map[string]any{"draft": true}},
+	}}
+	for template, want := range map[string]string{
+		"${{ github.action_path }}/script.sh":                      "/workspace/actions/composite/script.sh",
+		"${{ github.action_repository }}@${{ github.action_ref }}": "owner/action@v2",
+		"${{ github.base_ref }}":                                   "main",
+		"${{ github.job }}":                                        "build",
+		"${{ github.ref_name }}":                                   "feature",
+		"${{ github.ref_type }}":                                   "branch",
+		"${{ github.repository_owner }}":                           "buildkite",
+		"${{ github.run_attempt }}":                                "2",
+		"${{ github.run_id }}":                                     "0198c0c5-2e0f-7c68-8b0c-2e0f7c688b0c",
+		"${{ github.run_number }}":                                 "512",
+		"${{ github.workflow }}":                                   "CI",
+		"${{ github.workspace }}/fake-home":                        "/workspace/fake-home",
+	} {
+		if got, err := EvaluateStep(template, context); err != nil || got != want {
+			t.Errorf("EvaluateStep(%q) = %q, %v; want %q", template, got, err, want)
+		}
+	}
+	wantJSON := "{\n" +
+		"  \"action_path\": \"/workspace/actions/composite\",\n" +
+		"  \"action_ref\": \"v2\",\n" +
+		"  \"action_repository\": \"owner/action\",\n" +
+		"  \"base_ref\": \"main\",\n" +
+		"  \"event\": {\n" +
+		"    \"action\": \"opened\",\n" +
+		"    \"pull_request\": {\n" +
+		"      \"draft\": true\n" +
+		"    }\n" +
+		"  },\n" +
+		"  \"job\": \"build\",\n" +
+		"  \"ref_name\": \"feature\",\n" +
+		"  \"ref_type\": \"branch\",\n" +
+		"  \"repository_owner\": \"buildkite\",\n" +
+		"  \"run_attempt\": \"2\",\n" +
+		"  \"run_id\": \"0198c0c5-2e0f-7c68-8b0c-2e0f7c688b0c\",\n" +
+		"  \"run_number\": \"512\",\n" +
+		"  \"token\": \"ghs_scoped_token\",\n" +
+		"  \"workflow\": \"CI\",\n" +
+		"  \"workspace\": \"/workspace\"\n" +
+		"}"
+	for _, template := range []string{"${{ toJSON(github) }}", "${{ ToJson(GitHub) }}"} {
+		if got, err := EvaluateStep(template, context); err != nil || got != wantJSON {
+			t.Errorf("EvaluateStep(%q) = %q, %v; want %q", template, got, err, wantJSON)
+		}
+	}
+	if _, err := EvaluateStep("${{ toJSON(github) }}", Context{GitHub: map[string]any{"actor": "octocat"}}); err == nil || !strings.Contains(err.Error(), `unavailable github value "token"`) {
+		t.Fatalf("EvaluateStep() tokenless toJSON(github) error = %v", err)
+	}
+	if got, err := EvaluateStep("${{ github.action_path }}", Context{GitHub: map[string]any{}}); err != nil || got != "" {
+		t.Fatalf("EvaluateStep() action_path outside composite scope = %q, %v; want empty", got, err)
+	}
+	for _, template := range []string{"${{ github.run_attempt }}", "${{ github.run_id }}", "${{ github.run_number }}", "${{ github.workspace }}"} {
+		if _, err := EvaluateStep(template, Context{GitHub: map[string]any{}}); err == nil || !strings.Contains(err.Error(), "unavailable github value") {
+			t.Errorf("EvaluateStep(%q) without run identity error = %v, want unavailable github value", template, err)
+		}
+	}
+	if _, err := EvaluateStep("${{ github.run_started_at }}", context); err == nil || !strings.Contains(err.Error(), `unsupported runtime github reference "github.run_started_at"`) {
+		t.Fatalf("EvaluateStep() github.run_started_at error = %v, want unsupported reference", err)
+	}
+	if got, err := EvaluateStep("${{ toJSON(github.event) }}", context); err != nil || got != "{\n  \"action\": \"opened\",\n  \"pull_request\": {\n    \"draft\": true\n  }\n}" {
+		t.Fatalf("EvaluateStep() event payload = %q, %v", got, err)
+	}
+	context.Vars = map[string]string{"EVENT_FIELD": "action"}
+	if got, err := EvaluateStep("${{ github.event[vars.EVENT_FIELD] }}", context); err != nil || got != "opened" {
+		t.Fatalf("EvaluateStep() dynamic event member = %q, %v", got, err)
+	}
+	if _, err := EvaluateStep("${{ github.event.action }}", Context{GitHub: map[string]any{}}); err == nil || !strings.Contains(err.Error(), "event payload") {
+		t.Fatalf("EvaluateStep() missing event payload error = %v", err)
+	}
+	for _, template := range []string{
+		"${{ github }}",
+		"${{ github[env.KEY] }}",
+		"${{ github.* }}",
+		"${{ toJSON(github.*) }}",
+		"${{ toJSON(secrets) }}",
+		"${{ format('{0}', github) }}",
+	} {
+		if _, err := EvaluateStep(template, context); err == nil {
+			t.Errorf("EvaluateStep(%q) allowed unsupported whole or dynamic context access", template)
+		}
+	}
+	if _, err := EvaluateJobEnvironment("${{ toJSON(github) }}", context); err == nil || !strings.Contains(err.Error(), "github.token is unavailable in this field") {
+		t.Fatalf("EvaluateJobEnvironment() toJSON(github) error = %v", err)
+	}
+	if err := ValidateActionInputDefault("${{ toJSON(github) }}"); err == nil {
+		t.Fatal("ValidateActionInputDefault() accepted toJSON(github)")
+	}
+}
+
+func TestExpressionMapProjectionIsDeterministic(t *testing.T) {
+	context := Context{Matrix: map[string]any{"zed": "last", "alpha": "first", "middle": "second"}}
+	for range 100 {
+		got, err := EvaluateStep("${{ join(matrix.*, '-') }}", context)
+		if err != nil || got != "first-second-last" {
+			t.Fatalf("EvaluateStep() map projection = %q, %v", got, err)
+		}
+	}
+}
+
+func TestEvaluateJobSurfacesSupportAuthorizedCompoundExpressions(t *testing.T) {
+	context := Context{
+		GitHub:  map[string]any{"ref": "refs/heads/main"},
+		Inputs:  map[string]string{"suffix": "prod"},
+		Matrix:  map[string]any{"os": "linux"},
+		Needs:   map[string]NeedStatus{"build": {Outputs: map[string]string{"tag": "v1"}, Result: "success"}},
+		Secrets: map[string]string{"TOKEN": "secret"},
+		Steps:   map[string]StepStatus{"build": {Outputs: map[string]string{"image": "app:v1"}}},
+		Vars:    map[string]string{"PREFIX": "release"},
+		Env:     map[string]string{"ROOT": "src"},
+	}
+
+	jobEnv := "${{ format('{0}-{1}-{2}', vars.PREFIX, matrix.os, inputs.suffix) }}:${{ needs.build.outputs.tag }}"
+	if got, err := EvaluateJobEnvironment(jobEnv, context); err != nil || got != "release-linux-prod:v1" {
+		t.Fatalf("EvaluateJobEnvironment() = %q, %v", got, err)
+	}
+	jobDefault := "${{ format('{0}/{1}', env.ROOT, matrix.os) }}-${{ github.ref }}"
+	if got, err := EvaluateJobDefault(jobDefault, context); err != nil || got != "src/linux-refs/heads/main" {
+		t.Fatalf("EvaluateJobDefault() = %q, %v", got, err)
+	}
+	jobOutput := "${{ steps.build.outputs.image }}-${{ needs.build.result }}-${{ matrix.os }}"
+	if got, err := EvaluateJobOutput(jobOutput, context); err != nil || got != "app:v1-success-linux" {
+		t.Fatalf("EvaluateJobOutput() = %q, %v", got, err)
+	}
+	if got, err := EvaluateJobEnvironment("${{ secrets.TOKEN }}", context); err != nil || got != "secret" {
+		t.Fatalf("EvaluateJobEnvironment() secret = %q, %v", got, err)
+	}
+}
+
+func TestEvaluateJobSurfacesErrors(t *testing.T) {
+	context := Context{
+		GitHub: map[string]any{"token": "secret"},
+		Env:    map[string]string{"KEY": "TOKEN"},
+		Steps:  map[string]StepStatus{"build": {Outputs: map[string]string{"value": "ok"}}},
+	}
+	tests := []struct {
+		name     string
+		evaluate func(string, Context) (string, error)
+		template string
+	}{
+		{name: "job env excludes env", evaluate: EvaluateJobEnvironment, template: "${{ false && env.KEY || 'ok' }}"},
+		{name: "job env excludes steps", evaluate: EvaluateJobEnvironment, template: "${{ false && steps.build.outputs.value || 'ok' }}"},
+		{name: "job default excludes steps", evaluate: EvaluateJobDefault, template: "${{ false && steps.build.outputs.value || 'ok' }}"},
+		{name: "dynamic secret", evaluate: EvaluateJobEnvironment, template: "${{ false && secrets[env.KEY] || 'ok' }}"},
+		{name: "projected needs", evaluate: EvaluateJobDefault, template: "${{ false && toJSON(needs.*) || 'ok' }}"},
+		{name: "aggregate steps", evaluate: EvaluateJobOutput, template: "${{ false && toJSON(steps) || 'ok' }}"},
+		{name: "dynamic service", evaluate: EvaluateJobOutput, template: "${{ false && job.services[env.KEY].id || 'ok' }}"},
+		{name: "job status", evaluate: EvaluateJobOutput, template: "${{ false && job.status || 'ok' }}"},
+		{name: "hash files", evaluate: EvaluateJobDefault, template: "${{ false && hashFiles('go.sum') || 'ok' }}"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := test.evaluate(test.template, context); err == nil {
+				t.Fatalf("evaluation accepted %q", test.template)
+			}
+		})
+	}
+	if _, err := Evaluate("${{ contains('abc', 'a') }}", context); err == nil {
+		t.Fatal("Evaluate() broadened general runtime interpolation")
+	}
+}
+
+func TestEvaluateJobSurfacesRejectGitHubToken(t *testing.T) {
+	context := Context{GitHub: map[string]any{"token": "secret"}}
+	for _, evaluate := range []func(string, Context) (string, error){EvaluateJobEnvironment, EvaluateJobDefault, EvaluateJobOutput} {
+		for _, template := range []string{"${{ github.token }}", "${{ false && github.token || 'ok' }}"} {
+			if _, err := evaluate(template, context); err == nil || !strings.Contains(err.Error(), "github.token is unavailable in this field") {
+				t.Errorf("job evaluation of %q error = %v", template, err)
+			}
+		}
+	}
+	if got, err := EvaluateStep("${{ github.token }}", context); err != nil || got != "secret" {
+		t.Fatalf("EvaluateStep() token = %q, %v", got, err)
+	}
+}
+
+func TestEvaluateStepControlReturnsTypedValuesWithoutHashFiles(t *testing.T) {
+	context := Context{Matrix: map[string]any{"experimental": true, "timeout": 1.5}}
+	for _, test := range []struct {
+		expression string
+		want       any
+	}{
+		{expression: "${{ matrix.experimental && true }}", want: true},
+		{expression: "${{ matrix.timeout }}", want: 1.5},
+	} {
+		got, err := EvaluateStepControl(test.expression, context)
+		if err != nil || !reflect.DeepEqual(got, test.want) {
+			t.Errorf("EvaluateStepControl(%q) = %#v, %v; want %#v", test.expression, got, err, test.want)
+		}
+	}
+	context.HashFiles = func(patterns []string) (string, error) { return strings.Join(patterns, ","), nil }
+	if got, err := EvaluateStepControl("${{ hashFiles('go.sum') }}", context); err != nil || got != "go.sum" {
+		t.Fatalf("EvaluateStepControl() hashFiles = %#v, %v", got, err)
 	}
 }
 
@@ -533,47 +1107,40 @@ func TestCompileConditionValidationAdmitsRuntimeHashFilesWithoutFilesystemAccess
 	}
 }
 
-func TestValidateConditionUsesConcreteMatrixTypes(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		source string
-		matrix map[string]any
-		want   string
-	}{
-		{name: "numeric value", source: "matrix.version == 12", matrix: map[string]any{"version": 14.0}},
-		{name: "json numeric value", source: "matrix.version == 12", matrix: map[string]any{"version": json.Number("14")}},
-		{name: "boolean value", source: "matrix.experimental == true", matrix: map[string]any{"experimental": false}},
-		{name: "string and number", source: "matrix.version == 12", matrix: map[string]any{"version": "14"}, want: "condition equality compares incompatible string and number operands"},
-		{name: "null and number", source: "matrix.version == 12", matrix: map[string]any{"version": nil}, want: "condition equality compares incompatible null and number operands"},
-		{name: "missing value", source: "matrix.version == 12", matrix: map[string]any{}, want: `condition reference "matrix.version" is unavailable in this matrix instance`},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			err := ValidateConditionWithMatrix(test.source, JobCondition, test.matrix)
-			if test.want == "" && err != nil {
-				t.Fatalf("ValidateCondition() error = %v", err)
-			}
-			if test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
-				t.Fatalf("ValidateCondition() error = %v, want %q", err, test.want)
-			}
-		})
+func TestEvaluateReusableInputDefaultUsesOnlyGraphTimeValues(t *testing.T) {
+	context := CompileContext{
+		GitHub: map[string]any{"event_name": "push", "ref": "refs/heads/main"},
+		Vars:   map[string]string{"COUNT": "3", "SUFFIX": "release"},
 	}
-	if err := ValidateCondition("matrix.version == 12", JobCondition); err != nil {
-		t.Fatalf("ValidateCondition() rejected unknown matrix type: %v", err)
+	for _, test := range []struct {
+		template string
+		want     any
+	}{
+		{template: "${{ format('{0}-{1}', github.event_name, vars.SUFFIX) }}", want: "push-release"},
+		{template: "${{ github.ref == 'refs/heads/main' }}", want: true},
+		{template: "${{ fromJSON(vars.COUNT) }}", want: float64(3)},
+		{template: "deploy-${{ vars.SUFFIX }}", want: "deploy-release"},
+		{template: "pre-${{ format('{{{0}}}', vars.SUFFIX) }}", want: "pre-{release}"},
+	} {
+		got, err := EvaluateReusableInputDefault(test.template, context)
+		if err != nil || !reflect.DeepEqual(got, test.want) {
+			t.Errorf("EvaluateReusableInputDefault(%q) = %#v, %v; want %#v", test.template, got, err, test.want)
+		}
 	}
 }
 
-func TestValidateConditionAcceptsCompilerNumericKinds(t *testing.T) {
-	values := []any{
-		int(-1), int8(-1), int16(-1), int32(-1), int64(-1),
-		uint(1), uint8(1), uint16(1), uint32(1), uint64(1), ^uint64(0),
-		float32(1.5), float64(1.5), json.Number("1e3"),
-	}
-	for _, value := range values {
-		t.Run(reflect.TypeOf(value).String(), func(t *testing.T) {
-			if err := ValidateConditionWithMatrix("matrix.value != 0", JobCondition, map[string]any{"value": value}); err != nil {
-				t.Fatalf("ValidateConditionWithMatrix(%T) error = %v", value, err)
-			}
-		})
+func TestValidateReusableInputDefaultRejectsUnavailableContexts(t *testing.T) {
+	for _, template := range []string{
+		"${{ inputs.other }}",
+		"${{ needs.build.result }}",
+		"${{ matrix.os }}",
+		"${{ secrets.TOKEN }}",
+		"${{ false && github.token || 'safe' }}",
+		"${{ github[vars.KEY] }}",
+	} {
+		if err := ValidateReusableInputDefault(template); err == nil {
+			t.Errorf("ValidateReusableInputDefault(%q) unexpectedly succeeded", template)
+		}
 	}
 }
 
@@ -601,12 +1168,36 @@ func TestEvaluateFailsClosed(t *testing.T) {
 	}
 }
 
+func TestEvaluateNeedLookupDistinguishesMissingNeedAndOutput(t *testing.T) {
+	needs := map[string]NeedStatus{
+		"build": {Outputs: map[string]string{"release": "v1"}, Result: "success"},
+	}
+	context := Context{Needs: needs}
+	if got, err := Evaluate("${{ needs.BUILD.outputs.RELEASE }}", context); err != nil || got != "v1" {
+		t.Fatalf("case-insensitive need output = %q, %v, want v1", got, err)
+	}
+	if got, err := Evaluate("${{ needs.BUILD.outputs.missing }}", context); err != nil || got != "" {
+		t.Fatalf("missing output = %q, %v, want empty value", got, err)
+	}
+	if _, err := Evaluate("${{ needs.missing.outputs.release }}", context); err == nil {
+		t.Fatal("missing need output did not fail")
+	}
+	condition := ConditionContext{Needs: needs}
+	if got, err := EvaluateCondition("needs.BUILD.result == 'success' && needs.BUILD.outputs.MISSING == ''", condition); err != nil || !got {
+		t.Fatalf("condition need lookup = %v, %v, want true", got, err)
+	}
+	if _, err := EvaluateCondition("needs.missing.result", condition); err == nil {
+		t.Fatal("missing condition need did not fail")
+	}
+}
+
 func TestEvaluateActionLifecycleCondition(t *testing.T) {
 	tests := []struct {
 		name         string
 		condition    string
 		unsuccessful bool
 		cancelled    bool
+		env          map[string]string
 		want         bool
 		wantErr      bool
 	}{
@@ -623,21 +1214,36 @@ func TestEvaluateActionLifecycleCondition(t *testing.T) {
 		{name: "failure on success", condition: "failure()", want: false},
 		{name: "cancelled when cancelled", condition: "cancelled()", cancelled: true, want: true},
 		{name: "cancelled on success", condition: "cancelled()", want: false},
+		{name: "not cancelled on success", condition: "!cancelled()", want: true},
+		{name: "not cancelled after failure", condition: "!cancelled()", unsuccessful: true, want: true},
+		{name: "not cancelled after cancellation", condition: "!cancelled()", cancelled: true, want: false},
 		{name: "delimiters unwrap", condition: "${{ failure() }}", unsuccessful: true, want: true},
 		{name: "delimiters without spaces", condition: "${{always()}}", cancelled: true, want: true},
 		{name: "case is insensitive", condition: "ALWAYS()", want: true},
 		{name: "surrounding whitespace trims", condition: "  success()  ", want: true},
-		{name: "literals fail closed", condition: "true", wantErr: true},
-		{name: "references fail closed", condition: "github.event_name == 'push'", wantErr: true},
-		{name: "compound expressions fail closed", condition: "success() || failure()", wantErr: true},
-		{name: "arguments fail closed", condition: "success('build')", wantErr: true},
-		{name: "unknown functions fail closed", condition: "finished()", wantErr: true},
-		{name: "unopened delimiter fails closed", condition: "failure() }}", wantErr: true},
-		{name: "unclosed delimiter fails closed", condition: "${{ failure()", wantErr: true},
+		{name: "literal", condition: "true", want: true},
+		{name: "rust-cache succeeds normally", condition: "success() || env.CACHE_ON_FAILURE == 'true'", want: true},
+		{name: "rust-cache skips after failure by default", condition: "success() || env.CACHE_ON_FAILURE == 'true'", unsuccessful: true},
+		{name: "rust-cache skips after failure when disabled", condition: "success() || env.CACHE_ON_FAILURE == 'true'", unsuccessful: true, env: map[string]string{"CACHE_ON_FAILURE": "false"}},
+		{name: "rust-cache runs after opted-in failure", condition: "success() || env.CACHE_ON_FAILURE == 'true'", unsuccessful: true, env: map[string]string{"CACHE_ON_FAILURE": "true"}, want: true},
+		{name: "rust-cache skips after cancellation", condition: "success() || env.CACHE_ON_FAILURE == 'true'", cancelled: true},
+		{name: "unavailable references return errors", condition: "github.event_name == 'push'", wantErr: true},
+		{name: "compound status expression", condition: "success() || failure()", unsuccessful: true, want: true},
+		{name: "arguments return errors", condition: "success('build')", wantErr: true},
+		{name: "unknown functions return errors", condition: "finished()", wantErr: true},
+		{name: "unsupported lazy branch returns error", condition: "success() || secrets.TOKEN != ''", wantErr: true},
+		{name: "unopened delimiter returns error", condition: "failure() }}", wantErr: true},
+		{name: "unclosed delimiter returns error", condition: "${{ failure()", wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := EvaluateActionLifecycleCondition(test.condition, test.unsuccessful, test.cancelled)
+			context := ConditionContext{
+				Env:          test.env,
+				Failure:      test.unsuccessful && !test.cancelled,
+				Unsuccessful: test.unsuccessful,
+				Cancelled:    test.cancelled,
+			}
+			got, err := EvaluateActionLifecycleCondition(test.condition, context)
 			if test.wantErr {
 				if err == nil || got {
 					t.Fatalf("EvaluateActionLifecycleCondition(%q) = %v, %v, want false with error", test.condition, got, err)
@@ -651,13 +1257,70 @@ func TestEvaluateActionLifecycleCondition(t *testing.T) {
 	}
 }
 
+func TestValidateActionLifecycleCondition(t *testing.T) {
+	for _, condition := range []string{
+		"success() || env.CACHE_ON_FAILURE == 'true'",
+		"${{ failure() && matrix.allow_failure }}",
+		"steps.build.conclusion == 'success' && runner.os == 'Linux'",
+		"inputs.cache == true && hashFiles('Cargo.lock') != ''",
+		"inputs['cache'] == true",
+		"github.event[env.EVENT_FIELD] == 'opened'",
+	} {
+		if err := ValidateActionLifecycleCondition(condition); err != nil {
+			t.Errorf("ValidateActionLifecycleCondition(%q) error = %v", condition, err)
+		}
+	}
+	for _, condition := range []string{
+		"success() || secrets.TOKEN != ''",
+		"success() || needs.build.result == 'success'",
+		"needs[env.JOB].result == 'success'",
+		"vars[env.FLAG] == 'true'",
+		"steps[env.STEP].conclusion == 'success'",
+		"inputs[env.INPUT] == true",
+		"github.event[secrets.FIELD] == 'opened'",
+		"unknown()",
+	} {
+		if err := ValidateActionLifecycleCondition(condition); err == nil {
+			t.Errorf("ValidateActionLifecycleCondition(%q) accepted unsupported expression", condition)
+		}
+	}
+}
+
+func TestEvaluateActionLifecycleConditionUsesWorkflowInputsAndHashFiles(t *testing.T) {
+	var patterns []string
+	context := ConditionContext{
+		Inputs: map[string]any{"cache": true},
+		HashFiles: func(got []string) (string, error) {
+			patterns = append([]string(nil), got...)
+			return "digest", nil
+		},
+	}
+	got, err := EvaluateActionLifecycleCondition("inputs.cache && hashFiles('Cargo.lock') != ''", context)
+	if err != nil || !got {
+		t.Fatalf("EvaluateActionLifecycleCondition() = %v, %v, want true", got, err)
+	}
+	if !reflect.DeepEqual(patterns, []string{"Cargo.lock"}) {
+		t.Fatalf("hashFiles patterns = %#v, want [Cargo.lock]", patterns)
+	}
+}
+
+func TestEvaluateActionLifecycleConditionSupportsDynamicEventAccess(t *testing.T) {
+	context := ConditionContext{
+		GitHub: map[string]any{"event": map[string]any{"action": "opened"}},
+		Env:    map[string]string{"EVENT_FIELD": "action"},
+	}
+	got, err := EvaluateActionLifecycleCondition("github.event[env.EVENT_FIELD] == 'opened'", context)
+	if err != nil || !got {
+		t.Fatalf("EvaluateActionLifecycleCondition() = %v, %v, want true", got, err)
+	}
+}
+
 func TestEvaluateConditionStatusOutputsAndTruthiness(t *testing.T) {
 	context := ConditionContext{
-		Inputs:      map[string]string{"enabled": "true"},
-		Needs:       map[string]map[string]string{"build": {"gate": "yes"}},
-		NeedResults: map[string]string{"build": "failure"},
-		Steps:       map[string]StepStatus{"soft": {Outcome: "failure", Conclusion: "success", Outputs: map[string]string{"ready": "true"}}},
-		Failure:     true,
+		Inputs:  map[string]any{"enabled": "true"},
+		Needs:   map[string]NeedStatus{"build": {Outputs: map[string]string{"gate": "yes"}, Result: "failure"}},
+		Steps:   map[string]StepStatus{"soft": {Outcome: "failure", Conclusion: "success", Outputs: map[string]string{"ready": "true"}}},
+		Failure: true,
 	}
 	for _, condition := range []string{
 		"inputs.enabled == 'true'",
@@ -679,10 +1342,12 @@ func TestEvaluateConditionStatusOutputsAndTruthiness(t *testing.T) {
 }
 
 func TestEvaluateConditionInputsMatchNormalExpressionSemantics(t *testing.T) {
-	context := ConditionContext{Inputs: map[string]string{"enabled": "true"}}
+	context := ConditionContext{Inputs: map[string]any{"enabled": "true", "deploy": true, "retries": json.Number("2")}}
 	for condition, want := range map[string]bool{
 		"inputs.enabled == 'true'": true,
 		"INPUTS.ENABLED == 'true'": true,
+		"inputs.deploy":            true,
+		"inputs.retries == 2":      true,
 		"inputs.missing":           false,
 	} {
 		got, err := EvaluateCondition(condition, context)
@@ -715,15 +1380,235 @@ func TestEvaluateConditionSupportsJSONNumbers(t *testing.T) {
 	}
 }
 
+func TestEvaluateConditionMatchesGitHubCoercionAndOrdering(t *testing.T) {
+	tests := []struct {
+		condition string
+		context   ConditionContext
+		want      bool
+	}{
+		{condition: "null == 0", want: true},
+		{condition: "false == 0", want: true},
+		{condition: "'' == 0", want: true},
+		{condition: "'12' == 12", want: true},
+		{condition: "'01' == '1'", want: false},
+		{condition: "'Release' == 'release'", want: true},
+		{condition: "'12' > 2", want: true},
+		{condition: "'Beta' > 'alpha'", want: true},
+		{condition: "'not-a-number' > 0", want: false},
+		{condition: "matrix.left == matrix.right", context: ConditionContext{Matrix: map[string]any{"left": json.Number("9007199254740992"), "right": json.Number("9007199254740993")}}, want: true},
+		{condition: "'1e-400' == 0", want: true},
+		{condition: "'1e309' == matrix.value", context: ConditionContext{Matrix: map[string]any{"value": math.Inf(1)}}, want: true},
+		{condition: "matrix.value", context: ConditionContext{Matrix: map[string]any{"value": math.NaN()}}, want: false},
+		{condition: "matrix.value", context: ConditionContext{Matrix: map[string]any{"value": json.Number("1e-400")}}, want: false},
+		{condition: "matrix.missing == null", context: ConditionContext{Matrix: map[string]any{}}, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.condition, func(t *testing.T) {
+			got, err := EvaluateCondition(test.condition, test.context)
+			if err != nil || got != test.want {
+				t.Fatalf("EvaluateCondition(%q) = %v, %v, want %v", test.condition, got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestEvaluateConditionSupportsPureFunctions(t *testing.T) {
+	for _, condition := range []string{
+		"startsWith(123, '12')",
+		"endsWith(true, 'UE')",
+		"contains(fromJSON('[1,\"Deploy\"]'), 'deploy')",
+		"format('{0}-{1}', 'release', 2) == 'release-2'",
+		"format('{0}-{1}', fromJSON('{}'), fromJSON('[]')) == 'Object-Array'",
+		"format(fromJSON('{}')) == 'Object' && format(fromJSON('[]')) == 'Array'",
+		"join(fromJSON('[\"one\",2]'), '-') == 'one-2'",
+		"fromJSON(toJSON(true))",
+		"fromJSON(true)",
+		"join('abc', '-') == 'abc'",
+		"format(123) == '123'",
+		"format('ok', fromJSON('bad')) == 'ok'",
+		"contains(fromJSON('[]'), fromJSON('bad')) == false",
+		"startsWith(fromJSON('[]'), 'x') == false",
+		"case(false, matrix.unavailable, true, 'selected', matrix.unavailable) == 'selected'",
+	} {
+		got, err := EvaluateCondition(condition, ConditionContext{})
+		if err != nil || !got {
+			t.Errorf("EvaluateCondition(%q) = %v, %v", condition, got, err)
+		}
+	}
+	if err := ValidateCondition("case(true, 'selected', false, secrets.TOKEN, '')", StepCondition); err == nil {
+		t.Fatal("ValidateCondition() allowed an unsupported context in a lazy branch")
+	}
+	if _, err := EvaluateCondition("case('true', 'selected', 'fallback')", ConditionContext{}); err == nil || !strings.Contains(err.Error(), "want boolean") {
+		t.Fatalf("EvaluateCondition() case predicate error = %v", err)
+	}
+}
+
+func TestNestedMatrixReferencesAreSupported(t *testing.T) {
+	matrix := map[string]any{"config": map[string]any{"os": "ubuntu-24.04", "name": "linux"}, "os": "ubuntu-24.04"}
+
+	// Compile-time templates such as runs-on.
+	got, err := EvaluateCompileTemplate("${{ matrix.config.os }}", CompileContext{Matrix: matrix})
+	if err != nil || got != "ubuntu-24.04" {
+		t.Fatalf("EvaluateCompileTemplate() = %q, %v", got, err)
+	}
+	// Missing or scalar intermediate segments yield null, matching GitHub.
+	for _, template := range []string{"${{ matrix.config.missing }}", "${{ matrix.os.name }}"} {
+		if got, err := EvaluateCompileTemplate(template, CompileContext{Matrix: matrix}); err != nil || got != "" {
+			t.Errorf("EvaluateCompileTemplate(%q) = %q, %v, want empty", template, got, err)
+		}
+	}
+
+	// Runtime templates such as step run and env.
+	if err := ValidateRuntimeTemplate("${{ matrix.config.name }}"); err != nil {
+		t.Fatalf("ValidateRuntimeTemplate() error = %v", err)
+	}
+	if got, err := EvaluateStep("${{ matrix.config.name }}", Context{Matrix: matrix}); err != nil || got != "linux" {
+		t.Fatalf("EvaluateStep() = %q, %v", got, err)
+	}
+	if got, err := Evaluate("${{ matrix.config.missing }}", Context{Matrix: matrix}); err != nil || got != "" {
+		t.Fatalf("Evaluate() = %q, %v, want empty", got, err)
+	}
+
+	// Conditions.
+	for condition, want := range map[string]bool{
+		"matrix.config.name == 'linux'": true,
+		"matrix.config.name == 'mac'":   false,
+		"matrix.config.missing == null": true,
+		"matrix.os.name == null":        true,
+	} {
+		if err := ValidateCondition(condition, StepCondition); err != nil {
+			t.Errorf("ValidateCondition(%q) error = %v", condition, err)
+			continue
+		}
+		got, err := EvaluateCondition(condition, ConditionContext{Matrix: matrix})
+		if err != nil || got != want {
+			t.Errorf("EvaluateCondition(%q) = %v, %v, want %v", condition, got, err, want)
+		}
+	}
+}
+
+func TestEvaluateCompileTemplateResolvesReusableWorkflowConcurrencyInputs(t *testing.T) {
+	context := CompileContext{Inputs: map[string]any{"target": "production"}}
+	got, err := EvaluateCompileTemplate("deploy-${{ inputs.target }}", context)
+	if err != nil || got != "deploy-production" {
+		t.Fatalf("EvaluateCompileTemplate() = %q, %v", got, err)
+	}
+	for _, template := range []string{"${{ needs.prepare.result }}", "${{ strategy.job-index }}"} {
+		if _, err := EvaluateCompileTemplate(template, context); err == nil {
+			t.Errorf("EvaluateCompileTemplate(%q) accepted a runtime-only concurrency value", template)
+		}
+	}
+}
+
+func TestEvaluateConditionSupportsBracketFormGitHubReferences(t *testing.T) {
+	for condition, want := range map[string]bool{
+		"github['event_name'] == 'push'":       true,
+		"github['EVENT_NAME'] == 'push'":       true,
+		"github['event_name'] == 'workflow'":   false,
+		"github['head_ref'] == null":           true,
+		"github['ref'] == 'refs/heads/main'":   true,
+		"github['repository'] == 'acme/thing'": true,
+	} {
+		if err := ValidateCondition(condition, StepCondition); err != nil {
+			t.Errorf("ValidateCondition(%q) error = %v", condition, err)
+			continue
+		}
+		got, err := EvaluateCondition(condition, ConditionContext{GitHub: map[string]any{
+			"event_name": "push",
+			"ref":        "refs/heads/main",
+			"repository": "acme/thing",
+		}})
+		if err != nil || got != want {
+			t.Errorf("EvaluateCondition(%q) = %v, %v, want %v", condition, got, err, want)
+		}
+	}
+	if _, err := EvaluateCondition("github['event_name'] == 'push'", ConditionContext{}); err == nil || !strings.Contains(err.Error(), "condition references unavailable value github.event_name") {
+		t.Fatalf("EvaluateCondition() without github context error = %v", err)
+	}
+	// Whole and dynamic github access returns an error at evaluation even
+	// without prior validation, such as composite-action if conditions.
+	for _, condition := range []string{"github", "github[vars.KEY]", "github.*"} {
+		if _, err := EvaluateCondition(condition, ConditionContext{GitHub: map[string]any{"event_name": "push"}, Vars: map[string]string{"KEY": "event_name"}}); err == nil {
+			t.Errorf("EvaluateCondition(%q) error = nil, want unsupported access error", condition)
+		}
+	}
+}
+
+func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
+	context := ConditionContext{
+		Vars:   map[string]string{"KEY": "target"},
+		Inputs: map[string]any{"target": "selected"},
+		Matrix: map[string]any{
+			"target": "selected",
+			"array":  []any{"zero", "one", "two"},
+			"object": map[string]any{"true": "boolean", "2": "number"},
+			"items":  []any{[]any{"first"}, []any{}, []any{nil}},
+		},
+		Needs: map[string]NeedStatus{
+			"build": {Outputs: map[string]string{}, Result: "success"},
+			"lint":  {Outputs: map[string]string{}, Result: "failure"},
+		},
+		Env: map[string]string{"STEP": "build"},
+		Steps: map[string]StepStatus{
+			"build": {Outcome: "success", Conclusion: "success"},
+			"lint":  {Outcome: "failure", Conclusion: "success"},
+		},
+	}
+	for _, condition := range []string{
+		"matrix[vars.KEY] == 'selected'",
+		"inputs[vars.KEY] == 'selected'",
+		"fromJSON('[\"zero\",\"one\"]')[1] == 'one'",
+		"fromJSON('[1]')[4] == null",
+		"matrix.array['1'] == 'one'",
+		"matrix.array[1.9] == 'one'",
+		"matrix.array['1e309'] == null",
+		"matrix.array['2147483648'] == null",
+		"matrix.object[true] == 'boolean'",
+		"matrix.object[2] == 'number'",
+		"join(matrix.items.*[0], ',') == 'first,'",
+		"contains(fromJSON('[{\"name\":\"bug\"}]').*.name, 'bug')",
+		"contains(needs.*.result, 'FAILURE')",
+		"steps[env.STEP].outcome == 'success'",
+		"steps['missing'].outcome == null",
+		"contains(steps.*.outcome, 'success') && contains(steps.*.outcome, 'failure')",
+		"contains(toJSON(matrix), '\"target\"')",
+		"needs == needs",
+		"steps == steps",
+		"matrix <= matrix && matrix >= matrix",
+		"fromJSON('[]') != fromJSON('[]')",
+		"fromJSON('[]').* != fromJSON('[]').*",
+	} {
+		if err := ValidateCondition(condition, StepCondition); err != nil {
+			t.Errorf("ValidateCondition(%q) error = %v", condition, err)
+			continue
+		}
+		got, err := EvaluateCondition(condition, context)
+		if err != nil || !got {
+			t.Errorf("EvaluateCondition(%q) = %v, %v", condition, got, err)
+		}
+	}
+	if err := ValidateCondition("github[vars.KEY]", StepCondition); err == nil {
+		t.Fatal("ValidateCondition() allowed dynamic github access")
+	}
+	if err := ValidateCondition("steps.*.outcome", JobCondition); err == nil {
+		t.Fatal("ValidateCondition() allowed step projection in a job condition")
+	}
+	for _, condition := range []string{"toJSON(vars)", "toJSON(env)"} {
+		if err := ValidateCondition(condition, StepCondition); err == nil {
+			t.Errorf("ValidateCondition(%q) allowed an unavailable whole or computed context", condition)
+		}
+	}
+}
+
 func TestEvaluateConditionFailsClosed(t *testing.T) {
-	if _, err := EvaluateCondition("1 < 2", ConditionContext{}); err == nil {
-		t.Fatal("EvaluateCondition() accepted unsupported ordered comparison")
+	if got, err := EvaluateCondition("1 < 2", ConditionContext{}); err != nil || !got {
+		t.Fatalf("EvaluateCondition() ordered comparison = %v, %v", got, err)
 	}
-	if _, err := EvaluateCondition("true == 'true'", ConditionContext{}); err == nil {
-		t.Fatal("EvaluateCondition() silently coerced mixed equality operands")
+	if got, err := EvaluateCondition("true == 'true'", ConditionContext{}); err != nil || got {
+		t.Fatalf("EvaluateCondition() NaN equality = %v, %v", got, err)
 	}
-	if _, err := EvaluateCondition("null == true", ConditionContext{}); err == nil {
-		t.Fatal("EvaluateCondition() accepted mixed null equality operands")
+	if got, err := EvaluateCondition("null == false", ConditionContext{}); err != nil || !got {
+		t.Fatalf("EvaluateCondition() null coercion = %v, %v", got, err)
 	}
 	if got, err := EvaluateCondition("", ConditionContext{Unsuccessful: true}); err != nil || got {
 		t.Fatalf("default condition after skipped prerequisite = %v, %v, want false", got, err)
@@ -745,9 +1630,16 @@ func TestEvaluateConditionFailsClosed(t *testing.T) {
 
 func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 	context := CompileContext{
-		GitHub: map[string]any{"event_name": "push", "event": map[string]any{"action": "opened"}},
+		GitHub: map[string]any{
+			"base_ref":   "main",
+			"event_name": "push",
+			"event":      map[string]any{"action": "opened"},
+			"ref_name":   "42/merge",
+			"ref_type":   "branch",
+		},
 		Event:  map[string]any{"action": "opened"},
 		Vars:   map[string]string{"RUNNERS": `["ubuntu-24.04","ubuntu-22.04"]`},
+		Inputs: map[string]any{"TARGETS": `["linux","darwin"]`},
 		Matrix: map[string]any{"os": "ubuntu-24.04"},
 	}
 	tests := []struct {
@@ -755,9 +1647,14 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		want       any
 	}{
 		{expression: "${{ github.event_name }}", want: "push"},
+		{expression: "${{ github.ref_name }}", want: "42/merge"},
+		{expression: "${{ github.ref_type }}", want: "branch"},
+		{expression: "${{ github.base_ref }}", want: "main"},
 		{expression: "${{ github.event.action }}", want: "opened"},
 		{expression: "${{ event.action }}", want: "opened"},
+		{expression: "${{ fromJSON(inputs.TARGETS) }}", want: []any{"linux", "darwin"}},
 		{expression: "${{ matrix.os }}", want: "ubuntu-24.04"},
+		{expression: "${{ vars.MISSING }}", want: nil},
 		{expression: "${{ github.event.number || github.ref }}", want: "refs/pull/42/merge"},
 		{expression: "${{ github.ref == 'refs/pull/42/merge' }}", want: true},
 		{expression: "${{ startsWith(github.ref, 'REFS/PULL/') }}", want: true},
@@ -765,6 +1662,23 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ contains(github.ref, 'ISSUES') }}", want: false},
 		{expression: "${{ endsWith(github.ref, '/MERGE') }}", want: true},
 		{expression: "${{ endsWith(github.ref, '/HEAD') }}", want: false},
+		{expression: "${{ endsWith('ref', true) }}", want: false},
+		{expression: "${{ contains(fromJSON('[\"push\",\"pull_request\"]'), 'PUSH') }}", want: true},
+		{expression: "${{ format('{0}-{1}', github.event_name, 2) }}", want: "push-2"},
+		{expression: "${{ format('{0}', fromJSON('1e2')) }}", want: "100"},
+		{expression: "${{ join(fromJSON('[\"one\",2,true,null]'), '-') }}", want: "one-2-true-"},
+		{expression: "${{ join(fromJSON('[1e2]')) }}", want: "100"},
+		{expression: "${{ join(fromJSON('{}')) }}", want: ""},
+		{expression: "${{ join(fromJSON('[\"one\",\"two\"]'), fromJSON('{}')) }}", want: "one,two"},
+		{expression: "${{ join(fromJSON('[{},[]]')) }}", want: "Object,Array"},
+		{expression: "${{ toJSON(fromJSON('1e2')) }}", want: "100"},
+		{expression: "${{ toJSON(fromJSON('1e20')) }}", want: "1E+20"},
+		{expression: "${{ toJSON(github.event_name) }}", want: `"push"`},
+		{expression: "${{ toJSON('<&>') }}", want: `"<&>"`},
+		{expression: "${{ case(false, vars.missing, true, 'selected', vars.missing) }}", want: "selected"},
+		{expression: "${{ '0xff' == 255 && '0o10' == 8 && 'Infinity' > 1e308 }}", want: true},
+		{expression: "${{ '0xffffffff' == -1 }}", want: true},
+		{expression: "${{ '0o37777777777' == -1 }}", want: true},
 	}
 	context.GitHub["ref"] = "refs/pull/42/merge"
 	context.GitHub["event"] = map[string]any{"action": "opened", "number": json.Number("0")}
@@ -777,7 +1691,7 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		if err != nil {
 			t.Fatalf("EvaluateCompile(%q) error = %v", test.expression, err)
 		}
-		if got != test.want {
+		if !reflect.DeepEqual(got, test.want) {
 			t.Fatalf("EvaluateCompile(%q) = %#v, want %#v", test.expression, got, test.want)
 		}
 	}
@@ -793,6 +1707,121 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 	runners, ok := got.([]any)
 	if !ok || len(runners) != 2 || runners[0] != "ubuntu-24.04" {
 		t.Fatalf("fromJSON runners = %#v", got)
+	}
+}
+
+func TestEvaluateCompileTemplateSupportsGitHubRefScalars(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{
+		"base_ref": "main",
+		"ref_name": "42/merge",
+		"ref_type": "branch",
+	}}
+	got, err := EvaluateCompileTemplate("${{ github.ref_type }}-${{ github.ref_name }}-${{ github.base_ref }}", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "branch-42/merge-main" {
+		t.Fatalf("EvaluateCompileTemplate() = %q, want branch-42/merge-main", got)
+	}
+
+	got, err = EvaluateCompileTemplate("base-${{ github.base_ref }}", CompileContext{GitHub: map[string]any{"base_ref": ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "base-" {
+		t.Fatalf("EvaluateCompileTemplate() empty base_ref = %q, want base-", got)
+	}
+
+	if _, err := EvaluateCompileTemplate("${{ github.run_id }}", CompileContext{GitHub: map[string]any{"run_id": "123"}}); err == nil {
+		t.Fatal("EvaluateCompileTemplate() admitted unsupported github.run_id")
+	}
+}
+
+func TestEvaluateCompileStringTemplateRequiresStringCompleteExpression(t *testing.T) {
+	context := CompileContext{
+		Inputs: map[string]any{"image": "node:24", "enabled": true, "injected": "${{ secrets.TOKEN }}"},
+		Matrix: map[string]any{"version": 24},
+	}
+	for template, want := range map[string]string{
+		"${{ inputs.image }}":        "node:24",
+		"node:${{ matrix.version }}": "node:24",
+	} {
+		got, err := EvaluateCompileStringTemplate(template, context)
+		if err != nil || got != want {
+			t.Errorf("EvaluateCompileStringTemplate(%q) = %q, %v, want %q", template, got, err, want)
+		}
+	}
+	for _, template := range []string{"${{ inputs.enabled }}", "${{ matrix }}", "${{ secrets.TOKEN }}", "${{ needs.build.outputs.image }}", "${{ inputs.injected }}"} {
+		if _, err := EvaluateCompileStringTemplate(template, context); err == nil {
+			t.Errorf("EvaluateCompileStringTemplate(%q) succeeded", template)
+		}
+	}
+}
+
+func TestEncodeExpressionJSONSupportsNonFiniteNumbers(t *testing.T) {
+	got, err := encodeExpressionJSON(map[string]any{
+		"values": []any{math.Inf(1), math.Inf(-1), math.NaN()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\n  \"values\": [\n    Infinity,\n    -Infinity,\n    NaN\n  ]\n}"
+	if got != want {
+		t.Fatalf("encodeExpressionJSON() = %q, want %q", got, want)
+	}
+}
+
+func TestEvaluateCompileSupportsIndexesAndFilters(t *testing.T) {
+	context := CompileContext{
+		GitHub: map[string]any{"event": map[string]any{
+			"items": []any{
+				map[string]any{"name": "one", "groups": []any{map[string]any{"id": 1}, map[string]any{"id": 2}}},
+				map[string]any{"groups": []any{map[string]any{"id": 3}}},
+				map[string]any{"name": "three"},
+			},
+		}},
+		Vars:   map[string]string{"KEY": "target"},
+		Matrix: map[string]any{"target": "selected"},
+	}
+	for _, test := range []struct {
+		expression string
+		want       any
+	}{
+		{expression: "${{ matrix[vars.KEY] }}", want: "selected"},
+		{expression: "${{ fromJSON('[\"zero\",\"one\"]')[1] }}", want: "one"},
+		{expression: "${{ fromJSON('[1]')[4] }}", want: nil},
+		{expression: "${{ join(github.event.items.*.name, ',') }}", want: "one,three"},
+		{expression: "${{ join(github['event'].items.*.name, ',') }}", want: "one,three"},
+		{expression: "${{ join(github.event.items.*.groups.*.id, ',') }}", want: "1,2,3"},
+	} {
+		expr, err := Parse(test.expression, 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := EvaluateCompile(expr, context)
+		if err != nil || !reflect.DeepEqual(got, test.want) {
+			t.Errorf("EvaluateCompile(%q) = %#v, %v, want %#v", test.expression, got, err, test.want)
+		}
+	}
+}
+
+func TestEvaluateStepSupportsIndexedWorkflowInputs(t *testing.T) {
+	context := Context{
+		WorkflowInputs: map[string]any{"label": "dispatched", "enabled": true},
+		Env:            map[string]string{"KEY": "label"},
+	}
+	for _, test := range []struct {
+		template string
+		want     string
+	}{
+		{template: "${{ inputs['label'] }}", want: "dispatched"},
+		{template: "${{ inputs[env.KEY] }}", want: "dispatched"},
+		{template: "${{ inputs.enabled }}", want: "true"},
+	} {
+		got, err := EvaluateStep(test.template, context)
+		if err != nil || got != test.want {
+			t.Errorf("EvaluateStep(%q) = %q, %v; want %q", test.template, got, err, test.want)
+		}
 	}
 }
 
@@ -815,8 +1844,54 @@ func TestEvaluateCompileConditionUsesEventSnapshot(t *testing.T) {
 	if err != nil || !usesEvent {
 		t.Fatalf("ReferencesGitHubEvent() = %v, %v", usesEvent, err)
 	}
-	if usesEvent, err := ReferencesGitHubEvent("github.event_name == 'push'"); err != nil || usesEvent {
-		t.Fatalf("ReferencesGitHubEvent(event_name) = %v, %v", usesEvent, err)
+	for _, source := range []string{"github.event_name == 'push'", "github.ref == 'refs/heads/main'"} {
+		if usesEvent, err := ReferencesGitHubEvent(source); err != nil || usesEvent {
+			t.Fatalf("ReferencesGitHubEvent(%q) = %v, %v", source, usesEvent, err)
+		}
+	}
+	if usesEvent, err := ReferencesGitHubEvent("github.ref_type == 'branch' && github.ref_name && github.base_ref == ''"); err != nil || !usesEvent {
+		t.Fatalf("ReferencesGitHubEvent(ref scalars) = %v, %v", usesEvent, err)
+	}
+}
+
+func TestReduceCompileConditionPreservesRuntimeSubtrees(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{
+		"event": map[string]any{"pull_request": map[string]any{"draft": true, "title": "It's ready"}},
+	}}
+	got, err := ReduceCompileCondition("github.event.pull_request.draft && (failure() || github.event.pull_request.title == needs.build.outputs.title)", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "(true && (failure() || ('It''s ready' == needs.build.outputs.title)))"
+	if got != want {
+		t.Fatalf("ReduceCompileCondition() = %q, want %q", got, want)
+	}
+	if usesEvent, err := ReferencesGitHubEvent(got); err != nil || usesEvent {
+		t.Fatalf("reduced condition retains github.event: %q, %v", got, err)
+	}
+}
+
+func TestReduceCompileConditionConvertsMissingEventMembersToNull(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{}}}
+	got, err := ReduceCompileCondition("github.event.pull_request.draft || needs.build.result == 'success'", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "(null || (needs.build.result == 'success'))"; got != want {
+		t.Fatalf("ReduceCompileCondition() = %q, want %q", got, want)
+	}
+}
+
+func TestConditionAuthorityScanningIgnoresExpressionTextInLiterals(t *testing.T) {
+	source := "'${{ github.token }} ${{ secrets.DEPLOY }} ${{ github.event.action }}' == runner.os"
+	if names, err := ConditionSecretReferences(source); err != nil || len(names) != 0 {
+		t.Fatalf("ConditionSecretReferences() = %#v, %v", names, err)
+	}
+	if token, err := ConditionReferencesGitHubToken(source); err != nil || token {
+		t.Fatalf("ConditionReferencesGitHubToken() = %v, %v", token, err)
+	}
+	if event, err := ReferencesGitHubEvent(source); err != nil || event {
+		t.Fatalf("ReferencesGitHubEvent() = %v, %v", event, err)
 	}
 }
 
@@ -830,6 +1905,9 @@ func TestCompileConditionValidationSupportsStringPredicates(t *testing.T) {
 	}
 	if resolved, err := EvaluateCompileCondition(source, context); err != nil || !resolved {
 		t.Fatalf("EvaluateCompileCondition() = %v, %v, want true", resolved, err)
+	}
+	if err := ValidateCompileConditionWithMatrix("contains(toJSON(github.event), needs.build.outputs.marker)", JobCondition, context, nil); err != nil {
+		t.Fatalf("ValidateCompileConditionWithMatrix() whole event error = %v", err)
 	}
 }
 
@@ -851,7 +1929,7 @@ func TestCompileInputLiteralRepresentations(t *testing.T) {
 		{name: "float64 uses shortest form", value: 2.5, want: "2.5"},
 		{name: "aggregate values cannot be literals", value: []any{"x"}, wantErr: "cannot be represented"},
 		{name: "maps cannot be literals", value: map[string]any{"x": "y"}, wantErr: "cannot be represented"},
-		{name: "typed numerics outside the YAML model fail closed", value: int32(7), wantErr: "cannot be represented"},
+		{name: "typed numerics outside the YAML model are rejected", value: int32(7), wantErr: "cannot be represented"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -870,7 +1948,7 @@ func TestCompileInputLiteralRepresentations(t *testing.T) {
 }
 
 func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
-	template := "${{ !inputs.enabled && matrix.run-new && 'inputs.enabled' || inputs.label }}"
+	template := "${{ !inputs.enabled && matrix.run-new && 'inputs.enabled' || inputs['label'] }}"
 	got, err := SubstituteCompileInputs(template, map[string]any{"enabled": false, "label": "it''s ready"})
 	if err != nil {
 		t.Fatal(err)
@@ -881,13 +1959,150 @@ func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
 	}
 }
 
-func TestEvaluateAvailableCompileTemplatePreservesRuntimeExpressions(t *testing.T) {
-	got, err := EvaluateAvailableCompileTemplate("echo ${{ 'target' }} ${{ github.ref }}", CompileContext{})
+func TestSubstituteCompileInputsResolvesNestedComputedInputIndex(t *testing.T) {
+	got, err := SubstituteCompileInputs("${{ inputs[inputs.key] }}", map[string]any{"key": "target", "target": "release"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "echo target ${{ github.ref }}"; got != want {
+	if want := "${{ 'release' }}"; got != want {
+		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
+	}
+}
+
+func TestSubstituteCompileInputsIgnoresNestedInputsProperties(t *testing.T) {
+	template := "${{ inputs.debug }} ${{ github.event.inputs.debug }} ${{ steps.inputs.name }} ${{ fromJSON(vars.CFG).inputs.name }}"
+	got, err := SubstituteCompileInputs(template, map[string]any{"debug": true, "name": "prod"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "${{ true }} ${{ github.event.inputs.debug }} ${{ steps.inputs.name }} ${{ fromJSON(vars.CFG).inputs.name }}"
+	if got != want {
+		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
+	}
+}
+
+func TestEvaluateAvailableCompileTemplatePreservesRuntimeExpressions(t *testing.T) {
+	got, err := EvaluateAvailableCompileTemplate("echo ${{ 'target' }} ${{ fromJSON('1e20') }} ${{ github.ref }}", CompileContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "echo target 1E+20 ${{ github.ref }}"; got != want {
 		t.Fatalf("EvaluateAvailableCompileTemplate() = %q, want %q", got, want)
+	}
+}
+
+func TestReduceAvailableCompileTemplateReducesEventSubtrees(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{
+		"action":       "opened",
+		"pull_request": map[string]any{"head": map[string]any{"sha": "abc123"}},
+	}}, Event: map[string]any{"action": "opened"}}
+	tests := []struct {
+		name     string
+		template string
+		want     string
+	}{
+		{name: "direct", template: "${{ github.event.pull_request.head.sha }}", want: "abc123"},
+		{name: "missing member", template: "before-${{ github.event.push.missing }}-after", want: "before--after"},
+		{name: "mixed runtime", template: "${{ github.event.pull_request.head.sha == steps.checkout.outputs.sha }}", want: "${{ ('abc123' == steps.checkout.outputs.sha) }}"},
+		{name: "multiple", template: "${{ github.event.pull_request.head.sha }}-${{ event.action }}-${{ needs.build.outputs.suffix }}", want: "abc123-opened-${{ needs.build.outputs.suffix }}"},
+		{name: "runtime short circuit branch", template: "${{ github.event.action == 'opened' || needs.build.outputs.ready }}", want: "${{ (true || needs.build.outputs.ready) }}"},
+		{name: "unrelated compile value", template: "${{ github.sha }}", want: "${{ github.sha }}"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ReduceAvailableCompileTemplate(test.template, context)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("ReduceAvailableCompileTemplate() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestReduceAvailableCompileTemplateRejectsIntroducedExpressionSyntax(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"value": "${{ secrets.ADMIN }}"}}}
+	_, err := ReduceAvailableCompileTemplate("${{ github.event.value }}", context)
+	if err == nil || !strings.Contains(err.Error(), "result contains expression syntax") {
+		t.Fatalf("ReduceAvailableCompileTemplate() error = %v", err)
+	}
+}
+
+func TestReduceAvailableCompileTemplatePreservesWholeEventAccess(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"action": "opened"}}}
+	context.Event = context.GitHub["event"].(map[string]any)
+	for _, template := range []string{
+		"${{ toJSON(github.event) }}",
+		"${{ toJSON(github.event.*) }}",
+		"${{ toJSON(event.*) }}",
+	} {
+		got, err := ReduceAvailableCompileTemplate(template, context)
+		if err != nil || got != template {
+			t.Errorf("ReduceAvailableCompileTemplate(%q) = %q, %v", template, got, err)
+		}
+	}
+}
+
+func TestReduceAvailableCompileTemplateRejectsDeterministicEventErrors(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"value": "["}}}
+	for _, template := range []string{
+		"${{ fromJSON(github.event.value) }}",
+		"${{ needs.build.outputs.ready || fromJSON(github.event.value) }}",
+		"${{ (fromJSON(needs.build.outputs.config) || fromJSON(github.event.value)).foo }}",
+		"${{ (fromJSON(needs.build.outputs.config) || fromJSON(github.event.value)).*.foo }}",
+	} {
+		_, err := ReduceAvailableCompileTemplate(template, context)
+		if err == nil || !strings.Contains(err.Error(), "invalid JSON") {
+			t.Errorf("ReduceAvailableCompileTemplate(%q) error = %v", template, err)
+		}
+	}
+}
+
+func TestReduceCompileConditionRejectsDeterministicEventErrors(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"value": "["}}}
+	_, err := ReduceCompileCondition("needs.build.outputs.ready || fromJSON(github.event.value)", context)
+	if err == nil || !strings.Contains(err.Error(), "invalid JSON") {
+		t.Fatalf("ReduceCompileCondition() error = %v", err)
+	}
+}
+
+func TestEvaluateCompileTemplateUsesGitHubNumberRendering(t *testing.T) {
+	got, err := EvaluateCompileTemplate("prefix-${{ fromJSON('1e20') }}", CompileContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "prefix-1E+20"; got != want {
+		t.Fatalf("EvaluateCompileTemplate() = %q, want %q", got, want)
+	}
+}
+
+func TestValidateServiceCredentialTemplateContexts(t *testing.T) {
+	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER || 'user' }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}", "${{ needs.build.outputs.user }}"} {
+		if err := ValidateServiceCredentialTemplate(template); err != nil {
+			t.Errorf("ValidateServiceCredentialTemplate(%q) = %v", template, err)
+		}
+	}
+	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ env.USER.extra }}", "${{ secrets }}", "${{ 'safe' || inputs.user }}", "${{ 'safe' || secrets[env.KEY] }}", "${{ 'safe' || secrets[needs.build.outputs.key] }}", "${{ 'safe' || toJSON(github) }}"} {
+		if err := ValidateServiceCredentialTemplate(template); err == nil {
+			t.Errorf("ValidateServiceCredentialTemplate(%q) succeeded", template)
+		}
+	}
+}
+
+func TestEvaluateAvailableCompileTemplateRejectsIntroducedExpressionSyntax(t *testing.T) {
+	for _, test := range []struct {
+		template string
+		value    string
+	}{
+		{template: "${{ inputs.value }}", value: "${{ secrets.ADMIN }}"},
+		{template: "$${{ inputs.value }}", value: "{{ secrets.ADMIN }}"},
+		{template: "$${{ inputs.value }}{{ secrets.ADMIN }}", value: ""},
+	} {
+		_, err := EvaluateAvailableCompileTemplate(test.template, CompileContext{Inputs: map[string]any{"value": test.value}})
+		if err == nil || !strings.Contains(err.Error(), "result contains expression syntax") {
+			t.Errorf("EvaluateAvailableCompileTemplate(%q) error = %v", test.template, err)
+		}
 	}
 }
 
@@ -897,12 +2112,15 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 		want       string
 	}{
 		{expression: "${{ secrets.TOKEN }}", want: `unsupported compile-time context "secrets"`},
-		{expression: "${{ vars.MISSING }}", want: `unavailable value "vars.missing"`},
+		{expression: "${{ github.token }}", want: `unavailable value "github.token"`},
+		{expression: "${{ case(true, 'safe', github.token) }}", want: `unavailable value "github.token"`},
+		{expression: "${{ case(true, 'safe', secrets.TOKEN) }}", want: `unsupported compile-time context "secrets"`},
+		{expression: "${{ toJSON(github.event) }}", want: `unavailable value "github.event"`},
+		{expression: "${{ toJSON(github.event.*) }}", want: `whole event projection is unsupported`},
+		{expression: "${{ toJSON(event) }}", want: `whole event access is unsupported`},
 		{expression: "${{ hashFiles('go.sum') }}", want: `unsupported compile-time function "hashFiles"`},
-		{expression: "${{ startsWith(github.ref) }}", want: `unsupported compile-time function "startsWith"`},
-		{expression: "${{ contains(github.ref) }}", want: `unsupported compile-time function "contains"`},
-		{expression: "${{ endsWith('ref', true) }}", want: "endsWith arguments resolved to string and bool, want strings"},
-		{expression: "${{ contains(fromJSON('[\"push\"]'), 'push') }}", want: "contains arguments resolved to []interface {} and string, want strings"},
+		{expression: "${{ startsWith(github.ref) }}", want: `function "startsWith" received an unsupported number of arguments`},
+		{expression: "${{ contains(github.ref) }}", want: `function "contains" received an unsupported number of arguments`},
 		{expression: "${{ fromJSON(vars.BAD) }}", want: "invalid JSON"},
 		{expression: "${{ event.Ref }}", want: "ambiguous properties"},
 	}
@@ -912,10 +2130,67 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = EvaluateCompile(expr, CompileContext{Vars: map[string]string{"BAD": "["}, Event: map[string]any{"ref": "one", "REF": "two"}})
+			_, err = EvaluateCompile(expr, CompileContext{GitHub: map[string]any{"ref": "refs/heads/main"}, Vars: map[string]string{"BAD": "["}, Event: map[string]any{"ref": "one", "REF": "two"}})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("EvaluateCompile() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestEvaluateCompileRejectsNonDigitFormatPlaceholders(t *testing.T) {
+	for _, template := range []string{
+		"${{ format('{+0}', 'x') }}",
+		"${{ format('{-0}', 'x') }}",
+		"${{ format('{ 0 }', 'x') }}",
+		"${{ format('{0x1}', 'x') }}",
+	} {
+		if _, err := EvaluateCompileTemplate(template, CompileContext{}); err == nil || !strings.Contains(err.Error(), "format placeholder") {
+			t.Errorf("EvaluateCompileTemplate(%q) error = %v, want format placeholder error", template, err)
+		}
+	}
+	got, err := EvaluateCompileTemplate("${{ format('{0} {01}', 'a', 'b') }}", CompileContext{})
+	if err != nil || got != "a b" {
+		t.Fatalf("EvaluateCompileTemplate() = %q, %v", got, err)
+	}
+}
+
+func TestFromJSONCollapsesCaseInsensitiveDuplicateKeys(t *testing.T) {
+	for template, want := range map[string]string{
+		`${{ fromJSON('{"a":1,"A":2}').a }}`:       "2",
+		`${{ fromJSON('{"a":1,"A":2}').A }}`:       "2",
+		`${{ fromJSON('{"a":1,"A":2}')['A'] }}`:    "2",
+		`${{ fromJSON('{"A":2,"a":1}').a }}`:       "1",
+		`${{ fromJSON('{"Σ":1,"ς":2}')['Σ'] }}`:    "2",
+		`${{ fromJSON('{"Σ":1,"ς":2}')['σ'] }}`:    "2",
+		`${{ toJSON(fromJSON('{"a":1,"A":2}')) }}`: "{\n  \"a\": 2\n}",
+	} {
+		got, err := EvaluateCompileTemplate(template, CompileContext{})
+		if err != nil || got != want {
+			t.Errorf("EvaluateCompileTemplate(%q) = %q, %v, want %q", template, got, err, want)
+		}
+	}
+}
+
+func TestEvaluateCompileSupportsFunctionResultProjection(t *testing.T) {
+	expr, err := Parse("${{ join(fromJSON('[{\"name\":\"bug\"}]').*.name, ',') }}", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := EvaluateCompile(expr, CompileContext{})
+	if err != nil || got != "bug" {
+		t.Fatalf("EvaluateCompile() function projection = %#v, %v", got, err)
+	}
+}
+
+func TestEvaluateRunNameSupportsFunctionResultAccess(t *testing.T) {
+	got, err := EvaluateRunName("Deploy ${{ fromJSON(inputs.config).target }}", CompileContext{
+		Inputs: map[string]any{"config": `{"target":"production"}`},
+	})
+	if err != nil || got != "Deploy production" {
+		t.Fatalf("EvaluateRunName() = %q, %v", got, err)
+	}
+	if err := ValidateRunName("${{ fromJSON(secrets.config).target }}"); err == nil || !strings.Contains(err.Error(), `run-name context "secrets" is unavailable`) {
+		t.Fatalf("ValidateRunName() error = %v", err)
 	}
 }

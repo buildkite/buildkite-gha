@@ -1,32 +1,46 @@
 // Direct runtime template evaluation and runtime reference resolution.
+
 package expression
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
 	"github.com/rhysd/actionlint"
 )
 
-// Context contains the compile-time values available while evaluating a template.
+// NeedStatus contains the expression-visible state of one prerequisite.
+type NeedStatus struct {
+	Outputs map[string]string
+	Result  string
+}
+
+// Context contains the runtime values available while evaluating a template.
 type Context struct {
 	Inputs           map[string]string
+	WorkflowInputs   map[string]any
 	Matrix           map[string]any
-	Steps            map[string]map[string]string
-	StepStatuses     map[string]StepStatus
-	Needs            map[string]map[string]string
-	NeedResults      map[string]string
+	Steps            map[string]StepStatus
+	Needs            map[string]NeedStatus
 	Secrets          map[string]string
 	Vars             map[string]string
 	Env              map[string]string
 	GitHub           map[string]any
 	Runner           map[string]string
-	Services         map[string]map[string]string
+	Services         map[string]ServiceContext
 	JobStatus        string
 	HashFiles        func([]string) (string, error)
 	HashFilesContext func(context.Context, []string) (string, error)
+}
+
+type ServiceContext struct {
+	ID      string
+	Network string
+	Ports   map[string]string
 }
 
 type runtimeReferenceKind uint8
@@ -34,6 +48,7 @@ type runtimeReferenceKind uint8
 const (
 	runtimeReferenceUnsupported runtimeReferenceKind = iota
 	runtimeReferenceServicePort
+	runtimeReferenceServiceValue
 	runtimeReferenceGitHub
 	runtimeReferenceInput
 	runtimeReferenceMatrix
@@ -52,27 +67,191 @@ const (
 // deliberately not resolved because many contexts do not exist until a job or
 // step runs.
 func validateRuntimeTemplate(template string) error {
-	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
-		root, path, err := referencePath(node)
-		if err != nil {
-			return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
-		}
+	return visitTemplateExpressions(template, validateRuntimeReferenceNode)
+}
+
+func validateRuntimeReferenceNode(node actionlint.ExprNode) error {
+	validator := newSemanticValidator(runtimeReferenceSurface)
+	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
 			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
 		}
 		return nil
-	})
+	}
+	validator.referenceError = func(err error) error {
+		return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
+	}
+	validator.unsupported = func(node actionlint.ExprNode) error {
+		_, _, err := referencePath(node)
+		return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
+	}
+	return validator.validate(node)
 }
 
-// Evaluate substitutes direct runtime references in a template once.
-func Evaluate(template string, context Context) (string, error) {
+// evaluateDirectTemplate substitutes direct runtime references in a template once.
+func evaluateDirectTemplate(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateDirectRuntimeNode)
 }
 
-// EvaluateStep substitutes direct runtime references and hashFiles calls in a
-// workflow step template. Other runtime surfaces remain direct-reference only.
-func EvaluateStep(template string, context Context) (string, error) {
+func evaluateRuntimeValue(source string, context Context) (any, error) {
+	body, err := expressionBody(source)
+	if err != nil {
+		return nil, err
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
+	if parseErr != nil {
+		return nil, fmt.Errorf("invalid expression: %w", parseErr)
+	}
+	if call, ok := node.(*actionlint.FuncCallNode); ok && strings.EqualFold(call.Callee, "fromJSON") && len(call.Args) == 1 {
+		value, err := evaluateDirectRuntimeNode(call.Args[0], context)
+		if err != nil {
+			return nil, err
+		}
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("fromJSON argument resolved to %T, want string", value)
+		}
+		decoder := json.NewDecoder(strings.NewReader(text))
+		decoder.UseNumber()
+		var decoded any
+		if err := decoder.Decode(&decoded); err != nil {
+			return nil, fmt.Errorf("fromJSON: %w", err)
+		}
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			return nil, fmt.Errorf("fromJSON: unexpected trailing content")
+		}
+		return decoded, nil
+	}
+	return evaluateDirectRuntimeNode(node, context)
+}
+
+type ObjectEntry struct {
+	Name  string
+	Value any
+}
+
+// evaluateObject evaluates one fromJSON expression while retaining JSON object
+// order for surfaces, such as services, where declaration order is observable.
+func evaluateObject(source string, context Context) ([]ObjectEntry, error) {
+	return evaluateRuntimeObject(source, context)
+}
+
+func evaluateRuntimeObject(source string, context Context) ([]ObjectEntry, error) {
+	body, err := expressionBody(source)
+	if err != nil {
+		return nil, err
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
+	if parseErr != nil {
+		return nil, fmt.Errorf("invalid expression: %w", parseErr)
+	}
+	call, ok := node.(*actionlint.FuncCallNode)
+	if !ok || !strings.EqualFold(call.Callee, "fromJSON") || len(call.Args) != 1 {
+		return nil, fmt.Errorf("expression must call fromJSON with one argument")
+	}
+	value, err := evaluateStepRuntimeExpression(call.Args[0], context, false, false, stepProfileContextMap(profiles[ProfileServiceMap]))
+	if err != nil {
+		return nil, err
+	}
+	text, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("fromJSON argument resolved to %T, want string", value)
+	}
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("fromJSON: %w", err)
+	}
+	if token == nil {
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			return nil, fmt.Errorf("fromJSON: unexpected trailing content")
+		}
+		return nil, nil
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return nil, fmt.Errorf("fromJSON resolved to a non-object, want an object")
+	}
+	var result []ObjectEntry
+	seen := map[string]bool{}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return nil, fmt.Errorf("fromJSON: %w", err)
+		}
+		name := key.(string)
+		if seen[name] {
+			return nil, fmt.Errorf("fromJSON object repeats key %q", name)
+		}
+		seen[name] = true
+		var entry any
+		if err := decoder.Decode(&entry); err != nil {
+			return nil, fmt.Errorf("fromJSON: %w", err)
+		}
+		result = append(result, ObjectEntry{Name: name, Value: entry})
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("fromJSON: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, fmt.Errorf("fromJSON: unexpected trailing content")
+	}
+	return result, nil
+}
+
+// evaluateStep evaluates the expression surface available to workflow step
+// fields. Other runtime surfaces remain direct-reference only.
+func evaluateStep(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateStepRuntimeNode)
+}
+
+// evaluateStepControl evaluates one complete expression for a typed workflow
+// step control.
+func evaluateStepControl(expression string, context Context) (any, error) {
+	body, err := expressionBody(expression)
+	if err != nil {
+		return nil, err
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
+	if parseErr != nil {
+		return nil, fmt.Errorf("invalid expression: %w", parseErr)
+	}
+	return evaluateStepRuntimeExpression(node, context, true, true, nil)
+}
+
+// validateStepControl validates every branch of a typed workflow step control
+// without resolving runtime values.
+func validateStepControl(expression string) error {
+	body, err := expressionBody(expression)
+	if err != nil {
+		return err
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
+	if parseErr != nil {
+		return fmt.Errorf("invalid expression: %w", parseErr)
+	}
+	return validateStepRuntimeExpression(node, true, true, nil)
+}
+
+// evaluateJobEnvironment evaluates a job-level environment template.
+func evaluateJobEnvironment(template string, context Context) (string, error) {
+	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
+		return evaluateStepRuntimeExpression(node, context, false, false, map[string]bool{"github": true, "needs": true, "matrix": true, "vars": true, "secrets": true, "inputs": true})
+	})
+}
+
+// evaluateJobDefault evaluates a job-level run default template.
+func evaluateJobDefault(template string, context Context) (string, error) {
+	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
+		return evaluateStepRuntimeExpression(node, context, false, false, map[string]bool{"github": true, "needs": true, "matrix": true, "env": true, "vars": true, "inputs": true})
+	})
+}
+
+// evaluateJobOutput evaluates a job output template after all steps settle.
+func evaluateJobOutput(template string, context Context) (string, error) {
+	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
+		return evaluateStepRuntimeExpression(node, context, false, false, map[string]bool{"github": true, "needs": true, "matrix": true, "runner": true, "env": true, "vars": true, "secrets": true, "steps": true, "inputs": true})
+	})
 }
 
 func evaluateRuntimeTemplate(template string, context Context, evaluate func(actionlint.ExprNode, Context) (any, error)) (string, error) {
@@ -107,35 +286,250 @@ func evaluateRuntimeTemplate(template string, context Context, evaluate func(act
 		case string:
 			evaluated.WriteString(value)
 		default:
-			_, _ = fmt.Fprint(&evaluated, value)
+			text, ok := expressionString(value)
+			if !ok {
+				return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
+			}
+			evaluated.WriteString(text)
 		}
 		remaining = source[consumed:]
 	}
 }
 
 func evaluateDirectRuntimeNode(node actionlint.ExprNode, context Context) (any, error) {
-	root, path, err := referencePath(node)
-	if err != nil {
-		return nil, err
+	evaluator := newSemanticEvaluator(runtimeReferenceSurface)
+	evaluator.resolve = func(root string, path []string) (any, error) {
+		return resolveRuntimeReference(root, path, context)
 	}
-	return resolveRuntimeReference(root, path, context)
+	evaluator.unsupported = unsupportedReference
+	return evaluator.evaluate(node)
 }
 
 func evaluateStepRuntimeNode(node actionlint.ExprNode, context Context) (any, error) {
-	call, ok := node.(*actionlint.FuncCallNode)
-	if !ok || !strings.EqualFold(call.Callee, "hashFiles") {
-		return evaluateDirectRuntimeNode(node, context)
-	}
-	if context.HashFiles == nil {
-		return nil, fmt.Errorf("runtime function %q is unavailable", call.Callee)
-	}
-	patterns, err := evaluateHashFilesArguments(call.Args, func(argument actionlint.ExprNode) (any, error) {
-		return evaluateRuntimeHashFilesArgument(argument, context)
-	})
-	if err != nil {
+	return evaluateStepRuntimeExpression(node, context, true, true, nil)
+}
+
+func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, allowHashFiles, allowGitHubToken bool, allowedContexts map[string]bool) (any, error) {
+	if err := validateStepRuntimeExpression(node, allowHashFiles, allowGitHubToken, allowedContexts); err != nil {
 		return nil, err
 	}
-	return context.HashFiles(patterns)
+
+	evaluator := newSemanticEvaluator(stepRuntimeSurface)
+	evaluator.resolve = func(root string, path []string) (any, error) {
+		return resolveRuntimeReferenceWithMissingMembers(root, path, context)
+	}
+	evaluator.resolveRoot = func(root string) (any, error) { return resolveStepRuntimeRoot(root, context) }
+	evaluator.truthy = githubTruthy
+	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
+		return githubCompare(kind, left, right)
+	}
+	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported runtime expression") }
+	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
+		return fmt.Errorf("unsupported runtime logical operator %s", kind)
+	}
+	evaluator.call = func(evaluator *semanticEvaluator, call *actionlint.FuncCallNode) (any, error) {
+		if isToJSONGitHubCall(call) {
+			if !allowGitHubToken {
+				return nil, fmt.Errorf("github.token is unavailable in this field")
+			}
+			if _, err := resolveRuntimeReferenceWithMissingMembers("github", []string{"token"}, context); err != nil {
+				return nil, err
+			}
+		}
+		if value, recognized, err := evaluatePureFunction(evaluator, call); recognized {
+			return value, err
+		}
+		if !allowHashFiles || !strings.EqualFold(call.Callee, "hashFiles") {
+			return nil, fmt.Errorf("unsupported runtime function %q", call.Callee)
+		}
+		if context.HashFiles == nil {
+			return nil, fmt.Errorf("runtime function %q is unavailable", call.Callee)
+		}
+		patterns, err := evaluateHashFilesArguments(call.Args, evaluator.evaluate)
+		if err != nil {
+			return nil, err
+		}
+		return context.HashFiles(patterns)
+	}
+	return evaluator.evaluate(node)
+}
+
+func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, allowGitHubToken bool, allowedContexts map[string]bool) error {
+	validator := newSemanticValidator(stepRuntimeSurface)
+	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
+		if allowedContexts != nil && !allowedContexts[strings.ToLower(root)] {
+			return fmt.Errorf("runtime context %q is unavailable in this field", root)
+		}
+		// Job controls reduce strategy values during graph expansion, before
+		// the normalized program reaches runtime.
+		if strings.EqualFold(root, "strategy") && len(path) == 1 {
+			return nil
+		}
+		if strings.EqualFold(root, "github") {
+			if len(path) == 0 {
+				return fmt.Errorf("dynamic or whole github access is unsupported")
+			}
+			if len(path) >= 1 && strings.EqualFold(path[0], "event") {
+				return nil
+			}
+			if len(path) != 1 {
+				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
+			}
+			switch strings.ToLower(path[0]) {
+			case "token":
+				if !allowGitHubToken {
+					return fmt.Errorf("github.token is unavailable in this field")
+				}
+				return nil
+			case "action_path", "action_ref", "action_repository", "actor", "base_ref", "event_name", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_owner", "run_attempt", "run_id", "run_number", "server_url", "sha", "workflow", "workflow_ref", "workflow_sha", "workspace":
+				return nil
+			default:
+				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
+			}
+		}
+		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
+			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+		}
+		return nil
+	}
+	validator.validateAccess = func(access actionlint.ExprNode) error {
+		root := strings.ToLower(referenceRoot(access))
+		if root == "" {
+			switch access := access.(type) {
+			case *actionlint.ObjectDerefNode:
+				return validator.validate(access.Receiver)
+			case *actionlint.IndexAccessNode:
+				if err := validator.validate(access.Operand); err != nil {
+					return err
+				}
+				return validator.validate(access.Index)
+			case *actionlint.ArrayDerefNode:
+				return validator.validate(access.Receiver)
+			}
+		}
+		if allowedContexts != nil && !allowedContexts[root] {
+			return fmt.Errorf("runtime context %q is unavailable in this field", root)
+		}
+		switch root {
+		case "github":
+			if !isGitHubEventAccess(access) {
+				return fmt.Errorf("dynamic or whole github access is unsupported")
+			}
+		case "secrets":
+			return fmt.Errorf("dynamic or whole secrets access is unsupported")
+		case "steps", "needs":
+			// Needs is already restricted to the job's verified direct
+			// dependencies. Serializing it grants no additional authority.
+			if _, whole := access.(*actionlint.VariableNode); root == "needs" && whole {
+				return nil
+			}
+			return fmt.Errorf("computed or aggregate %s access is unsupported", root)
+		case "job":
+			referenceRoot, path, err := referencePath(access)
+			if err != nil || classifyRuntimeReference(referenceRoot, path) == runtimeReferenceUnsupported {
+				return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+			}
+			return nil
+		case "matrix", "vars", "inputs", "env", "runner":
+		default:
+			return fmt.Errorf("unsupported runtime context %q", root)
+		}
+		switch access := access.(type) {
+		case *actionlint.ObjectDerefNode:
+			return validator.validate(access.Receiver)
+		case *actionlint.IndexAccessNode:
+			if err := validator.validate(access.Operand); err != nil {
+				return err
+			}
+			return validator.validate(access.Index)
+		case *actionlint.ArrayDerefNode:
+			return validator.validate(access.Receiver)
+		default:
+			return nil
+		}
+	}
+	validator.validateCompare = func(actionlint.CompareOpNodeKind) error { return nil }
+	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
+	validator.validateCall = func(validator *semanticValidator, call *actionlint.FuncCallNode) error {
+		if isToJSONGitHubCall(call) {
+			if allowedContexts != nil && !allowedContexts["github"] {
+				return fmt.Errorf("runtime context %q is unavailable in this field", "github")
+			}
+			if !allowGitHubToken {
+				return fmt.Errorf("github.token is unavailable in this field")
+			}
+			return nil
+		}
+		if recognized, err := validatePureFunction(validator, call); recognized {
+			return err
+		}
+		if !allowHashFiles || !strings.EqualFold(call.Callee, "hashFiles") || len(call.Args) == 0 || len(call.Args) > 255 {
+			return fmt.Errorf("unsupported runtime function %q", call.Callee)
+		}
+		for _, argument := range call.Args {
+			if err := validator.validate(argument); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported runtime expression") }
+	return validator.validate(node)
+}
+
+// requiredGitHubRuntimeValue names github members that must never fall back to
+// null: token because absence means missing authority, and run identity or
+// workspace because a silently empty value would corrupt derived cache keys
+// and paths when the runtime cannot supply them.
+func requiredGitHubRuntimeValue(name string) bool {
+	switch strings.ToLower(name) {
+	case "token", "run_attempt", "run_id", "run_number", "workspace":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveStepRuntimeRoot(root string, context Context) (any, error) {
+	switch strings.ToLower(root) {
+	case "github":
+		return context.GitHub, nil
+	case "secrets":
+		return context.Secrets, nil
+	case "matrix":
+		return context.Matrix, nil
+	case "vars":
+		return context.Vars, nil
+	case "inputs":
+		if context.Inputs != nil {
+			return context.Inputs, nil
+		}
+		return context.WorkflowInputs, nil
+	case "env":
+		return context.Env, nil
+	case "runner":
+		return context.Runner, nil
+	case "job":
+		services := make(map[string]any, len(context.Services))
+		for name, service := range context.Services {
+			services[name] = map[string]any{"id": service.ID, "network": service.Network, "ports": service.Ports}
+		}
+		return map[string]any{"services": services}, nil
+	case "steps":
+		steps := make(map[string]any)
+		for name, step := range context.Steps {
+			steps[name] = map[string]any{"outputs": step.Outputs, "outcome": step.Outcome, "conclusion": step.Conclusion}
+		}
+		return steps, nil
+	case "needs":
+		needs := make(map[string]any)
+		for name, status := range context.Needs {
+			needs[name] = map[string]any{"outputs": status.Outputs, "result": status.Result}
+		}
+		return needs, nil
+	default:
+		return nil, fmt.Errorf("unsupported runtime context %q", root)
+	}
 }
 
 func evaluateHashFilesArguments(nodes []actionlint.ExprNode, evaluate func(actionlint.ExprNode) (any, error)) ([]string, error) {
@@ -153,25 +547,6 @@ func evaluateHashFilesArguments(nodes []actionlint.ExprNode, evaluate func(actio
 	return patterns, nil
 }
 
-func evaluateRuntimeHashFilesArgument(node actionlint.ExprNode, context Context) (any, error) {
-	switch node := node.(type) {
-	case *actionlint.NullNode:
-		return nil, nil
-	case *actionlint.BoolNode:
-		return node.Value, nil
-	case *actionlint.IntNode:
-		return node.Value, nil
-	case *actionlint.FloatNode:
-		return node.Value, nil
-	case *actionlint.StringNode:
-		return node.Value, nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		return evaluateDirectRuntimeNode(node, context)
-	default:
-		return nil, fmt.Errorf("arguments must be literals or direct context references")
-	}
-}
-
 func runtimeString(value any) string {
 	switch value := value.(type) {
 	case nil:
@@ -186,6 +561,14 @@ func runtimeString(value any) string {
 }
 
 func resolveRuntimeReference(root string, path []string, context Context) (any, error) {
+	return resolveRuntimeReferenceValue(root, path, context, false)
+}
+
+func resolveRuntimeReferenceWithMissingMembers(root string, path []string, context Context) (any, error) {
+	return resolveRuntimeReferenceValue(root, path, context, true)
+}
+
+func resolveRuntimeReferenceValue(root string, path []string, context Context, allowMissing bool) (any, error) {
 	switch classifyRuntimeReference(root, path) {
 	case runtimeReferenceRunner:
 		if value, ok := findStringValue(context.Runner, path[0]); ok {
@@ -194,21 +577,58 @@ func resolveRuntimeReference(root string, path []string, context Context) (any, 
 		return "", fmt.Errorf("expression references unavailable runner value %q", path[0])
 	case runtimeReferenceServicePort:
 		return resolveServicePort(context.Services, path[1], path[3], "expression")
+	case runtimeReferenceServiceValue:
+		return resolveServiceValue(context.Services, path[1], path[2], "expression")
 	case runtimeReferenceGitHub:
+		if strings.EqualFold(path[0], "event") {
+			event, found, err := objectValue(context.GitHub, path[0])
+			if err != nil {
+				return nil, err
+			}
+			if !found || event == nil {
+				return nil, fmt.Errorf("expression requires an event payload that is unavailable in this job plan")
+			}
+		}
 		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {
-			return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
+			if !allowMissing || context.GitHub == nil || requiredGitHubRuntimeValue(path[0]) {
+				return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
+			}
+			return nil, nil
 		}
 		return value, nil
 	case runtimeReferenceInput:
-		return findString(context.Inputs, path[0]), nil
+		if context.Inputs != nil {
+			return findString(context.Inputs, path[0]), nil
+		}
+		value, _, err := objectValue(context.WorkflowInputs, path[0])
+		return value, err
 	case runtimeReferenceMatrix:
 		for name, value := range context.Matrix {
 			if strings.EqualFold(name, path[0]) {
+				// Nested references such as matrix.config.os walk into
+				// object-valued matrix entries; a missing or non-object
+				// segment yields null, matching GitHub.
+				for _, part := range path[1:] {
+					var (
+						ok  bool
+						err error
+					)
+					value, ok, err = objectValue(value, part)
+					if err != nil {
+						return nil, err
+					}
+					if !ok {
+						return nil, nil
+					}
+				}
 				return value, nil
 			}
 		}
-		return "", fmt.Errorf("expression references unavailable matrix value %q", path[0])
+		if !allowMissing || context.Matrix == nil {
+			return "", fmt.Errorf("expression references unavailable matrix value %q", path[0])
+		}
+		return nil, nil
 	case runtimeReferenceSecret:
 		return findString(context.Secrets, path[0]), nil
 	case runtimeReferenceVar:
@@ -216,35 +636,29 @@ func resolveRuntimeReference(root string, path []string, context Context) (any, 
 	case runtimeReferenceEnv:
 		return findString(context.Env, path[0]), nil
 	case runtimeReferenceStepOutput:
-		outputs, ok := findOutputs(context.Steps, path[0])
+		step, ok := findStepStatus(context.Steps, path[0])
 		if !ok {
 			return "", fmt.Errorf("expression references unavailable step %q", path[0])
 		}
-		return findString(outputs, path[2]), nil
+		return findString(step.Outputs, path[2]), nil
 	case runtimeReferenceStepStatus:
-		for candidate, status := range context.StepStatuses {
-			if !strings.EqualFold(candidate, path[0]) {
-				continue
-			}
-			switch {
-			case strings.EqualFold(path[1], "outcome"):
-				return status.Outcome, nil
-			case strings.EqualFold(path[1], "conclusion"):
-				return status.Conclusion, nil
-			}
+		step, ok := findStepStatus(context.Steps, path[0])
+		if !ok {
+			return "", fmt.Errorf("expression references unavailable step %q", path[0])
 		}
-		return "", fmt.Errorf("expression references unavailable step %q", path[0])
+		if strings.EqualFold(path[1], "outcome") {
+			return step.Outcome, nil
+		}
+		return step.Conclusion, nil
 	case runtimeReferenceNeedOutput:
-		outputs, ok := findOutputs(context.Needs, path[0])
+		status, ok := findNeedStatus(context.Needs, path[0])
 		if !ok {
 			return "", fmt.Errorf("expression references unavailable need %q", path[0])
 		}
-		return findString(outputs, path[2]), nil
+		return findString(status.Outputs, path[2]), nil
 	case runtimeReferenceNeedResult:
-		for candidate, result := range context.NeedResults {
-			if strings.EqualFold(candidate, path[0]) {
-				return result, nil
-			}
+		if status, ok := findNeedStatus(context.Needs, path[0]); ok {
+			return status.Result, nil
 		}
 		return "", fmt.Errorf("expression references unavailable need %q", path[0])
 	default:
@@ -254,15 +668,17 @@ func resolveRuntimeReference(root string, path []string, context Context) (any, 
 
 func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 	switch {
-	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch")):
+	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") || strings.EqualFold(path[0], "temp")):
 		return runtimeReferenceRunner
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return runtimeReferenceServicePort
+	case len(path) == 3 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")):
+		return runtimeReferenceServiceValue
 	case len(path) >= 1 && strings.EqualFold(root, "github"):
 		return runtimeReferenceGitHub
 	case len(path) == 1 && strings.EqualFold(root, "inputs"):
 		return runtimeReferenceInput
-	case len(path) == 1 && strings.EqualFold(root, "matrix"):
+	case len(path) >= 1 && strings.EqualFold(root, "matrix"):
 		return runtimeReferenceMatrix
 	case len(path) == 1 && strings.EqualFold(root, "secrets"):
 		return runtimeReferenceSecret
@@ -293,22 +709,28 @@ func referenceName(root string, path []string) string {
 func lookupRuntimeValue(value any, path []string) (any, bool) {
 	current := value
 	for _, part := range path {
-		object, ok := current.(map[string]any)
-		if !ok {
-			return nil, false
-		}
 		matched := false
-		for name, item := range object {
-			if strings.EqualFold(name, part) {
-				current, matched = item, true
-				break
-			}
+		switch object := current.(type) {
+		case map[string]any:
+			current, matched = findFold(object, part)
+		case map[string]string:
+			current, matched = findFold(object, part)
 		}
 		if !matched {
 			return nil, false
 		}
 	}
 	return current, true
+}
+
+func findFold[V any](values map[string]V, target string) (V, bool) {
+	for name, value := range values {
+		if strings.EqualFold(name, target) {
+			return value, true
+		}
+	}
+	var zero V
+	return zero, false
 }
 
 func findString(values map[string]string, name string) string {
@@ -325,11 +747,20 @@ func findStringValue(values map[string]string, name string) (string, bool) {
 	return "", false
 }
 
-func findOutputs(values map[string]map[string]string, name string) (map[string]string, bool) {
-	for candidate, outputs := range values {
+func findStepStatus(values map[string]StepStatus, name string) (StepStatus, bool) {
+	for candidate, status := range values {
 		if strings.EqualFold(candidate, name) {
-			return outputs, true
+			return status, true
 		}
 	}
-	return nil, false
+	return StepStatus{}, false
+}
+
+func findNeedStatus(values map[string]NeedStatus, name string) (NeedStatus, bool) {
+	for candidate, status := range values {
+		if strings.EqualFold(candidate, name) {
+			return status, true
+		}
+	}
+	return NeedStatus{}, false
 }

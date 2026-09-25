@@ -1,4 +1,3 @@
-// Package compiler expands an owned workflow into deterministic workflow JSON IR.
 package compiler
 
 import (
@@ -9,65 +8,84 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"math/big"
-	"path/filepath"
-	"reflect"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
-	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
-const (
-	schema             = "buildkite-gha/compiler-ir/v1"
-	maxMatrixInstances = 256
-)
-
-// Event is the explicit provider event snapshot supplied to compilation.
-type Event struct {
-	Provider   string         `json:"provider"`
-	Event      string         `json:"event"`
-	Trust      EventTrust     `json:"trust"`
-	Repository Repository     `json:"repository"`
-	Ref        string         `json:"ref"`
-	SHA        string         `json:"sha"`
-	Actor      string         `json:"actor"`
-	Payload    map[string]any `json:"payload"`
-}
-
-// Repository identifies the source repository in the event snapshot.
-type Repository struct {
-	Owner         string `json:"owner"`
-	Name          string `json:"name"`
-	CloneURL      string `json:"clone_url"`
-	DefaultBranch string `json:"default_branch"`
-}
+const schema = "buildkite-gha/compiler-ir/v1"
 
 // IR is the deterministic, actionlint-independent workflow compiler output.
 type IR struct {
-	Schema    string            `json:"schema"`
-	Workflow  WorkflowSource    `json:"workflow"`
-	Warnings  []Warning         `json:"warnings,omitempty"`
-	Event     Event             `json:"event"`
-	Vars      map[string]string `json:"vars,omitempty"`
-	Execution ExecutionBoundary `json:"execution"`
-	Jobs      []JobInstance     `json:"jobs"`
+	Schema   string         `json:"schema"`
+	Workflow WorkflowSource `json:"workflow"`
+	Warnings []Warning      `json:"warnings,omitempty"`
+	Event    Event          `json:"event"`
+	// OrganizationVars and RepositoryVars are the snapshots of
+	// Options.Vars. VarsBeforeEnvironment merges them for compile-time fields.
+	OrganizationVars map[string]string `json:"organization_vars,omitempty"`
+	RepositoryVars   map[string]string `json:"repository_vars,omitempty"`
+	Execution        ExecutionBoundary `json:"execution"`
+	Jobs             []JobInstance     `json:"jobs"`
+	// Continuations are the deferred uploads that expand needs-derived
+	// matrices or select runners after their producer jobs run. Their jobs are
+	// absent from Jobs until a stage recompiles with the verified outputs.
+	Continuations []RuntimeContinuation `json:"continuations,omitempty"`
+	// RuntimeMatrixSkippedJobs is the forward closure of roots whose verified
+	// producers did not succeed. The continuation renders skipped placeholders.
+	RuntimeMatrixSkippedJobs map[string]bool `json:"runtime_matrix_skipped_jobs,omitempty"`
+	// deferredActions lists, per continuation consumer job ID, the `uses`
+	// steps of its deferred jobs. It is process-local input to
+	// resolveContinuationActions, which records the resulting locks on the
+	// continuation.
+	deferredActions map[string][]deferredAction
+	// deferredActionsReferenceVars records that a resolved action of a
+	// deferred job reads the vars context, so ActionsReferenceVars can report
+	// it although the deferred jobs have no plans in the bundle.
+	deferredActionsReferenceVars bool
+	// JobGraphComplete distinguishes a complete expanded graph from the
+	// partial instances retained when expansion fails. It is process-local
+	// evidence and is not part of serialized compiler output.
+	JobGraphComplete bool `json:"-"`
+	// Sources retains input identities for diagnostic presentation,
+	// including files whose parsing or graph expansion failed.
+	Sources map[string]WorkflowSourceReference `json:"-"`
+}
+
+// VarsBeforeEnvironment is the vars context GitHub evaluates before any job's
+// environment applies: compile-time fields such as runs-on, strategy, and
+// concurrency, plus jobs.<id>.if and reusable-workflow call guards.
+func (ir IR) VarsBeforeEnvironment() map[string]string {
+	return plan.MergeVars(ir.OrganizationVars, ir.RepositoryVars)
+}
+
+// WorkflowConcurrencyGate is one statically resolved called-workflow
+// concurrency scope inherited by a flattened job.
+type WorkflowConcurrencyGate struct {
+	ID    string `json:"id"`
+	Group string `json:"group"`
 }
 
 // Warning is one source-located, non-fatal compatibility diagnostic.
 type Warning struct {
-	Code    string `json:"code"`
-	Line    int    `json:"line"`
-	Column  int    `json:"column"`
-	Message string `json:"message"`
+	Code          string `json:"code"`
+	Blocker       string `json:"blocker,omitempty"`
+	BlockerDetail string `json:"blocker_detail,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Line          int    `json:"line"`
+	Column        int    `json:"column"`
+	Job           string `json:"job,omitempty"`
+	Step          int    `json:"step,omitempty"`
+	Message       string `json:"message"`
 }
 
 // ExecutionBoundary makes the compile-only boundary explicit.
@@ -80,64 +98,113 @@ type ExecutionBoundary struct {
 type WorkflowSource struct {
 	Path                          string             `json:"path"`
 	Name                          string             `json:"name,omitempty"`
+	RunName                       string             `json:"run_name,omitempty"`
 	Digest                        string             `json:"digest"`
 	ConcurrencyGroup              string             `json:"concurrency_group,omitempty"`
 	Triggers                      []workflow.Trigger `json:"-"`
 	WorkflowTokenPolicyFilename   string             `json:"-"`
+	WorkflowTokenPermissions      map[string]string  `json:"-"`
 	WorkflowTokenPolicyDiagnostic string             `json:"-"`
 }
 
 // JobInstance is one statically expanded job in the owned IR.
 type JobInstance struct {
-	Key                     string                  `json:"key"`
-	LogicalJobID            string                  `json:"logical_job_id"`
-	Label                   string                  `json:"label"`
-	Needs                   []string                `json:"needs,omitempty"`
-	NeedGroups              map[string][]string     `json:"need_groups,omitempty"`
-	NeedOutputs             map[string][]NeedOutput `json:"need_outputs,omitempty"`
-	RunsOn                  []string                `json:"runs_on"`
-	Queue                   string                  `json:"queue"`
-	Platform                Platform                `json:"-"`
-	RuntimeImage            string                  `json:"runtime_image,omitempty"`
-	Matrix                  map[string]any          `json:"matrix,omitempty"`
-	FailFast                *bool                   `json:"fail_fast,omitempty"`
-	MaxParallel             *int                    `json:"max_parallel,omitempty"`
-	ConcurrencyGroup        string                  `json:"concurrency_group,omitempty"`
-	Steps                   []workflow.Step         `json:"steps"`
-	Env                     map[string]string       `json:"env,omitempty"`
-	Permissions             map[string]string       `json:"permissions,omitempty"`
-	If                      string                  `json:"if,omitempty"`
-	ContinueOnError         bool                    `json:"continue_on_error,omitempty"`
-	TimeoutMinutes          float64                 `json:"timeout_minutes,omitempty"`
-	DefaultShell            string                  `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string                  `json:"default_working_directory,omitempty"`
-	Outputs                 map[string]string       `json:"outputs,omitempty"`
-	Container               *workflow.Container     `json:"container,omitempty"`
-	Services                []workflow.Service      `json:"services,omitempty"`
-	SourcePath              string                  `json:"source_path"`
-	SourceDigest            string                  `json:"source_digest"`
-	RepositoryRoot          string                  `json:"-"`
-	Source                  workflow.Span           `json:"source"`
-	secretAuthority         bool
+	Key                       string                    `json:"key"`
+	CacheMode                 string                    `json:"cache_mode,omitempty"`
+	LogicalJobID              string                    `json:"logical_job_id"`
+	Label                     string                    `json:"label"`
+	Needs                     []string                  `json:"needs,omitempty"`
+	NeedGroups                map[string][]string       `json:"need_groups,omitempty"`
+	NeedOutputs               map[string][]NeedOutput   `json:"need_outputs,omitempty"`
+	CallGuards                []CallGuard               `json:"call_guards,omitempty"`
+	RunsOn                    []string                  `json:"runs_on"`
+	Queue                     string                    `json:"queue"`
+	Platform                  Platform                  `json:"-"`
+	RuntimeImage              string                    `json:"runtime_image,omitempty"`
+	Agents                    map[string]string         `json:"agents,omitempty"`
+	ToolCache                 *bool                     `json:"tool_cache,omitempty"`
+	Cache                     *CacheVolume              `json:"-"`
+	Matrix                    map[string]any            `json:"matrix,omitempty"`
+	Inputs                    map[string]any            `json:"inputs,omitempty"`
+	DeferredInputs            map[string]DeferredInput  `json:"deferred_inputs,omitempty"`
+	FailFast                  *bool                     `json:"fail_fast,omitempty"`
+	MaxParallel               *int                      `json:"max_parallel,omitempty"`
+	ConcurrencyGroup          string                    `json:"concurrency_group,omitempty"`
+	ConcurrencyGates          []WorkflowConcurrencyGate `json:"workflow_concurrency_gates,omitempty"`
+	Environment               string                    `json:"environment,omitempty"`
+	EnvironmentApproval       bool                      `json:"environment_approval,omitempty"`
+	Steps                     []workflow.Step           `json:"steps"`
+	Env                       map[string]string         `json:"env,omitempty"`
+	Permissions               map[string]string         `json:"permissions,omitempty"`
+	If                        string                    `json:"if,omitempty"`
+	ContinueOnError           bool                      `json:"continue_on_error,omitempty"`
+	ContinueOnErrorExpression string                    `json:"continue_on_error_expression,omitempty"`
+	ContinueOnErrorSpan       workflow.Span             `json:"-"`
+	TimeoutMinutes            float64                   `json:"timeout_minutes,omitempty"`
+	DefaultShell              string                    `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory   string                    `json:"default_working_directory,omitempty"`
+	Outputs                   map[string]string         `json:"outputs,omitempty"`
+	Container                 *workflow.Container       `json:"container,omitempty"`
+	Services                  []workflow.Service        `json:"services,omitempty"`
+	ServicesExpression        string                    `json:"services_expression,omitempty"`
+	SourcePath                string                    `json:"source_path"`
+	SourceDigest              string                    `json:"source_digest"`
+	RemoteWorkflow            *RemoteWorkflowSource     `json:"remote_workflow,omitempty"`
+	BlockerDetailUnsafe       bool                      `json:"blocker_detail_unsafe,omitempty"`
+	RepositoryRoot            string                    `json:"-"`
+	Source                    workflow.Span             `json:"source"`
+	environmentSecrets        []string
+	environmentVariables      map[string]string
+	secretAuthority           secretAuthority
+	tokenPolicyNarrowed       bool
+	jobPermissionsIgnored     bool
+	reusableCall              workflow.Position
 }
 
-// NeedOutput selects one caller-visible output from a concrete prerequisite.
-// An empty output list explicitly prevents an aggregate need from exposing its
-// producers' internal outputs.
-type NeedOutput struct {
-	Name    string `json:"name"`
-	StepKey string `json:"step_key"`
-	Output  string `json:"output"`
+// CallGuard is one immutable caller-scoped condition inherited by a flattened
+// reusable-workflow job.
+type CallGuard struct {
+	Condition      string                   `json:"condition"`
+	Inputs         map[string]any           `json:"inputs,omitempty"`
+	DeferredInputs map[string]DeferredInput `json:"deferred_inputs,omitempty"`
+	NeedGroups     map[string][]string      `json:"need_groups,omitempty"`
+	NeedOutputs    map[string][]NeedOutput  `json:"need_outputs,omitempty"`
 }
+
+// DeferredInput is one workflow_call input whose value embeds caller
+// needs outputs. Template is the caller value with every graph-time part
+// folded; NeedGroups and NeedOutputs bind each referenced caller job to exact
+// producers and outputs without exposing the caller's needs context to the
+// callee.
+type DeferredInput struct {
+	Template    string                  `json:"template"`
+	Type        string                  `json:"type,omitempty"`
+	NeedGroups  map[string][]string     `json:"need_groups"`
+	NeedOutputs map[string][]NeedOutput `json:"need_outputs"`
+}
+
+// NeedOutput is the plan-boundary projection of one caller-visible output from
+// a concrete prerequisite. An empty output list explicitly prevents an
+// aggregate need from exposing its producers' internal outputs.
+type NeedOutput = plan.NeedOutput
 
 // Report summarizes successful workflow validation.
 type Report struct {
+	Sources               map[string]WorkflowSourceReference
 	LogicalJobs           int
 	Instances             int
 	Warnings              []Warning
 	Jobs                  []JobInstance
 	RuntimeMatrixBoundary bool
-	RuntimeMatrices       []RuntimeMatrixDescriptor
+	// ReferencesVars reports whether any expression in the workflow or a
+	// reusable workflow it calls reads the vars context. Callers resolve
+	// repository and organization variables before compiling only when it is
+	// set, so workflows without vars references cost no resolution request.
+	ReferencesVars  bool
+	RuntimeMatrices []RuntimeOutputDescriptor
+	// Continuations lists the deferred uploads that expand needs-derived
+	// matrices or select runners after their producer jobs run. Their jobs are not in Jobs.
+	Continuations         []RuntimeContinuation
 	ParsedJobs            []ParsedJob
 	NotEvaluatedJobs      map[string]bool
 	NotEvaluatedInstances map[string]bool
@@ -150,67 +217,46 @@ type ParsedJob struct {
 	Source workflow.Span
 }
 
-type expansionResult struct {
-	instances             []JobInstance
-	candidates            []JobInstance
-	runtimeMatrixBoundary bool
-	runtimeMatrices       []RuntimeMatrixDescriptor
-	jobs                  []ParsedJob
-	notEvaluatedJobs      map[string]bool
-	notEvaluatedInstances map[string]bool
-}
-
-func parsedJobs(path string, parsed *workflow.Workflow) []ParsedJob {
-	jobs := make([]ParsedJob, len(parsed.Jobs))
-	for i, job := range parsed.Jobs {
-		jobs[i] = ParsedJob{ID: job.ID, Path: path, Source: job.Span}
-	}
-	return jobs
-}
-
-func processingJobs(path string, parsed *workflow.Workflow, resolved []sourcedJob) []ParsedJob {
-	jobs := parsedJobs(path, parsed)
-	seen := make(map[string]bool, len(jobs)+len(resolved))
-	for _, job := range jobs {
-		seen[job.ID] = true
-	}
-	for _, sourced := range resolved {
-		if seen[sourced.ID] {
-			continue
-		}
-		seen[sourced.ID] = true
-		jobs = append(jobs, ParsedJob{ID: sourced.ID, Path: sourced.path, Source: sourced.Span})
-	}
-	return jobs
-}
-
 // ParseWorkflow reports only event-independent workflow syntax and job
 // identities. Later stages deliberately remain unevaluated.
-func ParseWorkflow(path string, source []byte) (Report, error) {
-	parsed, err := workflow.Parse(path, source)
+func ParseWorkflow(path string, source []byte) (report Report, err error) {
+	defer func() { report.Sources = retainRootSource(report.Sources, path, source) }()
+	parsed, err := parseReusableWorkflow(path, source)
 	if err != nil {
 		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
-	return Report{LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency, false)}, nil
-}
-
-func expansionReport(expanded expansionResult, warnings []Warning) Report {
-	return Report{
-		LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates),
-		Jobs: expanded.candidates, RuntimeMatrixBoundary: expanded.runtimeMatrixBoundary,
-		RuntimeMatrices: expanded.runtimeMatrices, ParsedJobs: expanded.jobs, Warnings: warnings,
-		NotEvaluatedJobs: expanded.notEvaluatedJobs, NotEvaluatedInstances: expanded.notEvaluatedInstances,
-	}
+	return Report{LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed, false)}, nil
 }
 
 // Validate parses and validates the supported static graph without requiring an
 // event snapshot.
 func Validate(path string, source []byte) (Report, error) {
-	parsed, err := workflow.Parse(path, source)
-	if err != nil {
-		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
+	return ValidateWithOptions(path, source, defaultOptions())
+}
+
+// ValidateWithOptions validates the static graph against an explicit runner
+// policy without requiring an event snapshot.
+func ValidateWithOptions(path string, source []byte, options Options) (Report, error) {
+	return ValidateWithOptionsContext(context.Background(), path, source, options)
+}
+
+// ValidateWithOptionsContext validates the static graph and permits
+// cancellation while resolving public reusable-workflow source.
+func ValidateWithOptionsContext(ctx context.Context, path string, source []byte, options Options) (report Report, err error) {
+	defer func() { report.Sources = retainRootSource(report.Sources, path, source) }()
+	var optionsErr error
+	if err := options.validate(); err != nil {
+		optionsErr = &ProcessingFinding{
+			Code: CodeEnvironment, Category: "environment",
+			Message: "workflow-processing configuration is invalid", Err: err,
+		}
 	}
-	options := defaultOptions()
+	parsed, parseErr := parseReusableWorkflow(path, source)
+	parseErr = processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", parseErr)
+	if parseErr != nil {
+		return Report{}, errors.Join(parseErr, optionsErr)
+	}
+	triggerErr := processingFinding(StagePipeline, CodePipelineGeneration, "compatibility", buildkitepipeline.ValidateTriggerConditions(parsed.Triggers))
 	event := Event{
 		Event: "validation", Trust: options.EventTrust,
 		Repository: Repository{Owner: "validation", Name: "validation"},
@@ -218,16 +264,18 @@ func Validate(path string, source []byte) (Report, error) {
 		Payload: map[string]any{},
 	}
 	context := compileContext(event, nil, path, parsed.Name)
+	context.Inputs = workflowDispatchInputs(parsed, event)
 	context.GitHub["head_ref"] = "validation"
+	runNameErr := validateWorkflowRunName(path, parsed)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expand(path, source, parsed, context, options)
-	if err := errors.Join(concurrencyErr, cancellationErr, expandErr); err != nil {
-		return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), err
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	if err := errors.Join(optionsErr, triggerErr, runNameErr, concurrencyErr, cancellationErr, expandErr); err != nil {
+		return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
-	return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), nil
+	return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), nil
 }
 
 // ValidateEvent validates both the supported static graph and its event input.
@@ -238,6 +286,13 @@ func ValidateEvent(path string, source, eventSource []byte) (Report, error) {
 // ValidateEventWithOptions validates the graph against explicit variables and
 // runner policy without producing compiler output.
 func ValidateEventWithOptions(path string, source, eventSource []byte, options Options) (Report, error) {
+	return ValidateEventWithOptionsContext(context.Background(), path, source, eventSource, options)
+}
+
+// ValidateEventWithOptionsContext validates the graph and event while
+// permitting cancellation during public source resolution.
+func ValidateEventWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) (report Report, err error) {
+	defer func() { report.Sources = retainRootSource(report.Sources, path, source) }()
 	var optionsErr error
 	if err := options.validate(); err != nil {
 		optionsErr = &ProcessingFinding{
@@ -245,7 +300,7 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 			Message: "workflow-processing configuration is invalid", Err: err,
 		}
 	}
-	parsed, parseErr := workflow.Parse(path, source)
+	parsed, parseErr := parseReusableWorkflow(path, source)
 	parseErr = processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", parseErr)
 	event, eventErr := parseEvent(eventSource)
 	eventErr = processingFinding(StageEventValidation, CodeEventInvalid, "environment", eventErr)
@@ -259,20 +314,22 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 		}
 		return Report{
 			LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed),
-			Warnings: compilerWarnings(parsed.Concurrency, false), NotEvaluatedJobs: notEvaluatedJobs,
+			Warnings: compilerWarnings(parsed, false), NotEvaluatedJobs: notEvaluatedJobs,
 		}, errors.Join(parseErr, eventErr, optionsErr)
 	}
 	event.Trust = options.EventTrust
-	context := compileContext(event, options.Vars.snapshot(), path, parsed.Name)
+	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
+	context.Inputs = workflowDispatchInputs(parsed, event)
+	_, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expand(path, source, parsed, context, options)
-	if err := errors.Join(concurrencyErr, cancellationErr, expandErr); err != nil {
-		return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), err
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	if err := errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr); err != nil {
+		return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
-	return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), nil
+	return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), nil
 }
 
 // Compile parses a workflow and event, expands its static graph, and returns
@@ -284,7 +341,13 @@ func Compile(path string, source, eventSource []byte) ([]byte, error) {
 // CompileWithOptions compiles using an explicit non-secret variable snapshot,
 // event trust classification, and runner policy.
 func CompileWithOptions(path string, source, eventSource []byte, options Options) ([]byte, error) {
-	ir, err := compile(path, source, eventSource, options)
+	return CompileWithOptionsContext(context.Background(), path, source, eventSource, options)
+}
+
+// CompileWithOptionsContext compiles a workflow and permits cancellation while
+// resolving public reusable-workflow source.
+func CompileWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) ([]byte, error) {
+	ir, err := CompileIRWithOptionsContext(ctx, path, source, eventSource, options)
 	if err != nil {
 		return nil, err
 	}
@@ -298,855 +361,421 @@ func CompileWithOptions(path string, source, eventSource []byte, options Options
 	return out.Bytes(), nil
 }
 
-func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, []PlanAuthorization, []JobEvaluation, error) {
-	payload, err := json.Marshal(ir.Event.Payload)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("encode event payload: %w", err)
-	}
-	eventDigest := sha256.Sum256(payload)
-	plans := make([]plan.Job, 0, len(ir.Jobs))
-	authorizations := make([]PlanAuthorization, 0, len(ir.Jobs))
-	evaluations := make([]JobEvaluation, 0, len(ir.Jobs))
-	failedInstances := make(map[string]bool, len(ir.Jobs))
-	var diagnostics []error
-	planDigests := make(map[string]string, len(ir.Jobs))
-	actionSource := newMemoizedActionSource(options.ActionSource)
-instances:
-	for _, instance := range ir.Jobs {
-		for _, dependency := range instance.Needs {
-			if failedInstances[dependency] {
-				failedInstances[instance.Key] = true
-				evaluations = append(evaluations, JobEvaluation{Instance: instance.Key, Job: instance.LogicalJobID})
-				continue instances
-			}
-		}
-		runtimeDistributionDigest := options.RuntimeDistributions[instance.Platform]
-		if runtimeDistributionDigest == "" && instance.Platform == PlatformLinuxAMD64 {
-			runtimeDistributionDigest = compilerDistributionDigest
-		}
-		var builtJob plan.Job
-		var builtAuthorization PlanAuthorization
-		var encoded []byte
-		planErr := func() error {
-			if runtimeDistributionDigest == "" {
-				return fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
-			}
-			steps := make([]plan.Step, len(instance.Steps))
-			var actionIndexes []int
-			var actionRefs []string
-			var actionInputs []map[string]string
-			usedIDs := make(map[string]struct{}, len(instance.Steps))
-			for _, step := range instance.Steps {
-				if step.ID != "" {
-					usedIDs[strings.ToLower(step.ID)] = struct{}{}
-				}
-			}
-			for i, step := range instance.Steps {
-				id := step.ID
-				if id == "" {
-					id = fmt.Sprintf("step-%d", i+1)
-					for suffix := 2; ; suffix++ {
-						if _, exists := usedIDs[strings.ToLower(id)]; !exists {
-							break
-						}
-						id = fmt.Sprintf("step-%d-%d", i+1, suffix)
-					}
-					usedIDs[strings.ToLower(id)] = struct{}{}
-				}
-				span := planSpan(step.Span)
-				steps[i] = plan.Step{
-					ID: id, Name: step.Name, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Command: step.Run, Uses: step.Uses,
-					Shell: step.Shell, WorkingDirectory: step.WorkingDirectory,
-					Env: cloneMap(step.Env), With: cloneMap(step.With), Condition: step.If,
-					ContinueOnError: step.ContinueOnError, TimeoutMinutes: step.TimeoutMinutes, Source: &span,
-				}
-				if step.Kind == "uses" {
-					actionIndexes = append(actionIndexes, i)
-					actionRefs = append(actionRefs, step.Uses)
-					actionInputs = append(actionInputs, step.With)
-				}
-			}
-			var actions []plan.ActionLock
-			requiresMise := len(actionRefs) != 0
-			var capabilities []string
-			var authorization PlanAuthorization
-			var actionRequiredSecrets []string
-			actionInputsInspected := false
-			lockActions := options.ResolveActions
-			if len(actionRefs) != 0 && !lockActions {
-				lockActions = true
-				for _, ref := range actionRefs {
-					if !strings.HasPrefix(ref, "./") {
-						lockActions = false
-						break
-					}
-				}
-			}
-			actionRequiresGitHubToken := false
-			if lockActions && len(actionRefs) != 0 {
-				compiledActions, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, plan.EventServerURL(ir.Event.Provider), actionRefs, actionInputs)
-				if err != nil {
-					return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
-				}
-				selectors := compiledActions.selectors
-				locks := compiledActions.locks
-				actionCapabilities := compiledActions.capabilities
-				requiresMise = compiledActions.requiresMise
-				actionRequiresGitHubToken = compiledActions.requiresGitHubToken
-				actionRequiredSecrets = compiledActions.requiredSecrets
-				authorization.GitHubTokenActions = append([]string(nil), compiledActions.githubTokenActions...)
-				actionInputsInspected = true
-				locksByID := make(map[string]plan.ActionLock, len(locks))
-				for _, lock := range locks {
-					locksByID[lock.ID] = lock
-				}
-				for i, selector := range selectors {
-					stepIndex := actionIndexes[i]
-					steps[stepIndex].Action = &plan.ActionSelector{Lock: selector.Lock}
-					lock, ok := locksByID[selector.Lock]
-					if !ok {
-						return fmt.Errorf("build plan for job %q: action lock %q is missing", instance.LogicalJobID, selector.Lock)
-					}
-					descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-					if descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA {
-						checkoutInputs := cloneMap(instance.Steps[stepIndex].With)
-						for name, value := range checkoutInputs {
-							if !strings.EqualFold(name, "ref") {
-								continue
-							}
-							root, path, refErr := expression.ReferencePath(value)
-							if refErr == nil && (strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "sha") ||
-								strings.EqualFold(root, "needs") && len(path) == 3 && strings.EqualFold(path[1], "outputs")) {
-								checkoutInputs[name] = ir.Event.SHA
-							}
-						}
-						if err := actionintegration.ValidateCheckoutInputs(lock.Commit, checkoutInputs, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
-							span := instance.Steps[stepIndex].Span.Start
-							return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
-						}
-						capabilities = append(capabilities, "provider-token-read")
-						authorization.ProviderTokenReadCapabilitySources = append(authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
-					}
-					if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
-						if err := actionintegration.ValidateUploadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
-							span := instance.Steps[stepIndex].Span.Start
-							return fmt.Errorf("%s:%d:%d: bounded upload-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
-						}
-					}
-					if descriptor.Adapter == actionintegration.AdapterDownloadArtifactBuildkite {
-						if err := actionintegration.ValidateDownloadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
-							span := instance.Steps[stepIndex].Span.Start
-							return fmt.Errorf("%s:%d:%d: bounded download-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
-						}
-						if len(instance.NeedGroups) == 0 {
-							span := instance.Steps[stepIndex].Span.Start
-							return fmt.Errorf("%s:%d:%d: bounded download-artifact adapter requires at least one direct needs producer", instance.SourcePath, span.Line, span.Column)
-						}
-					}
-				}
-				actions = locks
-				capabilities = append(append([]string{}, capabilities...), actionCapabilities...)
-				sort.Strings(capabilities)
-				capabilities = slices.Compact(capabilities)
-				sort.Strings(authorization.ProviderTokenReadCapabilitySources)
-				authorization.ProviderTokenReadCapabilitySources = slices.Compact(authorization.ProviderTokenReadCapabilitySources)
-				if slices.Contains(actionCapabilities, "docker") {
-					authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "dockerfile-actions")
-				}
-			} else {
-				var err error
-				capabilities, err = requiredCapabilities(instance.RepositoryRoot, instance.SourcePath, instance.Steps)
-				if err != nil {
-					return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
-				}
-			}
-			if instance.Container != nil || len(instance.Services) != 0 {
-				if len(actionRefs) != 0 && !lockActions {
-					return fmt.Errorf("build plan for job %q: containers with remote actions require action resolution through upload or profile validation", instance.LogicalJobID)
-				}
-				capabilities = append(capabilities, "docker", "network")
-				sort.Strings(capabilities)
-				capabilities = slices.Compact(capabilities)
-				if instance.Container != nil {
-					authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "job-containers")
-				}
-				if len(instance.Services) != 0 {
-					authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "service-containers")
-				}
-				sort.Strings(authorization.DockerCapabilitySources)
-			}
-			needSources := make(map[string][]plan.NeedSource, len(instance.NeedGroups))
-			for _, logicalNeed := range sortedKeys(instance.NeedGroups) {
-				dependencies := instance.NeedGroups[logicalNeed]
-				if len(dependencies) > plan.MaxNeedProducers {
-					return fmt.Errorf("build plan for job %q: prerequisite %q has %d producers, maximum is %d", instance.LogicalJobID, logicalNeed, len(dependencies), plan.MaxNeedProducers)
-				}
-				for _, dependency := range dependencies {
-					digest, ok := planDigests[dependency]
-					if !ok {
-						return fmt.Errorf("build plan for job %q: prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
-					}
-					needSources[logicalNeed] = append(needSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
-				}
-			}
-			var needOutputs map[string][]plan.NeedOutput
-			if len(instance.NeedOutputs) != 0 {
-				needOutputs = make(map[string][]plan.NeedOutput, len(instance.NeedOutputs))
-				for _, logicalNeed := range sortedKeys(instance.NeedOutputs) {
-					outputs := instance.NeedOutputs[logicalNeed]
-					needOutputs[logicalNeed] = make([]plan.NeedOutput, len(outputs))
-					for i, output := range outputs {
-						needOutputs[logicalNeed][i] = plan.NeedOutput{Name: output.Name, StepKey: output.StepKey, Output: output.Output}
-					}
-				}
-			}
-			secrets, err := requiredSecrets(instance, actionRequiredSecrets, actionInputsInspected)
-			if err != nil {
-				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
-			}
-			var githubToken *plan.GitHubToken
-			referencesGitHubTokenSecret := slices.Contains(secrets, "GITHUB_TOKEN")
-			if referencesGitHubTokenSecret {
-				secrets = slices.DeleteFunc(secrets, func(name string) bool { return name == "GITHUB_TOKEN" })
-			}
-			if referencesGitHubTokenSecret || actionRequiresGitHubToken {
-				if len(instance.Permissions) == 0 {
-					reference := "an action input default that references github.token"
-					if referencesGitHubTokenSecret {
-						reference = "secrets.GITHUB_TOKEN"
-					}
-					return fmt.Errorf("%s:%d:%d: job %q references %s but has no effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, reference)
-				}
-				permissions := make(map[string]string, len(instance.Permissions))
-				for name, access := range instance.Permissions {
-					permissions[strings.ReplaceAll(name, "-", "_")] = access
-				}
-				githubToken = &plan.GitHubToken{Permissions: permissions}
-				capabilities = append(capabilities, "provider-token-write")
-				authorization.ProviderTokenWriteCapabilitySources = []string{"effective-permissions"}
-				authorization.WorkflowTokenPolicyFilename = ir.Workflow.WorkflowTokenPolicyFilename
-				authorization.GitHubTokenSecretReference = referencesGitHubTokenSecret
-			}
-			if len(secrets) != 0 {
-				capabilities = append(capabilities, "secrets")
-			}
-			sort.Strings(capabilities)
-			capabilities = slices.Compact(capabilities)
-			if instance.Platform == PlatformDarwinARM64 && slices.Contains(capabilities, "docker") {
-				return fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on darwin/arm64", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
-			}
-			job := plan.Job{
-				Schema: plan.Schema,
-				Compiler: plan.Compiler{
-					Version: compilerVersion, DistributionDigest: compilerDistributionDigest,
-				},
-				Runtime: &plan.Runtime{DistributionDigest: runtimeDistributionDigest},
-				Workflow: plan.Workflow{
-					Path:         instance.SourcePath,
-					Digest:       instance.SourceDigest,
-					LogicalJobID: instance.LogicalJobID,
-				},
-				Event: plan.Event{
-					Provider: ir.Event.Provider, Name: ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(eventDigest[:]),
-					Repository: ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name,
-					Ref:        ir.Event.Ref, HeadRef: eventHeadRef(ir.Event), SHA: ir.Event.SHA, Actor: ir.Event.Actor,
-				},
-				Target:                  plan.Target{StepKey: instance.Key, Queue: instance.Queue},
-				RequiredCapabilities:    capabilities,
-				RequiredSecrets:         secrets,
-				GitHubToken:             githubToken,
-				Matrix:                  instance.Matrix,
-				Vars:                    cloneMap(ir.Vars),
-				Dependencies:            append([]string(nil), instance.Needs...),
-				NeedSources:             needSources,
-				NeedOutputs:             needOutputs,
-				Env:                     instance.Env,
-				Condition:               instance.If,
-				ContinueOnError:         instance.ContinueOnError,
-				TimeoutMinutes:          instance.TimeoutMinutes,
-				DefaultShell:            instance.DefaultShell,
-				DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
-				Outputs:                 instance.Outputs,
-				Steps:                   steps,
-				Actions:                 actions,
-			}
-			job.RequiresMise = &requiresMise
-			if instance.Container != nil {
-				job.Container = &plan.Container{Image: instance.Container.Image, Env: cloneMap(instance.Container.Env), Ports: append([]string(nil), instance.Container.Ports...)}
-			}
-			if len(instance.Services) != 0 {
-				job.Services = make(map[string]plan.Container, len(instance.Services))
-			}
-			for _, service := range instance.Services {
-				job.Services[service.Name] = plan.Container{Image: service.Container.Image, Env: cloneMap(service.Container.Env), Ports: append([]string(nil), service.Container.Ports...)}
-			}
-			if err := job.Validate(); err != nil {
-				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
-			}
-			encodedJob, err := plan.Encode(job)
-			if err != nil {
-				return fmt.Errorf("encode plan for job %q: %w", instance.LogicalJobID, err)
-			}
-			builtJob = job
-			builtAuthorization = authorization
-			encoded = encodedJob
-			return nil
-		}()
-		if planErr != nil {
-			failedInstances[instance.Key] = true
-			evaluations = append(evaluations, JobEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Evaluated: true})
-			diagnostics = append(diagnostics, planConstructionFinding(instance, planErr))
-			continue
-		}
-		digest := sha256.Sum256(encoded)
-		planDigests[instance.Key] = "sha256:" + hex.EncodeToString(digest[:])
-		plans = append(plans, builtJob)
-		authorizations = append(authorizations, builtAuthorization)
-		evaluations = append(evaluations, JobEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Evaluated: true, Passed: true})
-	}
-	return plans, authorizations, evaluations, errors.Join(diagnostics...)
+// CompileIRWithOptionsContext returns the owned compiler IR even when a
+// failure occurs after static job expansion. Callers may use that partial
+// result for diagnostics and may compile unaffected jobs separately. Every
+// retained plan still requires normal admission before execution.
+func CompileIRWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) (IR, error) {
+	return compile(ctx, path, source, eventSource, options)
 }
 
-func planConstructionFinding(instance JobInstance, err error) error {
-	return &ProcessingFinding{
-		Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility",
-		Path: instance.SourcePath, Line: instance.Source.Start.Line, Column: instance.Source.Start.Column,
-		Job: instance.LogicalJobID, Instance: instance.Key, Err: err,
-	}
-}
-
-func requiredSecrets(instance JobInstance, actionRequired []string, actionInputsInspected bool) ([]string, error) {
-	found := map[string]string{}
-	collect := func(value string) error {
-		names, err := expression.SecretReferences(value)
-		if err != nil {
-			return err
-		}
-		for _, name := range names {
-			found[name] = name
-		}
-		return nil
-	}
-	for _, value := range []string{instance.If, instance.DefaultShell, instance.DefaultWorkingDirectory} {
-		if err := collect(value); err != nil {
-			return nil, err
-		}
-	}
-	for _, values := range []map[string]string{instance.Env, instance.Outputs} {
-		for _, name := range sortedValueKeys(values) {
-			if err := collect(values[name]); err != nil {
-				return nil, err
-			}
-		}
-	}
-	for _, step := range instance.Steps {
-		for _, value := range []string{step.Run, step.If, step.Shell, step.WorkingDirectory} {
-			if err := collect(value); err != nil {
-				return nil, err
-			}
-		}
-		valuesToInspect := []map[string]string{step.Env}
-		if step.Kind != "uses" || !actionInputsInspected {
-			valuesToInspect = append(valuesToInspect, step.With)
-		}
-		for _, values := range valuesToInspect {
-			for _, name := range sortedValueKeys(values) {
-				if err := collect(values[name]); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-	for _, name := range actionRequired {
-		found[name] = name
-	}
-	if !instance.secretAuthority {
-		for name := range found {
-			if name != "GITHUB_TOKEN" {
-				delete(found, name)
-			}
-		}
-	}
-	names := make([]string, 0, len(found))
-	for name := range found {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names, nil
-}
-
-func planSpan(span workflow.Span) plan.Span {
-	return plan.Span{
-		Start: plan.Position{Line: span.Start.Line, Column: span.Start.Column},
-		End:   plan.Position{Line: span.End.Line, Column: span.End.Column},
-	}
-}
-
-func compile(path string, source, eventSource []byte, options Options) (IR, error) {
+func compile(ctx context.Context, path string, source, eventSource []byte, options Options) (ir IR, err error) {
+	defer func() { ir.Sources = retainRootSource(ir.Sources, path, source) }()
 	if err := options.validate(); err != nil {
 		return IR{}, &ProcessingFinding{
 			Code: CodeEnvironment, Category: "environment",
 			Message: "workflow-processing configuration is invalid", Err: err,
 		}
 	}
-	parsed, err := workflow.Parse(path, source)
+	parsed, err := parseReusableWorkflow(path, source)
 	if err != nil {
 		return IR{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
-	workflowTokenPolicyFilename, workflowTokenPolicyDiagnostic := workflowTokenPolicyEvidence(path, parsed)
+	workflowTokenPolicyFilename, workflowTokenPermissions, workflowTokenPolicyDiagnostic := workflowTokenPolicyEvidence(path, parsed)
 	event, err := parseEvent(eventSource)
 	if err != nil {
 		return IR{}, processingFinding(StageEventValidation, CodeEventInvalid, "environment", err)
 	}
 	event.Trust = options.EventTrust
-	vars := options.Vars.snapshot()
-	context := compileContext(event, vars, path, parsed.Name)
+	organizationVars, repositoryVars := cloneMap(options.Vars.Organization), cloneMap(options.Vars.Repository)
+	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
+	context.Inputs = workflowDispatchInputs(parsed, event)
+	runName, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expand(path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	jobGraphComplete := expandErr == nil
+	if jobGraphComplete {
+		expandErr = resolveJobEnvironments(ctx, expanded.instances, event, options)
+	}
 	digest := sha256.Sum256(source)
-	ir := IR{
+	ir = IR{
 		Schema: schema,
 		Workflow: WorkflowSource{
-			Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
-			WorkflowTokenPolicyFilename: workflowTokenPolicyFilename, WorkflowTokenPolicyDiagnostic: workflowTokenPolicyDiagnostic,
+			Path: path, Name: parsed.Name, RunName: runName, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
+			WorkflowTokenPolicyFilename: workflowTokenPolicyFilename, WorkflowTokenPermissions: workflowTokenPermissions, WorkflowTokenPolicyDiagnostic: workflowTokenPolicyDiagnostic,
 		},
-		Event:    event,
-		Vars:     vars,
-		Warnings: compilerWarnings(parsed.Concurrency, cancelInProgress),
+		Event:            event,
+		OrganizationVars: organizationVars,
+		RepositoryVars:   repositoryVars,
+		Warnings:         append(compilerWarnings(parsed, cancelInProgress), expanded.warnings...),
 		Execution: ExecutionBoundary{
 			Supported: true,
-			Reason:    "run-job supports the fail-closed supported shell and local-action subset",
+			Reason:    "run-job rejects unsupported shells and local actions",
 		},
-		Jobs: expanded.instances,
+		Jobs: expanded.instances, Continuations: expanded.continuations, RuntimeMatrixSkippedJobs: expanded.skippedJobs, deferredActions: expanded.deferredActions, JobGraphComplete: jobGraphComplete, Sources: expanded.sources,
 	}
-	return ir, errors.Join(concurrencyErr, cancellationErr, expandErr)
+	return ir, errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr)
 }
 
-func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string, string) {
-	filename, err := plan.GitHubWorkflowPolicyFilename(canonicalWorkflowName(path))
-	if err != nil {
-		return "", err.Error()
+// ResolveWorkflowRunName evaluates one parsed workflow's explicit run-name
+// against the event snapshot used for compilation. Dispatch inputs are only
+// available when the workflow applies to the event.
+func ResolveWorkflowRunName(path string, parsed *workflow.Workflow, event Event, applicable bool) (string, error) {
+	context := compileContext(event, nil, path, parsed.Name)
+	if applicable {
+		context.Inputs = workflowDispatchInputs(parsed, event)
 	}
-	if parsed.Permissions != nil && len(parsed.Permissions.Scopes) == 0 {
-		return "", "GitHub workflow access tokens require explicit non-empty top-level permissions"
+	return resolveWorkflowRunName(path, parsed, context)
+}
+
+func resolveWorkflowRunName(path string, parsed *workflow.Workflow, context expression.CompileContext) (string, error) {
+	if strings.TrimSpace(parsed.RunName) == "" {
+		return "", nil
 	}
+	value, err := evaluateCompileSite(parsed.RunName, expression.ProfileRunName, expression.ResultString, context)
+	resolved, _ := value.(string)
+	if err == nil {
+		if strings.TrimSpace(resolved) == "" {
+			return "", nil
+		}
+		return resolved, nil
+	}
+	position := parsed.RunNameSpan.Start
+	return "", attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, position.Line, position.Column, "", "", "", 0,
+		fmt.Errorf("%s:%d:%d: workflow run-name: %w", path, position.Line, position.Column, err))
+}
+
+func validateWorkflowRunName(path string, parsed *workflow.Workflow) error {
+	if strings.TrimSpace(parsed.RunName) == "" {
+		return nil
+	}
+	if err := validateCompileSite(parsed.RunName, expression.ProfileRunName, expression.ResultString); err != nil {
+		position := parsed.RunNameSpan.Start
+		return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, position.Line, position.Column, "", "", "", 0,
+			fmt.Errorf("%s:%d:%d: workflow run-name: %w", path, position.Line, position.Column, err))
+	}
+	return nil
+}
+
+func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string, map[string]string, string) {
+	filename, filenameErr := plan.GitHubWorkflowPolicyFilename(canonicalWorkflowName(path))
 	permissions := defaultGitHubTokenPermissions().Scopes
 	if parsed.Permissions != nil {
 		permissions = parsed.Permissions.Scopes
 	}
 	normalizedPermissions := make(map[string]string, len(permissions))
 	for name, access := range permissions {
+		if name == "id-token" {
+			continue
+		}
 		normalizedPermissions[strings.ReplaceAll(name, "-", "_")] = access
 	}
+	if filenameErr != nil {
+		return "", normalizedPermissions, filenameErr.Error()
+	}
+	if parsed.Permissions != nil && len(parsed.Permissions.Scopes) == 0 {
+		return "", nil, "GitHub workflow access tokens require explicit non-empty top-level permissions"
+	}
 	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(normalizedPermissions); err != nil {
-		return "", err.Error()
+		return "", normalizedPermissions, err.Error()
 	}
-	for _, job := range parsed.Jobs {
-		if job.Permissions != nil {
-			return "", "GitHub workflow access tokens do not support job-level permissions"
-		}
-		if job.Reusable != nil {
-			return "", "GitHub workflow access tokens do not support reusable-workflow jobs"
-		}
-	}
-	return filename, ""
+	return filename, normalizedPermissions, ""
 }
 
-func compilerWarnings(concurrency *workflow.Concurrency, cancelInProgress bool) []Warning {
-	if concurrency == nil || !cancelInProgress {
-		return nil
+func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warning {
+	var warnings []Warning
+	supported := make(map[string]bool, len(parsed.Triggers))
+	for _, trigger := range parsed.Triggers {
+		if buildkitepipeline.SupportedTriggerEvent(trigger.Event) {
+			supported[trigger.Event] = true
+		}
 	}
-	position := concurrency.CancelInProgressPosition
-	return []Warning{{
+	supportedNames := make([]string, 0, len(supported))
+	for event := range supported {
+		supportedNames = append(supportedNames, event)
+	}
+	sort.Strings(supportedNames)
+	for _, trigger := range parsed.Triggers {
+		if trigger.Event == "merge_group" && (trigger.Paths != nil || trigger.PathsIgnore != nil) {
+			warnings = append(warnings, mergeGroupPathFiltersWarning(trigger.Position))
+		}
+		if trigger.Event == "release" && (trigger.Types == nil || slices.ContainsFunc(trigger.Types, func(activity string) bool {
+			return slices.Contains([]string{"unpublished", "edited", "deleted", "prereleased"}, activity)
+		})) {
+			warnings = append(warnings, nativeReleaseActivitiesWarning(trigger.Position))
+		}
+		if buildkitepipeline.SupportedTriggerEvent(trigger.Event) {
+			continue
+		}
+		message := fmt.Sprintf("on.%s is ignored, so nothing in this workflow runs from it.", trigger.Event)
+		if len(supportedNames) == 0 {
+			message += " This workflow declares no supported triggers that still run."
+		} else {
+			message += " The supported triggers declared in this workflow still run: " + strings.Join(supportedNames, ", ") + "."
+			message += " Move the jobs this trigger guards to one of those triggers if you need them."
+		}
+		message += fmt.Sprintf(" If you need %s, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.", trigger.Event)
+		warnings = append(warnings, Warning{
+			Code:          "W_TRIGGER_EVENT_UNSUPPORTED",
+			Blocker:       "trigger",
+			BlockerDetail: trigger.Event,
+			Line:          trigger.Position.Line,
+			Column:        trigger.Position.Column,
+			Message:       message,
+		})
+	}
+	if parsed.Concurrency != nil && cancelInProgress {
+		warnings = append(warnings, workflowCancellationWarning(parsed.Concurrency.CancelInProgressPosition))
+	}
+	return warnings
+}
+
+func nativeReleaseActivitiesWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "GitHub Actions Pipeline Triggers accept all seven release activities and apply GitHub's draft-release suppression. Native Buildkite release builds deliver only published, created, and released, so unpublished, edited, deleted, and prereleased will not run this workflow through the native integration.",
+	}
+}
+
+func mergeGroupPathFiltersWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_MERGE_GROUP_PATH_FILTERS_IGNORED",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "on.merge_group paths and paths-ignore are ignored, matching GitHub, which does not evaluate path filters for merge_group events. Every merge_group delivery runs this workflow. Move the filtering into a job or step condition if you need it.",
+	}
+}
+
+func workflowCancellationWarning(position workflow.Position) Warning {
+	return Warning{
 		Code:    "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED",
 		Line:    position.Line,
 		Column:  position.Column,
-		Message: "workflow concurrency cancel-in-progress is not enforced; Buildkite pipeline settings can approximate it for same-branch builds",
-	}}
-}
-
-// ParseEvent validates and decodes the event snapshot used for compilation.
-// Callers that select work before compiling must use this same parser so event
-// applicability cannot diverge from compiler semantics.
-func ParseEvent(source []byte) (Event, error) {
-	return parseEvent(source)
-}
-
-func parseEvent(source []byte) (Event, error) {
-	if len(bytes.TrimSpace(source)) == 0 {
-		return Event{}, fmt.Errorf("event snapshot is required")
-	}
-	var input struct {
-		Provider   string         `json:"provider"`
-		Event      string         `json:"event"`
-		Repository Repository     `json:"repository"`
-		Ref        string         `json:"ref"`
-		SHA        string         `json:"sha"`
-		Actor      string         `json:"actor"`
-		Payload    map[string]any `json:"payload"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(source))
-	decoder.UseNumber()
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
-		return Event{}, fmt.Errorf("parse event snapshot: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return Event{}, fmt.Errorf("parse event snapshot: multiple JSON values")
-		}
-		return Event{}, fmt.Errorf("parse event snapshot: %w", err)
-	}
-	if strings.TrimSpace(input.Provider) == "" || strings.TrimSpace(input.Event) == "" || strings.TrimSpace(input.Repository.Owner) == "" || strings.TrimSpace(input.Repository.Name) == "" || strings.TrimSpace(input.Ref) == "" || strings.TrimSpace(input.SHA) == "" || strings.TrimSpace(input.Actor) == "" {
-		return Event{}, fmt.Errorf("event snapshot requires provider, event, repository owner/name, ref, sha, and actor")
-	}
-	if input.Payload == nil {
-		input.Payload = map[string]any{}
-	}
-	return Event{
-		Provider: input.Provider, Event: input.Event, Repository: input.Repository,
-		Ref: input.Ref, SHA: input.SHA, Actor: input.Actor, Payload: input.Payload,
-	}, nil
-}
-
-func compileContext(event Event, vars map[string]string, workflowPath, workflowName string) expression.CompileContext {
-	repository := event.Repository.Owner + "/" + event.Repository.Name
-	if workflowName == "" {
-		workflowName = canonicalWorkflowName(workflowPath)
-	}
-	return expression.CompileContext{
-		GitHub: map[string]any{
-			"event_name":       event.Event,
-			"event":            event.Payload,
-			"head_ref":         eventHeadRef(event),
-			"repository":       repository,
-			"repository_owner": event.Repository.Owner,
-			"ref":              event.Ref,
-			"sha":              event.SHA,
-			"actor":            event.Actor,
-			"workflow":         workflowName,
-		},
-		Event: event.Payload,
-		Vars:  vars,
+		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
 	}
 }
 
-func eventHeadRef(event Event) string {
-	if event.Event != "pull_request" && event.Event != "pull_request_target" {
-		return ""
+func guardedReusableConcurrencyWarning(position workflow.Position, calleePath string) Warning {
+	return Warning{
+		Code:    "W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: fmt.Sprintf("The call condition depends on runtime values, so Buildkite enters the concurrency group of reusable workflow %q before it knows whether the call runs. When the condition is false, the skipped jobs still wait for the group and hold it until they finish. GitHub never enters the group for a skipped call. Write the condition with github, inputs, or event values only, which resolve during compilation, if the wait matters.", calleePath),
 	}
-	pullRequest, ok := event.Payload["pull_request"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	head, ok := pullRequest["head"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	ref, _ := head["ref"].(string)
-	return ref
 }
 
-func canonicalWorkflowName(path string) string {
-	if isRepositoryWorkflowPath(path) {
-		root, canonicalPath, err := workflowRepository(path)
-		if err == nil {
-			if relative, err := repositoryWorkflowPath(root, canonicalPath); err == nil {
-				return strings.TrimPrefix(relative, "./")
-			}
-		}
+func prerequisiteReusableConcurrencyWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_REUSABLE_WORKFLOW_CONCURRENCY_QUEUED_BEFORE_PREREQUISITES",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "Buildkite reserves the reusable workflow's concurrency queue position at pipeline upload, before its prerequisites finish. The opening gate waits for those prerequisites, but later calls or builds using the group can wait behind it even when they are ready. GitHub admits the called workflow after its prerequisites finish. Mutual exclusion is preserved; admission order can differ.",
 	}
-	return filepath.ToSlash(filepath.Clean(path))
 }
 
-func expand(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (expansionResult, error) {
-	resolved, runtimeMatrixBoundary, err := resolveReusableWorkflows(path, source, parsed, context)
-	if err != nil {
-		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
-		for _, job := range parsed.Jobs {
-			notEvaluatedJobs[job.ID] = true
-		}
-		return expansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: runtimeMatrixBoundary}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
+func legacyCheckoutWarning(position workflow.Position, release string, defaultsToFullHistory bool) Warning {
+	generation := "v2"
+	if defaultsToFullHistory {
+		generation = "v1"
 	}
-	result := expansionResult{
-		jobs:                  processingJobs(path, parsed, resolved),
-		runtimeMatrixBoundary: runtimeMatrixBoundary,
-		notEvaluatedJobs:      make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
+	message := fmt.Sprintf("actions/checkout %s behaves like %s. It does not set the ref and commit outputs, which actions/checkout added in v4.2.0.", release, generation)
+	if defaultsToFullHistory {
+		message += " It also defaults to full history when fetch-depth is omitted. Upgrade to actions/checkout v4 or later if either difference matters."
+	} else {
+		message += " Upgrade to actions/checkout v4 or later if a later step reads either output."
 	}
-	jobs := make(map[string]workflow.Job, len(resolved))
-	sourcePaths := make(map[string]string, len(resolved))
-	sourceDigests := make(map[string]string, len(resolved))
-	sourceRoots := make(map[string]string, len(resolved))
-	secretAuthorities := make(map[string]bool, len(resolved))
-	needBindings := make(map[string]map[string]needBinding, len(resolved))
-	var diagnostics []error
-	failedJobs := make(map[string]bool, len(resolved))
-	for _, sourced := range resolved {
-		job := sourced.Job
-		if _, exists := jobs[job.ID]; exists {
-			diagnostics = append(diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", sourced.path, 0, 0, job.ID, "", "", 0, jobError(sourced.path, job, fmt.Sprintf("flattened job id %q collides with another job", job.ID))))
-			continue
-		}
-		jobs[job.ID] = job
-		sourcePaths[job.ID] = sourced.path
-		sourceDigests[job.ID] = sourced.digest
-		sourceRoots[job.ID] = sourced.root
-		secretAuthorities[job.ID] = sourced.secretAuthority
-		needBindings[job.ID] = sourced.needBindings
-		if err := supported(sourced.path, job); err != nil {
-			diagnostics = append(diagnostics, err)
-			failedJobs[job.ID] = true
-		}
+	return Warning{
+		Code:    "W_CHECKOUT_LEGACY_RELEASE",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: message,
 	}
-	order, err := topologicalOrder(path, jobs)
-	if err != nil {
-		diagnostics = append(diagnostics, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err))
-		order = sortedKeys(jobs)
-	}
+}
 
-	matricesByJob := make(map[string][]map[string]any, len(jobs))
-	failedMatrices := make(map[string]bool)
-	for _, id := range order {
-		job := jobs[id]
-		descriptor, deferred, matrixErr := describeRuntimeMatrix(job, sourcePaths[id], sourceDigests[id], needBindings[id], jobs, matricesByJob)
-		var matrices []map[string]any
-		if deferred {
-			result.runtimeMatrixBoundary = true
-			position := job.Matrix.Span.Start
-			if job.Matrix.Expression != nil {
-				position = workflow.Position{Line: job.Matrix.Expression.Span.Start.Line, Column: job.Matrix.Expression.Span.Start.Column}
-			} else if job.Matrix.IncludeExpression != nil {
-				position = workflow.Position{Line: job.Matrix.IncludeExpression.Span.Start.Line, Column: job.Matrix.IncludeExpression.Span.Start.Column}
-			}
-			if matrixErr == nil {
-				result.runtimeMatrices = append(result.runtimeMatrices, descriptor)
-				matrixErr = errors.New("runtime matrix source is valid, but continuation upload is disabled because Buildkite transport has no authoritative current-attempt fence and durable idempotency boundary")
-			}
-			matrixErr = locatedJobError(sourcePaths[id], job, position.Line, position.Column, matrixErr.Error())
-		} else if !deferred {
-			matrices, matrixErr = expandMatrix(sourcePaths[id], job, context)
+func unknownCheckoutCommitWarning(position workflow.Position, commit string) Warning {
+	return Warning{
+		Code:   "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("actions/checkout resolved to immutable commit %s, which is absent from the frozen per-commit snapshot. The native adapter is using the supported %s contract instead; it still restricts repository, ref, path, credentials, and other inputs, and does not run the upstream action JavaScript.",
+			commit, actionintegration.CheckoutFallbackContractRelease),
+	}
+}
+
+func unknownUploadArtifactCommitWarning(position workflow.Position, commit string) Warning {
+	return Warning{
+		Code:   "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("actions/upload-artifact resolved to immutable commit %s, which is absent from the frozen per-commit snapshot. The native adapter is using the supported %s contract instead; it still restricts names, paths, archive mode, overwrite, hidden files, sizes, and outputs, and does not run the upstream action JavaScript.",
+			commit, actionintegration.UploadArtifactFallbackContractRelease),
+	}
+}
+
+func substitutedCacheCommitWarning(position workflow.Position, substitution CacheSubstitution) Warning {
+	action, _, _ := strings.Cut(substitution.Reference, "@")
+	return Warning{
+		Code:   "W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("%s resolved to commit %s, which is not in the frozen actions/cache snapshot admitted to the Buildkite cache-v2 service. The audited %s release (%s) runs instead. Pin %s@%s to remove this warning.",
+			substitution.Reference, substitution.ResolvedCommit, substitution.Release, substitution.Commit, action, substitution.Commit),
+	}
+}
+
+func legacyUploadArtifactWarning(position workflow.Position, release string) Warning {
+	return Warning{
+		Code:    "W_UPLOAD_ARTIFACT_LEGACY_RELEASE",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: fmt.Sprintf("actions/upload-artifact %s is emulated by the native adapter with its release contract; upgrade to v4 or later", release),
+	}
+}
+
+func unknownDownloadArtifactCommitWarning(position workflow.Position, commit string) Warning {
+	return Warning{
+		Code:   "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("actions/download-artifact resolved to immutable commit %s, which is outside the exact admission set. The native adapter is using the supported %s contract instead; it still restricts selection to artifacts from verified direct needs producers and enforces destination, ZIP, digest, count, and size bounds, and does not run the upstream action JavaScript.",
+			commit, actionintegration.DownloadArtifactFallbackContractRelease),
+	}
+}
+
+func reusableWorkflowTokenWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "jobs expanded from local reusable workflows use the top-level requesting workflow permissions for GITHUB_TOKEN; permissions declared in called workflows are not enforced",
+	}
+}
+
+func jobWorkflowTokenWarning(position workflow.Position, permissions map[string]string) Warning {
+	names := make([]string, 0, len(permissions))
+	for name := range permissions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	effective := make([]string, 0, len(names))
+	for _, name := range names {
+		effective = append(effective, strings.ReplaceAll(name, "_", "-")+": "+permissions[name])
+	}
+	return Warning{
+		Code:    "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "Job-level permissions are ignored for GITHUB_TOKEN. The top-level workflow permissions apply instead. This job's token has " + strings.Join(effective, ", ") + ". Move this job's permissions block to the workflow top level. If you need per-job permissions, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
+	}
+}
+
+func resolveCompileContainer(container *workflow.Container, context expression.CompileContext) (*workflow.Container, error) {
+	if container == nil {
+		return nil, nil
+	}
+	resolved := *container
+	resolved.Env = cloneMap(container.Env)
+	resolved.Ports = append([]string(nil), container.Ports...)
+	resolved.Volumes = append([]string(nil), container.Volumes...)
+	if strings.Contains(resolved.Image, "${{") {
+		value, err := evaluateCompileSite(resolved.Image, expression.ProfileCompileContainerImage, expression.ResultString, context)
+		if err != nil {
+			return nil, err
 		}
-		if matrixErr != nil {
-			line, column := job.Span.Start.Line, job.Span.Start.Column
-			if job.Matrix != nil {
-				line, column = job.Matrix.Span.Start.Line, job.Matrix.Span.Start.Column
-				if job.Matrix.Expression != nil {
-					line, column = job.Matrix.Expression.Span.Start.Line, job.Matrix.Expression.Span.Start.Column
-				} else if job.Matrix.IncludeExpression != nil {
-					line, column = job.Matrix.IncludeExpression.Span.Start.Line, job.Matrix.IncludeExpression.Span.Start.Column
+		resolved.Image = value.(string)
+		// GitHub treats an empty evaluated image as host execution, including
+		// object-form containers. Literal images are validated during parsing.
+		if resolved.Image == "" {
+			return nil, nil
+		}
+	}
+	if strings.TrimSpace(resolved.Image) == "" {
+		return nil, fmt.Errorf("container image resolved to an empty string")
+	}
+	if len(resolved.Image) > 512 || !plan.ValidContainerImageReference(resolved.Image) {
+		return nil, fmt.Errorf("container image resolved to an invalid image reference")
+	}
+	return &resolved, nil
+}
+
+func resolveCompileServices(services []workflow.Service, context expression.CompileContext) ([]workflow.Service, error) {
+	// Credentials are runner-evaluated after the job's environment applies, so
+	// their vars context is not known here. Keep vars residual so the runtime
+	// evaluates them with environment variables laid over the pre-environment
+	// scopes. Every other service field is compile-time and keeps the context.
+	credentialContext := context
+	credentialContext.Vars = nil
+	resolved := make([]workflow.Service, 0, len(services))
+	for _, service := range services {
+		container := service.Container
+		container.Env = cloneMap(container.Env)
+		container.Ports = append([]string(nil), container.Ports...)
+		container.Volumes = append([]string(nil), container.Volumes...)
+		if container.Credentials != nil {
+			credentials := *container.Credentials
+			container.Credentials = &credentials
+			for _, field := range []*string{&container.Credentials.Username, &container.Credentials.Password} {
+				if err := validateCompileSite(*field, expression.ProfileServiceCredential, expression.ResultString); err != nil {
+					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
 				}
-			}
-			diagnostics = append(diagnostics, &ProcessingFinding{
-				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
-				Path: sourcePaths[id], Line: line, Column: column, Job: job.ID,
-				Message: "matrix could not be expanded or validated", Err: matrixErr,
-			})
-			failedMatrices[id] = true
-			failedJobs[id] = true
-			continue
-		}
-		matricesByJob[id] = matrices
-	}
-
-	byLogicalID := make(map[string][]JobInstance, len(jobs))
-	instanceKeys := make(map[string]string)
-	for _, id := range order {
-		job := jobs[id]
-		jobPath := sourcePaths[id]
-		if failedMatrices[id] {
-			continue
-		}
-		jobBlocked := false
-		for _, binding := range needBindings[id] {
-			for _, member := range binding.members {
-				if failedJobs[member] {
-					jobBlocked = true
-				}
-			}
-		}
-		jobFailed := failedJobs[id]
-		matrices := matricesByJob[id]
-		concurrencyGroups := make(map[string]struct{}, len(matrices))
-		for _, matrix := range matrices {
-			compileConditionErr := supportedCompileTimeConditions(jobPath, job, context, matrix)
-			instanceJob := resolveCompileTimeConditions(job, context, matrix)
-			conditionValidationJob := instanceJob
-			conditionContext := context
-			conditionContext.Matrix = matrix
-			if resolved, err := expression.EvaluateCompileCondition(instanceJob.If, conditionContext); err == nil && !resolved {
-				instanceJob.If = "false"
-				instanceJob.Steps = []workflow.Step{{Name: "Statically disabled job", Kind: "run", Run: ":", If: "false", Span: job.Span}}
-			}
-			key, err := namespacedInstanceKey(options.StepKeyNamespace, job.ID, matrix)
-			if err != nil {
-				diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err))))
-				jobFailed = true
-				continue
-			}
-			if existingJob, exists := instanceKeys[key]; exists {
-				diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("deterministic instance key %q collides with another instance from job %q", key, existingJob))))
-				jobFailed = true
-				continue
-			}
-			instanceKeys[key] = job.ID
-			candidate := JobInstance{
-				Key:                     key,
-				LogicalJobID:            job.ID,
-				Matrix:                  matrix,
-				FailFast:                job.FailFast,
-				MaxParallel:             job.MaxParallel,
-				Steps:                   append([]workflow.Step(nil), instanceJob.Steps...),
-				Env:                     cloneMap(instanceJob.Env),
-				Permissions:             permissionScopes(job.Permissions),
-				If:                      instanceJob.If,
-				ContinueOnError:         job.ContinueOnError,
-				TimeoutMinutes:          job.TimeoutMinutes,
-				DefaultShell:            job.DefaultShell,
-				DefaultWorkingDirectory: job.DefaultWorkingDirectory,
-				Outputs:                 cloneMap(job.Outputs),
-				Container:               job.Container,
-				Services:                append([]workflow.Service(nil), job.Services...),
-				SourcePath:              jobPath,
-				SourceDigest:            sourceDigests[id],
-				RepositoryRoot:          sourceRoots[id],
-				Source:                  job.Span,
-				secretAuthority:         secretAuthorities[id],
-			}
-			result.candidates = append(result.candidates, candidate)
-
-			valid := true
-			if compileConditionErr != nil {
-				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, compileConditionErr))
-				valid = false
-			} else if err := supportedConditions(jobPath, conditionValidationJob, matrix, true); err != nil {
-				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
-				valid = false
-			}
-			labels, runsOnErr := resolveRunsOn(job, context, matrix)
-			if runsOnErr != nil {
-				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, key, "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, runsOnErr.Error())))
-				valid = false
-			}
-			var target RunnerTarget
-			if runsOnErr == nil {
-				target, err = options.Runners.resolve(labels, options.EventTrust)
+				value, err := reducePartialTemplateString(*field, expression.ProfileServiceCredential, credentialContext)
 				if err != nil {
-					message, detail := runnerRejectionDiagnostic(err, reportableRunnerLabels(job, labels), options.Runners.supportedLabels(), options.Runners.UntrustedQueues)
-					finding := &ProcessingFinding{
-						Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
-						Path: jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
-						Job: job.ID, Instance: key, Message: message, Detail: detail,
-						Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
-					}
-					diagnostics = append(diagnostics, finding)
-					valid = false
+					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
 				}
+				*field = value
 			}
-			concurrencyGroup, concurrencyErr := resolveConcurrency(jobPath, job.ID, job.Concurrency, context, matrix)
-			if concurrencyErr != nil {
-				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, concurrencyErr))
-				valid = false
-			}
-			if cancellationErr := rejectJobCancellation(jobPath, job); cancellationErr != nil {
-				position := job.Concurrency.CancelInProgressPosition
-				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, key, "", 0, cancellationErr))
-				valid = false
-			}
-			if concurrencyGroup != "" {
-				concurrencyGroups[canonicalConcurrencyGroup(concurrencyGroup)] = struct{}{}
-			}
-			if !valid {
-				jobFailed = true
-				continue
-			}
-			if jobBlocked {
-				result.notEvaluatedJobs[id] = true
-				result.notEvaluatedInstances[key] = true
-				continue
-			}
-			instance := candidate
-			instance.Label = instanceLabel(job, matrix, context)
-			instance.RunsOn = labels
-			instance.Queue = target.Queue
-			instance.Platform = target.Platform
-			instance.RuntimeImage = target.Image
-			instance.ConcurrencyGroup = concurrencyGroup
-			dependencyFailed := false
-			for _, need := range sortedKeys(needBindings[id]) {
-				binding := needBindings[id][need]
-				var members []string
-				for _, member := range binding.members {
-					for _, prerequisite := range byLogicalID[member] {
-						members = append(members, prerequisite.Key)
-					}
-				}
-				sort.Strings(members)
-				if len(members) == 0 {
-					diagnostics = append(diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("prerequisite %q has no expanded instances", need))))
-					dependencyFailed = true
-					break
-				}
-				if instance.NeedGroups == nil {
-					instance.NeedGroups = make(map[string][]string, len(needBindings[id]))
-				}
-				instance.NeedGroups[need] = members
-				instance.Needs = append(instance.Needs, members...)
-				if binding.projectOutputs {
-					if instance.NeedOutputs == nil {
-						instance.NeedOutputs = make(map[string][]NeedOutput)
-					}
-					projected := []NeedOutput{}
-					for _, output := range binding.outputs {
-						producers := byLogicalID[output.member]
-						if len(producers) == 0 {
-							diagnostics = append(diagnostics, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", fmt.Errorf("%s:%d:%d: workflow_call output %q selects unexpanded job %q", output.path, output.span.Start.Line, output.span.Start.Column, output.name, output.member)))
-							continue
-						}
-						if len(projected)+len(producers) > plan.MaxNeedOutputs {
-							diagnostics = append(diagnostics, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", fmt.Errorf("%s:%d:%d: workflow_call output %q expands call projections beyond the maximum of %d", output.path, output.span.Start.Line, output.span.Start.Column, output.name, plan.MaxNeedOutputs)))
-							continue
-						}
-						for _, producer := range producers {
-							projected = append(projected, NeedOutput{Name: output.name, StepKey: producer.Key, Output: output.output})
-						}
-					}
-					sort.Slice(projected, func(i, j int) bool {
-						if projected[i].Name != projected[j].Name {
-							return projected[i].Name < projected[j].Name
-						}
-						if projected[i].StepKey != projected[j].StepKey {
-							return projected[i].StepKey < projected[j].StepKey
-						}
-						return projected[i].Output < projected[j].Output
-					})
-					instance.NeedOutputs[need] = projected
-				}
-			}
-			if dependencyFailed {
-				jobFailed = true
-				continue
-			}
-			sort.Strings(instance.Needs)
-			instance.Needs = slices.Compact(instance.Needs)
-			byLogicalID[id] = append(byLogicalID[id], instance)
 		}
-		if job.MaxParallel != nil && len(concurrencyGroups) > 1 {
-			position := job.Concurrency.Span.Start
-			diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, "", "", 0, locatedJobError(jobPath, job, position.Line, position.Column, "concurrency groups that vary by matrix cannot be combined with strategy.max-parallel")))
-			jobFailed = true
+		fields := []*string{&container.Image, &container.Options, &container.Command, &container.Entrypoint}
+		for _, field := range fields {
+			value, err := reducePartialTemplateString(*field, expression.ProfileServiceTemplate, context)
+			if err != nil {
+				return nil, fmt.Errorf("service %q: %w", service.Name, err)
+			}
+			*field = value
 		}
-		failedJobs[id] = jobFailed || jobBlocked
+		for key, value := range container.Env {
+			resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceTemplate, context)
+			if err != nil {
+				return nil, fmt.Errorf("service %q environment %q: %w", service.Name, key, err)
+			}
+			container.Env[key] = resolvedValue
+		}
+		for _, values := range [][]string{container.Ports, container.Volumes} {
+			for j, value := range values {
+				resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceTemplate, context)
+				if err != nil {
+					return nil, fmt.Errorf("service %q: %w", service.Name, err)
+				}
+				values[j] = resolvedValue
+			}
+		}
+		for _, value := range append(append(append([]string{container.Image, container.Options, container.Command, container.Entrypoint}, container.Ports...), container.Volumes...), mapValues(container.Env)...) {
+			if strings.Contains(value, "${{") {
+				if err := validateCompileSite(value, expression.ProfileServiceTemplate, expression.ResultString); err != nil {
+					return nil, fmt.Errorf("service %q: %w", service.Name, err)
+				}
+			}
+		}
+		if container.Image == "" {
+			continue
+		}
+		service.Container = container
+		resolved = append(resolved, service)
 	}
+	return resolved, nil
+}
 
-	var instances []JobInstance
-	for _, id := range order {
-		instances = append(instances, byLogicalID[id]...)
+func mapValues(values map[string]string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, value)
 	}
-	result.instances = instances
-	return result, errors.Join(diagnostics...)
+	return result
 }
 
 func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, context expression.CompileContext, matrix map[string]any) (string, error) {
@@ -1154,7 +783,8 @@ func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, c
 		return "", nil
 	}
 	context.Matrix = matrix
-	group, err := expression.EvaluateCompileTemplate(concurrency.Group, context)
+	value, err := evaluateCompileSite(concurrency.Group, expression.ProfileCompileTemplate, expression.ResultString, context)
+	group, _ := value.(string)
 	if err != nil {
 		message := fmt.Sprintf("concurrency group cannot be resolved at compile time: %v", err)
 		if jobID == "" {
@@ -1183,7 +813,7 @@ func resolveWorkflowCancellation(path string, concurrency *workflow.Concurrency,
 	if concurrency == nil || concurrency.CancelInProgressExpression == nil {
 		return concurrency != nil && concurrency.CancelInProgress, nil
 	}
-	value, err := expression.EvaluateCompile(*concurrency.CancelInProgressExpression, context)
+	value, err := evaluateCompileSite(concurrency.CancelInProgressExpression.Text, expression.ProfileCompile, expression.ResultAny, context)
 	if err != nil {
 		position := concurrency.CancelInProgressPosition
 		return false, fmt.Errorf("%s:%d:%d: workflow concurrency cancel-in-progress cannot be resolved at compile time: %v", path, position.Line, position.Column, err)
@@ -1215,7 +845,16 @@ func supported(path string, job workflow.Job) error {
 		return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, 0, 0, job.ID, "", "", 0, jobError(path, job, "runs-on must resolve statically"))
 	}
 	ids := make(map[string]struct{}, len(job.Steps))
-	for _, step := range job.Steps {
+	for i, step := range job.Steps {
+		if step.Kind == "uses" && strings.HasPrefix(strings.ToLower(step.Uses), "docker://") {
+			return &ProcessingFinding{
+				Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
+				Blocker: "action_ref", BlockerDetail: step.Uses,
+				Path: path, Line: step.Span.Start.Line, Column: step.Span.Start.Column,
+				Job: job.ID, Action: step.Uses, Step: i + 1,
+				Err: locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, actionsource.UnsupportedContainerActionReason),
+			}
+		}
 		if step.ID != "" {
 			id := strings.ToLower(step.ID)
 			if _, exists := ids[id]; exists {
@@ -1227,56 +866,73 @@ func supported(path string, job workflow.Job) error {
 	return nil
 }
 
+// resolveCompileTimeConditions reduces event values in the job and step
+// conditions. Conditions keep vars residual: the runtime evaluates each
+// position with its own scopes from the plan (repository over organization
+// for the job condition, the environment laid over them for steps), and a
+// condition a variable makes false must not prune token or secret authority,
+// which planning computes from the residual condition.
 func resolveCompileTimeConditions(job workflow.Job, context expression.CompileContext, matrix map[string]any) workflow.Job {
 	context.Matrix = matrix
-	if resolved, ok := resolveCompileTimeCondition(job.If, context); ok {
+	context.Vars = nil
+	if resolved, ok := resolveCompileTimeCondition(job.If, expression.ProfileCompileJobCondition, context); ok {
 		job.If = resolved
 	}
 	job.Steps = append([]workflow.Step(nil), job.Steps...)
 	for i := range job.Steps {
 		step := &job.Steps[i]
-		if resolved, ok := resolveCompileTimeCondition(step.If, context); ok {
+		if resolved, ok := resolveCompileTimeCondition(step.If, expression.ProfileCompileStepCondition, context); ok {
 			step.If = resolved
 		}
 	}
 	return job
 }
 
-func resolveCompileTimeCondition(source string, context expression.CompileContext) (string, bool) {
-	usesEvent, err := expression.ReferencesGitHubEvent(source)
+func resolveCompileTimeCondition(source string, profile expression.ProfileID, context expression.CompileContext) (string, bool) {
+	usesEvent, err := siteReferencesEvent(source, profile, expression.ResultBoolean, true)
 	if err != nil || !usesEvent {
 		return source, false
 	}
-	resolved, err := expression.EvaluateCompileCondition(source, context)
+	reduced, err := reduceCompileSite(source, profile, expression.ResultBoolean, context)
 	if err != nil {
 		return source, false
 	}
-	if resolved {
-		referencesStatus, _ := expression.ReferencesStatusFunction(source)
-		if referencesStatus {
-			return "always()", true
+	if reduced.Known {
+		resolved, _ := reduced.Value.(bool)
+		if resolved {
+			referencesStatus, _ := referencesStatus(source, profile)
+			if referencesStatus {
+				return "always()", true
+			}
 		}
+		return strconv.FormatBool(resolved), true
 	}
-	return strconv.FormatBool(resolved), true
+	return reduced.Source, true
 }
 
-func supportedConditions(path string, job workflow.Job, matrix map[string]any, matrixKnown bool) error {
-	validate := expression.ValidateCondition
-	if matrixKnown {
-		validate = func(source string, scope expression.ConditionScope) error {
-			return expression.ValidateConditionWithMatrix(source, scope, matrix)
+func supportedConditions(path string, job workflow.Job) error {
+	validate := func(source string, scope expression.ConditionScope) error {
+		profile, err := runtimeConditionProfile(scope)
+		if err != nil {
+			return err
 		}
+		return validateCompileSite(source, profile, expression.ResultBoolean)
 	}
 	return validateConditions(path, job, validate)
 }
 
-func supportedCompileTimeConditions(path string, job workflow.Job, context expression.CompileContext, matrix map[string]any) error {
+func supportedCompileTimeConditions(path string, job workflow.Job, context expression.CompileContext) error {
 	validate := func(source string, scope expression.ConditionScope) error {
-		usesEvent, err := expression.ReferencesGitHubEvent(source)
+		profile, err := compileConditionProfile(scope)
+		if err != nil {
+			return err
+		}
+		usesEvent, err := siteReferencesEvent(source, profile, expression.ResultBoolean, true)
 		if err != nil || !usesEvent {
 			return nil
 		}
-		return expression.ValidateCompileConditionWithMatrix(source, scope, context, matrix)
+		_, err = reduceCompileSite(source, profile, expression.ResultBoolean, context)
+		return err
 	}
 	return validateConditions(path, job, validate)
 }
@@ -1288,7 +944,7 @@ func validateConditions(path string, job workflow.Job, validate func(string, exp
 		if position.Line == 0 {
 			position = job.Span.Start
 		}
-		diagnostics = append(diagnostics, locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("job condition: %v", err)))
+		diagnostics = append(diagnostics, locatedJobWrappedError(path, job, position.Line, position.Column, "job condition", err))
 	}
 	for i, step := range job.Steps {
 		if err := validate(step.If, expression.StepCondition); err != nil {
@@ -1300,7 +956,7 @@ func validateConditions(path string, job workflow.Job, validate func(string, exp
 			if step.ID != "" {
 				label = fmt.Sprintf("step %q", step.ID)
 			}
-			diagnostics = append(diagnostics, locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("%s condition: %v", label, err)))
+			diagnostics = append(diagnostics, locatedJobWrappedError(path, job, position.Line, position.Column, label+" condition", err))
 		}
 	}
 	return errors.Join(diagnostics...)
@@ -1311,9 +967,7 @@ func cloneMap(in map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -1326,568 +980,10 @@ func sortedKeys[V any](values map[string]V) []string {
 	return keys
 }
 
-func expandMatrix(path string, job workflow.Job, context expression.CompileContext) ([]map[string]any, error) {
-	if job.Matrix == nil {
-		return []map[string]any{nil}, nil
-	}
-	matrix, err := resolveMatrix(job.Matrix, context)
-	if err != nil {
-		position := job.Matrix.Span.Start
-		if job.Matrix.Expression != nil {
-			position = workflow.Position{Line: job.Matrix.Expression.Span.Start.Line, Column: job.Matrix.Expression.Span.Start.Column}
-		} else if job.Matrix.IncludeExpression != nil {
-			position = workflow.Position{Line: job.Matrix.IncludeExpression.Span.Start.Line, Column: job.Matrix.IncludeExpression.Span.Start.Column}
-		}
-		return nil, locatedJobError(path, job, position.Line, position.Column, err.Error())
-	}
-	matrices, err := expandMatrixDefinition(matrix)
-	if err != nil {
-		return nil, jobError(path, job, err.Error())
-	}
-	return matrices, nil
-}
-
-func expandMatrixDefinition(matrix *workflow.Matrix) ([]map[string]any, error) {
-	matrices := []map[string]any{{}}
-	if len(matrix.Rows) == 0 {
-		matrices = nil
-	}
-	for _, row := range matrix.Rows {
-		if len(row.Values) == 0 {
-			return nil, fmt.Errorf("matrix dimension %q has no values", row.Name)
-		}
-		var next []map[string]any
-		for _, current := range matrices {
-			for _, value := range row.Values {
-				combination := make(map[string]any, len(current)+1)
-				for key, existing := range current {
-					combination[key] = existing
-				}
-				combination[row.Name] = value.Data
-				next = append(next, combination)
-				if len(next) > maxMatrixInstances {
-					return nil, fmt.Errorf("matrix expands beyond %d instances", maxMatrixInstances)
-				}
-			}
-		}
-		matrices = next
-	}
-
-	matrices = excludeMatrixCombinations(matrices, matrix.Exclude)
-	// Includes may overwrite values added by earlier includes, but not original
-	// dimensions. Standalone combinations are never candidates for later entries.
-	type includedMatrix struct {
-		values   map[string]any
-		original map[string]any
-	}
-	included := make([]includedMatrix, len(matrices))
-	for i, matrix := range matrices {
-		included[i] = includedMatrix{values: matrix, original: cloneAnyMap(matrix)}
-	}
-	for _, combination := range matrix.Include {
-		values := matrixCombinationValues(combination)
-		matched := false
-		for i := range included {
-			if included[i].original == nil || !includeCompatible(included[i].original, values) {
-				continue
-			}
-			for key, value := range values {
-				included[i].values[key] = value
-			}
-			matched = true
-		}
-		if !matched {
-			included = append(included, includedMatrix{values: cloneAnyMap(values)})
-		}
-		if len(included) > maxMatrixInstances {
-			return nil, fmt.Errorf("matrix expands beyond %d instances", maxMatrixInstances)
-		}
-	}
-	matrices = matrices[:0]
-	for _, matrix := range included {
-		matrices = append(matrices, matrix.values)
-	}
-	if len(matrices) == 0 {
-		return nil, fmt.Errorf("matrix excludes every combination")
-	}
-	return matrices, nil
-}
-
-func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (*workflow.Matrix, error) {
-	if matrix.Expression != nil {
-		value, err := expression.EvaluateCompile(*matrix.Expression, context)
-		if err != nil {
-			return nil, matrixExpressionError(err)
-		}
-		object, ok := value.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("matrix expression resolved to %T, want object", value)
-		}
-		return matrixFromObject(object)
-	}
-	resolved := *matrix
-	resolved.Rows = make([]workflow.MatrixRow, len(matrix.Rows))
-	for i, row := range matrix.Rows {
-		resolved.Rows[i] = row
-		if row.Expression == nil {
-			resolved.Rows[i].Values = append([]workflow.Value(nil), row.Values...)
-			continue
-		}
-		value, err := expression.EvaluateCompile(*row.Expression, context)
-		if err != nil {
-			return nil, fmt.Errorf("matrix dimension %q: %w", row.Name, matrixExpressionError(err))
-		}
-		values, ok := value.([]any)
-		if !ok {
-			return nil, fmt.Errorf("matrix dimension %q resolved to %T, want array", row.Name, value)
-		}
-		resolved.Rows[i].Expression = nil
-		resolved.Rows[i].Values = make([]workflow.Value, len(values))
-		for j, value := range values {
-			resolved.Rows[i].Values[j] = workflow.Value{Data: value, Span: row.Span}
-		}
-	}
-	if matrix.IncludeExpression != nil {
-		return nil, fmt.Errorf("runtime-dependent matrix include expressions are unsupported")
-	}
-	return &resolved, nil
-}
-
-func matrixExpressionError(err error) error {
-	if strings.Contains(err.Error(), `compile-time context "needs"`) || strings.Contains(err.Error(), `compile-time context "steps"`) {
-		return fmt.Errorf("runtime-dependent matrix expressions are unsupported: %w", err)
-	}
-	return fmt.Errorf("matrix expression cannot be resolved at compile time: %w", err)
-}
-
-func matrixFromObject(object map[string]any) (*workflow.Matrix, error) {
-	keys := make([]string, 0, len(object))
-	for key := range object {
-		if key != "include" && key != "exclude" {
-			keys = append(keys, key)
-		}
-	}
-	sort.Strings(keys)
-	matrix := &workflow.Matrix{}
-	for _, key := range keys {
-		values, ok := object[key].([]any)
-		if !ok {
-			return nil, fmt.Errorf("matrix dimension %q resolved to %T, want array", key, object[key])
-		}
-		row := workflow.MatrixRow{Name: key, Values: make([]workflow.Value, len(values))}
-		for i, value := range values {
-			row.Values[i] = workflow.Value{Data: value}
-		}
-		matrix.Rows = append(matrix.Rows, row)
-	}
-	var err error
-	if matrix.Include, err = matrixCombinationsFromValue("include", object["include"]); err != nil {
-		return nil, err
-	}
-	if matrix.Exclude, err = matrixCombinationsFromValue("exclude", object["exclude"]); err != nil {
-		return nil, err
-	}
-	return matrix, nil
-}
-
-func matrixCombinationsFromValue(name string, value any) ([]workflow.MatrixCombination, error) {
-	if value == nil {
-		return nil, nil
-	}
-	items, ok := value.([]any)
-	if !ok {
-		return nil, fmt.Errorf("matrix %s resolved to %T, want array", name, value)
-	}
-	combinations := make([]workflow.MatrixCombination, len(items))
-	for i, item := range items {
-		object, ok := item.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("matrix %s entry %d resolved to %T, want object", name, i, item)
-		}
-		values := make(map[string]workflow.Value, len(object))
-		for key, value := range object {
-			values[key] = workflow.Value{Data: value}
-		}
-		combinations[i] = workflow.MatrixCombination{Values: values}
-	}
-	return combinations, nil
-}
-
-func resolveRunsOn(job workflow.Job, context expression.CompileContext, matrix map[string]any) ([]string, error) {
-	context.Matrix = matrix
-	if job.RunsOnExpr != nil {
-		value, err := expression.EvaluateCompile(*job.RunsOnExpr, context)
-		if err != nil {
-			return nil, fmt.Errorf("runs-on expression cannot be resolved at compile time: %w", err)
-		}
-		switch value := value.(type) {
-		case string:
-			return []string{value}, nil
-		case []any:
-			labels := make([]string, len(value))
-			for i, item := range value {
-				label, ok := item.(string)
-				if !ok {
-					return nil, fmt.Errorf("runs-on expression item %d resolved to %T, want string", i, item)
-				}
-				labels[i] = label
-			}
-			return labels, nil
-		default:
-			return nil, fmt.Errorf("runs-on expression resolved to %T, want string or array", value)
-		}
-	}
-	labels := make([]string, len(job.RunsOn))
-	for i, label := range job.RunsOn {
-		resolved, err := expression.EvaluateCompileTemplate(label, context)
-		if err != nil {
-			return nil, fmt.Errorf("runs-on label %q cannot be resolved at compile time: %w", label, err)
-		}
-		labels[i] = resolved
-	}
-	return labels, nil
-}
-
-func reportableRunnerLabels(job workflow.Job, labels []string) []string {
-	if job.RunsOnExpr == nil {
-		for _, label := range job.RunsOn {
-			if strings.Contains(label, "${{") {
-				return nil
-			}
-		}
-		return labels
-	}
-	text := strings.TrimSpace(job.RunsOnExpr.Text)
-	if !strings.HasPrefix(text, "${{") || !strings.HasSuffix(text, "}}") || job.Matrix == nil {
-		return nil
-	}
-	body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, "${{"), "}}"))
-	if !strings.HasPrefix(strings.ToLower(body), "matrix.") || strings.ContainsAny(body, " []()|&") {
-		return nil
-	}
-	if job.Matrix.Expression != nil || job.Matrix.IncludeExpression != nil {
-		return nil
-	}
-	for _, row := range job.Matrix.Rows {
-		if row.Expression != nil {
-			return nil
-		}
-	}
-	return labels
-}
-
-func runsOnPosition(job workflow.Job) workflow.Position {
-	if job.RunsOnExpr != nil {
-		return workflow.Position{Line: job.RunsOnExpr.Span.Start.Line, Column: job.RunsOnExpr.Span.Start.Column}
-	}
-	return job.Span.Start
-}
-
-func excludeMatrixCombinations(matrices []map[string]any, exclusions []workflow.MatrixCombination) []map[string]any {
-	if len(exclusions) == 0 {
-		return matrices
-	}
-	out := matrices[:0]
-	for _, matrix := range matrices {
-		excluded := false
-		for _, exclusion := range exclusions {
-			if matrixMatches(matrix, matrixCombinationValues(exclusion)) {
-				excluded = true
-				break
-			}
-		}
-		if !excluded {
-			out = append(out, matrix)
-		}
-	}
-	return out
-}
-
-func matrixMatches(matrix, pattern map[string]any) bool {
-	for key, expected := range pattern {
-		actual, ok := matrix[key]
-		if !ok || !matrixValuesEqual(actual, expected) {
-			return false
-		}
-	}
-	return true
-}
-
-func includeCompatible(original, values map[string]any) bool {
-	for key, value := range values {
-		if originalValue, exists := original[key]; exists && !matrixValuesEqual(originalValue, value) {
-			return false
-		}
-	}
-	return true
-}
-
-func matrixValuesEqual(left, right any) bool {
-	if leftNumber, ok := matrixNumber(left); ok {
-		rightNumber, rightOK := matrixNumber(right)
-		return rightOK && leftNumber.Cmp(rightNumber) == 0
-	}
-	switch left := left.(type) {
-	case []any:
-		right, ok := right.([]any)
-		if !ok || len(left) != len(right) {
-			return false
-		}
-		for i := range left {
-			if !matrixValuesEqual(left[i], right[i]) {
-				return false
-			}
-		}
-		return true
-	case map[string]any:
-		right, ok := right.(map[string]any)
-		if !ok || len(left) != len(right) {
-			return false
-		}
-		for key, value := range left {
-			other, ok := right[key]
-			if !ok || !matrixValuesEqual(value, other) {
-				return false
-			}
-		}
-		return true
-	default:
-		return reflect.DeepEqual(left, right)
-	}
-}
-
-func matrixNumber(value any) (*big.Rat, bool) {
-	var text string
-	switch value := value.(type) {
-	case json.Number:
-		text = value.String()
-	default:
-		reflected := reflect.ValueOf(value)
-		switch reflected.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			text = strconv.FormatInt(reflected.Int(), 10)
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			text = strconv.FormatUint(reflected.Uint(), 10)
-		case reflect.Float32, reflect.Float64:
-			text = strconv.FormatFloat(reflected.Float(), 'g', -1, reflected.Type().Bits())
-		default:
-			return nil, false
-		}
-	}
-	number, ok := new(big.Rat).SetString(text)
-	return number, ok
-}
-
-func matrixCombinationValues(combination workflow.MatrixCombination) map[string]any {
-	out := make(map[string]any, len(combination.Values))
-	for key, value := range combination.Values {
-		out[key] = value.Data
-	}
-	return out
-}
-
 func cloneAnyMap(in map[string]any) map[string]any {
 	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 	return out
-}
-
-func topologicalOrder(path string, jobs map[string]workflow.Job) ([]string, error) {
-	indegree := make(map[string]int, len(jobs))
-	dependents := make(map[string][]string, len(jobs))
-	for id, job := range jobs {
-		indegree[id] = len(job.Needs)
-		for _, need := range job.Needs {
-			if _, ok := jobs[need]; !ok {
-				return nil, jobError(path, job, fmt.Sprintf("needs unknown job %q", need))
-			}
-			dependents[need] = append(dependents[need], id)
-		}
-	}
-	var ready []string
-	for id, degree := range indegree {
-		if degree == 0 {
-			ready = append(ready, id)
-		}
-	}
-	sort.Strings(ready)
-
-	var order []string
-	for len(ready) != 0 {
-		id := ready[0]
-		ready = ready[1:]
-		order = append(order, id)
-		for _, dependent := range dependents[id] {
-			indegree[dependent]--
-			if indegree[dependent] == 0 {
-				ready = append(ready, dependent)
-				sort.Strings(ready)
-			}
-		}
-	}
-	if len(order) != len(jobs) {
-		var cyclic []string
-		for id, degree := range indegree {
-			if degree != 0 {
-				cyclic = append(cyclic, id)
-			}
-		}
-		sort.Strings(cyclic)
-		return nil, jobError(path, jobs[cyclic[0]], "workflow job graph contains a cycle")
-	}
-	return order, nil
-}
-
-func instanceKey(jobID string, matrix map[string]any) (string, error) {
-	return namespacedInstanceKey("", jobID, matrix)
-}
-
-func namespacedInstanceKey(namespace, jobID string, matrix map[string]any) (string, error) {
-	prefix := "gha-"
-	if namespace != "" {
-		prefix += namespace + "-"
-	}
-	prefix += sanitize(jobID)
-	if len(matrix) == 0 {
-		return prefix, nil
-	}
-	canonical, err := json.Marshal(matrix)
-	if err != nil {
-		return "", fmt.Errorf("canonicalize matrix: %w", err)
-	}
-	digest := sha256.Sum256(canonical)
-	return prefix + "-" + hex.EncodeToString(digest[:6]), nil
-}
-
-func requiredCapabilities(repositoryRoot, workflowPath string, steps []workflow.Step) ([]string, error) {
-	capabilities := map[string]struct{}{}
-	for _, step := range steps {
-		if step.Kind != "uses" || !strings.HasPrefix(step.Uses, "./") {
-			continue
-		}
-		if repositoryRoot == "" {
-			return nil, fmt.Errorf("resolve local action %q: workflow path %q must identify a repository root", step.Uses, workflowPath)
-		}
-		if err := collectActionCapabilities(repositoryRoot, step.Uses, capabilities, nil); err != nil {
-			return nil, err
-		}
-	}
-	out := make([]string, 0, len(capabilities))
-	for capability := range capabilities {
-		out = append(out, capability)
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
-func collectActionCapabilities(repositoryRoot, uses string, capabilities map[string]struct{}, stack []string) error {
-	if !strings.HasPrefix(uses, "./") {
-		return fmt.Errorf("nested remote action %q is unsupported", uses)
-	}
-	action, err := loadLocalAction(repositoryRoot, uses)
-	if err != nil {
-		return err
-	}
-	for _, ancestor := range stack {
-		if ancestor == action.Path {
-			return fmt.Errorf("local action recursion detected at %q", action.Path)
-		}
-	}
-	if len(stack) >= metadata.MaxNestedActionDepth {
-		return fmt.Errorf("local action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, action.Path)
-	}
-	runtime, err := action.Runtime()
-	if err != nil {
-		return fmt.Errorf("local action %q uses %w", uses, err)
-	}
-	for _, capability := range runtime.RequiredCapabilities() {
-		capabilities[capability] = struct{}{}
-	}
-	if runtime != metadata.RuntimeComposite {
-		return nil
-	}
-	stack = append(append([]string(nil), stack...), action.Path)
-	for _, child := range action.Runs.Steps {
-		if child.Uses != "" {
-			if err := collectActionCapabilities(repositoryRoot, child.Uses, capabilities, stack); err != nil {
-				return fmt.Errorf("local action %q nested uses %w", uses, err)
-			}
-		}
-	}
-	return nil
-}
-
-func loadLocalAction(repositoryRoot, uses string) (metadata.Metadata, error) {
-	relativeActionPath := filepath.Clean(filepath.FromSlash(strings.TrimPrefix(uses, "./")))
-	return metadata.Load(repositoryRoot, relativeActionPath)
-}
-
-func instanceLabel(job workflow.Job, matrix map[string]any, context expression.CompileContext) string {
-	label := job.Name
-	if label == "" {
-		label = job.ID
-	} else {
-		context.Matrix = matrix
-		if resolved, err := expression.EvaluateCompileTemplate(label, context); err == nil {
-			label = resolved
-			withoutMatrix := context
-			withoutMatrix.Matrix = nil
-			if _, err := expression.EvaluateCompileTemplate(job.Name, withoutMatrix); err != nil {
-				return label
-			}
-		}
-	}
-	if len(matrix) == 0 {
-		return label
-	}
-	return matrixInstanceLabel(label, matrix)
-}
-
-func instanceCheckLabel(job JobInstance) string {
-	if len(job.Matrix) == 0 {
-		return job.LogicalJobID
-	}
-	keys := make([]string, 0, len(job.Matrix))
-	for key := range job.Matrix {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	values := make([]string, 0, len(keys))
-	for _, key := range keys {
-		encoded, _ := json.Marshal(job.Matrix[key])
-		values = append(values, key+"="+string(encoded))
-	}
-	return job.LogicalJobID + " (" + strings.Join(values, ", ") + ")"
-}
-
-func matrixInstanceLabel(label string, matrix map[string]any) string {
-	if len(matrix) == 0 {
-		return label
-	}
-	keys := make([]string, 0, len(matrix))
-	for key := range matrix {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	values := make([]string, 0, len(keys))
-	for _, key := range keys {
-		values = append(values, fmt.Sprintf("%s=%v", key, matrix[key]))
-	}
-	return label + " (" + strings.Join(values, ", ") + ")"
-}
-
-func sanitize(value string) string {
-	var out strings.Builder
-	for _, r := range strings.ToLower(value) {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' {
-			out.WriteRune(r)
-		} else if out.Len() > 0 {
-			out.WriteByte('-')
-		}
-	}
-	return strings.Trim(out.String(), "-")
 }
 
 func jobError(path string, job workflow.Job, message string) error {
@@ -1896,4 +992,11 @@ func jobError(path string, job workflow.Job, message string) error {
 
 func locatedJobError(path string, job workflow.Job, line, column int, message string) error {
 	return fmt.Errorf("%s:%d:%d: job %q: %s", path, line, column, job.ID, message)
+}
+
+func locatedJobWrappedError(path string, job workflow.Job, line, column int, message string, err error) error {
+	if message == "" {
+		return fmt.Errorf("%s:%d:%d: job %q: %w", path, line, column, job.ID, err)
+	}
+	return fmt.Errorf("%s:%d:%d: job %q: %s: %w", path, line, column, job.ID, message, err)
 }

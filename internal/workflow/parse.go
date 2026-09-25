@@ -3,33 +3,38 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"sort"
-	"strconv"
 	"strings"
+	"unicode/utf8"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/containerpolicy"
 	"github.com/buildkite/buildkite-gha/internal/expression"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/rhysd/actionlint"
 	"go.yaml.in/yaml/v4"
 )
 
 const missingStepExecutionDiagnostic = "step must run script with \"run\" section or run action with \"uses\" section"
 
-type stepConcurrency struct {
-	Kind       string
-	Background bool
-	Targets    []string
-	Parallel   []Step
-}
-
 type expectedActionlintDiagnostic struct {
 	Position Position
 	Prefix   string
 }
 
-type concurrencySyntax struct {
-	Steps       map[Position]stepConcurrency
-	Diagnostics []expectedActionlintDiagnostic
+type rawServiceContainer struct {
+	Image       string
+	Credentials *ContainerCredentials
+	Env         map[string]string
+	Ports       []string
+	Volumes     []string
+	Options     string
+	Command     string
+	Entrypoint  string
+	Order       int
 }
 
 // Parse uses actionlint as the syntax frontend and immediately converts its AST
@@ -39,7 +44,8 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		return nil, fmt.Errorf("%s: parse workflow YAML: %w", path, err)
 	}
-	if err := validateRawContainers(path, &document); err != nil {
+	rawContainers, containerDiagnostics, err := validateRawContainers(path, &document)
+	if err != nil {
 		return nil, err
 	}
 	workflowCancellation, jobCancellations := rawConcurrencyCancellations(&document)
@@ -48,7 +54,12 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, err
 	}
 	parsed, errs := actionlint.Parse(source)
-	if err := filterActionlintDiagnostics(path, errs, concurrency.Diagnostics); err != nil {
+	cacheMode, jobCacheModes, cacheDiagnostics, err := parseCacheModes(path, &document)
+	if err != nil {
+		return nil, err
+	}
+	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, acceptedEmptyTypesDiagnostics(&document), cacheDiagnostics)
+	if err := filterActionlintDiagnostics(path, errs, expectedDiagnostics); err != nil {
 		return nil, err
 	}
 	scalars, err := scalarValues(&document)
@@ -56,10 +67,36 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, fmt.Errorf("%s: parse scalar values: %w", path, err)
 	}
 
-	owned := &Workflow{}
+	owned := &Workflow{CacheMode: cacheMode}
 	owned.Triggers = adaptTriggers(parsed.On)
+	// The raw mapping also retains keys such as types and workflows, whose
+	// positions are not preserved by actionlint's event model.
+	events := mappingEntries(mappingEntries(document.Content[0])["on"])
+	for i := range owned.Triggers {
+		trigger := &owned.Triggers[i]
+		node := events[trigger.Event]
+		if node == nil || node.Kind != yaml.MappingNode {
+			continue
+		}
+		trigger.FilterSpans = make(map[string]Span)
+		for j := 0; j+1 < len(node.Content); j += 2 {
+			key := node.Content[j]
+			position := Position{Line: key.Line, Column: key.Column}
+			trigger.FilterSpans[key.Value] = Span{Start: position, End: position}
+		}
+		switch trigger.Event {
+		case "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment":
+			if types := mappingValue(node, "types"); types != nil && types.Tag == "!!null" {
+				trigger.Types = nil
+			}
+		}
+	}
 	if parsed.Name != nil {
 		owned.Name = parsed.Name.Value
+	}
+	if parsed.RunName != nil {
+		owned.RunName = parsed.RunName.Value
+		owned.RunNameSpan = spanFrom(parsed.RunName.Pos, parsed.RunName.Value)
 	}
 	owned.Concurrency, err = adaptConcurrency(path, "", parsed.Concurrency)
 	if err != nil {
@@ -72,7 +109,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		owned.Concurrency.CancelInProgress = true
 		owned.Concurrency.CancelInProgressPosition = *workflowCancellation
 	}
-	owned.Permissions, err = adaptPermissions(path, parsed.Permissions)
+	owned.Permissions, err = adaptPermissions(path, parsed.Permissions, "")
 	if err != nil {
 		return nil, err
 	}
@@ -80,6 +117,16 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, locatedError(path, parsed.Env.Expression.Pos, "workflow", "expression-valued workflow env is unsupported")
 	}
 	owned.Env = adaptEnv(parsed.Env)
+	envNames := make([]string, 0, len(owned.Env))
+	for name := range owned.Env {
+		envNames = append(envNames, name)
+	}
+	sort.Strings(envNames)
+	for _, name := range envNames {
+		if err := validateExpressionSite(owned.Env[name], expression.ProfileJobEnvironment, expression.ResultString); err != nil {
+			return nil, fmt.Errorf("%s: workflow env %q: %w", path, name, err)
+		}
+	}
 	if parsed.Defaults != nil && parsed.Defaults.Run != nil {
 		if parsed.Defaults.Run.Shell != nil {
 			owned.DefaultShell = parsed.Defaults.Run.Shell.Value
@@ -87,16 +134,37 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		if parsed.Defaults.Run.WorkingDirectory != nil {
 			owned.DefaultWorkingDirectory = parsed.Defaults.Run.WorkingDirectory.Value
 		}
+		if err := validateExpressionSite(owned.DefaultShell, expression.ProfileRuntimeTemplate, expression.ResultString); err != nil {
+			return nil, fmt.Errorf("%s: workflow default shell: %w", path, err)
+		}
+		if err := validateExpressionSite(owned.DefaultWorkingDirectory, expression.ProfileRuntimeTemplate, expression.ResultString); err != nil {
+			return nil, fmt.Errorf("%s: workflow default working-directory: %w", path, err)
+		}
 	}
 	if call, ok := parsed.FindWorkflowCallEvent(); ok {
 		owned.Callable = true
 		if len(call.Inputs) != 0 {
 			owned.CallInputs = make(map[string]CallInput, len(call.Inputs))
 		}
-		for _, input := range call.Inputs {
+		inputIndices := make([]int, len(call.Inputs))
+		for i := range call.Inputs {
+			inputIndices[i] = i
+		}
+		sort.Slice(inputIndices, func(i, j int) bool { return call.Inputs[inputIndices[i]].ID < call.Inputs[inputIndices[j]].ID })
+		for _, i := range inputIndices {
+			input := call.Inputs[i]
 			ownedInput := CallInput{Type: workflowCallInputType(input.Type), Required: input.IsRequired()}
 			if input.Default != nil {
 				value := Value{Data: scalarAt(input.Default, scalars), Span: spanFrom(input.Default.Pos, input.Default.Value)}
+				if text, ok := value.Data.(string); ok && strings.Contains(text, "${{") {
+					if err := validateExpressionSite(text, expression.ProfileReusableInput, expression.ResultString); err != nil {
+						message := fmt.Sprintf("default for workflow_call input %q is invalid: %v", input.ID, err)
+						if strings.Contains(err.Error(), `context "inputs" is unavailable`) {
+							message = fmt.Sprintf("default for workflow_call input %q references workflow-dispatch inputs, which are unavailable during compilation", input.ID)
+						}
+						return nil, locatedError(path, input.Default.Pos, "workflow", message)
+					}
+				}
 				ownedInput.Default = &value
 			}
 			owned.CallInputs[input.ID] = ownedInput
@@ -118,11 +186,18 @@ func Parse(path string, source []byte) (*Workflow, error) {
 			if secret.Required != nil && secret.Required.Expression != nil {
 				return nil, locatedError(path, secret.Required.Expression.Pos, "workflow", fmt.Sprintf("expression-valued required flag for workflow_call secret %q is unsupported", name))
 			}
-			if secret.Required != nil && secret.Required.Value {
-				owned.RequiredCallSecrets = append(owned.RequiredCallSecrets, name)
+			if owned.CallSecrets == nil {
+				owned.CallSecrets = make(map[string]CallSecret, len(call.Secrets))
 			}
+			declaration := CallSecret{
+				Name: secret.Name.Value,
+				Span: spanFrom(secret.Name.Pos, secret.Name.Value),
+			}
+			if secret.Required != nil && secret.Required.Value {
+				declaration.Required = true
+			}
+			owned.CallSecrets[strings.ToUpper(name)] = declaration
 		}
-		sort.Strings(owned.RequiredCallSecrets)
 	}
 
 	ids := make([]string, 0, len(parsed.Jobs))
@@ -131,9 +206,16 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		job, err := adaptJob(path, parsed.Jobs[id], scalars, concurrency.Steps)
+		job, err := adaptJob(path, parsed.Jobs[id], scalars, concurrency.Steps, rawContainers)
 		if err != nil {
 			return nil, err
+		}
+		job.CacheMode = jobCacheModes[id]
+		if job.CacheMode == "" {
+			job.CacheMode = owned.CacheMode
+		}
+		if job.CacheMode != "" && (job.Reusable != nil || owned.Callable) {
+			return nil, locatedError(path, parsed.Jobs[id].Pos, fmt.Sprintf("job %q", id), "cache-mode with reusable workflows is unsupported")
 		}
 		if position, ok := jobCancellations[id]; ok {
 			if job.Concurrency == nil {
@@ -168,6 +250,95 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	return owned, nil
 }
 
+// The pinned actionlint predates cache-mode. Validate the raw values and
+// suppress only its unexpected-key diagnostic at each accepted position.
+func parseCacheModes(path string, document *yaml.Node) (string, map[string]string, []expectedActionlintDiagnostic, error) {
+	var diagnostics []expectedActionlintDiagnostic
+	parse := func(node *yaml.Node, section string) (string, error) {
+		node = resolveAlias(node)
+		if node == nil || node.Kind != yaml.MappingNode {
+			return "", nil
+		}
+		mode := ""
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key, value := node.Content[i], resolveAlias(node.Content[i+1])
+			if !mappingKeyMatches(key, "cache-mode") {
+				continue
+			}
+			if value.Kind != yaml.ScalarNode || value.Tag != "!!str" || !plan.ValidCacheMode(value.Value) {
+				return "", rawError(path, value, "cache-mode must be read, write, write-only, or none")
+			}
+			mode = value.Value
+			diagnostics = append(diagnostics, expectedActionlintDiagnostic{
+				Position: nodePosition(key), Prefix: fmt.Sprintf("unexpected key %q for %q section", "cache-mode", section),
+			})
+		}
+		return mode, nil
+	}
+	jobs := make(map[string]string)
+	if len(document.Content) == 0 {
+		return "", jobs, nil, nil
+	}
+	root := document.Content[0]
+	mode, err := parse(root, "workflow")
+	if err != nil {
+		return "", nil, nil, err
+	}
+	jobNodes := mappingValue(root, "jobs")
+	if jobNodes == nil || jobNodes.Kind != yaml.MappingNode {
+		return mode, jobs, diagnostics, nil
+	}
+	for i := 0; i+1 < len(jobNodes.Content); i += 2 {
+		id := resolveAlias(jobNodes.Content[i]).Value
+		jobMode, err := parse(jobNodes.Content[i+1], "job")
+		if err != nil {
+			return "", nil, nil, err
+		}
+		jobs[strings.ToLower(id)] = jobMode
+	}
+	return mode, jobs, diagnostics, nil
+}
+
+// The pinned actionlint parser rejects empty activity lists more strictly than
+// GitHub. Accept only that diagnostic at each verified sequence, leaving the
+// source and all other diagnostics (including alias errors) intact. The pinned
+// parser represents these sequences as omitted types, matching GitHub's default
+// activity behavior.
+func acceptedEmptyTypesDiagnostics(document *yaml.Node) []expectedActionlintDiagnostic {
+	if len(document.Content) == 0 {
+		return nil
+	}
+	on := mappingValue(document.Content[0], "on")
+	var diagnostics []expectedActionlintDiagnostic
+	for _, event := range []string{"issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "merge_group", "label", "release", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment"} {
+		types := mappingValue(mappingValue(on, event), "types")
+		if types != nil && types.Kind == yaml.SequenceNode && len(types.Content) == 0 {
+			diagnostics = append(diagnostics, expectedActionlintDiagnostic{
+				Position: nodePosition(types), Prefix: `"types" section should not be empty`,
+			})
+		}
+	}
+	return diagnostics
+}
+
+func triggerPosition(event actionlint.Event) Position {
+	switch e := event.(type) {
+	case *actionlint.WebhookEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.ScheduledEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.WorkflowDispatchEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.RepositoryDispatchEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.WorkflowCallEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.ImageVersionEvent:
+		return pointSpan(e.Pos).Start
+	}
+	return Position{}
+}
+
 func adaptTriggers(events []actionlint.Event) []Trigger {
 	out := make([]Trigger, 0, len(events))
 	values := func(f *actionlint.WebhookEventFilter) []string {
@@ -191,7 +362,7 @@ func adaptTriggers(events []actionlint.Event) []Trigger {
 		return out
 	}
 	for _, event := range events {
-		t := Trigger{Event: event.EventName()}
+		t := Trigger{Event: event.EventName(), Position: triggerPosition(event)}
 		switch e := event.(type) {
 		case *actionlint.WebhookEvent:
 			t.Types, t.Branches, t.BranchesIgnore = stringsOf(e.Types), values(e.Branches), values(e.BranchesIgnore)
@@ -247,155 +418,229 @@ func adaptTriggers(events []actionlint.Event) []Trigger {
 	return out
 }
 
-var containerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$`)
 var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
 
 // validateRawContainers deliberately walks only the owned container locations.
 // actionlint normalizes maps (including service IDs), so the raw tree is also
 // the authoritative source for diagnostics.
-func validateRawContainers(path string, document *yaml.Node) error {
+func validateRawContainers(path string, document *yaml.Node) (map[string]rawServiceContainer, []expectedActionlintDiagnostic, error) {
+	rawContainers := map[string]rawServiceContainer{}
+	var diagnostics []expectedActionlintDiagnostic
 	root := document
 	if root.Kind == yaml.DocumentNode && len(root.Content) != 0 {
 		root = root.Content[0]
 	}
 	jobs := mappingValue(root, "jobs")
 	if jobs == nil || jobs.Kind != yaml.MappingNode {
-		return nil
+		return rawContainers, diagnostics, nil
 	}
 	for i := 0; i+1 < len(jobs.Content); i += 2 {
+		jobID := strings.ToLower(resolveAlias(jobs.Content[i]).Value)
 		job := jobs.Content[i+1]
 		if container := mappingValue(job, "container"); container != nil {
-			if err := validateRawContainer(path, container); err != nil {
-				return err
+			extra, _, err := validateRawContainer(path, container, false)
+			if err != nil {
+				return nil, nil, err
 			}
+			rawContainers[jobID+"\x00"] = extra
 		}
 		services := mappingValue(job, "services")
 		if services == nil || services.Kind != yaml.MappingNode {
 			continue
 		}
 		if len(services.Content)/2 > 32 {
-			return rawError(path, services, "container services have more than 32 entries")
+			return nil, nil, rawError(path, services, "container services have more than 32 entries")
 		}
 		for j := 0; j+1 < len(services.Content); j += 2 {
 			name, container := services.Content[j], services.Content[j+1]
 			if name.Value != strings.ToLower(name.Value) || !serviceIDPattern.MatchString(name.Value) {
-				return rawError(path, name, fmt.Sprintf("invalid service ID %q; service IDs must be lowercase", name.Value))
+				return nil, nil, rawError(path, name, fmt.Sprintf("invalid service ID %q; service IDs must be lowercase", name.Value))
 			}
-			if err := validateRawContainer(path, container); err != nil {
-				return err
+			extra, expected, err := validateRawContainer(path, container, true)
+			if err != nil {
+				return nil, nil, err
 			}
+			extra.Order = j / 2
+			rawContainers[jobID+"\x00"+name.Value] = extra
+			diagnostics = append(diagnostics, expected...)
 		}
 	}
-	return nil
+	return rawContainers, diagnostics, nil
 }
 
 func rawError(path string, node *yaml.Node, message string) error {
 	return fmt.Errorf("%s:%d:%d: %s", path, node.Line, node.Column, message)
 }
 
-// actionlint v1.7.12 compares YAML boolean text case-sensitively, even though
-// YAML accepts True and TRUE. Decode cancellation booleans from the raw tree so
-// no true spelling can be silently adapted as false.
-func rawConcurrencyCancellations(document *yaml.Node) (*Position, map[string]Position) {
-	root := document
-	if root.Kind == yaml.DocumentNode && len(root.Content) != 0 {
-		root = root.Content[0]
-	}
-	workflowCancellation := rawConcurrencyCancellation(mappingValue(root, "concurrency"))
-	jobCancellations := map[string]Position{}
-	jobs := mappingValue(root, "jobs")
-	if jobs == nil || jobs.Kind != yaml.MappingNode {
-		return workflowCancellation, jobCancellations
-	}
-	for i := 0; i+1 < len(jobs.Content); i += 2 {
-		name, job := resolveAlias(jobs.Content[i]), jobs.Content[i+1]
-		if position := rawConcurrencyCancellation(mappingValue(job, "concurrency")); position != nil {
-			jobCancellations[name.Value] = *position
-		}
-	}
-	return workflowCancellation, jobCancellations
-}
-
-func rawConcurrencyCancellation(concurrency *yaml.Node) *Position {
-	if concurrency == nil || concurrency.Kind != yaml.MappingNode {
-		return nil
-	}
-	cancel := mappingValue(concurrency, "cancel-in-progress")
-	if cancel == nil || cancel.Kind != yaml.ScalarNode || cancel.ShortTag() != "!!bool" {
-		return nil
-	}
-	var enabled bool
-	if err := cancel.Decode(&enabled); err != nil || !enabled {
-		return nil
-	}
-	position := nodePosition(cancel)
-	return &position
-}
-
-func validateRawContainer(path string, node *yaml.Node) error {
+func validateRawContainer(path string, node *yaml.Node, service bool) (rawServiceContainer, []expectedActionlintDiagnostic, error) {
+	var extra rawServiceContainer
+	var diagnostics []expectedActionlintDiagnostic
 	image := node
 	if node.Kind == yaml.MappingNode {
 		image = mappingValue(node, "image")
-		for _, control := range []string{"credentials", "volumes", "options"} {
+		controls := []string{"credentials", "command", "entrypoint"}
+		if service {
+			controls = nil
+		}
+		for _, control := range controls {
 			if key := mappingKey(node, control); key != nil {
-				return rawError(path, key, "container "+control+" are unsupported")
+				return extra, nil, rawError(path, key, "container "+control+" are unsupported")
+			}
+		}
+		if service {
+			if credentials := mappingValue(node, "credentials"); credentials != nil {
+				if credentials.Kind != yaml.MappingNode {
+					return extra, nil, rawError(path, credentials, "invalid service container credentials")
+				}
+				username, password := mappingValue(credentials, "username"), mappingValue(credentials, "password")
+				for _, value := range []*yaml.Node{username, password} {
+					if value != nil && (value.Kind != yaml.ScalarNode || len(value.Value) > 65536 || strings.ContainsAny(value.Value, "\x00\r\n")) {
+						return extra, nil, rawError(path, credentials, "invalid service container credentials")
+					}
+				}
+				extra.Credentials = &ContainerCredentials{}
+				if username != nil {
+					extra.Credentials.Username = username.Value
+				}
+				if password != nil {
+					extra.Credentials.Password = password.Value
+				}
+				if (username == nil) != (password == nil) {
+					diagnostics = append(diagnostics, expectedActionlintDiagnostic{Position: nodePosition(mappingKey(node, "credentials")), Prefix: "both \"username\" and \"password\" must be specified"})
+				}
+			}
+			for _, field := range []struct {
+				name  string
+				limit int
+				dest  *string
+			}{{"command", 65536, &extra.Command}, {"entrypoint", 4096, &extra.Entrypoint}} {
+				if value := mappingValue(node, field.name); value != nil {
+					if value.Kind != yaml.ScalarNode || len(value.Value) > field.limit || strings.ContainsAny(value.Value, "\x00\r") {
+						return extra, nil, rawError(path, value, "invalid service container "+field.name)
+					}
+					*field.dest = value.Value
+					key := mappingKey(node, field.name)
+					diagnostics = append(diagnostics, expectedActionlintDiagnostic{Position: nodePosition(key), Prefix: "unexpected key \"" + field.name + "\""})
+				}
 			}
 		}
 	}
-	if image == nil || image.Kind != yaml.ScalarNode || len(image.Value) > 512 || !containerImagePattern.MatchString(image.Value) {
+	if image == nil || image.Kind != yaml.ScalarNode || len(image.Value) > 512 || strings.ContainsAny(image.Value, "\x00\r\n") || !strings.Contains(image.Value, "${{") && !plan.ValidContainerImageReference(image.Value) {
 		if image == nil {
 			image = node
 		}
-		return rawError(path, image, "invalid container image")
+		return extra, nil, rawError(path, image, "invalid container image")
 	}
+	extra.Image = image.Value
 	env := mappingValue(node, "env")
 	if env != nil && env.Kind == yaml.MappingNode {
 		if len(env.Content)/2 > 256 {
-			return rawError(path, env, "container environment has more than 256 entries")
+			return extra, nil, rawError(path, env, "container environment has more than 256 entries")
 		}
 		total := 0
 		for i := 0; i+1 < len(env.Content); i += 2 {
 			key, value := env.Content[i], env.Content[i+1]
 			if len(key.Value) > 255 || !containerEnvKeyPattern.MatchString(key.Value) {
-				return rawError(path, key, "invalid container environment key")
+				return extra, nil, rawError(path, key, "invalid container environment key")
 			}
 			if value.Kind != yaml.ScalarNode || len(value.Value) > 65536 {
-				return rawError(path, value, "invalid container environment value")
+				return extra, nil, rawError(path, value, "invalid container environment value")
 			}
 			total += len(key.Value) + len(value.Value)
+			if service {
+				if extra.Env == nil {
+					extra.Env = map[string]string{}
+				}
+				extra.Env[key.Value] = value.Value
+			}
 		}
 		if total > 1048576 {
-			return rawError(path, env, "container environment exceeds 1048576 bytes")
+			return extra, nil, rawError(path, env, "container environment exceeds 1048576 bytes")
 		}
 	}
 	ports := mappingValue(node, "ports")
 	if ports != nil && ports.Kind == yaml.SequenceNode {
 		if len(ports.Content) > 128 {
-			return rawError(path, ports, "container has more than 128 ports")
+			return extra, nil, rawError(path, ports, "container has more than 128 ports")
 		}
 		seen := map[string]bool{}
 		for _, port := range ports.Content {
-			if port.Kind != yaml.ScalarNode || !containerPortPattern.MatchString(port.Value) || seen[port.Value] {
-				return rawError(path, port, "invalid or repeated container port")
+			if port.Kind != yaml.ScalarNode || len(port.Value) > 4096 || strings.ContainsAny(port.Value, "\x00\r\n") || seen[port.Value] || !service && !containerPortPattern.MatchString(port.Value) {
+				return extra, nil, rawError(path, port, "invalid or repeated container port")
 			}
 			seen[port.Value] = true
+			extra.Ports = append(extra.Ports, port.Value)
 		}
 	}
-	return nil
+	if node.Kind == yaml.MappingNode {
+		volumes := mappingValue(node, "volumes")
+		if volumes != nil {
+			limit := 128
+			subject := "service container"
+			if !service {
+				limit = containerpolicy.MaxJobVolumes
+				subject = "container"
+			}
+			if volumes.Kind != yaml.SequenceNode || len(volumes.Content) > limit {
+				return extra, nil, rawError(path, volumes, "invalid "+subject+" volumes")
+			}
+			seen := map[string]bool{}
+			for _, volume := range volumes.Content {
+				if volume.Kind != yaml.ScalarNode || len(volume.Value) > 4096 || strings.ContainsAny(volume.Value, "\x00\r\n") || seen[volume.Value] {
+					return extra, nil, rawError(path, volume, "invalid or repeated "+subject+" volume")
+				}
+				if !service {
+					if strings.Contains(volume.Value, "${{") {
+						return extra, nil, rawError(path, volume, "expression-valued container volume is unsupported")
+					}
+					if err := containerpolicy.ValidateJobVolume(volume.Value); err != nil {
+						return extra, nil, rawError(path, volume, "invalid container volume: "+err.Error())
+					}
+				}
+				seen[volume.Value] = true
+				extra.Volumes = append(extra.Volumes, volume.Value)
+			}
+		}
+		if options := mappingValue(node, "options"); options != nil {
+			limit := 65536
+			subject := "service container"
+			if !service {
+				limit = containerpolicy.MaxJobOptionsLength
+				subject = "container"
+			}
+			if options.Kind != yaml.ScalarNode || len(options.Value) > limit || strings.ContainsAny(options.Value, "\x00\r\n") {
+				return extra, nil, rawError(path, options, "invalid "+subject+" options")
+			}
+			if !service {
+				if strings.Contains(options.Value, "${{") {
+					return extra, nil, rawError(path, options, "expression-valued container options are unsupported")
+				}
+				if _, err := containerpolicy.JobOptions(options.Value); err != nil {
+					return extra, nil, rawError(path, options, "invalid container options: "+err.Error())
+				}
+			}
+			extra.Options = options.Value
+		}
+	}
+	return extra, diagnostics, nil
 }
 
-func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurrency map[Position]stepConcurrency) (Job, error) {
+func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurrency map[Position]stepConcurrency, rawContainers map[string]rawServiceContainer) (Job, error) {
 	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos)}
 	if in.Environment != nil {
-		return Job{}, locatedError(path, in.Environment.Pos, fmt.Sprintf("job %q", in.ID.Value), "GitHub environments and environment secrets are unsupported")
+		environment, err := adaptEnvironment(path, in)
+		if err != nil {
+			return Job{}, err
+		}
+		out.Environment = environment
 	}
 	ownedConcurrency, err := adaptConcurrency(path, in.ID.Value, in.Concurrency)
 	if err != nil {
 		return Job{}, err
 	}
 	out.Concurrency = ownedConcurrency
-	permissions, err := adaptPermissions(path, in.Permissions)
+	permissions, err := adaptPermissions(path, in.Permissions, in.ID.Value)
 	if err != nil {
 		return Job{}, err
 	}
@@ -404,9 +649,22 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		call := in.WorkflowCall
 		out.Reusable = &ReusableWorkflowCall{
 			Uses:           call.Uses.Value,
-			Secrets:        len(call.Secrets) != 0,
 			InheritSecrets: call.InheritSecrets,
 			Span:           spanFrom(call.Uses.Pos, call.Uses.Value),
+		}
+		if len(call.Secrets) != 0 {
+			out.Reusable.Secrets = make(map[string]SecretMapping, len(call.Secrets))
+			for name, secret := range call.Secrets {
+				source, err := expression.DirectSecretReference(secret.Value.Value)
+				if err != nil {
+					return Job{}, locatedError(path, secret.Value.Pos, fmt.Sprintf("job %q", in.ID.Value), fmt.Sprintf("secret mapping %q: %v", secret.Name.Value, err))
+				}
+				target := strings.ToUpper(name)
+				out.Reusable.Secrets[target] = SecretMapping{
+					Source: source,
+					Span:   spanFrom(secret.Value.Pos, secret.Value.Value),
+				}
+			}
 		}
 		if len(call.Inputs) != 0 {
 			out.Reusable.Inputs = make(map[string]Value, len(call.Inputs))
@@ -423,7 +681,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		out.IfSpan = spanFrom(in.If.Pos, in.If.Value)
 	}
 	if in.Container != nil {
-		container, err := adaptContainer(path, in.ID.Value, in.Container)
+		container, err := adaptContainer(path, in.ID.Value, in.Container, rawContainers[strings.ToLower(in.ID.Value)+"\x00"])
 		if err != nil {
 			return Job{}, err
 		}
@@ -431,34 +689,50 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 	}
 	if in.Services != nil {
 		if in.Services.Expression != nil {
-			return Job{}, locatedError(path, in.Services.Expression.Pos, in.ID.Value, "expression-valued services are unsupported")
-		}
-		names := make([]string, 0, len(in.Services.Value))
-		for name := range in.Services.Value {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			service := in.Services.Value[name]
-			if service == nil || service.Name == nil || service.Container == nil || !serviceIDPattern.MatchString(service.Name.Value) {
-				return Job{}, locatedError(path, in.Services.Pos, in.ID.Value, fmt.Sprintf("invalid service ID %q", name))
+			out.ServicesExpression = in.Services.Expression.Value
+			if err := validateExpressionSite(out.ServicesExpression, expression.ProfileServiceMap, expression.ResultObject); err != nil {
+				return Job{}, locatedError(path, in.Services.Expression.Pos, in.ID.Value, err.Error())
 			}
-			container, err := adaptContainer(path, in.ID.Value, service.Container)
-			if err != nil {
-				return Job{}, err
+		} else {
+			names := make([]string, 0, len(in.Services.Value))
+			for name := range in.Services.Value {
+				names = append(names, name)
 			}
-			out.Services = append(out.Services, Service{Name: service.Name.Value, Container: container})
+			sort.Slice(names, func(i, j int) bool {
+				left := rawContainers[strings.ToLower(in.ID.Value)+"\x00"+names[i]].Order
+				right := rawContainers[strings.ToLower(in.ID.Value)+"\x00"+names[j]].Order
+				if left != right {
+					return left < right
+				}
+				return names[i] < names[j]
+			})
+			for _, name := range names {
+				service := in.Services.Value[name]
+				if service == nil || service.Name == nil || service.Container == nil || !serviceIDPattern.MatchString(service.Name.Value) {
+					return Job{}, locatedError(path, in.Services.Pos, in.ID.Value, fmt.Sprintf("invalid service ID %q", name))
+				}
+				container, err := adaptServiceContainer(path, in.ID.Value, service.Container, rawContainers[strings.ToLower(in.ID.Value)+"\x00"+service.Name.Value])
+				if err != nil {
+					return Job{}, err
+				}
+				out.Services = append(out.Services, Service{Name: service.Name.Value, Container: container})
+			}
 		}
 	}
 	if in.ContinueOnError != nil {
 		if in.ContinueOnError.Expression != nil {
-			return Job{}, locatedError(path, in.ContinueOnError.Expression.Pos, in.ID.Value, "expression-valued job continue-on-error is unsupported")
+			out.ContinueOnErrorExpression = in.ContinueOnError.Expression.Value
+			out.ContinueOnErrorSpan = spanFrom(in.ContinueOnError.Expression.Pos, in.ContinueOnError.Expression.Value)
+			if err := validateExpressionSite(out.ContinueOnErrorExpression, expression.ProfileJobControl, expression.ResultBoolean); err != nil {
+				return Job{}, locatedError(path, in.ContinueOnError.Expression.Pos, in.ID.Value, err.Error())
+			}
+		} else {
+			value, ok := scalars[Position{Line: in.ContinueOnError.Pos.Line, Column: in.ContinueOnError.Pos.Col}].(bool)
+			if !ok {
+				return Job{}, locatedError(path, in.ContinueOnError.Pos, in.ID.Value, "job continue-on-error must be a boolean or expression")
+			}
+			out.ContinueOnError = value
 		}
-		value, ok := scalars[Position{Line: in.ContinueOnError.Pos.Line, Column: in.ContinueOnError.Pos.Col}].(bool)
-		if !ok {
-			return Job{}, locatedError(path, in.ContinueOnError.Pos, in.ID.Value, "job continue-on-error must be a literal boolean")
-		}
-		out.ContinueOnError = value
 	}
 	if in.TimeoutMinutes != nil {
 		if in.TimeoutMinutes.Expression != nil {
@@ -518,10 +792,18 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		}
 		if in.Strategy.MaxParallel != nil {
 			if in.Strategy.MaxParallel.Expression != nil {
-				return Job{}, locatedError(path, in.Strategy.MaxParallel.Expression.Pos, in.ID.Value, "expression-valued matrix max-parallel is unsupported")
+				expr, err := adaptExpression(in.Strategy.MaxParallel.Expression)
+				if err != nil {
+					return Job{}, err
+				}
+				if _, err := expression.RuntimeMatrixOutput(expr); err != nil {
+					return Job{}, locatedError(path, in.Strategy.MaxParallel.Expression.Pos, in.ID.Value, "expression-valued matrix max-parallel is unsupported except fromJSON(needs.<job>.outputs.<name>) on a needs-derived matrix")
+				}
+				out.MaxParallelExpression = &expr
+			} else {
+				v := in.Strategy.MaxParallel.Value
+				out.MaxParallel = &v
 			}
-			v := in.Strategy.MaxParallel.Value
-			out.MaxParallel = &v
 		}
 		if in.Strategy.Matrix != nil {
 			matrix, err := adaptMatrix(path, in.ID.Value, in.Strategy.Matrix, scalars)
@@ -569,15 +851,17 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		}
 		if step.ContinueOnError != nil {
 			if step.ContinueOnError.Expression != nil {
-				return Job{}, locatedError(path, step.ContinueOnError.Expression.Pos, in.ID.Value, "expression-valued step continue-on-error is unsupported")
+				owned.ContinueOnErrorExpression = step.ContinueOnError.Expression.Value
+			} else {
+				owned.ContinueOnError = step.ContinueOnError.Value
 			}
-			owned.ContinueOnError = step.ContinueOnError.Value
 		}
 		if step.TimeoutMinutes != nil {
 			if step.TimeoutMinutes.Expression != nil {
-				return Job{}, locatedError(path, step.TimeoutMinutes.Expression.Pos, in.ID.Value, "expression-valued step timeout-minutes is unsupported")
+				owned.TimeoutMinutesExpression = step.TimeoutMinutes.Expression.Value
+			} else {
+				owned.TimeoutMinutes = step.TimeoutMinutes.Value
 			}
-			owned.TimeoutMinutes = step.TimeoutMinutes.Value
 		}
 		if step.Env != nil && step.Env.Expression != nil {
 			return Job{}, locatedError(path, step.Env.Expression.Pos, in.ID.Value, "expression-valued step env is unsupported")
@@ -596,7 +880,11 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			owned.Span = spanFrom(step.Pos, exec.Run.Value)
 		case *actionlint.ExecAction:
 			if exec.Entrypoint != nil || exec.Args != nil {
-				return Job{}, locatedError(path, step.Pos, in.ID.Value, "action entrypoint and args overrides are unsupported in the supported runtime subset")
+				reason := "action entrypoint and args overrides are unsupported in the supported runtime subset"
+				if strings.HasPrefix(strings.ToLower(exec.Uses.Value), "docker://") {
+					reason = actionsource.UnsupportedContainerActionReason
+				}
+				return Job{}, locatedError(path, step.Pos, in.ID.Value, reason)
 			}
 			owned.Kind = "uses"
 			owned.Uses = exec.Uses.Value
@@ -624,50 +912,56 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 	return out, nil
 }
 
-func adaptConcurrency(path, jobID string, in *actionlint.Concurrency) (*Concurrency, error) {
-	if in == nil {
-		return nil, nil
+// adaptEnvironment owns the statically supported subset of the GitHub
+// environment key: one literal environment name. The optional url is used only
+// for GitHub deployment records, which buildkite-gha never creates, so it is
+// accepted and ignored.
+func adaptEnvironment(path string, in *actionlint.Job) (string, error) {
+	environment := in.Environment
+	if in.WorkflowCall != nil {
+		return "", locatedError(path, environment.Pos, in.ID.Value, "environment cannot be combined with a reusable workflow call")
 	}
-	var cancellationExpression *expression.Expression
-	var cancellationPosition Position
-	if in.CancelInProgress != nil && in.CancelInProgress.Expression != nil {
-		position := in.CancelInProgress.Pos
-		if in.CancelInProgress.Expression.Pos != nil {
-			position = in.CancelInProgress.Expression.Pos
-		}
-		expr, err := adaptExpression(in.CancelInProgress.Expression)
-		if err != nil {
-			scope := "workflow"
-			if jobID != "" {
-				scope = fmt.Sprintf("job %q", jobID)
-			}
-			return nil, fmt.Errorf("%s:%d:%d: %s concurrency cancel-in-progress: %w", path, position.Line, position.Col, scope, err)
-		}
-		cancellationExpression = &expr
-		cancellationPosition = Position{Line: position.Line, Column: position.Col}
+	if environment.Name == nil || strings.TrimSpace(environment.Name.Value) == "" {
+		return "", locatedError(path, environment.Pos, in.ID.Value, "environment requires a literal name")
 	}
-	if in.Group == nil || strings.TrimSpace(in.Group.Value) == "" {
-		position := in.Pos
-		if jobID == "" {
-			return nil, fmt.Errorf("%s:%d:%d: workflow concurrency group must not be empty", path, position.Line, position.Col)
-		}
-		return nil, locatedError(path, position, jobID, "concurrency group must not be empty")
+	name := environment.Name
+	if name.ContainsExpression() {
+		return "", locatedError(path, name.Pos, in.ID.Value, "environment names that use expressions are unsupported; use a literal environment name")
 	}
-	return &Concurrency{
-		Group:                      in.Group.Value,
-		CancelInProgress:           in.CancelInProgress != nil && in.CancelInProgress.Value,
-		CancelInProgressExpression: cancellationExpression,
-		CancelInProgressPosition:   cancellationPosition,
-		Span:                       spanFrom(in.Group.Pos, in.Group.Value),
-	}, nil
+	if utf8.RuneCountInString(name.Value) > 255 || strings.ContainsAny(name.Value, "\x00\r\n") {
+		return "", locatedError(path, name.Pos, in.ID.Value, "environment name must be at most 255 characters without control characters")
+	}
+	return name.Value, nil
 }
 
-func adaptPermissions(path string, in *actionlint.Permissions) (*Permissions, error) {
+func adaptPermissions(path string, in *actionlint.Permissions, jobID string) (*Permissions, error) {
 	if in == nil {
 		return nil, nil
 	}
+	permissionError := func(pos *actionlint.Pos, message string) error {
+		if jobID == "" {
+			return fmt.Errorf("%s:%d:%d: workflow permissions: %s", path, pos.Line, pos.Col, message)
+		}
+		return locatedError(path, pos, jobID, message)
+	}
 	if in.All != nil {
-		return nil, locatedError(path, in.All.Pos, "permissions", "permission aliases are unsupported; declare each required permission explicitly")
+		if in.All.Value != "read-all" && in.All.Value != "write-all" {
+			message := fmt.Sprintf("invalid permissions scalar %q; declare each needed permission in a map", in.All.Value)
+			if jobID == "" {
+				message = fmt.Sprintf("invalid permissions scalar %q; use read-all, write-all, or a permissions map", in.All.Value)
+			}
+			return nil, permissionError(in.All.Pos, message)
+		}
+		if jobID == "" {
+			access := strings.TrimSuffix(in.All.Value, "-all")
+			scopes := make(map[string]string, len(topLevelAllPermissionNames))
+			for _, name := range topLevelAllPermissionNames {
+				scopes[name] = access
+			}
+			return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
+		}
+		access := strings.TrimSuffix(in.All.Value, "-all")
+		return nil, fmt.Errorf("%s:%d:%d: permissions: %s is unsupported as job-level shorthand. In job %q, you cannot set separate repository permissions. At the workflow top level, declare each needed repository permission, such as contents: %s and pull-requests: %s. These permissions apply to every job that receives GITHUB_TOKEN. Use permissions: %s at the workflow top level only when every supported repository permission should have %s access. If you need different repository permissions for individual jobs, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support", path, in.All.Pos.Line, in.All.Pos.Col, in.All.Value, jobID, access, access, in.All.Value, access)
 	}
 	scopes := make(map[string]string, len(in.Scopes))
 	names := make([]string, 0, len(in.Scopes))
@@ -678,23 +972,25 @@ func adaptPermissions(path string, in *actionlint.Permissions) (*Permissions, er
 	for _, name := range names {
 		scope := in.Scopes[name]
 		if scope == nil || scope.Name == nil || scope.Value == nil {
-			return nil, locatedError(path, in.Pos, "permissions", "invalid permission declaration")
+			return nil, permissionError(in.Pos, "invalid permission declaration")
 		}
-		if name == "id-token" {
-			return nil, locatedError(path, scope.Name.Pos, "permissions", "id-token permission requires GitHub-compatible OIDC and is unsupported")
-		}
-		if !supportedGitHubTokenPermission(name) {
-			return nil, locatedError(path, scope.Name.Pos, "permissions", fmt.Sprintf("unsupported permission %q; use canonical GitHub permission names", name))
+		if name != "id-token" && !supportedGitHubTokenPermission(name) {
+			return nil, permissionError(scope.Name.Pos, fmt.Sprintf("unsupported permission %q; use canonical GitHub permission names", name))
 		}
 		switch scope.Value.Value {
 		case "read", "write":
 			scopes[name] = scope.Value.Value
 		case "none":
 		default:
-			return nil, locatedError(path, scope.Value.Pos, "permissions", fmt.Sprintf("invalid access %q for permission %q", scope.Value.Value, name))
+			return nil, permissionError(scope.Value.Pos, fmt.Sprintf("invalid access %q for permission %q", scope.Value.Value, name))
 		}
 	}
 	return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
+}
+
+var topLevelAllPermissionNames = []string{
+	"actions", "artifact-metadata", "attestations", "checks", "contents", "deployments", "discussions",
+	"issues", "packages", "pages", "pull-requests", "security-events", "statuses",
 }
 
 func supportedGitHubTokenPermission(name string) bool {
@@ -739,21 +1035,12 @@ func adaptEnv(in *actionlint.Env) map[string]string {
 
 var serviceIDPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
 
-func adaptContainer(path, jobID string, in *actionlint.Container) (Container, error) {
+func adaptContainer(path, jobID string, in *actionlint.Container, raw rawServiceContainer) (Container, error) {
 	if in.Image == nil || strings.TrimSpace(in.Image.Value) == "" {
-		return Container{}, locatedError(path, in.Pos, jobID, "container image must be a non-empty literal")
-	}
-	if in.Image.ContainsExpression() {
-		return Container{}, locatedError(path, in.Image.Pos, jobID, "expression-valued container image is unsupported")
+		return Container{}, locatedError(path, in.Pos, jobID, "container image must be non-empty")
 	}
 	if in.Credentials != nil {
 		return Container{}, locatedError(path, in.Credentials.Pos, jobID, "container credentials are unsupported")
-	}
-	if len(in.Volumes) != 0 {
-		return Container{}, locatedError(path, in.Volumes[0].Pos, jobID, "container volumes are unsupported")
-	}
-	if in.Options != nil {
-		return Container{}, locatedError(path, in.Options.Pos, jobID, "container options are unsupported")
 	}
 	if in.Env != nil && in.Env.Expression != nil {
 		return Container{}, locatedError(path, in.Env.Expression.Pos, jobID, "expression-valued container env is unsupported")
@@ -765,13 +1052,23 @@ func adaptContainer(path, jobID string, in *actionlint.Container) (Container, er
 			}
 		}
 	}
-	out := Container{Image: in.Image.Value, Env: adaptEnv(in.Env), Span: pointSpan(in.Pos)}
-	for _, port := range in.Ports {
-		if port.ContainsExpression() {
-			return Container{}, locatedError(path, port.Pos, jobID, "expression-valued container port is unsupported")
-		}
-		out.Ports = append(out.Ports, port.Value)
+	// actionlint v1.7.12 assigns volume nodes to Container.Ports. Keep the raw
+	// owned fields authoritative until that dependency behavior changes.
+	out := Container{
+		Image: in.Image.Value, Env: adaptEnv(in.Env), Ports: raw.Ports,
+		Volumes: raw.Volumes, Options: raw.Options, Span: pointSpan(in.Pos),
 	}
+	return out, nil
+}
+
+func adaptServiceContainer(path, jobID string, in *actionlint.Container, raw rawServiceContainer) (ServiceContainer, error) {
+	if in.Image == nil || strings.TrimSpace(raw.Image) == "" {
+		return ServiceContainer{}, locatedError(path, in.Pos, jobID, "container image must be non-empty")
+	}
+	if in.Env != nil && in.Env.Expression != nil {
+		return ServiceContainer{}, locatedError(path, in.Env.Expression.Pos, jobID, "expression-valued service container env is unsupported")
+	}
+	out := ServiceContainer{Image: raw.Image, Credentials: raw.Credentials, Env: raw.Env, Ports: raw.Ports, Volumes: raw.Volumes, Options: raw.Options, Command: raw.Command, Entrypoint: raw.Entrypoint, Span: pointSpan(in.Pos)}
 	return out, nil
 }
 
@@ -780,12 +1077,8 @@ func mergeEnv(base, override map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(base)+len(override))
-	for name, value := range base {
-		out[name] = value
-	}
-	for name, value := range override {
-		out[name] = value
-	}
+	maps.Copy(out, base)
+	maps.Copy(out, override)
 	return out
 }
 
@@ -845,9 +1138,18 @@ func adaptMatrix(path, jobID string, in *actionlint.Matrix, scalars map[Position
 			return nil, err
 		}
 	}
-	out.Exclude, err = adaptMatrixCombinations(path, jobID, "exclude", in.Exclude, scalars)
-	if err != nil {
-		return nil, err
+	if in.Exclude != nil && in.Exclude.Expression != nil {
+		expr, expressionErr := adaptExpression(in.Exclude.Expression)
+		if expressionErr != nil {
+			return nil, locatedError(path, in.Exclude.Expression.Pos, jobID, expressionErr.Error())
+		}
+		out.ExcludeExpression = &expr
+		out.Span.End = Position{Line: expr.Span.End.Line, Column: expr.Span.End.Column}
+	} else {
+		out.Exclude, err = adaptMatrixCombinations(path, jobID, "exclude", in.Exclude, scalars)
+		if err != nil {
+			return nil, err
+		}
 	}
 	for _, combinations := range [][]MatrixCombination{out.Include, out.Exclude} {
 		for _, combination := range combinations {
@@ -953,321 +1255,6 @@ func scalarValues(document *yaml.Node) (map[Position]any, error) {
 	return values, nil
 }
 
-func parseConcurrencySyntax(path string, document *yaml.Node) (concurrencySyntax, error) {
-	syntax := concurrencySyntax{Steps: map[Position]stepConcurrency{}}
-	root := document
-	if root.Kind == yaml.DocumentNode && len(root.Content) != 0 {
-		root = root.Content[0]
-	}
-	jobs := mappingValue(root, "jobs")
-	if jobs == nil || jobs.Kind != yaml.MappingNode {
-		return syntax, nil
-	}
-	for i := 0; i+1 < len(jobs.Content); i += 2 {
-		job := jobs.Content[i+1]
-		steps := mappingValue(job, "steps")
-		if steps == nil || steps.Kind != yaml.SequenceNode {
-			continue
-		}
-		for _, step := range steps.Content {
-			if step.Kind != yaml.MappingNode {
-				continue
-			}
-			parsed, diagnostic, ok, err := parseStepConcurrency(path, step)
-			if err != nil {
-				return concurrencySyntax{}, err
-			}
-			if !ok {
-				continue
-			}
-			position := nodePosition(step)
-			syntax.Steps[position] = parsed
-			syntax.Diagnostics = append(syntax.Diagnostics, diagnostic)
-		}
-	}
-	return syntax, nil
-}
-
-func parseStepConcurrency(path string, step *yaml.Node) (stepConcurrency, expectedActionlintDiagnostic, bool, error) {
-	entries := mappingEntries(step)
-	background, hasBackground := entries["background"]
-	controlKinds := make([]string, 0, 3)
-	for _, kind := range []string{"wait", "wait-all", "cancel", "parallel"} {
-		if _, ok := entries[kind]; ok {
-			controlKinds = append(controlKinds, kind)
-		}
-	}
-	if !hasBackground && len(controlKinds) == 0 {
-		return stepConcurrency{}, expectedActionlintDiagnostic{}, false, nil
-	}
-	if len(controlKinds) > 1 || len(controlKinds) != 0 && (hasBackground || entries["run"] != nil || entries["uses"] != nil) {
-		return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, step, "concurrent step must declare exactly one execution or control kind")
-	}
-	if hasBackground {
-		if entries["run"] == nil && entries["uses"] == nil {
-			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, background, "background is only valid on run or uses steps")
-		}
-		if background.ShortTag() != "!!bool" || background.Value != "true" {
-			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, background, "background must be the literal true")
-		}
-		key := mappingKey(step, "background")
-		return stepConcurrency{Background: true}, expectedActionlintDiagnostic{
-			Position: nodePosition(key),
-			Prefix:   "unexpected key \"background\" for step to ",
-		}, true, nil
-	}
-
-	kind := controlKinds[0]
-	if kind == "parallel" {
-		if len(entries) != 1 {
-			names := make([]string, 0, len(entries))
-			for name := range entries {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			for _, name := range names {
-				if name != kind {
-					return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, mappingKey(step, name), fmt.Sprintf("parallel control does not support %q", name))
-				}
-			}
-		}
-		members, err := parseParallelSteps(path, entries[kind])
-		if err != nil {
-			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, err
-		}
-		return stepConcurrency{Kind: kind, Parallel: members}, expectedActionlintDiagnostic{Position: nodePosition(step), Prefix: missingStepExecutionDiagnostic}, true, nil
-	}
-	allowed := map[string]bool{"name": true, kind: true}
-	for name := range entries {
-		if !allowed[name] {
-			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, mappingKey(step, name), fmt.Sprintf("%s control does not support %q", kind, name))
-		}
-	}
-	control := stepConcurrency{Kind: kind}
-	switch kind {
-	case "wait":
-		targets, err := stringList(entries[kind])
-		if err != nil || len(targets) == 0 {
-			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, entries[kind], "wait requires one step id or a non-empty list of step ids")
-		}
-		control.Targets = targets
-	case "wait-all":
-		if entries[kind].ShortTag() != "!!null" {
-			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, entries[kind], "wait-all does not accept a value")
-		}
-	case "cancel":
-		targets, err := stringList(entries[kind])
-		if err != nil || len(targets) != 1 || entries[kind].Kind != yaml.ScalarNode {
-			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, entries[kind], "cancel requires exactly one step id")
-		}
-		control.Targets = targets
-	}
-	return control, expectedActionlintDiagnostic{Position: nodePosition(step), Prefix: missingStepExecutionDiagnostic}, true, nil
-}
-
-func parseParallelSteps(path string, node *yaml.Node) ([]Step, error) {
-	if node.Kind != yaml.SequenceNode || len(node.Content) == 0 {
-		return nil, yamlNodeError(path, node, "parallel requires a non-empty list of run or uses steps")
-	}
-	steps := make([]Step, 0, len(node.Content))
-	for _, child := range node.Content {
-		step, err := parseParallelStep(path, child)
-		if err != nil {
-			return nil, err
-		}
-		steps = append(steps, step)
-	}
-	return steps, nil
-}
-
-func parseParallelStep(path string, node *yaml.Node) (Step, error) {
-	if node.Kind != yaml.MappingNode {
-		return Step{}, yamlNodeError(path, node, "parallel member must be a run or uses step")
-	}
-	entries := mappingEntries(node)
-	allowed := map[string]bool{
-		"id": true, "name": true, "run": true, "uses": true, "shell": true, "working-directory": true,
-		"env": true, "with": true, "if": true, "continue-on-error": true, "timeout-minutes": true,
-	}
-	for name := range entries {
-		if !allowed[name] {
-			return Step{}, yamlNodeError(path, mappingKey(node, name), fmt.Sprintf("parallel member does not support %q", name))
-		}
-	}
-	run, hasRun := entries["run"]
-	uses, hasUses := entries["uses"]
-	if hasRun == hasUses {
-		return Step{}, yamlNodeError(path, node, "parallel member must declare exactly one of run or uses")
-	}
-	if err := validateParallelStepSyntax(path, node); err != nil {
-		return Step{}, err
-	}
-	execution := run
-	if hasUses {
-		execution = uses
-	}
-	if execution.Kind != yaml.ScalarNode || execution.ShortTag() == "!!null" || strings.TrimSpace(execution.Value) == "" {
-		return Step{}, yamlNodeError(path, execution, "parallel member execution must be a non-empty scalar")
-	}
-	step := Step{Span: yamlStepSpan(node, execution)}
-	var err error
-	if step.ID, err = optionalString(entries["id"]); err != nil {
-		return Step{}, yamlNodeError(path, entries["id"], "parallel member id must be a string")
-	}
-	if step.Name, err = optionalScalar(entries["name"]); err != nil {
-		return Step{}, yamlNodeError(path, entries["name"], "parallel member name must be a scalar")
-	}
-	if step.If, err = optionalScalar(entries["if"]); err != nil {
-		return Step{}, yamlNodeError(path, entries["if"], "parallel member if must be a scalar")
-	}
-	if value := entries["if"]; value != nil {
-		step.IfSpan = yamlStepSpan(value, value)
-	}
-	if step.Env, err = scalarMap(entries["env"]); err != nil {
-		return Step{}, yamlNodeError(path, entries["env"], "parallel member env must be a scalar mapping")
-	}
-	if value := entries["continue-on-error"]; value != nil {
-		if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!bool" {
-			return Step{}, yamlNodeError(path, value, "parallel member continue-on-error must be a literal boolean")
-		}
-		if err := value.Decode(&step.ContinueOnError); err != nil {
-			return Step{}, yamlNodeError(path, value, "parallel member continue-on-error must be a literal boolean")
-		}
-	}
-	if value := entries["timeout-minutes"]; value != nil {
-		if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!int" && value.ShortTag() != "!!float" {
-			return Step{}, yamlNodeError(path, value, "parallel member timeout-minutes must be a literal number")
-		}
-		step.TimeoutMinutes, err = strconv.ParseFloat(value.Value, 64)
-		if err != nil {
-			return Step{}, yamlNodeError(path, value, "parallel member timeout-minutes must be a literal number")
-		}
-	}
-	if hasRun {
-		if entries["with"] != nil {
-			return Step{}, yamlNodeError(path, mappingKey(node, "with"), "parallel run member does not support with")
-		}
-		step.Kind = "run"
-		step.Run = run.Value
-		if step.Shell, err = optionalScalar(entries["shell"]); err != nil {
-			return Step{}, yamlNodeError(path, entries["shell"], "parallel member shell must be a scalar")
-		}
-		if step.WorkingDirectory, err = optionalScalar(entries["working-directory"]); err != nil {
-			return Step{}, yamlNodeError(path, entries["working-directory"], "parallel member working-directory must be a scalar")
-		}
-		return step, nil
-	}
-	if entries["shell"] != nil || entries["working-directory"] != nil {
-		return Step{}, yamlNodeError(path, node, "parallel uses member cannot declare shell or working-directory")
-	}
-	step.Kind = "uses"
-	step.Uses = uses.Value
-	if step.With, err = scalarMap(entries["with"]); err != nil {
-		return Step{}, yamlNodeError(path, entries["with"], "parallel member with must be a scalar mapping")
-	}
-	for name, value := range step.With {
-		lower := strings.ToLower(name)
-		if lower != name {
-			delete(step.With, name)
-			step.With[lower] = value
-		}
-	}
-	_, hasEntrypoint := step.With["entrypoint"]
-	_, hasArgs := step.With["args"]
-	if strings.HasPrefix(strings.ToLower(step.Uses), "docker://") && (hasEntrypoint || hasArgs) {
-		return Step{}, yamlNodeError(path, entries["with"], "parallel docker action member uses unsupported entrypoint or args overrides")
-	}
-	return step, nil
-}
-
-func validateParallelStepSyntax(path string, step *yaml.Node) error {
-	stringNode := func(value string) *yaml.Node {
-		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
-	}
-	mappingNode := func(content ...*yaml.Node) *yaml.Node {
-		return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: content}
-	}
-	document := yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{
-		mappingNode(
-			stringNode("on"), stringNode("push"),
-			stringNode("jobs"), mappingNode(
-				stringNode("parallel"), mappingNode(
-					stringNode("runs-on"), stringNode("ubuntu-latest"),
-					stringNode("steps"), &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: []*yaml.Node{step}},
-				),
-			),
-		),
-	}}
-	source, err := yaml.Marshal(&document)
-	if err != nil {
-		return yamlNodeError(path, step, fmt.Sprintf("validate parallel member: %v", err))
-	}
-	_, errs := actionlint.Parse(source)
-	if len(errs) != 0 {
-		return yamlNodeError(path, step, fmt.Sprintf("invalid parallel member: %s", errs[0].Message))
-	}
-	return nil
-}
-
-func optionalString(node *yaml.Node) (string, error) {
-	if node == nil {
-		return "", nil
-	}
-	if node.Kind != yaml.ScalarNode || node.ShortTag() != "!!str" || node.Value == "" {
-		return "", fmt.Errorf("value is not a string")
-	}
-	return node.Value, nil
-}
-
-func optionalScalar(node *yaml.Node) (string, error) {
-	if node == nil {
-		return "", nil
-	}
-	if node.Kind != yaml.ScalarNode || node.ShortTag() == "!!null" {
-		return "", fmt.Errorf("value is not a scalar")
-	}
-	return node.Value, nil
-}
-
-func scalarMap(node *yaml.Node) (map[string]string, error) {
-	if node == nil {
-		return nil, nil
-	}
-	if node.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("value is not a mapping")
-	}
-	values := make(map[string]string, len(node.Content)/2)
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		key, value := node.Content[i], node.Content[i+1]
-		if key.Kind != yaml.ScalarNode || key.ShortTag() != "!!str" || key.Value == "" || value.Kind != yaml.ScalarNode {
-			return nil, fmt.Errorf("mapping contains a non-scalar entry")
-		}
-		values[key.Value] = value.Value
-	}
-	return values, nil
-}
-
-func parallelStepID(position Position, member int) string {
-	return fmt.Sprintf("__parallel_%d_%d_%d", position.Line, position.Column, member)
-}
-
-func parallelBarrierID(position Position) string {
-	return fmt.Sprintf("__parallel_%d_%d_wait", position.Line, position.Column)
-}
-
-func yamlStepSpan(step, execution *yaml.Node) Span {
-	span := Span{Start: nodePosition(step), End: nodePosition(execution)}
-	for _, r := range execution.Value {
-		if r == '\n' {
-			span.End.Line++
-			span.End.Column = 1
-		} else {
-			span.End.Column++
-		}
-	}
-	return span
-}
-
 func filterActionlintDiagnostics(path string, errs []*actionlint.Error, expected []expectedActionlintDiagnostic) error {
 	matched := make([]bool, len(expected))
 	var diagnostics []error
@@ -1283,7 +1270,11 @@ func filterActionlintDiagnostics(path string, errs []*actionlint.Error, expected
 			matched[match] = true
 			continue
 		}
-		diagnostics = append(diagnostics, fmt.Errorf("%s:%d:%d: %s", path, actionlintErr.Line, actionlintErr.Column, actionlintErr.Message))
+		message := actionlintErr.Message
+		if message == missingStepExecutionDiagnostic {
+			message = `This step has nothing to execute. Add a script with "run", for example "run: echo hello", or an action with "uses", for example "uses: actions/checkout@v4".`
+		}
+		diagnostics = append(diagnostics, fmt.Errorf("%s:%d:%d: %s", path, actionlintErr.Line, actionlintErr.Column, message))
 	}
 	for i, ok := range matched {
 		if !ok {
@@ -1292,30 +1283,6 @@ func filterActionlintDiagnostics(path string, errs []*actionlint.Error, expected
 		}
 	}
 	return errors.Join(diagnostics...)
-}
-
-func validateStepConcurrency(path, jobID string, steps []Step) error {
-	background := make(map[string]struct{})
-	for _, step := range steps {
-		if step.Background && step.ID != "" {
-			background[strings.ToLower(step.ID)] = struct{}{}
-		}
-		if step.Kind != "wait" && step.Kind != "cancel" {
-			continue
-		}
-		seen := make(map[string]struct{}, len(step.Targets))
-		for _, target := range step.Targets {
-			key := strings.ToLower(target)
-			if _, duplicate := seen[key]; duplicate {
-				return workflowSpanError(path, step.Span, jobID, fmt.Sprintf("%s repeats background step %q", step.Kind, target))
-			}
-			seen[key] = struct{}{}
-			if _, ok := background[key]; !ok {
-				return workflowSpanError(path, step.Span, jobID, fmt.Sprintf("%s target %q is not a prior background step with an id", step.Kind, target))
-			}
-		}
-	}
-	return nil
 }
 
 func mappingEntries(node *yaml.Node) map[string]*yaml.Node {
@@ -1367,30 +1334,6 @@ func resolveAlias(node *yaml.Node) *yaml.Node {
 	return node
 }
 
-func stringList(node *yaml.Node) ([]string, error) {
-	if node == nil {
-		return nil, fmt.Errorf("missing value")
-	}
-	switch node.Kind {
-	case yaml.ScalarNode:
-		if node.ShortTag() != "!!str" || node.Value == "" {
-			return nil, fmt.Errorf("value is not a step id")
-		}
-		return []string{node.Value}, nil
-	case yaml.SequenceNode:
-		values := make([]string, 0, len(node.Content))
-		for _, child := range node.Content {
-			if child.Kind != yaml.ScalarNode || child.ShortTag() != "!!str" || child.Value == "" {
-				return nil, fmt.Errorf("value is not a step id")
-			}
-			values = append(values, child.Value)
-		}
-		return values, nil
-	default:
-		return nil, fmt.Errorf("value is not a string or list")
-	}
-}
-
 func nodePosition(node *yaml.Node) Position {
 	if node == nil {
 		return Position{}
@@ -1408,7 +1351,12 @@ func workflowSpanError(path string, span Span, jobID, message string) error {
 }
 
 func adaptExpression(in *actionlint.String) (expression.Expression, error) {
-	return expression.Parse(in.Value, in.Pos.Line, in.Pos.Col)
+	return expression.NewEngine().Parse(expression.Site{Source: in.Value, Profile: expression.ProfileCompile, Result: expression.ResultAny}, in.Pos.Line, in.Pos.Col)
+}
+
+func validateExpressionSite(source string, profile expression.ProfileID, result expression.ResultType) error {
+	_, err := expression.NewEngine().Validate(expression.Site{Source: source, Profile: profile, Result: result})
+	return err
 }
 
 func locatedError(path string, pos *actionlint.Pos, jobID, message string) error {

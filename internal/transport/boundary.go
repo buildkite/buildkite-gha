@@ -18,6 +18,8 @@ const (
 	maxAnnotationBodyBytes         = 1024 * 1024
 	maxAnnotationContextCharacters = 100
 	maxAgentErrorBytes             = 64 * 1024
+	importerArtifactPattern        = ".buildkite-gha/**/*"
+	importerArtifactConcurrency    = "8"
 )
 
 // ErrMetadataUnavailable means Buildkite confirmed that reserved webhook
@@ -165,8 +167,38 @@ func (a Agent) GetMetadataBounded(ctx context.Context, key string, limit int) ([
 	return nil, fmt.Errorf("get Buildkite metadata %q: %w", key, err)
 }
 
+// GetStepAttribute reads one attribute of a step already in the build by its
+// step key. A continuation uses it to confirm that a rejected duplicate upload
+// was its own earlier upload.
+func (a Agent) GetStepAttribute(ctx context.Context, stepKey, attribute string) ([]byte, error) {
+	if !keyPattern.MatchString(stepKey) {
+		return nil, fmt.Errorf("invalid step key %q", stepKey)
+	}
+	if !keyPattern.MatchString(attribute) {
+		return nil, fmt.Errorf("invalid step attribute %q", attribute)
+	}
+	return a.run(ctx, []string{"step", "get", attribute, "--step", stepKey}, nil)
+}
+
 func (a Agent) UploadPipeline(ctx context.Context, pipeline []byte) error {
-	_, err := a.run(ctx, []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, pipeline)
+	_, err := a.run(ctx, []string{"pipeline", "upload", "--no-interpolation"}, pipeline)
+	return err
+}
+
+// EnsureStepLabelSuffix makes a terminal runtime distinction visible on the
+// current Buildkite step without duplicating it when the step is retried.
+func (a Agent) EnsureStepLabelSuffix(ctx context.Context, suffix string) error {
+	if suffix == "" || !utf8.ValidString(suffix) {
+		return fmt.Errorf("step label suffix must be nonempty valid UTF-8")
+	}
+	label, err := a.run(ctx, []string{"step", "get", "label"}, nil)
+	if err != nil {
+		return err
+	}
+	if strings.HasSuffix(strings.TrimSpace(string(label)), strings.TrimSpace(suffix)) {
+		return nil
+	}
+	_, err = a.run(ctx, []string{"step", "update", "label", suffix, "--append"}, nil)
 	return err
 }
 
@@ -233,7 +265,6 @@ func UploadArtifacts(ctx context.Context, agent Agent, root string, artifacts []
 		return fmt.Errorf("open artifact root: %w", err)
 	}
 	defer func() { _ = rootFS.Close() }()
-	materialized := make(map[string]string, len(artifacts))
 	for _, artifact := range artifacts {
 		path, err := writeMaterialized(rootFS, absoluteRoot, artifact.Path, artifact.Contents)
 		if err != nil {
@@ -242,18 +273,25 @@ func UploadArtifacts(ctx context.Context, agent Agent, root string, artifacts []
 		if err := verifyMaterialized(path, artifact.Contents, artifact.Digest); err != nil {
 			return fmt.Errorf("verify artifact %q before upload: %w", artifact.Path, err)
 		}
-		materialized[artifact.Path] = path
 	}
-	for _, artifact := range artifacts {
-		if err := verifyMaterialized(materialized[artifact.Path], artifact.Contents, artifact.Digest); err != nil {
-			return fmt.Errorf("verify artifact %q at upload: %w", artifact.Path, err)
-		}
-		if err := agent.UploadArtifactFrom(ctx, absoluteRoot, artifact.Path); err != nil {
-			return fmt.Errorf("upload artifact %q: %w", artifact.Path, err)
-		}
+	if err := uploadMaterializedArtifacts(ctx, agent, absoluteRoot, artifacts); err != nil {
+		return err
 	}
 	if err := agent.UploadPipeline(ctx, pipeline); err != nil {
 		return fmt.Errorf("%w: %w", ErrPipelineUpload, err)
+	}
+	return nil
+}
+
+func uploadMaterializedArtifacts(ctx context.Context, agent Agent, absoluteRoot string, artifacts []Artifact) error {
+	for _, artifact := range artifacts {
+		path := filepath.Join(absoluteRoot, filepath.FromSlash(artifact.Path))
+		if err := verifyMaterialized(path, artifact.Contents, artifact.Digest); err != nil {
+			return fmt.Errorf("verify artifact %q at upload: %w", artifact.Path, err)
+		}
+	}
+	if _, err := agent.runInDir(ctx, absoluteRoot, []string{"artifact", "upload", importerArtifactPattern, "--concurrency", importerArtifactConcurrency}, nil); err != nil {
+		return fmt.Errorf("upload artifacts: %w", err)
 	}
 	return nil
 }
@@ -268,8 +306,10 @@ func cloneArtifacts(artifacts []Artifact) []Artifact {
 }
 
 func validateArtifact(artifact Artifact) error {
-	path := filepath.FromSlash(artifact.Path)
-	if artifact.Path == "" || !filepath.IsLocal(path) || filepath.ToSlash(filepath.Clean(path)) != artifact.Path {
+	if !strings.HasPrefix(artifact.Path, ".buildkite-gha/") {
+		return fmt.Errorf("invalid artifact path %q", artifact.Path)
+	}
+	if _, err := filepath.Localize(artifact.Path); err != nil {
 		return fmt.Errorf("invalid artifact path %q", artifact.Path)
 	}
 	if !digestPattern.MatchString(artifact.Digest) || Digest(artifact.Contents) != artifact.Digest {

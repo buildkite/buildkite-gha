@@ -50,6 +50,10 @@ if ! command -v gh >/dev/null; then
   exit 1
 fi
 
+# Orb system configuration requires commit signing but does not provide its
+# signing key. Tests create temporary repositories, so override it globally.
+git config --global commit.gpgsign false
+
 echo "Installing mise if needed..."
 if [[ ! -x "$mise_bin" ]]; then
   curl -fsSL https://mise.run | sh

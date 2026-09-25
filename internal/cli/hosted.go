@@ -1,0 +1,504 @@
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"os"
+	"regexp"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
+	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/plan"
+	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
+)
+
+const (
+	hostedProfile                = "hosted"
+	legacyHostedTokenlessProfile = "hosted-tokenless"
+	defaultNobleRunnerImage      = "buildkite.namespace-images.com/agent-base@sha256:243c4015ea220c526b7976df88b037aff1930c1278d8d716b2f5f90247c72a08"
+	defaultJammyRunnerImage      = "buildkite.namespace-images.com/agent-base@sha256:21c6794d225832c5e104c2ed97c8602da5925caf225e31018f32408074fa40fc"
+	defaultMacOSRunnerQueue      = "macos-medium"
+)
+
+var runnerQueuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
+var runnerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
+
+type hostedCompilation struct {
+	Bundle           compiler.Bundle
+	JobGraphComplete bool
+	HasActions       bool
+	Admitted         bool
+}
+
+type hostedFailureKind string
+
+const (
+	hostedEnvironmentFailure hostedFailureKind = "environment"
+	hostedEvaluationFailure  hostedFailureKind = "evaluation"
+	hostedAdmissionFailure   hostedFailureKind = "admission"
+)
+
+type hostedFailure struct {
+	Kind hostedFailureKind
+	Err  error
+}
+
+func (e *hostedFailure) Error() string { return e.Err.Error() }
+func (e *hostedFailure) Unwrap() error { return e.Err }
+
+func hostedError(kind hostedFailureKind, err error) error {
+	return &hostedFailure{Kind: kind, Err: err}
+}
+
+type actionSourceAuthentication struct {
+	provider   gharuntime.ActionSourceTokenProvider
+	redactor   gharuntime.Redactor
+	warnings   io.Writer
+	once       sync.Once
+	credential string
+	err        error
+}
+
+type repositorySourceSwitch struct {
+	mu     sync.RWMutex
+	source compiler.RepositorySource
+}
+
+func (s *repositorySourceSwitch) Fetch(ctx context.Context, ref actionsource.Reference) (actionsource.Resolved, actionsource.Materialized, error) {
+	s.mu.RLock()
+	source := s.source
+	s.mu.RUnlock()
+	return source.Fetch(ctx, ref)
+}
+
+func (s *repositorySourceSwitch) set(source compiler.RepositorySource) {
+	s.mu.Lock()
+	s.source = source
+	s.mu.Unlock()
+}
+
+func importerJobActionSourceAuthentication(warnings io.Writer, clientVersion string) *actionSourceAuthentication {
+	authentication := &actionSourceAuthentication{
+		redactor: gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
+		warnings: warnings,
+	}
+	provider, err := gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
+		Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+		JobID:         os.Getenv("BUILDKITE_JOB_ID"),
+		JobToken:      os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+		ClientVersion: clientVersion,
+	})
+	if err != nil {
+		return authentication
+	}
+	authentication.provider = provider
+	return authentication
+}
+
+func (a *actionSourceAuthentication) option(repository string) actionsource.Option {
+	if a == nil {
+		return nil
+	}
+	return actionsource.WithGitHubActionSourceTokenProvider(repository, func(ctx context.Context) (string, error) {
+		return a.token(ctx, repository)
+	})
+}
+
+func (a *actionSourceAuthentication) token(ctx context.Context, repository string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	a.once.Do(func() {
+		a.credential, a.err = a.provision(ctx, repository)
+	})
+	return a.credential, a.err
+}
+
+func (a *actionSourceAuthentication) provision(ctx context.Context, repository string) (string, error) {
+	if a.provider == nil {
+		a.warnAnonymousFallback("GitHub action source authentication is unavailable")
+		return "", nil
+	}
+	token, err := a.provider.ActionSourceToken(ctx, repository)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) {
+			return "", err
+		}
+		a.warnAnonymousFallback("could not mint a GitHub action source token")
+		return "", nil
+	}
+	if err := a.redactor.AddRedaction(ctx, token); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) {
+			return "", err
+		}
+		a.warnAnonymousFallback("could not register the GitHub action source token with the Buildkite Agent redactor")
+		return "", nil
+	}
+	return token, nil
+}
+
+func (a *actionSourceAuthentication) warnAnonymousFallback(reason string) {
+	if a.warnings != nil {
+		_, _ = fmt.Fprintf(a.warnings, "buildkite-gha: upload: warning: %s; resolving mutable public action references anonymously\n", reason)
+	}
+}
+
+func hostedOptions(groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string) compiler.Options {
+	targets := hostedRunnerTargets()
+	maps.Copy(targets, configuredTargets)
+	options := compiler.Options{
+		EventTrust:           compiler.EventUntrusted,
+		GroupLabel:           groupLabel,
+		RuntimeDistributions: runtimeDistributions,
+		Runners: compiler.RunnerPolicy{
+			Targets:                    targets,
+			AllowUntrustedDefaultQueue: true,
+		},
+	}
+	for _, target := range targets {
+		if target.Queue != "" && !slices.Contains(options.Runners.UntrustedQueues, target.Queue) {
+			options.Runners.UntrustedQueues = append(options.Runners.UntrustedQueues, target.Queue)
+		}
+	}
+	return options
+}
+
+// candidateWorkflowSource is not provenance. The compiler must fetch the exact
+// workflow path and match its bytes before resolving $/. Synthetic validation
+// events use an all-zero placeholder SHA and cannot identify source.
+func candidateWorkflowSource(eventSource []byte) *compiler.WorkflowSourceReference {
+	event, err := compiler.ParseEvent(eventSource)
+	if err != nil || event.Provider != "github" || strings.Trim(event.SHA, "0") == "" {
+		return nil
+	}
+	return &compiler.WorkflowSourceReference{Repository: event.Repository.Owner + "/" + event.Repository.Name, Commit: event.SHA}
+}
+
+func applyRunnerResolution(options *compiler.Options, resolution agentRunnerResolution) {
+	options.Runners.Selectors = resolution.selectors
+	options.Runners.Rejections = resolution.rejections
+	for _, selector := range resolution.selectors {
+		if selector.Target.Queue != "" && !slices.Contains(options.Runners.UntrustedQueues, selector.Target.Queue) {
+			options.Runners.UntrustedQueues = append(options.Runners.UntrustedQueues, selector.Target.Queue)
+		}
+	}
+}
+
+// hostedRunnerTargets is the runner preset shared by hosted validation and
+// production upload. RunnerPolicy resolves these labels case-insensitively.
+// Keep API-resolved and organization-provided targets out of this preset.
+func hostedRunnerTargets() map[string]compiler.RunnerTarget {
+	return map[string]compiler.RunnerTarget{
+		"ubuntu-latest": {Platform: compiler.PlatformLinuxAMD64, Image: defaultNobleRunnerImage},
+		"ubuntu-24.04":  {Platform: compiler.PlatformLinuxAMD64, Image: defaultNobleRunnerImage},
+		"ubuntu-22.04":  {Platform: compiler.PlatformLinuxAMD64, Image: defaultJammyRunnerImage},
+		"macos-latest":  {Platform: compiler.PlatformDarwinARM64, Queue: defaultMacOSRunnerQueue},
+	}
+}
+
+func failedPartialBundle(bundle compiler.Bundle) compiler.Bundle {
+	bundle.Plans = nil
+	bundle.EventArtifact = nil
+	bundle.GeneratedWorkflow = buildkitepipeline.Workflow{}
+	bundle.JobOutcomes = make(map[string]compiler.JobOutcome, len(bundle.IR.Jobs))
+	for _, instance := range bundle.IR.Jobs {
+		bundle.JobOutcomes[instance.Key] = compiler.JobFailed
+	}
+	return bundle
+}
+
+func newHostedActionSource(ctx context.Context, actionCacheDir, clientVersion string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
+	actionSource, cleanup, _, err := newHostedActionSourceWithSnapshot(ctx, actionCacheDir, clientVersion, resolverOptions, storeOptions)
+	return actionSource, cleanup, err
+}
+
+func newHostedActionSourceWithSnapshot(ctx context.Context, actionCacheDir, clientVersion string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), string, error) {
+	resolverOptions = append(resolverOptions, actionsource.WithUserAgentVersion(clientVersion))
+	storeOptions = append(storeOptions, actionsource.WithUserAgentVersion(clientVersion))
+	actionRoot := actionCacheDir
+	cleanup := func() {}
+	if actionRoot == "" {
+		var err error
+		actionRoot, err = os.MkdirTemp("", "buildkite-gha-action-source-")
+		if err != nil {
+			return nil, cleanup, "", fmt.Errorf("create action source store: %w", err)
+		}
+		cleanup = func() { _ = os.RemoveAll(actionRoot) }
+	}
+	resolver, err := actionsource.NewResolver(nil, resolverOptions...)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, "", fmt.Errorf("configure public action resolver: %w", err)
+	}
+	store, err := actionsource.NewStoreContext(ctx, actionRoot, nil, storeOptions...)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, "", fmt.Errorf("configure public action source store: %w", err)
+	}
+	return compiler.MemoizeActionSource(compiler.PublicActionSource{Resolver: resolver, Store: store}), cleanup, resolver.ResolutionSnapshotID(), nil
+}
+
+func validateUnprivilegedBundle(bundle compiler.Bundle) error {
+	instances := make(map[string]compiler.JobInstance, len(bundle.IR.Jobs))
+	for _, instance := range bundle.IR.Jobs {
+		instances[instance.Key] = instance
+	}
+	var diagnostics []error
+	addFailure := func(artifact compiler.PlanArtifact, message, detail string, err error) {
+		finding := &compiler.ProcessingFinding{
+			Stage: workflowprocessing.StageAdmission, Code: "E_PROFILE", Category: "admission",
+			Job: artifact.Job.Workflow.LogicalJobID, Instance: artifact.Job.Target.StepKey,
+			Message: message, Detail: detail, Err: err,
+		}
+		if instance, ok := instances[artifact.Job.Target.StepKey]; ok {
+			finding.Path = instance.SourcePath
+			finding.Line = instance.Source.Start.Line
+			finding.Column = instance.Source.Start.Column
+		}
+		diagnostics = append(diagnostics, finding)
+	}
+	for _, artifact := range bundle.Plans {
+		for _, capability := range artifact.Job.RequiredCapabilities {
+			if capability == "secrets" {
+				continue
+			}
+			if capability == "docker" && !admittedDockerProvenance(artifact.Job, artifact.Authorization.DockerCapabilitySources) {
+				message := fmt.Sprintf("Job %q requires Docker without matching compiler provenance. Hosted runs support only verified Docker actions and bounded job or service containers.", artifact.Job.Workflow.LogicalJobID)
+				addFailure(artifact, message, "", errors.New("unsupported Docker access"))
+				continue
+			}
+			if capability == "provider-token-read" {
+				if !slices.Equal(artifact.Authorization.ProviderTokenReadCapabilitySources, []string{"checkout-adapter"}) {
+					message := "GitHub checkout credentials are unsupported for this job; use the managed actions/checkout integration"
+					addFailure(artifact, message, "", errors.New("unsupported GitHub checkout credentials"))
+				}
+				continue
+			}
+			if capability == "provider-token-write" {
+				filename := ""
+				if artifact.Job.GitHubToken != nil {
+					filename = artifact.Job.GitHubToken.Workflow
+				}
+				filenameErr := plan.ValidateGitHubWorkflowPolicyFilename(filename)
+				if artifact.Job.GitHubToken == nil || !slices.Equal(artifact.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) || filenameErr != nil || artifact.Authorization.WorkflowTokenPolicyFilename == "" || artifact.Authorization.WorkflowTokenPolicyFilename != filename {
+					reason := bundle.IR.Workflow.WorkflowTokenPolicyDiagnostic
+					if reason == "" {
+						reason = "the workflow token request does not match the compiled job"
+					}
+					message, detail := githubTokenAdmissionDiagnostic(artifact, reason)
+					addFailure(artifact, message, detail, errors.New("hosted GITHUB_TOKEN unsupported"))
+				}
+				continue
+			}
+			if capability != "network" && capability != "docker" {
+				message := fmt.Sprintf("Job %q requires unsupported hosted runtime capability %q. Remove the requirement or use a runtime profile that supports it.", artifact.Job.Workflow.LogicalJobID, capability)
+				addFailure(artifact, message, "", errors.New(message))
+			}
+		}
+		for _, action := range artifact.Job.Actions {
+			identity := actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path}
+			descriptor, _ := actionintegration.Lookup(identity)
+			if descriptor.Service == actionintegration.ServiceCache {
+				if _, _, err := actionintegration.Admit(identity, action.Commit); err != nil {
+					reference := action.Repository
+					if action.Path != "" {
+						reference += "/" + action.Path
+					}
+					if action.RequestedRef != "" {
+						reference += "@" + action.RequestedRef
+					}
+					message, detail, _ := actionintegration.UnsupportedVersionDiagnostic(reference, err)
+					addFailure(artifact, message, detail, fmt.Errorf("job %q uses unsupported cache action: %w", artifact.Job.Workflow.LogicalJobID, err))
+				}
+				continue
+			}
+			if descriptor.Service != "" {
+				reference := action.Repository
+				if action.Path != "" {
+					reference += "/" + action.Path
+				}
+				message := fmt.Sprintf("Action %q requires the GitHub Actions %s service, which hosted runs do not provide. Replace the action or use a runtime profile that provides this service.", reference, descriptor.Service)
+				addFailure(artifact, message, "", fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service", artifact.Job.Workflow.LogicalJobID, reference, descriptor.Service))
+			}
+		}
+	}
+	return errors.Join(diagnostics...)
+}
+
+func admittedDockerProvenance(job plan.Job, sources []string) bool {
+	if len(sources) == 0 {
+		return false
+	}
+	expected := make([]string, 0, 3)
+	if slices.Contains(sources, "dockerfile-actions") {
+		expected = append(expected, "dockerfile-actions")
+	}
+	if job.Container != nil {
+		expected = append(expected, "job-containers")
+	}
+	if len(job.Services) != 0 || job.ServicesExpression != "" {
+		expected = append(expected, "service-containers")
+	}
+	return slices.Equal(sources, expected)
+}
+
+func githubTokenAdmissionDiagnostic(artifact compiler.PlanArtifact, reason string) (message, detail string) {
+	limitation := reason
+	fix := "Use a supported workflow-level permissions map or remove the GITHUB_TOKEN dependency."
+	switch {
+	case strings.Contains(reason, "reusable-workflow jobs"):
+		limitation = "workflows containing reusable-workflow jobs cannot receive a hosted GITHUB_TOKEN"
+		fix = "Inline the reusable job or remove the GITHUB_TOKEN dependency; runner configuration cannot enable this shape."
+	case strings.Contains(reason, "directly under .github/workflows"):
+		limitation = "hosted GITHUB_TOKEN issuance requires the workflow directly under .github/workflows"
+		fix = "Move the workflow directly under .github/workflows."
+	case strings.Contains(reason, "unsupported permission"):
+		limitation = reason
+		fix = "Remove the unsupported permission or avoid requiring GITHUB_TOKEN."
+	case strings.Contains(reason, "explicit non-empty"):
+		limitation = "an explicit empty or all-none top-level permissions map cannot issue GITHUB_TOKEN"
+		fix = "Declare the required permissions at the workflow top level."
+	}
+
+	var causes []string
+	if artifact.Authorization.GitHubTokenSecretReference {
+		causes = append(causes, "the workflow references secrets.GITHUB_TOKEN")
+	}
+	if len(artifact.Authorization.GitHubTokenActions) != 0 {
+		quoted := make([]string, len(artifact.Authorization.GitHubTokenActions))
+		for i, action := range artifact.Authorization.GitHubTokenActions {
+			quoted[i] = fmt.Sprintf("%q", action)
+		}
+		actionLabel := "action"
+		if len(quoted) > 1 {
+			actionLabel = "actions"
+		}
+		causes = append(causes, actionLabel+" "+strings.Join(quoted, ", ")+" defaults an input to github.token")
+	}
+	if len(causes) == 0 {
+		causes = append(causes, "the compiled job requests a workflow token")
+	}
+	permissions := "none"
+	if artifact.Job.GitHubToken != nil && len(artifact.Job.GitHubToken.Permissions) != 0 {
+		names := make([]string, 0, len(artifact.Job.GitHubToken.Permissions))
+		for name := range artifact.Job.GitHubToken.Permissions {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		values := make([]string, 0, len(names))
+		for _, name := range names {
+			values = append(values, strings.ReplaceAll(name, "_", "-")+": "+artifact.Job.GitHubToken.Permissions[name])
+		}
+		permissions = strings.Join(values, ", ")
+	}
+	message = fmt.Sprintf("Job %q needs GITHUB_TOKEN, but %s. %s", artifact.Job.Workflow.LogicalJobID, limitation, fix)
+	detail = fmt.Sprintf("Cause: %s. Effective permissions: %s.", strings.Join(causes, "; "), permissions)
+	return message, detail
+}
+
+func irUsesActions(ir compiler.IR) bool {
+	for _, job := range ir.Jobs {
+		for _, step := range job.Steps {
+			if step.Uses != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bundleRunsUnprovenActions reports whether a compiled bundle executes action
+// code the compiler never ran. Actions a native adapter replaces keep both
+// their locks and their `uses` steps in the plan, so the adapter decision is
+// the only thing separating them from actions that really run.
+func bundleRunsUnprovenActions(bundle compiler.Bundle) bool {
+	for _, artifact := range bundle.Plans {
+		for _, lock := range artifact.Job.Actions {
+			identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
+			if _, native, err := actionintegration.AdmitNativeAdapter(identity, lock.Commit); err != nil || !native {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func bundleUsesActions(bundle compiler.Bundle) bool {
+	for _, artifact := range bundle.Plans {
+		if len(artifact.Job.Actions) != 0 {
+			return true
+		}
+		if artifact.Job.Program == nil {
+			continue
+		}
+		for _, step := range artifact.Job.ExecutionJob().Steps {
+			if step.Invocation != nil || step.Kind == "uses" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func configuredRunnerTarget(label, queue, image string) (string, compiler.RunnerTarget, error) {
+	canonical, platform, err := supportedRunnerTarget(label)
+	if err != nil {
+		return "", compiler.RunnerTarget{}, err
+	}
+	if !runnerQueuePattern.MatchString(queue) {
+		return "", compiler.RunnerTarget{}, fmt.Errorf("runner queue for %q is invalid", canonical)
+	}
+	if image != "" && !runnerImagePattern.MatchString(image) {
+		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q must be an immutable registry sha256 reference", canonical)
+	}
+	if image != "" && platform != compiler.PlatformLinuxAMD64 {
+		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q is unsupported on %s", canonical, platform)
+	}
+	if image == "" {
+		if preset, ok := hostedRunnerTargets()[canonical]; ok {
+			image = preset.Image
+		}
+	}
+	return canonical, compiler.RunnerTarget{Queue: queue, Platform: platform, Image: image}, nil
+}
+
+func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
+	if label == "" || label != strings.TrimSpace(label) || strings.ContainsAny(label, "\r\n") {
+		return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q", label)
+	}
+	canonical := strings.ToLower(label)
+	if preset, ok := hostedRunnerTargets()[canonical]; ok {
+		return canonical, preset.Platform, nil
+	}
+	switch canonical {
+	case "macos-15", "macos-14":
+		// These remain available as local fallbacks when the Agent API is absent.
+		return canonical, compiler.PlatformDarwinARM64, nil
+	case "windows-latest", "windows-2022":
+		return canonical, compiler.PlatformWindowsAMD64, nil
+	default:
+		if canonical == "windows" || strings.HasPrefix(canonical, "windows-") {
+			return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q; Windows mappings support windows-latest and windows-2022", label)
+		}
+		// Configuring an otherwise unknown selector explicitly maps it to the
+		// supported Linux/amd64 platform. The Agent API owns compatibility
+		// policy for every selector that is not configured locally.
+		return canonical, compiler.PlatformLinuxAMD64, nil
+	}
+}

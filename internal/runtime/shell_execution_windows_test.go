@@ -1,0 +1,210 @@
+package runtime
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+)
+
+func TestWindowsCygwinShell(t *testing.T) {
+	// Match curl/curl's windows.yml at
+	// 0b04700029149d740f50b7925dd162aa270e3908. CI installs real Cygwin at D:.
+	if os.Getenv("BUILDKITE_GHA_TEST_CYGWIN") == "" {
+		t.Skip(`set BUILDKITE_GHA_TEST_CYGWIN=1 with Cygwin installed at D:\cygwin`)
+	}
+	const shell = `D:\cygwin\bin\bash.exe '{0}'`
+	workspace := t.TempDir()
+	temp := filepath.Join(workspace, "script temp")
+	if err := os.Mkdir(temp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wantTemp, err := os.Stat(temp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMP", temp)
+	t.Setenv("TEMP", temp)
+	workflow := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflow, "name: Cygwin test\n")
+	const script = `set -eu
+PATH=/usr/bin
+test "$(uname -o)" = Cygwin
+test "$(cygpath -w "$PWD")" = "$GITHUB_WORKSPACE"
+printf 'value=%s\n' 'Cygwin héllo' >> "$GITHUB_OUTPUT"
+printf 'script=%s\n' "$(cygpath -w "$0")" >> "$GITHUB_OUTPUT"
+cat "$0" > "$SCRIPT_COPY"
+`
+	job := runtimePlan(t, workspace, workflow, []runtimeTestStep{{
+		ID: "cygwin", Kind: "run", Command: script,
+		Env: map[string]string{"SCRIPT_COPY": filepath.Join(workspace, "script-copy")},
+	}})
+	job.DefaultShell = shell
+	job.Outputs = map[string]string{"value": "${{ steps.cygwin.outputs.value }}", "script": "${{ steps.cygwin.outputs.script }}"}
+	var output bytes.Buffer
+	result, err := (Runner{Stdout: &output, Stderr: &output}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Outputs["value"] != "Cygwin héllo" {
+		t.Fatalf("outputs = %v, error = %v\n%s", result.Outputs, err, output.String())
+	}
+	contents, err := os.ReadFile(filepath.Join(workspace, "script-copy"))
+	if err != nil || string(contents) != script {
+		t.Fatalf("script changed: %q, error = %v", contents, err)
+	}
+	scriptPath := result.Outputs["script"]
+	// Compare directory identity, not Windows path alias spelling.
+	gotTemp, err := os.Stat(filepath.Dir(scriptPath))
+	if err != nil || !os.SameFile(gotTemp, wantTemp) {
+		t.Fatalf("script path = %q, want parent directory %q: %v", scriptPath, temp, err)
+	}
+	if _, err := os.Stat(scriptPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary script was not removed: %v", err)
+	}
+	failed := newResult()
+	err = (&jobRun{}).runShellProcess(t.Context(), newCommandOutputProcessor(&output, &output), workspace, nil, &failed, shell, "exit 37")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 37 {
+		t.Fatalf("exit = %v, want 37\n%s", err, output.String())
+	}
+}
+
+func TestWindowsBatchArgumentHelper(t *testing.T) {
+	if os.Getenv("GHA_BATCH_HELPER") == "" {
+		return
+	}
+	if os.Getenv("GHA_BATCH_AMBIENT_SECRET") != "" {
+		os.Exit(99)
+	}
+	separator := slices.Index(os.Args, "--")
+	if separator < 0 {
+		os.Exit(98)
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(os.Args[separator+1:]); err != nil {
+		os.Exit(97)
+	}
+	os.Exit(23)
+}
+
+func TestWindowsBatchArguments(t *testing.T) {
+	root := t.TempDir()
+	// Defined variables expose accidental percent/delayed expansion, not just
+	// the easier case where expansion leaves an unknown variable unchanged.
+	dir := filepath.Join(root, "space & (parent's) ^ %GHA_BATCH_POISON% !GHA_BATCH_POISON!")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := filepath.Join(dir, "shell.cmd")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Like setup-msys2: forward %* to a native executable without CALL.
+	if err := os.WriteFile(command, []byte("@echo off\r\n\""+executable+"\" -test.run=^TestWindowsBatchArgumentHelper$ -- %*\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GHA_BATCH_AMBIENT_SECRET", "must-not-reach-child")
+	want := []string{"", "two words", "&whoami", "(group)|<>^", "%GHA_BATCH_POISON%", "%", "!GHA_BATCH_POISON!", "single'quote", "héllo", `C:\path with spaces\file`, "semi;colon", ""}
+	var output bytes.Buffer
+	env := map[string]string{
+		"GHA_BATCH_HELPER": "1", "GHA_BATCH_POISON": "expanded",
+		"COMSPEC":                   filepath.Join(root, "missing.exe"),
+		"buildkite_gha_batch_arg_0": "poisoned",
+	}
+	err = (Runner{}).runStreaming(t.Context(), newCommandOutputProcessor(&output, &output), dir, env, command, want...)
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 23 {
+		t.Fatalf("exit = %v, output = %s", err, output.String())
+	}
+	var got []string
+	if err := json.Unmarshal(output.Bytes(), &got); err != nil || !slices.Equal(got, want) {
+		t.Fatalf("arguments = %q, want %q; decode error = %v; output = %s", got, want, err, output.String())
+	}
+	for _, argument := range []string{"quote\"&whoami", "line\nbreak", "line\rbreak", "nul\x00byte", `trailing\`} {
+		err := (Runner{}).runStreaming(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), dir, env, command, argument)
+		if err == nil || !strings.Contains(err.Error(), "Windows batch shell arguments cannot contain") {
+			t.Fatalf("argument %q: error = %v", argument, err)
+		}
+	}
+}
+
+func TestWindowsMSYS2Shell(t *testing.T) {
+	// CI supplies the wrapper generated by the pinned setup-msys2 action. Do
+	// not silently substitute Git Bash or reimplement the wrapper in this test.
+	wrapper := os.Getenv("BUILDKITE_GHA_TEST_MSYS2")
+	if wrapper == "" {
+		t.Skip("set BUILDKITE_GHA_TEST_MSYS2 to setup-msys2's msys2.cmd")
+	}
+	source, err := os.ReadFile(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	temp := filepath.Join(workspace, "temp & (parent's) ^ %GHA_BATCH_POISON% !GHA_BATCH_POISON!")
+	if err := os.Mkdir(temp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMP", temp)
+	t.Setenv("TEMP", temp)
+	bin := filepath.Join(temp, "wrapper bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "msys2.cmd"), source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workflow := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflow, "name: MSYS2 test\n")
+	// MSYS2's 05-home-dir.post preserves CHERE_INVOKING in the user-visible
+	// marker and unsets the original after deciding not to cd to HOME.
+	const script = `test "$MSYSTEM" = MINGW64 || { echo 'expected MSYSTEM=MINGW64' >&2; exit 1; }
+test "$MSYS2_PATH_TYPE" = minimal || { echo 'expected MSYS2_PATH_TYPE=minimal' >&2; exit 1; }
+test "$CHERE_INVOKING_VISIBLE_FOR_USER" = 1 || { echo 'expected the invoking-directory marker after login' >&2; exit 1; }
+test "$(cygpath -w "$PWD")" = "$GITHUB_WORKSPACE" || { echo 'MSYS2 login changed the working directory' >&2; exit 1; }
+printf 'value=%s\n' 'héllo & ^ %GHA_BATCH_POISON% !GHA_BATCH_POISON! "quoted"' >> "$GITHUB_OUTPUT"
+printf 'script=%s\n' "$0" >> "$GITHUB_OUTPUT"
+cat "$0" > "$SCRIPT_COPY"
+`
+	job := runtimePlan(t, workspace, workflow, []runtimeTestStep{
+		{ID: "path", Kind: "run", Shell: "pwsh", Env: map[string]string{"WRAPPER_BIN": bin}, Command: `"PATH=$env:SystemRoot\System32" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+$env:WRAPPER_BIN | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append`},
+		{ID: "msys", Kind: "run", Command: script, Env: map[string]string{"SCRIPT_COPY": filepath.Join(workspace, "script-copy"), "GHA_BATCH_POISON": "expanded"}},
+	})
+	job.DefaultShell = "msys2 {0}"
+	job.Outputs = map[string]string{"value": "${{ steps.msys.outputs.value }}", "script": "${{ steps.msys.outputs.script }}"}
+	var output bytes.Buffer
+	result, err := (Runner{Stdout: &output, Stderr: &output}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Outputs["value"] != `héllo & ^ %GHA_BATCH_POISON% !GHA_BATCH_POISON! "quoted"` {
+		t.Fatalf("outputs = %v, error = %v\n%s", result.Outputs, err, output.String())
+	}
+	contents, err := os.ReadFile(filepath.Join(workspace, "script-copy"))
+	if err != nil || string(contents) != script {
+		t.Fatalf("script changed: %q, error = %v", contents, err)
+	}
+	if path := result.Outputs["script"]; path == "" || filepath.Ext(path) != "" {
+		t.Fatalf("expected extensionless script, got %q", path)
+	} else if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary script was not removed: %v", err)
+	}
+	for _, failure := range []struct {
+		script string
+		code   int
+	}{
+		{"exit 37", 37},
+		{"false | true\nprintf 'unreachable=yes\\n' >> \"$GITHUB_OUTPUT\"", 1},
+	} {
+		t.Run(fmt.Sprintf("exit-%d", failure.code), func(t *testing.T) {
+			result := newResult()
+			err := (&jobRun{}).runShellProcess(t.Context(), newCommandOutputProcessor(&output, &output), workspace, map[string]string{"PATH": bin}, &result, "msys2 {0}", failure.script)
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != failure.code || result.Outputs["unreachable"] != "" {
+				t.Fatalf("exit = %v, result = %v\n%s", err, result, output.String())
+			}
+		})
+	}
+}

@@ -124,7 +124,6 @@ func TestResultManifestRejectsMalformedArtifacts(t *testing.T) {
 		{name: "uppercase path digest", mutate: func(a *ResultArtifact) { a.Path = "buildkite-gha/v1/artifacts/" + strings.Repeat("A", 64) + ".zip" }},
 		{name: "invalid digest", mutate: func(a *ResultArtifact) { a.Digest = strings.Repeat("a", 64) }},
 		{name: "zero size", mutate: func(a *ResultArtifact) { a.Size = 0 }},
-		{name: "oversized archive", mutate: func(a *ResultArtifact) { a.Size = MaxResultArtifactSizeBytes + 1 }},
 		{name: "zero files", mutate: func(a *ResultArtifact) { a.FileCount = 0 }},
 		{name: "too many files", mutate: func(a *ResultArtifact) { a.FileCount = MaxResultArtifactFileCount + 1 }},
 	}
@@ -144,6 +143,16 @@ func TestResultManifestRejectsMalformedArtifacts(t *testing.T) {
 	manifest.Artifacts = make([]ResultArtifact, MaxResultArtifacts+1)
 	if _, err := MarshalResultManifest(manifest); err == nil {
 		t.Fatal("MarshalResultManifest() accepted too many artifacts")
+	}
+}
+
+func TestResultManifestAcceptsArtifactSizeWithoutPolicyLimit(t *testing.T) {
+	artifact := resultArtifact("artifact", "1", strings.Repeat("a", 64))
+	artifact.Size = int64(^uint64(0) >> 1)
+	manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), "success")
+	manifest.Artifacts = []ResultArtifact{artifact}
+	if _, err := MarshalResultManifest(manifest); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -184,33 +193,50 @@ type capturedCommand struct {
 
 type captureRunner struct {
 	commands []capturedCommand
+	uploaded map[string][]byte
 	failAt   int
-	afterRun func(int)
+	output   []byte
 }
 
-func (r *captureRunner) Run(_ context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
+func (r *captureRunner) Run(ctx context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
 	r.commands = append(r.commands, capturedCommand{dir: dir, name: name, args: append([]string(nil), args...), stdin: string(stdin)})
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if r.failAt != 0 && len(r.commands) == r.failAt {
 		return nil, errors.New("injected failure")
 	}
-	if r.afterRun != nil {
-		r.afterRun(len(r.commands))
+	if reflect.DeepEqual(args, []string{"artifact", "upload", ".buildkite-gha/**/*", "--concurrency", "8"}) {
+		r.uploaded = map[string][]byte{}
+		if err := filepath.WalkDir(filepath.Join(dir, ".buildkite-gha"), func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			relative, err := filepath.Rel(dir, path)
+			if err != nil {
+				return err
+			}
+			r.uploaded[filepath.ToSlash(relative)], err = os.ReadFile(path)
+			return err
+		}); err != nil {
+			return nil, err
+		}
 	}
-	return nil, nil
+	return bytes.Clone(r.output), nil
 }
 
-func TestAgentUsesExactProducerAndSafeUploadFlags(t *testing.T) {
+func TestAgentUsesExactProducerAndUploadFlags(t *testing.T) {
 	runner := &captureRunner{}
 	agent := Agent{Runner: runner}
-	if err := agent.DownloadArtifact(context.Background(), "result.json", ".", "gha-producer"); err != nil {
+	if err := agent.DownloadArtifact(t.Context(), "result.json", ".", "gha-producer"); err != nil {
 		t.Fatal(err)
 	}
-	if err := agent.UploadPipeline(context.Background(), []byte("steps: []\n")); err != nil {
+	if err := agent.UploadPipeline(t.Context(), []byte("steps: []\n")); err != nil {
 		t.Fatal(err)
 	}
 	want := []capturedCommand{
 		{name: "buildkite-agent", args: []string{"artifact", "download", "result.json", ".", "--step", "gha-producer"}},
-		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, stdin: "steps: []\n"},
+		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation"}, stdin: "steps: []\n"},
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
 		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
@@ -221,7 +247,7 @@ func TestAgentPublishesBoundedJobAnnotationThroughStdin(t *testing.T) {
 	runner := &captureRunner{}
 	agent := Agent{Runner: runner}
 	body := "### Job summary\n\nPassed.\n"
-	if err := agent.AnnotateJob(context.Background(), testJobID, "buildkite-gha-job-summary", "info", body); err != nil {
+	if err := agent.AnnotateJob(t.Context(), testJobID, "buildkite-gha-job-summary", "info", body); err != nil {
 		t.Fatal(err)
 	}
 	want := capturedCommand{
@@ -247,11 +273,40 @@ func TestAgentPublishesBoundedJobAnnotationThroughStdin(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			validationRunner := &captureRunner{}
-			err := (Agent{Runner: validationRunner}).AnnotateJob(context.Background(), test.jobID, test.context, test.style, test.body)
+			err := (Agent{Runner: validationRunner}).AnnotateJob(t.Context(), test.jobID, test.context, test.style, test.body)
 			if err == nil || len(validationRunner.commands) != 0 {
 				t.Fatalf("AnnotateJob() error = %v, commands = %#v", err, validationRunner.commands)
 			}
 		})
+	}
+}
+
+func TestAgentEnsuresStepLabelSuffix(t *testing.T) {
+	runner := &captureRunner{}
+	agent := Agent{Runner: runner}
+	if err := agent.EnsureStepLabelSuffix(t.Context(), " (skipped)"); err != nil {
+		t.Fatal(err)
+	}
+	want := []capturedCommand{
+		{name: "buildkite-agent", args: []string{"step", "get", "label"}},
+		{name: "buildkite-agent", args: []string{"step", "update", "label", " (skipped)", "--append"}},
+	}
+	if !reflect.DeepEqual(runner.commands, want) {
+		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+	alreadyMarked := &captureRunner{output: []byte(":github: job · e2e (skipped)\n")}
+	if err := (Agent{Runner: alreadyMarked}).EnsureStepLabelSuffix(t.Context(), " (skipped)"); err != nil {
+		t.Fatal(err)
+	}
+	if len(alreadyMarked.commands) != 1 || !reflect.DeepEqual(alreadyMarked.commands[0].args, []string{"step", "get", "label"}) {
+		t.Fatalf("already marked commands = %#v, want no duplicate update", alreadyMarked.commands)
+	}
+
+	for _, suffix := range []string{"", string([]byte{0xff})} {
+		validationRunner := &captureRunner{}
+		if err := (Agent{Runner: validationRunner}).EnsureStepLabelSuffix(t.Context(), suffix); err == nil || len(validationRunner.commands) != 0 {
+			t.Fatalf("EnsureStepLabelSuffix(%q) error = %v, commands = %#v", suffix, err, validationRunner.commands)
+		}
 	}
 }
 
@@ -262,29 +317,62 @@ func TestUploadArtifactsMaterializesContentBeforePipeline(t *testing.T) {
 	distribution := Artifact{Path: ".buildkite-gha/distributions/bin/buildkite-gha", Contents: []byte("binary")}
 	distribution.Digest = Digest(distribution.Contents)
 	runner := &captureRunner{}
-	if err := UploadArtifacts(context.Background(), Agent{Runner: runner}, root, []Artifact{plan, distribution}, []byte("steps: []\n")); err != nil {
+	if err := UploadArtifacts(t.Context(), Agent{Runner: runner}, root, []Artifact{plan, distribution}, []byte("steps: []\n")); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.commands) != 3 {
-		t.Fatalf("commands = %#v, want two artifacts then pipeline", runner.commands)
+	if len(runner.commands) != 2 {
+		t.Fatalf("commands = %#v, want one artifact batch then pipeline", runner.commands)
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []capturedCommand{
-		{dir: resolvedRoot, name: "buildkite-agent", args: []string{"artifact", "upload", distribution.Path}},
-		{dir: resolvedRoot, name: "buildkite-agent", args: []string{"artifact", "upload", plan.Path}},
-		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, stdin: "steps: []\n"},
+		{dir: resolvedRoot, name: "buildkite-agent", args: []string{"artifact", "upload", ".buildkite-gha/**/*", "--concurrency", "8"}},
+		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation"}, stdin: "steps: []\n"},
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
 		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+	wantUploaded := map[string][]byte{plan.Path: plan.Contents, distribution.Path: distribution.Contents}
+	if !reflect.DeepEqual(runner.uploaded, wantUploaded) {
+		t.Fatalf("uploaded bytes = %#v, want %#v", runner.uploaded, wantUploaded)
 	}
 	for _, artifact := range []Artifact{plan, distribution} {
 		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(artifact.Path)))
 		if err != nil || !bytes.Equal(contents, artifact.Contents) {
 			t.Fatalf("materialized %q = %q, %v", artifact.Path, contents, err)
 		}
+	}
+}
+
+func TestUploadArtifactsCancellationDoesNotUploadPipeline(t *testing.T) {
+	artifact := Artifact{Path: ".buildkite-gha/plans/plan.json", Contents: []byte("plan")}
+	artifact.Digest = Digest(artifact.Contents)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	runner := &captureRunner{}
+	err := UploadArtifacts(ctx, Agent{Runner: runner}, t.TempDir(), []Artifact{artifact}, []byte("steps: []\n"))
+	if !errors.Is(err, context.Canceled) || len(runner.commands) != 1 || runner.commands[0].args[0] != "artifact" {
+		t.Fatalf("UploadArtifacts() error = %v, commands = %#v", err, runner.commands)
+	}
+}
+
+func TestUploadMaterializedArtifactsIntegrityFailureDoesNotInvokeAgent(t *testing.T) {
+	root := t.TempDir()
+	artifact := Artifact{Path: ".buildkite-gha/plans/plan.json", Contents: []byte("plan")}
+	artifact.Digest = Digest(artifact.Contents)
+	path := filepath.Join(root, filepath.FromSlash(artifact.Path))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &captureRunner{}
+	err := uploadMaterializedArtifacts(t.Context(), Agent{Runner: runner}, root, []Artifact{artifact})
+	if err == nil || !strings.Contains(err.Error(), "verify artifact") || len(runner.commands) != 0 {
+		t.Fatalf("uploadMaterializedArtifacts() error = %v, commands = %#v", err, runner.commands)
 	}
 }
 
@@ -303,7 +391,7 @@ func TestUploadArtifactsFailsBeforePipeline(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &captureRunner{failAt: test.failAt}
-			err := UploadArtifacts(context.Background(), Agent{Runner: runner}, t.TempDir(), test.artifacts, []byte("steps: []\n"))
+			err := UploadArtifacts(t.Context(), Agent{Runner: runner}, t.TempDir(), test.artifacts, []byte("steps: []\n"))
 			if err == nil {
 				t.Fatal("UploadArtifacts() succeeded")
 			}
@@ -317,14 +405,14 @@ func TestUploadArtifactsFailsBeforePipeline(t *testing.T) {
 func TestUploadArtifactsIdentifiesPipelineFailure(t *testing.T) {
 	artifact := Artifact{Path: ".buildkite-gha/plans/plan.json", Contents: []byte("plan")}
 	artifact.Digest = Digest(artifact.Contents)
-	err := UploadArtifacts(context.Background(), Agent{Runner: &captureRunner{failAt: 2}}, t.TempDir(), []Artifact{artifact}, []byte("steps: []\n"))
+	err := UploadArtifacts(t.Context(), Agent{Runner: &captureRunner{failAt: 2}}, t.TempDir(), []Artifact{artifact}, []byte("steps: []\n"))
 	if !errors.Is(err, ErrPipelineUpload) || !strings.Contains(err.Error(), "upload pipeline") {
 		t.Fatalf("UploadArtifacts() error = %v", err)
 	}
 }
 
 func TestCommandRunnerBoundsOutputWhileReading(t *testing.T) {
-	stdout, _, err := (CommandRunner{}).RunBounded(context.Background(), "", "sh", []string{"-c", "printf 123456789"}, nil, 8)
+	stdout, _, err := (CommandRunner{}).RunBounded(t.Context(), "", "sh", []string{"-c", "printf 123456789"}, nil, 8)
 	if err == nil || !strings.Contains(err.Error(), "exceeds 8 bytes") || len(stdout) != 0 {
 		t.Fatalf("runBounded() stdout = %q, error = %v", stdout, err)
 	}
@@ -350,7 +438,7 @@ func TestGetMetadataBoundedClassifiesOnlyExpectedWebhookAbsence(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", dir)
-			_, err := (Agent{Runner: CommandRunner{}}).GetMetadataBounded(context.Background(), "buildkite:webhook", 1024)
+			_, err := (Agent{Runner: CommandRunner{}}).GetMetadataBounded(t.Context(), "buildkite:webhook", 1024)
 			if got := errors.Is(err, ErrMetadataUnavailable); got != test.wantAbsent {
 				t.Fatalf("GetMetadataBounded() error = %v, absent = %t, want %t", err, got, test.wantAbsent)
 			}

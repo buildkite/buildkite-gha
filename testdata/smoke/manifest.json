@@ -11,6 +11,15 @@
       "action_preflight": "none"
     },
     {
+      "id": "smoke-powershell",
+      "workflow": "testdata/compatibility-gaps/.github/workflows/other-shells.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "runtime-pass",
+      "evidence": "PowerShell 7.4.13 on Linux passes TestPowerShellExecution and TestCompatibilityGapOtherShells.",
+      "note": "Execution requires pwsh on PATH; the local smoke gate only validates and compiles.",
+      "action_preflight": "none"
+    },
+    {
       "id": "smoke-concurrent",
       "workflow": "testdata/smoke/.github/workflows/concurrent.yml",
       "event": "testdata/smoke/events/push.json",
@@ -106,8 +115,8 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "The complete compiler-to-Runner container fixture passed in exact-commit Buildkite build 136.",
-      "note": "Hosted admission still rejects its job- and service-container provenance.",
-      "action_preflight": "none"
+      "note": "Hosted profile smoke admits the compiler-provenanced container path; the dedicated exact-commit proof also checks admission before runtime execution.",
+      "action_preflight": "hosted"
     },
     {
       "id": "summary-annotation",
@@ -125,6 +134,15 @@
       "expectation": "runtime-pass",
       "evidence": "Exact-commit Buildkite build 252 and a read-only API observation proved both persisted job-scoped workflow-command annotation contracts.",
       "note": "The verifier bound build 252, merged implementation commit 4050f0c884eef0f54a77c27958abe3ca21ede9e0, and generated job 019fb5d6-f314-4294-b991-7ceb540604b7.",
+      "action_preflight": "none"
+    },
+    {
+      "id": "hash-files",
+      "workflow": "testdata/smoke/.github/workflows/hash-files.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "Expression and runtime tests cover hashing, glob ordering, empty matches, and step conditions.",
+      "note": "Run the hash-files compatibility proof for end-to-end hosted runtime evidence.",
       "action_preflight": "none"
     },
     {
@@ -178,8 +196,8 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "The plan-v4 job-container fixture passed in exact-commit Buildkite build 136.",
-      "note": "Hosted admission still rejects job-container provenance.",
-      "action_preflight": "none"
+      "note": "Hosted profile smoke admits compiler-provenanced job containers.",
+      "action_preflight": "hosted"
     },
     {
       "id": "unsupported-service-container",
@@ -187,8 +205,8 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "The plan-v4 service-container fixture passed in exact-commit Buildkite build 136.",
-      "note": "Hosted admission still rejects service-container provenance.",
-      "action_preflight": "none"
+      "note": "Hosted profile smoke admits compiler-provenanced service containers.",
+      "action_preflight": "hosted"
     }
   ]
 }

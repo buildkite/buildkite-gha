@@ -1,14 +1,15 @@
-// Package expression adapts actionlint's expression parser into owned values.
 package expression
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/big"
+	"math"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/rhysd/actionlint"
 )
@@ -31,17 +32,14 @@ type Expression struct {
 	Span Span   `json:"span"`
 }
 
-// StepStatus contains the values exposed for one completed step while
-// evaluating a condition.
+// StepStatus contains the runtime values exposed for one completed step.
 type StepStatus struct {
 	Outcome    string
 	Conclusion string
 	Outputs    map[string]string
 }
 
-// Parse validates a complete ${{ ... }} expression using actionlint and returns
-// an owned representation.
-func Parse(text string, line, column int) (Expression, error) {
+func parseExpression(text string, line, column int) (Expression, error) {
 	body, err := expressionBody(text)
 	if err != nil {
 		return Expression{}, err
@@ -99,30 +97,169 @@ func visitTemplateExpressions(template string, visit func(actionlint.ExprNode) e
 	}
 }
 
-// conditionNumber converts native numeric representations to a rational.
-// It is shared infrastructure for both the strict condition family and the
-// loose actionInputDefault family and does not by itself imply coercion:
-// callers decide whether non-numeric values become numbers.
-func conditionNumber(value any) (*big.Rat, bool) {
-	var source string
+func githubTruthy(value any) bool {
 	switch value := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return value
+	case string:
+		return value != ""
+	case float32:
+		return !math.IsNaN(float64(value)) && value != 0
+	case float64:
+		return !math.IsNaN(value) && value != 0
+	}
+	if number, ok := githubNumber(value); ok {
+		return !math.IsNaN(number) && number != 0
+	}
+	return true
+}
+
+func githubEqual(left, right any) bool {
+	if left == nil && right == nil {
+		return true
+	}
+	switch left := left.(type) {
+	case string:
+		if right, ok := right.(string); ok {
+			return strings.EqualFold(left, right)
+		}
+	case bool:
+		if right, ok := right.(bool); ok {
+			return left == right
+		}
+	}
+	if left != nil && right != nil && reflect.TypeOf(left) == reflect.TypeOf(right) {
+		leftValue, rightValue := reflect.ValueOf(left), reflect.ValueOf(right)
+		switch leftValue.Kind() {
+		case reflect.Map:
+			return leftValue.UnsafePointer() == rightValue.UnsafePointer()
+		case reflect.Pointer, reflect.Slice:
+			return leftValue.Pointer() == rightValue.Pointer()
+		}
+	}
+	leftNumber, leftOK := githubNumber(left)
+	rightNumber, rightOK := githubNumber(right)
+	return leftOK && rightOK && !math.IsNaN(leftNumber) && !math.IsNaN(rightNumber) && leftNumber == rightNumber
+}
+
+func githubOrderedCompare(left, right any) (int, bool) {
+	leftString, leftIsString := left.(string)
+	rightString, rightIsString := right.(string)
+	if leftIsString && rightIsString {
+		return strings.Compare(strings.ToLower(leftString), strings.ToLower(rightString)), true
+	}
+	leftNumber, leftOK := githubNumber(left)
+	rightNumber, rightOK := githubNumber(right)
+	if !leftOK || !rightOK {
+		return 0, false
+	}
+	switch {
+	case math.IsNaN(leftNumber) || math.IsNaN(rightNumber):
+		return 0, false
+	case leftNumber < rightNumber:
+		return -1, true
+	case leftNumber > rightNumber:
+		return 1, true
+	default:
+		return 0, true
+	}
+}
+
+func githubCompare(kind actionlint.CompareOpNodeKind, left, right any) (bool, error) {
+	switch kind {
+	case actionlint.CompareOpNodeKindEq:
+		return githubEqual(left, right), nil
+	case actionlint.CompareOpNodeKindNotEq:
+		return !githubEqual(left, right), nil
+	case actionlint.CompareOpNodeKindLessEq, actionlint.CompareOpNodeKindGreaterEq:
+		if githubEqual(left, right) {
+			return true, nil
+		}
+	}
+	comparison, ok := githubOrderedCompare(left, right)
+	if !ok {
+		return false, nil
+	}
+	switch kind {
+	case actionlint.CompareOpNodeKindLess:
+		return comparison < 0, nil
+	case actionlint.CompareOpNodeKindLessEq:
+		return comparison <= 0, nil
+	case actionlint.CompareOpNodeKindGreater:
+		return comparison > 0, nil
+	case actionlint.CompareOpNodeKindGreaterEq:
+		return comparison >= 0, nil
+	default:
+		return false, fmt.Errorf("unsupported comparison %s", kind)
+	}
+}
+
+func githubNumber(value any) (float64, bool) {
+	switch value := value.(type) {
+	case nil:
+		return 0, true
+	case bool:
+		if value {
+			return 1, true
+		}
+		return 0, true
 	case json.Number:
-		source = value.String()
+		parsed, err := strconv.ParseFloat(value.String(), 64)
+		return parsed, err == nil || math.IsInf(parsed, 0)
+	case string:
+		return parseExpressionNumber(value), true
 	default:
 		reflected := reflect.ValueOf(value)
 		switch reflected.Kind() {
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			source = strconv.FormatInt(reflected.Int(), 10)
+			return float64(reflected.Int()), true
 		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			source = strconv.FormatUint(reflected.Uint(), 10)
+			return float64(reflected.Uint()), true
 		case reflect.Float32, reflect.Float64:
-			source = strconv.FormatFloat(reflected.Float(), 'g', -1, reflected.Type().Bits())
+			return reflected.Float(), true
 		default:
-			return nil, false
+			return math.NaN(), false
 		}
 	}
-	number, ok := new(big.Rat).SetString(source)
-	return number, ok
+}
+
+var decimalExpressionNumber = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`)
+
+func parseExpressionNumber(source string) float64 {
+	value := strings.TrimSpace(source)
+	if value == "" {
+		return 0
+	}
+	if strings.HasPrefix(value, "0x") {
+		parsed, err := strconv.ParseUint(value[2:], 16, 32)
+		if err == nil {
+			return float64(int32(parsed))
+		}
+		return math.NaN()
+	}
+	if strings.HasPrefix(value, "0o") {
+		parsed, err := strconv.ParseUint(value[2:], 8, 32)
+		if err == nil {
+			return float64(int32(parsed))
+		}
+		return math.NaN()
+	}
+	switch value {
+	case "Infinity":
+		return math.Inf(1)
+	case "-Infinity":
+		return math.Inf(-1)
+	}
+	if !decimalExpressionNumber.MatchString(value) {
+		return math.NaN()
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil && !math.IsInf(parsed, 0) {
+		return math.NaN()
+	}
+	return parsed
 }
 
 func containsStatusFunction(node actionlint.ExprNode) bool {
@@ -144,14 +281,18 @@ func containsStatusFunction(node actionlint.ExprNode) bool {
 
 func expressionBody(text string) (string, error) {
 	trimmed := strings.TrimSpace(text)
-	if !strings.HasPrefix(trimmed, "${{") || !strings.HasSuffix(trimmed, "}}") {
+	if !strings.HasPrefix(trimmed, "${{") {
 		return "", fmt.Errorf("expected a complete ${{ ... }} expression")
 	}
-	body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "${{"), "}}"))
-	if strings.Contains(body, "}}") {
+	source := strings.TrimPrefix(trimmed, "${{")
+	_, consumed, err := actionlint.LexExpression(source)
+	if err != nil {
+		return "", fmt.Errorf("invalid expression: %w", err)
+	}
+	if consumed != len(source) {
 		return "", fmt.Errorf("expression contains an embedded closing delimiter")
 	}
-	return body, nil
+	return strings.TrimSpace(strings.TrimSuffix(source[:consumed], "}}")), nil
 }
 
 func referencePath(node actionlint.ExprNode) (string, []string, error) {
@@ -192,7 +333,7 @@ func objectValue(value any, name string) (any, bool, error) {
 		for candidate, item := range value {
 			if strings.EqualFold(candidate, name) {
 				if matchedKey != "" {
-					return nil, false, fmt.Errorf("compile-time object contains ambiguous properties")
+					return nil, false, fmt.Errorf("object contains ambiguous properties")
 				}
 				found, matchedKey = item, candidate
 			}
@@ -208,7 +349,7 @@ func objectValue(value any, name string) (any, bool, error) {
 		for candidate, item := range value {
 			if strings.EqualFold(candidate, name) {
 				if matchedKey != "" {
-					return nil, false, fmt.Errorf("compile-time object contains ambiguous properties")
+					return nil, false, fmt.Errorf("object contains ambiguous properties")
 				}
 				found, matchedKey = item, candidate
 			}
@@ -223,12 +364,117 @@ func objectValue(value any, name string) (any, bool, error) {
 func decodeJSONValue(source string) (any, error) {
 	decoder := json.NewDecoder(strings.NewReader(source))
 	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
+	value, err := decodeJSONToken(decoder)
+	if err != nil {
 		return nil, fmt.Errorf("fromJSON argument is invalid JSON")
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if _, err := decoder.Token(); err != io.EOF {
 		return nil, fmt.Errorf("fromJSON argument contains multiple JSON values")
+	}
+	return normalizeJSONNumbers(value)
+}
+
+// decodeJSONToken decodes one JSON value token by token so object keys retain
+// document order. GitHub stores fromJSON objects in case-insensitive
+// dictionaries: a key that matches an earlier key case-insensitively replaces
+// its value while the earlier spelling survives, so {"a":1,"A":2} yields one
+// property a with value 2. A plain map decode loses key order and cannot
+// reproduce that.
+func decodeJSONToken(decoder *json.Decoder) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return token, nil
+	}
+	switch delim {
+	case '{':
+		object := make(map[string]any)
+		spellings := make(map[string]string)
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return nil, fmt.Errorf("fromJSON argument is invalid JSON")
+			}
+			value, err := decodeJSONToken(decoder)
+			if err != nil {
+				return nil, err
+			}
+			folded := foldedKey(key)
+			if first, ok := spellings[folded]; ok {
+				key = first
+			} else {
+				spellings[folded] = key
+			}
+			object[key] = value
+		}
+		_, err = decoder.Token()
+		return object, err
+	case '[':
+		values := make([]any, 0, 1)
+		for decoder.More() {
+			value, err := decodeJSONToken(decoder)
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, value)
+		}
+		_, err = decoder.Token()
+		return values, err
+	default:
+		return nil, fmt.Errorf("fromJSON argument is invalid JSON")
+	}
+}
+
+// foldedKey canonicalizes a key under the same case-fold equivalence
+// strings.EqualFold uses for object lookup: every rune maps to the smallest
+// rune in its unicode.SimpleFold orbit, so keys collapse exactly when
+// EqualFold considers them equal.
+func foldedKey(key string) string {
+	return strings.Map(func(r rune) rune {
+		minimum := r
+		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+			if folded < minimum {
+				minimum = folded
+			}
+		}
+		return minimum
+	}, key)
+}
+
+func normalizeJSONNumbers(value any) (any, error) {
+	switch value := value.(type) {
+	case json.Number:
+		parsed, err := strconv.ParseFloat(value.String(), 64)
+		if err != nil && !math.IsInf(parsed, 0) {
+			return nil, fmt.Errorf("fromJSON argument contains an invalid number")
+		}
+		return parsed, nil
+	case []any:
+		if len(value) == 0 {
+			return make([]any, 0, 1), nil
+		}
+		for i, item := range value {
+			normalized, err := normalizeJSONNumbers(item)
+			if err != nil {
+				return nil, err
+			}
+			value[i] = normalized
+		}
+	case map[string]any:
+		for name, item := range value {
+			normalized, err := normalizeJSONNumbers(item)
+			if err != nil {
+				return nil, err
+			}
+			value[name] = normalized
+		}
 	}
 	return value, nil
 }

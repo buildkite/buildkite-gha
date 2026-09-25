@@ -1,0 +1,8 @@
+name: Compatibility gap - other shells
+on: push
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh
+        run: Write-Output compatible

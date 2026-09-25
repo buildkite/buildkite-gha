@@ -1,6 +1,18 @@
 # Use the buildkite-gha CLI
 
-The [GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/github-actions-buildkite-plugin) is the recommended way to run `buildkite-gha`. Use the CLI directly to validate workflows, inspect generated output, or build a custom importer.
+The [GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/github-actions-buildkite-plugin)
+is the easiest way to run `buildkite-gha`. Use the CLI directly when you need
+to validate a workflow, inspect generated output, or build a custom importer.
+
+| Command | Use it to |
+| --- | --- |
+| `validate` | Check one workflow and, optionally, production policy. |
+| `validate-batch` | Check a large workflow corpus. |
+| `compile` | Render pipeline YAML or compiler IR without uploading it. |
+| `upload` | Upload workflows from a custom importer. |
+
+`run-job` and the `upload --stage-digest` form are internal commands that
+generated steps run. Do not invoke them directly.
 
 ## Before you begin
 
@@ -10,21 +22,44 @@ Install `buildkite-gha` with `mise` 2026.5.12 or newer:
 mise use -g --minimum-release-age 0s github:buildkite/buildkite-gha
 ```
 
-The `--minimum-release-age 0s` override prevents mise's default 24-hour delay from selecting an older release without an artifact for your platform.
+The override avoids mise's default 24-hour release delay. Without it, mise may
+select an older release that has no artifact for your platform.
 
-Append `@<version>` to install an exact release. A custom importer that generates jobs for the other supported platform must also download and verify that platform's distribution from the same release.
+Append `@<version>` to install an exact release. If a custom importer creates
+jobs for the other supported platform, it must download and verify that
+platform's distribution from the same release.
 
-Jobs with JavaScript actions require `mise`. `run-job` checks `BUILDKITE_GHA_MISE`, then `PATH`, and then downloads a verified managed copy. Shell-only, native-adapter, and Docker-only jobs do not require `mise`.
+Jobs with JavaScript actions need `mise`. The runtime checks
+`BUILDKITE_GHA_MISE`, then `PATH`, then downloads a verified managed copy.
+Shell-only, native-adapter, and Docker-only jobs do not need it.
+
+When a managed cache is configured, the runtime installs Node there rather
+than reusing system-wide mise installations. The install directory remains
+pinned even when an agent's mise wrapper overrides `MISE_DATA_DIR`.
 
 Managed Node binaries require glibc 2.28 or newer. The Go CLI has no glibc requirement.
 
 ## Validate a workflow
 
-Validate syntax and the static graph:
+Validate syntax, the static graph, and every declared trigger without an event:
 
 ```sh
 buildkite-gha validate .github/workflows/ci.yml
 ```
+
+This event-independent check validates syntax, triggers, and the static graph.
+It accepts valid push and pull-request path filters because upload can evaluate
+them later with linked-webhook data and a verified local Git diff.
+
+It does not:
+
+- resolve actions
+- evaluate event payload expressions
+- claim that production policy would admit the workflow
+
+Malformed filters, unsupported filter combinations, and unsupported pull
+request activity types still fail. See [Names and triggers](compatibility.md#names-and-triggers)
+for the exact trigger contract.
 
 Resolve actions and apply production policy:
 
@@ -35,17 +70,225 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
+For a quick compatibility check, generate a minimal supported event snapshot:
+
+```sh
+buildkite-gha validate \
+  --profile hosted \
+  --event pull_request \
+  .github/workflows/ci.yml
+```
+
+`--event` supports `push`, `pull_request`, `merge_group`, `release`, `deployment`, `deployment_status`, `create`, `delete`, `label`, `fork`, `public`, `gollum`, `page_build`, `watch`, `milestone`, `branch_protection_rule`, `discussion`, `discussion_comment`, `issues`,
+`issue_comment`, `pull_request_review`, `pull_request_review_comment`,
+`workflow_dispatch`, and `schedule`. It requires
+`--profile hosted` and cannot be combined with `--event-path`.
+
+The generated snapshot contains an example repository and the minimum event
+fields. It is useful for a quick check, but it is not a real payload. The
+release snapshot represents one stable, non-prerelease `published` event. The
+issues snapshot represents `opened`, review represents `submitted`, and both
+comment events represent `created`. Deployment snapshots use the `staging` branch
+and `preview` environment; deployment status represents `success`. Use
+`--event-path` when exact refs, activity, repository identity, or payload fields
+matter.
+
+Use `--all-events` with `--profile hosted` to evaluate each declared supported
+event with its own generated snapshot:
+
+```sh
+buildkite-gha validate \
+  --profile hosted \
+  --all-events \
+  .github/workflows/ci.yml
+```
+
+`--all-events` cannot be combined with `--event` or `--event-path`. It does not
+evaluate `workflow_call` as a standalone event.
+
+Each generated event is checked separately. The result does not cover every
+possible real payload. `context-required` means the available checks passed,
+but admission needs evidence the generated snapshot cannot provide. Push and
+pull-request path filters, for example, need linked-webhook data and a verified
+local Git diff.
+
+Reuse downloaded immutable action source across profile validation runs:
+
+```sh
+mkdir -p .buildkite-gha-action-cache
+buildkite-gha validate \
+  --profile hosted \
+  --all-events \
+  --action-cache-dir .buildkite-gha-action-cache \
+  .github/workflows/ci.yml
+```
+
+`--action-cache-dir` is available only with `--profile hosted`. It stores
+verified action source by immutable commit.
+
+Mutable ref resolutions are cached for one hour under
+`$XDG_CACHE_HOME/buildkite-gha/action-ref-resolutions/v1`, or the platform's
+user cache directory. Concurrent validators can share this cache, so a moved
+tag or branch may use its previous commit for up to one hour. Uploads with
+`private-reusable-workflows` enabled skip this cache for called repositories
+and resolve their refs once per operation. Do not share either writable cache
+between untrusted validation jobs.
+
+For a large workflow corpus, reuse one validator process and action resolver:
+
+```sh
+buildkite-gha validate-batch \
+  --manifest workflows.jsonl \
+  --output-dir reports \
+  --corpus-id zenodo:20340547 \
+  --action-cache-dir .buildkite-gha-action-cache \
+  --action-cache-max-bytes 21474836480 \
+  --action-resolution-snapshot .buildkite-gha-action-resolutions
+```
+
+Each JSON Lines manifest record requires `id`, `repository`, `path`, `hash`, and
+`source`. Batch validation:
+
+- applies the hosted profile to every declared supported event
+- writes one `processing-report/v3` JSON file per workflow
+- uses one worker per CPU unless `--jobs` overrides it
+- publishes each report atomically
+- resumes reports only when the corpus, record, workflow dependencies,
+  validator executable, and action-resolution generation still match
+
+Records with unresolved local dependencies are processed again.
+
+`--action-cache-max-bytes` requires `--action-cache-dir`. When the cache exceeds
+the limit, validation evicts the least recently used immutable action trees.
+Concurrent validators lock active entries. Maintenance removes abandoned
+partial entries but leaves active ones alone. The public corpus script defaults
+to 20 GiB.
+
+The required `--action-resolution-snapshot` pins each mutable
+`owner/repository@ref` to the first commit it resolves. Reusing the same
+generation keeps those refs stable across validator versions. Exact commit
+references bypass the snapshot.
+
+The snapshot records definitively missing public refs. It does not record
+network, cancellation, TLS, rate-limit, or server failures; those are retried.
+Use `--refresh-action-resolution-snapshot` to start a new generation. The public
+corpus script then removes old report sets for that corpus record.
+
+The snapshot pins action revisions only. It does not make the whole corpus run
+reproducible.
+
+For authenticated GitHub API resolution, keep the token in an environment variable and name that variable without exposing its value:
+
+```sh
+GITHUB_TOKEN="$(your-secure-token-command)" \
+  buildkite-gha validate-batch \
+  --manifest workflows.jsonl \
+  --output-dir reports \
+  --corpus-id example \
+  --action-resolution-snapshot .buildkite-gha-action-resolutions \
+  --github-token-env GITHUB_TOKEN
+```
+
+The token authenticates GitHub API metadata requests only. It is not written to
+arguments, logs, reports, snapshots, or action caches. Validation does not run
+action subprocesses, and it still verifies that every action repository is
+public.
+
+Inspect the aggregate result and each event outcome:
+
+```sh
+buildkite-gha validate \
+  --profile hosted \
+  --all-events \
+  --format json \
+  .github/workflows/ci.yml |
+  jq '{result, events: [.evaluations[] | {event, result: .report.result}]}'
+```
+
+Inspect diagnostics with their generated event names:
+
+```sh
+buildkite-gha validate \
+  --profile hosted \
+  --all-events \
+  --format json \
+  .github/workflows/ci.yml |
+  jq -r '(.validation.diagnostics[] | "validation: \(.code): \(.message)"),
+    (.evaluations[] | .event as $event | .report.diagnostics[] | "\($event): \(.code): \(.message)")'
+```
+
 The deprecated `hosted-tokenless` profile name remains an alias for `hosted`.
+Hosted validation uses the same runner preset as production upload.
 
 Use `--format json` for a `buildkite-gha/processing-report/v2` report.
+`--all-events` emits v3, containing the event-independent report and one v2
+report per generated event.
 
-Reports cover workflow parsing, event validation, graph construction, matrix expansion, expressions, action discovery and resolution, plan construction, profile admission, and pipeline generation. A blocked downstream stage is `not-evaluated`, not `failed`.
+The top-level result is:
 
-Report warnings and errors become job-scoped Buildkite annotations. `validate`, `compile`, and upload failures that abort the transaction attach them to the current job. Generated failure steps attach their diagnostics to themselves. CLI-side annotation failures produce a warning but do not change the command result.
+- `admitted` only when every event is admitted
+- `context-required` when generated input cannot measure an otherwise supported
+  path, unless another finding takes precedence
 
-Profile validation applies the upload trigger policy before compilation. A `not-applicable` result means the workflow does not declare the selected event and would become a top-level skipped step during upload. Unsupported triggers and malformed data are incompatible.
+Reports cover every stage from parsing through pipeline generation. If an
+earlier stage blocks a later one, the later stage is `not-evaluated`, not
+`failed`.
 
-Validation may use the public network to resolve actions. Apart from annotation publication when it runs in a Buildkite job, it does not call Buildkite, install Node, or execute workflow code.
+Warnings and errors become job-scoped Buildkite annotations. A failure that
+aborts `validate`, `compile`, or upload attaches to the current job. Generated
+failure steps attach their own diagnostics. Their logs identify the root
+workflow and each diagnostic's source location, job, matrix instance, action,
+and step when available. Failure logs use bold red errors, amber warnings,
+and cyan workflow/source context, with blank lines between diagnostics.
+Importer logs and generated failure logs share annotations' human-readable
+explanations, source excerpts, and diagnostic details. Internal diagnostic codes
+remain in structured reports and telemetry rather than these logs. Warning-only
+importer output uses an amber `Workflow diagnostics` heading. Untrusted terminal
+control characters are removed without changing the underlying report data.
+If the CLI cannot publish an annotation, it warns without changing the command
+result.
+
+For fetched public and private reusable workflows, source locations in
+annotations link to the resolved commit and line in the source repository,
+including nested local calls inside that repository. The link opens only for
+viewers with GitHub access to that repository. Generated failure logs make the
+source path and coordinates an OSC 8 terminal hyperlink to the same URL, without
+a separate URL line. Terminals without hyperlink support display the label.
+If the source could not be fetched, the CLI keeps the location without guessing
+a revision.
+
+Local workflow links use the event's commit only when its file in the checkout's
+Git object database matches the bytes parsed. This includes local reusable
+workflows and early syntax errors. Logs and annotations display local source
+paths relative to the checkout when possible. They keep
+the location without a link for edited inputs, unavailable revisions, files
+outside the checkout, or files larger than the 1 MiB verification limit. Changes
+on disk after parsing do not change which source revision the diagnostic links to.
+
+Annotations and generated failure logs include a real configuration excerpt
+where safe: literal action/workflow references in `uses`, standard Ubuntu,
+Windows, or macOS `runs-on` labels, and built-in step `shell` names. Excerpts
+retain the parsed line numbers, mark the offending line with `>`, and underline
+the reference, runner label, or shell with `^`.
+Standalone trigger filter keys, such as `branches:` and `types:`, also appear
+with an underline. Filter values and inline filter declarations are omitted.
+Rejected filters, invalid filter patterns, and unsupported activity types link
+to their filter key. Errors without a corresponding field retain the event
+declaration location.
+Only eligible adjacent lines are included. Scripts, `env`, `with`, comments,
+expressions, aliases, malformed YAML, and other unclassified content are omitted.
+Capture is limited to 240 bytes per line and 16 KiB per workflow; excerpts are
+excluded from JSON reports and telemetry. At annotation size limits, the excerpt
+is dropped before shortening the explanation.
+
+Profile validation applies upload's trigger policy before compilation.
+`not-applicable` means the workflow does not declare the selected event and
+would become a skipped top-level step. Malformed event data is incompatible. An
+unsupported trigger beside a supported one produces a warning.
+
+Validation may use the public network to resolve actions. It does not install
+Node or execute workflow code. It calls Buildkite only to publish annotations
+when it runs inside a Buildkite job.
 
 ## Migrate GitHub Actions secrets
 
@@ -112,7 +355,7 @@ separate short-lived, permission-scoped workflow-token path.
 
 ## Provide an event snapshot
 
-`compile` and profile validation need a bounded event snapshot:
+`compile` and profile validation with `--event-path` need a bounded event snapshot:
 
 ```json
 {
@@ -133,7 +376,10 @@ separate short-lived, permission-scoped workflow-token path.
 }
 ```
 
-The snapshot supplies compile-time context. Generated plans retain the event name, repository, ref, pull request head ref, SHA, actor, and a payload digest. They do not retain the payload object. Runtime expressions cannot use `github.event`.
+The snapshot supplies compile-time context. Plans retain the event name,
+repository, refs, SHA, actor, and a payload digest. Upload stores the snapshot's
+payload once as a content-addressed artifact and marks each job to load it for
+[`GITHUB_EVENT_PATH`](compatibility.md#event-file), even without event expressions.
 
 The snapshot is compatibility data, not authorization.
 
@@ -156,7 +402,31 @@ buildkite-gha compile \
   .github/workflows/ci.yml
 ```
 
+Inside a Buildkite job, the IR includes the resolved
+[repository and organization variables](compatibility.md#repository-and-organization-variables)
+when the workflow references `vars`.
+
+Workflows whose jobs declare a GitHub
+[`environment`](compatibility.md#deployment-environments) need GitHub
+environment access at compile time. Inside a Buildkite job, `upload` and
+`compile` resolve environments automatically through the job-scoped Agent API;
+no GitHub token reaches the importer. Outside a job, `compile` fails for such
+workflows with an error naming the job and its environment; there is no token
+option.
+
 `compile` does not upload the executable, plans, or pipeline, so piping its YAML directly to `buildkite-agent pipeline upload` is incomplete.
+
+A workflow with a
+[matrix](compatibility.md#matrices-from-job-outputs) or
+[runner selection](compatibility.md#runners-from-job-outputs) from a job output has jobs
+that only exist after a deferred step runs inside the build, so `compile`
+renders its IR but not its pipeline YAML:
+
+```
+buildkite-gha: compile: job "build" takes its matrix from a job output, so upload expands it with a deferred step inside the build; the pipeline format cannot render it. Use --format ir-json to inspect the compiled graph.
+```
+
+The IR lists the deferred step and its jobs under `continuations`.
 
 ## Upload from a custom importer
 
@@ -166,20 +436,150 @@ buildkite-gha compile \
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
-The importer must run on Linux/amd64 or Darwin/arm64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
+The importer must run on Linux/amd64 or Darwin/arm64 with Buildkite agent v3.129 or newer, `BUILDKITE=true`, and `BUILDKITE_STEP_KEY`.
 
-The hidden zero-argument `buildkite-gha plugin` entry point reads `workflow`,
-`workflows`, and `runners` from `BUILDKITE_PLUGIN_CONFIGURATION`. Set `workflow`
-to one explicit path or `workflows` to a non-empty array of explicit paths; the
-fields are mutually exclusive. Every path must identify a regular, tracked
-`.yml` or `.yaml` file inside the repository; directories and glob patterns are
-rejected. It also accepts the plugin-owned `version`, `source-ref`, and
-`minimum-release-age` fields, plus the boolean `experimental-runner-user` field.
-Unknown fields and non-boolean experiment values are rejected before upload.
-The importer uses its verified executable for jobs on the same platform and
-fetches the other platform's distribution from the same release only when a
-workflow requires it. Custom importers can use the public flags below. Runner
-queue mappings affect generated jobs, not the importer step.
+The hidden, zero-argument `buildkite-gha plugin` entry point reads plugin
+configuration from `BUILDKITE_PLUGIN_CONFIGURATION`. It accepts:
+
+- either one `workflow` path or a non-empty `workflows` array
+- `runners` and `oidc`
+- plugin-owned `version`, `source-ref`, and `minimum-release-age` fields
+- the Boolean `experimental-runner-user` and `private-reusable-workflows` fields
+
+### Private-preview Pipeline Trigger selection
+
+Server-selected workflow imports are available only in private-preview GitHub
+Actions Pipeline Trigger builds. Most users should configure an explicit
+`workflow` or `workflows` selector.
+
+Without an explicit selector, `BUILDKITE_GITHUB_WORKFLOW_PATH` marks a GitHub
+Actions Pipeline Trigger selection. The server also supplies:
+
+- `GITHUB_EVENT_NAME`: `push`, `pull_request`, `issues`, `issue_comment`,
+  `pull_request_review`, `pull_request_review_comment`, `release`, `merge_group`,
+  `deployment`, `deployment_status`, `create`, `delete`, `label`, `fork`, `public`, `gollum`, `page_build`, `watch`, `milestone`, `branch_protection_rule`, `discussion`, or `discussion_comment`
+- `GITHUB_WORKFLOW`: the workflow `name`, or its repository-relative path when
+  `name` is absent
+- `GITHUB_WORKFLOW_REF`:
+  `<owner>/<repo>/<repository-relative-path>@<event-ref>`
+- `GITHUB_WORKFLOW_SHA`: the full commit used to match the workflow
+- `BUILDKITE_GITHUB_EVENT`: a compatibility duplicate of `GITHUB_EVENT_NAME`
+- `BUILDKITE_GITHUB_ACTION`: the event activity, including `checks_requested` for merge groups; push
+  and deployment events, plus `create`, `delete`, `fork`, `public`, `gollum`, and `page_build`, omit it
+
+The `GITHUB_*` values take precedence when present. The plugin derives the
+selected path from `GITHUB_WORKFLOW_REF`, checks `GITHUB_WORKFLOW` against the
+checked-out file, and requires `GITHUB_WORKFLOW_SHA` to match the checkout
+commit. A malformed preferred value fails instead of falling back.
+For pull requests, `GITHUB_WORKFLOW_REF` and imported jobs' `GITHUB_REF` retain
+`refs/pull/<number>/merge`, while `GITHUB_WORKFLOW_SHA`, `GITHUB_SHA`, and the
+Buildkite checkout use the pull request head commit.
+Review and inline review-comment events use the same PR-head contract. They
+require both workflow identity fields and the original `buildkite:webhook`
+payload. The PR number, head SHA, head/base branches, activity, and all three
+repository identities must agree with the build. Missing payloads (including
+rebuilds without retained webhook data) fail closed, not as synthetic PR events.
+For `issues` and `issue_comment`, the ref is the current repository default
+branch and the SHA is its server-verified tip. Both identity fields are
+required. The linked payload action and repository must match the Buildkite
+environment, and `issue_comment` accepts both issue and pull request
+conversation comments.
+For `release`, both workflow identity fields and the original linked payload
+are required. The ref identifies the release tag; the SHA identifies its
+server-resolved peeled commit. Repository, tag, branch, and activity must agree.
+Draft releases reject `created`, `edited`, `deleted`, and `unpublished`. See
+[release compatibility](compatibility.md#names-and-triggers).
+Deployment events require both workflow identity fields and the original linked
+payload. Workflows use the deployment commit and branch/tag ref, or an empty
+Actions ref for SHA-only deployments. SHA-only workflow identity uses `@<sha>`.
+See [deployment compatibility](compatibility.md#names-and-triggers) for provenance
+checks and inactive-status suppression.
+For `merge_group`, both workflow identity fields and the original linked payload
+are required. The selected ref/SHA identifies the speculative head; the distinct
+base branch/SHA must match Buildkite's merge-queue metadata. Only tokenless
+workflows are supported. See [merge-group compatibility](compatibility.md#names-and-triggers).
+`BUILDKITE_GITHUB_WORKFLOW_PATH` remains the path fallback because GitHub has no
+`GITHUB_WORKFLOW_PATH`. `BUILDKITE_GITHUB_ACTION` remains the action source
+because GitHub's `GITHUB_ACTION` has a different meaning. An explicit
+`workflow` or `workflows` value takes precedence over server workflow selection.
+
+Use the plugin shorthand to request server selection:
+
+```yaml
+steps:
+  - label: ":github:"
+    plugin: github-actions
+```
+
+This server-selected form does not require the importer step to have a `key`.
+The plugin uploads the event, runtime, and plan artifacts before uploading the
+dynamic pipeline, and scopes artifact reads to the importer job. It does not use
+the job ID as a dependency key. Explicit-selector importers still require a
+step `key` and generated workflow groups depend on it.
+
+Missing or untracked explicitly configured workflow paths warn and are skipped.
+If every configured path is missing or untracked, the plugin succeeds without
+uploading a pipeline. A missing or untracked server-selected path fails. Every
+present path must be a regular, tracked `.yml` or `.yaml` file inside the
+repository. Directories, tracked files missing from the checkout, symlinks, and
+globs are rejected. The optional `oidc` object accepts non-empty `claims`,
+`aws-session-tags`, and `subject-claim` values. Unknown fields and invalid values
+fail before upload.
+
+The plugin resolves relative workflow paths from `BUILDKITE_BUILD_CHECKOUT_PATH`,
+not the command hook's working directory.
+
+The importer reuses its verified executable for jobs on the same platform. It
+downloads the other platform's distribution from the same release only when a
+workflow needs it. Runner mappings apply to generated jobs, not the importer.
+
+### Configure generated-job cache volumes
+
+An explicit runner mapping can attach one Buildkite Hosted cache volume to each
+generated job using that mapping:
+
+```yaml
+plugins:
+  - github-actions#latest:
+      workflow: .github/workflows/ci.yml
+      runners:
+        - runs-on: ubuntu-latest
+          queue: hosted
+          cache:
+            paths:
+              - /home/runner/.gradle/caches
+              - /home/runner/.gradle/wrapper
+            name: gradle-dependencies
+            size: 40g
+```
+
+`cache.paths` is a required, non-empty list of unique absolute paths. `name`
+and `size` are optional. Names follow Buildkite's 100-character
+letters-numbers-hyphens format and may contain `${BUILDKITE_*}` variables.
+Sizes use `Ng` and must be at least `20g`. Without a name or size, Buildkite
+uses its pipeline-scoped name and 20 GB defaults.
+
+Each Buildkite step supports one cache volume. When a job also needs the
+internally managed mise cache, `buildkite-gha` adds the mise path to the same
+volume. A configured name and size apply to that combined volume; otherwise,
+the managed mise name and Buildkite's default size remain unchanged. Jobs with
+neither configuration emit no `cache` attribute.
+
+Runner cache volumes are not supported for workflow jobs that set `container`.
+
+Generated Linux jobs run as `runner`. Configured cache paths are made writable
+by that user after the bootstrap verifies that they target the Buildkite cache
+volume. Prefer narrowly scoped paths.
+For example, caching an entire Gradle User Home also persists `init.d` scripts
+and other executable configuration, increasing the impact of cache poisoning.
+Caching only `caches` and `wrapper` reduces that exposure, but a cache-volume
+miss does not provide setup-gradle's archive-cache fallback once the mounted
+`caches` directory exists.
+
+Cache volumes are best-effort accelerators, scoped to the Buildkite pipeline
+and cluster. They commit after successful jobs and are abandoned after failed
+jobs. Do not use them as durable or trusted storage. See [Buildkite cache
+volumes](https://buildkite.com/docs/agent/buildkite-hosted/cache-volumes).
 
 ### Select workflows
 
@@ -191,13 +591,41 @@ buildkite-gha upload -- \
   .github/workflows/release.yml
 ```
 
-Every operand must name one regular `.yml` or `.yaml` file. When uploading more than one workflow, every path must be tracked inside the repository. Aliases and duplicates are canonicalized, deduplicated, and sorted, so reversed arguments produce the same pipeline. Directories, globs, missing files, other extensions, and symlinks are rejected before any workflow is parsed or Buildkite command runs; aggregate uploads also reject untracked and outside paths.
+Every operand must name one regular `.yml` or `.yaml` file. For multiple
+workflows, every path must be tracked inside the repository. Upload
+canonicalizes, deduplicates, and sorts aliases, so argument order does not
+change the pipeline.
 
-`--` ends option parsing and is required when a path operand begins with `-`; options must appear before it. Without `--`, a leading-dash operand is an unknown option. The CLI does not split shell strings or decode a JSON or YAML list from one argument: custom wrappers should pass each path as a separate argument and use `--` before externally supplied operands.
+Directories, globs, missing files, other extensions, and symlinks fail before
+parsing or Buildkite commands run. Multiple-workflow uploads also reject
+untracked and outside paths.
 
-All selected directly runnable workflows are represented in one atomic pipeline upload. Each successfully compiled workflow becomes an aggregate group whose label is `:github: <workflow-name>` or, for an unnamed workflow, its canonical path. The group depends on the importer; child jobs do not repeat that dependency. Each child publishes a provider check named `<workflow-name-or-path> / <job-id> (<effective-event>)`. A skipped workflow becomes one top-level skipped command step with a check named `<workflow-name-or-path> (<effective-event>)`. GitHub events publish GitHub checks; Origin events publish Origin checks. A reusable-only `workflow_call` file may be selected so local callers can resolve it, but it does not create a group. An input set containing only reusable workflows is an error.
+`--` ends option parsing. Use it before any externally supplied paths, and
+always when a path begins with `-`. Pass each path as its own argument; the CLI
+does not split one shell string or decode a JSON or YAML list.
 
-Every directly runnable workflow is selected against the effective event. A workflow with safe compilation or trigger-translation errors is replaced by one failing top-level command step labeled `:github: <workflow-name-or-path>`. The replacement step publishes all redacted diagnostics as a job-scoped Buildkite annotation, then exits with status 1. Its provider check presents the failure reasons as described in [Aggregate workflow upload](compatibility.md#aggregate-workflow-upload). A compiler failure takes precedence if the workflow also has a skip reason. Compilation continues for later workflows, and successfully compiled workflows retain their normal groups and jobs. Parse, event-input, admission, artifact, and upload failures still abort the aggregate transaction. No partially compiled pipeline is uploaded.
+Upload is atomic. Skipped workflows become top-level skipped steps.
+Reusable-only files remain available to local callers but do not create groups.
+Selecting only reusable workflows is an error.
+
+An explicit non-empty workflow `run-name` appends ` — <run-name>` to its group
+label after resolving supported `github` and `inputs` expressions. Workflow
+names, provider-check names, and the Buildkite build message remain unchanged.
+
+See [Aggregate workflow upload](compatibility.md#aggregate-workflow-upload) for
+workflow grouping, labels, provider checks, and failure behavior.
+
+Private reusable workflows are off by default. Set the plugin's
+`private-reusable-workflows: true` field, or pass
+`upload --private-reusable-workflows` from a custom importer. See
+[Reusable workflows](compatibility.md#reusable-workflows) for the access
+boundary and [Security](security.md#repository-data-does-not-grant-authority)
+for the credential boundary.
+
+A safe compilation or trigger-translation error replaces only that workflow
+with a failing top-level step. Compilation continues for later workflows.
+Parse, event-input, admission, artifact, and upload failures abort the complete
+transaction; no partial pipeline is uploaded.
 
 ### Select the effective event
 
@@ -207,21 +635,57 @@ Event source precedence is:
 1. `buildkite:webhook` metadata reserved by Buildkite
 1. A reduced snapshot derived from `BUILDKITE_*` variables when no linked webhook is available
 
-An explicit event path never reads Buildkite metadata. Webhook metadata must be one valid JSON object no larger than 25 MiB. Malformed, unreadable, or oversized data stops upload rather than falling back. The Buildkite repository mapping, commit, and ref remain authoritative for the workload.
+An explicit path never reads Buildkite metadata. Webhook metadata must be one
+valid JSON object no larger than 25 MiB. Malformed, unreadable, or oversized
+data stops upload instead of falling back. Buildkite's repository mapping,
+commit, and ref remain authoritative.
 
-Raw webhook data is not retained in generated plans or pipeline YAML and cannot grant queues, secrets, or tokens.
+Raw webhook data is not embedded in generated plans or pipeline YAML. Upload
+retains one content-addressed event artifact for linked webhooks and explicit
+snapshots, so every job and its retries can read the [event file](compatibility.md#event-file).
+For reduced fallback snapshots, it retains the artifact only when runtime event
+expressions require it. Event data cannot grant queues, secrets, or tokens.
 
-The selected snapshot establishes one effective GitHub event for applicability, compilation, group conditions, and event-qualified check names; group labels remain static across events. An explicit event path uses its event directly and never re-reads live Buildkite event fields. Linked webhook metadata supplies the GitHub event name. Without either source, pull request builds map to `pull_request`; Buildkite `ui` and `api` sources map to `workflow_dispatch`; `schedule` maps to `schedule`; and other sources, including `trigger_job`, map to `push` even when `build.source_event` is absent.
+The selected snapshot establishes one event for applicability, compilation,
+workflow conditions, provider-check names, and explicit run-name evaluation. An
+explicit event is never replaced with live Buildkite fields.
 
-Top-level workflows that do not declare the effective event are excluded before event-dependent validation and compilation, then emitted as top-level skipped command steps with no plan artifacts. Reusable-only workflows remain available to local callers. If no directly runnable workflow applies, upload succeeds with a skipped-only pipeline. For applicable workflows, only the selected event contributes a group condition: push branch/tag filters, pull request base-branch/activity filters, or the corresponding manual/schedule Buildkite source predicate. Cross-event trigger conditions are never ORed into that group.
+Linked webhook data can provide native `merge_group`, `release`, and `issues`
+events. GitHub Actions Pipeline Trigger identity additionally supports `merge_group`, `release`,
+`deployment`, `deployment_status`, `create`, `delete`, `label`, `fork`, `public`, `gollum`, `page_build`, `watch`, `milestone`, `branch_protection_rule`, `discussion`, `discussion_comment`, `issues`, `issue_comment`, and PR review events without native event settings. Merge
+groups and releases need matching Buildkite refs, commits, and
+activity. Release also needs a valid payload and a tag matching `BUILDKITE_TAG`
+and `BUILDKITE_BRANCH`. Issue and comment payloads need a valid action, object
+identity, and repository matching the Buildkite checkout. The GitHub Code
+Access App provides immutable server provenance and is required for hosted
+release `GITHUB_TOKEN` issuance.
 
-Unsupported trigger events, path filters, and inexact filters replace the affected workflow with one failing top-level command step rather than being approximated. Malformed event data remains fatal to the importer. Safe compilation errors in an applicable workflow also produce a failing replacement step. Buildkite still owns build creation and schedule identity; every workflow with `on.schedule` is eligible for a Buildkite scheduled build because Buildkite does not expose which schedule created it.
+See [Names and triggers](compatibility.md#names-and-triggers) for exact matching
+rules and the environment fallback.
 
-After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps before running one:
+A top-level workflow that does not declare the event becomes a skipped step with
+no plan artifacts. If none apply, upload succeeds with a skipped-only pipeline.
+
+For an applicable workflow, only the selected event contributes a workflow
+condition. Supported branch, tag, base-branch, and activity filters add their
+constraints. A verified path-filter nonmatch becomes a skipped step without
+workflow jobs or plan artifacts. Conditions from different events are never combined.
+
+Unsupported or uncertain filters replace only the affected workflow with a
+failing step. Push and pull-request path filters need a linked webhook and a
+matching local checkout. Generated or explicit snapshots can report that need,
+but cannot grant admission. Malformed event data stops the import.
+
+Buildkite owns schedule identity, so every `on.schedule` workflow is eligible
+for every Buildkite scheduled build.
+
+After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps in one artifact batch with a concurrency limit of 8. It then runs one:
 
 ```sh
-buildkite-agent pipeline upload --no-interpolation --reject-secrets
+buildkite-agent pipeline upload --no-interpolation
 ```
+
+Buildkite Agent v4 rejects pipeline uploads containing secrets by default.
 
 ### Choose runners and runtimes
 
@@ -235,57 +699,212 @@ buildkite-gha upload \
   .github/workflows/ci.yml
 ```
 
-`ubuntu-latest` and `ubuntu-24.04` default to the Noble hosted-toolchains
-image; `ubuntu-22.04` defaults to Jammy. Use `--runner-image` with an immutable
-digest to override the default for a configured profile. Unmapped Linux labels
-keep default agent targeting with the matching image. Unmapped `macos-latest`
-targets the hosted `macos-medium` queue provisioned at signup; a mapping
-overrides it, and the queue must exist and allow macOS capacity. `macos-14`
-and `macos-15` require a queue. Every macOS label rejects images. Runtime distribution paths must be absolute executables. The
-importer's platform defaults to its running executable; the other platform has
-no direct-upload default.
+The hosted preset accepts runner labels case-insensitively, so aliases such as
+`macOS-latest` and `Ubuntu-Latest` are equivalent to their lowercase forms.
+Local presets use Noble for `ubuntu-latest` and `ubuntu-24.04`, and Jammy for
+`ubuntu-22.04`. Backend resolution can instead select a native Linux environment
+through agent tags. Use `--runner-image` with an immutable digest
+to override the preset for a configured profile; backend tags never replace
+that explicit image. An explicit mapping declares
+that its selector runs on Linux x86-64, except for the known macOS and Windows labels, and
+bypasses Agent API resolution. The Agent API owns compatibility and returns the
+complete target for every other selector. The importer publishes returned
+warnings as annotations. See [Compatibility](compatibility.md#job-configuration)
+for runner behavior. Runtime distribution paths must be absolute executables.
+The importer's platform defaults to its running executable; other platforms
+have no direct-upload default.
 `BUILDKITE_GHA_TARGET_QUEUE` and `BUILDKITE_GHA_RUNTIME_IMAGE` are no longer
 supported.
 
+For [experimental Windows jobs](compatibility.md#experimental-windows-jobs),
+explicitly map `windows-latest` or `windows-2022` and supply the matching
+Windows x86-64 runtime from the same release:
+
+```sh
+buildkite-gha upload \
+  --event-path event.json \
+  --runner-queue windows-2022=my-windows-queue \
+  --runtime-distribution windows/amd64=/opt/buildkite-gha.exe \
+  .github/workflows/ci.yml
+```
+
+The plugin acquires the Windows runtime from the same release only when a
+selected workflow requires it. Development plugin runs use
+`BUILDKITE_GHA_PLUGIN_DEV_WINDOWS_RUNTIME` as an absolute path to a locally
+built Windows executable. Windows targets reject `--runner-image` and cache
+volumes. These mappings do not create queues or grant hosted Windows access.
+
 The deprecated `--runtime-queue hosted` argument is accepted as a no-op for compatibility with plugin releases that pass it. Other values are rejected.
 
-### Experiment with a non-root runner user
+### Expand a matrix inside the build
 
-`upload --experimental-runner-user` enables the removable PB-2731 Linux
-experiment. Generated jobs must start as root. Their bootstrap creates a
-`runner` user, grants passwordless `sudo` and Docker socket access when the
-socket exists, prepares the runner home, temp, mise, and tool-cache paths, then
-runs `buildkite-gha run-job` as `runner`. The verified executable and compiled
-plan remain root-owned and read-only to `runner`. The option does not infer
-behavior from a queue name and does not affect macOS jobs.
+When a workflow takes matrices or runner selections from job outputs, `upload` creates one deferred
+step per group of overlapping downstream jobs, in addition to the static jobs
+(see [Matrices from job outputs](compatibility.md#matrices-from-job-outputs) and
+[Runners from job outputs](compatibility.md#runners-from-job-outputs)).
+The importer needs `BUILDKITE_JOB_ID` for this. Every runtime platform the
+expanded jobs may need must already be configured with `--runtime-distribution`;
+a row that selects an unconfigured platform fails the deferred step. The importer
+resolves repository and organization variables when any job of the workflow,
+deferred or not, reads `vars` in the workflow or in an action it uses, and
+records the scopes for the deferred steps. Such a workflow is never uploaded
+job by job: when any of its jobs fails compilation, the whole workflow is
+replaced with one failing step, because a partial upload would drop the
+deferred steps.
 
-The existing plugin can run this experiment without a plugin release. Its
-`source-ref` field builds the CLI at the pinned commit and passes the boolean
-configuration to the zero-argument `plugin` entry point:
+The importer and every deferred step are stages of one compilation. Each
+stage compiles the whole workflow through the same compile path, uploads the
+jobs whose scheduling values it knows, and writes a stage record for each boundary the
+compiler still defers. The deferred step downloads the importer's executable,
+then runs the internal form of the same command:
+
+```sh
+buildkite-gha upload \
+  --stage-digest sha256:<digest> \
+  --stage-producer <job-id>
+```
+
+This form accepts no other options or operands. `--stage-producer` is the job
+whose artifacts hold the stage record: the importer for the first deferred
+step of a component, or the earlier deferred step when a matrix chains from a
+job that step compiled (see
+[Matrices from job outputs](compatibility.md#matrices-from-job-outputs)). The
+event source and the runtimes always come from the importer the record names.
+Releases before this form emitted a separate `continue` command; a deferred
+step always runs the executable digest its own importer uploaded, so the two
+never mix inside one build.
+
+A stage step runs inside a Buildkite job with `BUILDKITE=true`,
+`BUILDKITE_BUILD_ID`, `BUILDKITE_JOB_ID`, and the default checkout. It:
+
+1. downloads the stage record, verifies its digest and compiler version, and
+   checks that the workflow in the checkout is byte-for-byte the one the
+   importer compiled; the record also holds the action revisions and the
+   variable scopes the importer resolved for the deferred jobs, so a stage
+   never requests variables itself, and the rows every earlier stage of a
+   chained component resolved
+2. reads each producer's verified result through the same manifest path
+   that `needs` outputs use, bound to its exact instance key and plan digest;
+   a verified non-success result skips that root's downstream jobs, while a
+   missing or invalid manifest fails the step before any upload; earlier
+   producers must still match their recorded results (see
+   [matrix retries](compatibility.md#matrices-from-job-outputs))
+3. expands successful outputs with the static-matrix rules and limits, or
+   evaluates the runner selection using an output of at most 1 KiB; checks
+   that the rows and dependents fit the share of the 1,024-job limit the record
+   holds for this step (see
+   [Matrices from job outputs](compatibility.md#matrices-from-job-outputs)),
+   recompiles the
+   workflow with the recorded event, variables, runner mappings, OIDC, and
+   `private-reusable-workflows` settings and the recorded rows of earlier
+   stages, reads remote reusable workflows and
+   actions through the same repository source as `upload`, resolves runners
+   through the Agent API as `upload` does,
+   requires the jobs the earlier uploads created to compile identically,
+   requires each deferred job to come from the workflow source the importer
+   recorded, including the commit of a reusable workflow from another
+   repository, and pins each deferred job's actions to the recorded revisions
+4. uploads the plans and a pipeline holding only the deferred jobs whose scheduling values
+   exist, including skipped placeholders where needed; joins appear once, and
+   outside prerequisites remain references to steps already in the build.
+   When some deferred jobs read their matrix from a job this upload compiled,
+   the pipeline also holds the next stage's deferred step, and the upload
+   writes that step's stage record with the rows accepted so far and the
+   unused part of this step's job share
+
+Buildkite rejects an upload whose step keys already exist. When that happens,
+the stage confirms through `buildkite-agent step get` that each expected step
+carries the plan it just compiled and exits 0, so retrying the deferred step
+never duplicates jobs. For skipped jobs in a merged component, it also verifies
+the command marker bound to the stage record digest. A missing step
+or a different binding fails the replay. For
+[output-derived scheduling](compatibility.md#scheduling-from-matrix-producer-outputs),
+it also compares the concurrency group and limit. Any other failure exits 1 with:
+
+```
+Retry the whole build to expand this matrix again. If the matrix producer job was retried, only a new build can expand it.
+```
+
+Runner selection failures instead say:
+
+```
+Retry the whole build to select this runner again. If the producer job was retried, only a new build can select it.
+```
+
+### Run Linux jobs as a non-root user
+
+Generated Linux jobs use a dedicated `runner` user by default. This behavior
+requires buildkite-gha v0.13.7 or newer. Jobs can start as root or as an existing
+`runner` user with home `/home/runner` and passwordless `sudo`. For a non-root
+start, the bootstrap uses `sudo -n` for privileged setup. It creates the
+`runner` user when needed, grants passwordless `sudo` and Docker
+socket access when the socket exists, prepares the runner home, temp, mise, and
+tool-cache paths, then runs `buildkite-gha run-job` as `runner`. The verified
+executable and compiled plan remain root-owned and read-only to `runner`.
+Generated jobs skip the Buildkite checkout. When a workflow uses
+`actions/checkout`, the native adapter clones as `runner`, so the runtime does
+not recursively change workspace ownership. This behavior does not depend on a
+queue name and does not affect macOS jobs.
+
+During the transition, set the plugin field to `false` to run as the agent's
+original user without this bootstrap:
 
 ```yaml
 steps:
-  - label: ":github: PB-2731 runner user proof"
-    key: "pb-2731-runner-user"
-    agents:
-      queue: "hosted"
+  - label: ":github: CI"
     plugins:
-      - github-actions#v0.9.3:
-          workflow: .github/workflows/experimental-runner-user.yml
-          source-ref: 65209ba627e45a9c0ad124c6ca0334e4ba9e24f5
-          experimental-runner-user: true
-          runners:
-            - runs-on: ubuntu-latest
-              queue: hosted
+      - github-actions#latest:
+          workflow: .github/workflows/ci.yml
+          experimental-runner-user: false
 ```
 
-`experimental-runner-user` must be a YAML boolean, not a quoted string. Do not
-set `version` with `source-ref`.
+For a custom importer, pass `upload --experimental-runner-user=false`. The bare
+`--experimental-runner-user` form and a plugin value of `true` remain accepted.
+The plugin value must be a YAML boolean, not a quoted string.
 
 ## Disable telemetry
 
-In Buildkite jobs, the plugin importer and `run-job` send best-effort completion telemetry through the job-authenticated Buildkite Agent API. Events contain the command, outcome, client version, duration, and bounded diagnostic codes and severities. They do not contain diagnostic messages, workflow content, repository details, paths, action references, expressions, environment variables, or command text.
+In Buildkite jobs, the importer and runtime send best-effort completion
+telemetry through the job-authenticated Agent API. Events contain the command,
+outcome, client version, duration, and bounded diagnostics. Diagnostics can
+identify a rejected feature with a `blocker` slug and bounded `blocker_detail`,
+such as `runner_label` and `windows-latest`. Distinct rejected values remain
+separate diagnostics even when they share a diagnostic code.
+
+Workflow diagnostics include their message and detail in `message`, even when
+the importer exits zero after uploading failing steps for rejected workflows.
+Messages are normalized to one line and retain at most their first 1,024 UTF-8 bytes;
+`message_truncated` is true when text was shortened. `workflow_path` identifies
+the root workflow being imported, relative to the checkout when possible.
+Paths over 1,024 bytes or containing invalid UTF-8 or control characters are
+omitted rather than shortened. Deduplication includes the bounded message and
+workflow path, subject to the limit of 20 diagnostics per command.
+
+For an unsuccessful command, events also contain a normalized user-visible error
+message of at most 1,024 bytes. When a workflow diagnostic attributes the
+failure, the message is that diagnostic's text, kept whole so later job output
+cannot displace it. Otherwise it is the final bytes of the command's error
+output. `error_message_truncated` says whether part of the message was
+omitted.
+
+Failed runs also carry a failure phase and a code from a fixed set. The code
+separates workflow-authored process exits (`E_STEP_PROCESS_EXIT`) from
+unsupported-feature rejections (`E_UNSUPPORTED_FEATURE`) and runtime integrity
+failures (`E_RUNTIME_INTEGRITY`), so a failing test suite is not counted as a
+compatibility gap. Runtime rejections include the same blocker fields when the
+runtime can identify the rejected shell or action reference.
+Secret resolution failures use `E_SECRET_UNAVAILABLE`, making secret
+availability independently measurable.
+
+Buildkite adds organization, pipeline, build, and job identifiers on the
+server. The client does not send workflow or event content, environment
+variables, command text, or secrets as separate properties. Blocker details
+come from workflow-authored configuration. Event-derived runner labels and
+environment expressions are omitted.
+
+Diagnostic messages and error output can include details already printed in
+the job log, such as workflow paths, action references, expressions, or invalid
+configuration values. Avoid putting secrets in error messages. Disable
+telemetry when this diagnostic context must stay inside the job.
 
 Set `BUILDKITE_GHA_TELEMETRY_DISABLED=true` to disable telemetry. Missing Agent endpoint, job ID, or job token also disables it. Telemetry failures do not change command results.
-
-`run-job` is internal. Users should not invoke it directly.

@@ -1,0 +1,9 @@
+name: Compatibility gap - download-artifact versions
+on: push
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: compatibility-gap

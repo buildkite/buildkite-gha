@@ -17,10 +17,11 @@ cache, and narrowly supported Docker action behaviour.
   compiler `PlanAuthorization` evidence decides whether requested Docker or
   provider-token capabilities may enter an uploaded plan.
 - `plan.Job.Validate`, `verifyWorkflow`, and runtime capability checks bind a
-  job to exact workflow bytes and fail closed on unknown authority.
+  job to exact workflow bytes and reject unknown authority.
 - `resolveAgentRepositoryCredentialsBeforeWorkflow` and
-  `runRepositoryProviderCheckoutFetch` confine the Buildkite Agent access token
-  to Git fetches through the repository-provider credential helper.
+  command-scoped checkout helpers confine the Buildkite Agent access token to
+  repository and LFS fetches, filtered checkout materialization, and submodule
+  updates through the repository-provider credential helper.
 - `resolveWorkflowToken` mints one event-repository token with
   compiler-resolved permissions; `resolveSecrets` loads only explicitly
   declared secret names. Both require the Buildkite Agent redactor before use.

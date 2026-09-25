@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
@@ -13,6 +14,7 @@ const (
 	jobSummaryAnnotationContext = "buildkite-gha-job-summary"
 	jobWarningAnnotationContext = "buildkite-gha-workflow-warnings"
 	jobErrorAnnotationContext   = "buildkite-gha-workflow-errors"
+	skippedJobLabelSuffix       = " (skipped)"
 )
 
 // ResolveNeeds converts compiler-owned producer identities into the verified
@@ -47,6 +49,62 @@ func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID stri
 		needs[name] = need
 	}
 	return needs, nil
+}
+
+// ResolveDeferredInputs evaluates each workflow_call input from
+// exact producer outputs without adding the caller's needs context to the
+// callee expression scope. Only the outputs the template references are
+// available; the caller's need results stay hidden.
+func ResolveDeferredInputs(ctx context.Context, agent transport.Agent, root, buildID string, deferred map[string]plan.DeferredInput) (map[string]any, error) {
+	engine := expression.NewEngine()
+	inputs := make(map[string]any, len(deferred))
+	for _, name := range sortedKeys(deferred) {
+		input := deferred[name]
+		needs, err := ResolveNeeds(ctx, agent, root, buildID, input.NeedSources, input.NeedOutputs)
+		if err != nil {
+			return nil, fmt.Errorf("input %q: %w", name, err)
+		}
+		outputs := make(map[string]expression.NeedStatus, len(needs))
+		for job, need := range needs {
+			outputs[job] = expression.NeedStatus{Outputs: need.Outputs}
+		}
+		resultType := expression.ResultType(input.Type)
+		if resultType == "" {
+			resultType = expression.ResultString
+		}
+		value, err := engine.Evaluate(
+			expression.Site{Source: input.Template, Profile: expression.ProfileDeferredInput, Result: resultType, Purpose: expression.PurposeExpression},
+			expression.Values{Runtime: expression.Context{Needs: outputs}},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("input %q: %w", name, err)
+		}
+		inputs[name] = value
+	}
+	return inputs, nil
+}
+
+// ResolveCallGuards hydrates each caller scope independently so nested guards
+// cannot observe a callee job's needs or another call boundary's producers.
+func ResolveCallGuards(ctx context.Context, agent transport.Agent, root, buildID string, guards []plan.CallGuard) ([]plan.CallGuard, error) {
+	resolved := append([]plan.CallGuard(nil), guards...)
+	for i := range resolved {
+		if len(resolved[i].NeedSources) != 0 {
+			needs, err := ResolveNeeds(ctx, agent, root, buildID, resolved[i].NeedSources, resolved[i].NeedOutputs)
+			if err != nil {
+				return nil, fmt.Errorf("call guard %d: %w", i+1, err)
+			}
+			resolved[i].Needs = needs
+		}
+		if len(resolved[i].DeferredInputs) != 0 {
+			inputs, err := ResolveDeferredInputs(ctx, agent, root, buildID, resolved[i].DeferredInputs)
+			if err != nil {
+				return nil, fmt.Errorf("call guard %d: %w", i+1, err)
+			}
+			resolved[i].DeferredInputValues = inputs
+		}
+	}
+	return resolved, nil
 }
 
 // PublishJobResult maps every terminal runtime conclusion to the canonical
@@ -88,6 +146,11 @@ func PublishJobResult(ctx context.Context, agent transport.Agent, root, workflow
 }
 
 func publishJobAnnotations(ctx context.Context, agent transport.Agent, jobID string, result JobResult, publication *transport.Publication) {
+	if result.Conclusion == "skipped" {
+		if err := agent.EnsureStepLabelSuffix(ctx, skippedJobLabelSuffix); err != nil {
+			publication.SkippedLabelError = fmt.Errorf("mark skipped job: %w", err)
+		}
+	}
 	publishJobSummary(ctx, agent, jobID, result.Summary, publication)
 	if result.WarningAnnotations != "" {
 		if err := agent.AnnotateJob(ctx, jobID, jobWarningAnnotationContext, "warning", result.WarningAnnotations); err != nil {

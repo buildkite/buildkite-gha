@@ -17,13 +17,14 @@ sha256_digest() {
 }
 
 profile=false
+explicit_cases=false
 case_ids=()
 while (( $# > 0 )); do
   case "$1" in
     --profile) profile=true ;;
     --help|-h) usage; exit 0 ;;
     -*) usage; exit 2 ;;
-    *) case_ids+=("$1") ;;
+    *) explicit_cases=true; case_ids+=("$1") ;;
   esac
   shift
 done
@@ -43,7 +44,9 @@ jq -e '
   all(.cases[];
     (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
     (.template | test("^ci/[A-Za-z0-9_.-]+\\.yml$")) and
-    (.template_sha256 | test("^[0-9a-f]{64}$"))) and
+    (.template_sha256 | test("^[0-9a-f]{64}$")) and
+    ((has("disabled_reason") | not) or
+      (.disabled_reason | type == "string" and length > 0))) and
   ([.cases[].id] | length == (unique | length))
 ' "$manifest" >/dev/null
 
@@ -72,6 +75,7 @@ summary="$work/summary.md"
 printf '<h2 class="h4 mb2">Starter workflow compatibility — %s</h2>\n<div class="border-top border-gray pt2"></div>\n\n' "$mode" > "$summary"
 passed=0
 blocked=0
+disabled=0
 
 clean_env() {
   env \
@@ -126,8 +130,8 @@ expand_template() {
 record_report() {
   local id=$1 status=$2 output=$3 result codes reason graph icon
   if result="$(jq -er '.result | select(type == "string")' "$output")"; then
-    codes="$(jq -r '[.diagnostics[]?.code] | unique | join(", ")' "$output")"
-    reason="$(jq -r '[.diagnostics[]?.message | split(". ")[0] | gsub("\\s+"; " ")] | unique | if length == 0 then "" elif length == 1 then .[0] else .[0] + " (+" + ((length - 1) | tostring) + " more)" end | if length > 180 then .[:177] + "..." else . end' "$output")"
+    codes="$(jq -r '[.diagnostics[]? | select(.code != "W_ACTION_RUNTIME_UNKNOWN") | .code] | unique | join(", ")' "$output")"
+    reason="$(jq -r '[.diagnostics[]? | select(.code != "W_ACTION_RUNTIME_UNKNOWN") | .message | split(". ")[0] | gsub("\\s+"; " ")] | unique | if length == 0 then "" elif length == 1 then .[0] else .[0] + " (+" + ((length - 1) | tostring) + " more)" end | if length > 180 then .[:177] + "..." else . end' "$output")"
     graph="$(jq -r 'if has("compile") then .compile else . end | "\(.logical_jobs // 0) jobs, \(.instances // 0) instances"' "$output")"
   else
     result=invalid-report
@@ -161,6 +165,13 @@ make_event "$repository" "$commit" "$branch" "$event_path"
 
 for id in "${case_ids[@]}"; do
   entry="$(jq -c --arg id "$id" '.cases[] | select(.id == $id)' "$manifest")"
+  disabled_reason="$(jq -r '.disabled_reason // empty' <<<"$entry")"
+  if ! $explicit_cases && [[ -n "$disabled_reason" ]]; then
+    echo "⏭️ $id: disabled; $disabled_reason"
+    printf -- "- ⏭️ \`%s\`: disabled — %s\n" "$id" "$disabled_reason" >> "$summary"
+    disabled=$((disabled + 1))
+    continue
+  fi
   template="$(jq -r '.template' <<<"$entry")"
   template_sha256="$(jq -r '.template_sha256' <<<"$entry")"
 
@@ -190,15 +201,15 @@ for id in "${case_ids[@]}"; do
   record_report "$id" "$status" "$report"
 done
 
-printf '\n**%d passing; %d blocked.**\n' "$passed" "$blocked" >> "$summary"
+if $profile; then
+  printf '\n_Profile admission resolves and validates actions but does not execute action code._\n' >> "$summary"
+fi
+printf '\n**%d passing; %d blocked; %d disabled.**\n' "$passed" "$blocked" "$disabled" >> "$summary"
 cat "$summary"
 if [[ "${BUILDKITE:-}" == true ]] && command -v buildkite-agent >/dev/null; then
   style=success
-  (( blocked > 0 )) && style=warning
+  (( blocked > 0 || disabled > 0 )) && style=warning
   buildkite-agent annotate --context "starter-workflows-corpus-$mode" --style "$style" < "$summary" || \
     echo 'warning: failed to publish Buildkite annotation' >&2
-fi
-if $profile; then
-  echo 'CAVEAT: profile checks resolve actions but do not execute third-party code.'
 fi
 (( blocked == 0 ))

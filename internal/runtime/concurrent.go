@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
 
 const maxActiveBackgroundSteps = 10
@@ -16,12 +18,21 @@ const maxActiveBackgroundSteps = 10
 var errExplicitBackgroundCancel = errors.New("background step explicitly cancelled")
 
 type stepExecution struct {
-	step       plan.Step
+	id         string
 	result     Result
 	err        error
 	outcome    string
 	conclusion string
 }
+
+type backgroundTaskState uint8
+
+const (
+	backgroundTaskQueued backgroundTaskState = iota
+	backgroundTaskRunning
+	backgroundTaskFinished
+	backgroundTaskCommitted
+)
 
 type backgroundTask struct {
 	id     string
@@ -32,9 +43,18 @@ type backgroundTask struct {
 	// cancelled may run while the supervisor mutex is held and must not block.
 	cancelled func(context.Context) stepExecution
 	execution stepExecution
-	started   bool
-	finished  bool
-	committed bool
+	// state is protected by the supervisor mutex.
+	state backgroundTaskState
+}
+
+func (task *backgroundTask) transitionLocked(next backgroundTaskState) {
+	valid := task.state == backgroundTaskQueued && (next == backgroundTaskRunning || next == backgroundTaskFinished) ||
+		task.state == backgroundTaskRunning && next == backgroundTaskFinished ||
+		task.state == backgroundTaskFinished && next == backgroundTaskCommitted
+	if !valid {
+		panic(fmt.Sprintf("invalid background task transition %d -> %d", task.state, next))
+	}
+	task.state = next
 }
 
 // backgroundSupervisor owns private task admission and completion state. It
@@ -72,7 +92,7 @@ func (s *backgroundSupervisor) dispatchLocked() {
 			s.finishLocked(task, task.cancelled(task.ctx))
 			continue
 		}
-		task.started = true
+		task.transitionLocked(backgroundTaskRunning)
 		s.active++
 		go func() {
 			execution := task.run(task.ctx)
@@ -87,7 +107,7 @@ func (s *backgroundSupervisor) dispatchLocked() {
 
 func (s *backgroundSupervisor) finishLocked(task *backgroundTask, execution stepExecution) {
 	task.execution = execution
-	task.finished = true
+	task.transitionLocked(backgroundTaskFinished)
 	task.cancel(nil)
 	close(task.done)
 }
@@ -95,12 +115,12 @@ func (s *backgroundSupervisor) finishLocked(task *backgroundTask, execution step
 func (s *backgroundSupervisor) cancel(target string) []stepExecution {
 	s.mu.Lock()
 	task := s.tasks[strings.ToLower(target)]
-	if task == nil || task.committed {
+	if task == nil || task.state == backgroundTaskCommitted {
 		s.mu.Unlock()
 		return nil
 	}
 	task.cancel(errExplicitBackgroundCancel)
-	if !task.started && !task.finished {
+	if task.state == backgroundTaskQueued {
 		for i, queued := range s.queue {
 			if queued == task {
 				s.queue = append(s.queue[:i], s.queue[i+1:]...)
@@ -118,7 +138,7 @@ func (s *backgroundSupervisor) wait(targets []string) []stepExecution {
 	tasks := make([]*backgroundTask, 0, len(targets))
 	for _, target := range targets {
 		task := s.tasks[strings.ToLower(target)]
-		if task != nil && !task.committed {
+		if task != nil && task.state != backgroundTaskCommitted {
 			tasks = append(tasks, task)
 		}
 	}
@@ -130,7 +150,7 @@ func (s *backgroundSupervisor) waitAll() []stepExecution {
 	s.mu.Lock()
 	tasks := make([]*backgroundTask, 0, len(s.order))
 	for _, task := range s.order {
-		if !task.committed {
+		if task.state != backgroundTaskCommitted {
 			tasks = append(tasks, task)
 		}
 	}
@@ -146,10 +166,10 @@ func (s *backgroundSupervisor) commitCompleted(tasks []*backgroundTask) []stepEx
 	defer s.mu.Unlock()
 	executions := make([]stepExecution, 0, len(tasks))
 	for _, task := range tasks {
-		if task.committed {
+		if task.state == backgroundTaskCommitted {
 			continue
 		}
-		task.committed = true
+		task.transitionLocked(backgroundTaskCommitted)
 		executions = append(executions, task.execution)
 	}
 	return executions
@@ -170,13 +190,13 @@ func bindHashFilesContext(ctx context.Context, eval *expression.Context) {
 	}
 }
 
-func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
+func (r *jobRun) executePlanStep(jobCtx, runCtx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step executionprogram.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
 	result, err := r.runJobStep(runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
-	return classifyStepExecution(jobCtx, runCtx, step, result, err)
+	return classifyStepExecutionWithControls(jobCtx, runCtx, step, result, err, eval)
 }
 
-func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, result Result, err error) stepExecution {
-	execution := stepExecution{step: step, result: result, err: err, outcome: "success", conclusion: "success"}
+func classifyStepExecution(jobCtx, runCtx context.Context, id string, continueOnError bool, result Result, err error) stepExecution {
+	execution := stepExecution{id: id, result: result, err: err, outcome: "success", conclusion: "success"}
 	if err == nil {
 		return execution
 	}
@@ -185,36 +205,42 @@ func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, resul
 		execution.outcome = "cancelled"
 	}
 	execution.conclusion = execution.outcome
-	if step.ContinueOnError && execution.outcome == "failure" && !isHardJobFailure(err) {
+	if continueOnError && execution.outcome == "failure" && !isHardJobFailure(err) {
 		execution.conclusion = "success"
 	}
 	return execution
 }
 
-func cancelledStepExecution(jobCtx, runCtx context.Context, step plan.Step) stepExecution {
+func classifyStepExecutionWithControls(jobCtx, runCtx context.Context, step executionprogram.Step, result Result, err error, eval expression.Context) stepExecution {
+	execution := classifyStepExecution(jobCtx, runCtx, step.ID, step.ContinueOnError.Literal, result, err)
+	if execution.outcome == "failure" && !isHardJobFailure(err) && step.ContinueOnError.Expression != nil {
+		resolved, controlErr := evaluateStepContinueOnError(step, eval)
+		if controlErr != nil {
+			return classifyStepExecution(jobCtx, runCtx, step.ID, false, result, errors.Join(err, fmt.Errorf("controls: %w", controlErr)))
+		}
+		return classifyStepExecution(jobCtx, runCtx, step.ID, resolved, result, err)
+	}
+	return execution
+}
+
+func cancelledStepExecution(jobCtx, runCtx context.Context, step executionprogram.Step) stepExecution {
 	err := context.Cause(runCtx)
 	if err == nil {
 		err = context.Canceled
 	}
-	return classifyStepExecution(jobCtx, runCtx, step, newResult(), err)
+	return classifyStepExecution(jobCtx, runCtx, step.ID, step.ContinueOnError.Literal, newResult(), err)
 }
 
-func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *expression.Context, statuses map[string]expression.StepStatus) error {
-	id := strings.ToLower(execution.step.ID)
-	eval.Steps[id] = execution.result.Outputs
+func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *expression.Context) error {
+	id := strings.ToLower(execution.id)
+	eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
 	commitResultEnvironment(jobResult.Env, execution.result)
 	eval.Env = jobResult.Env
-	mergeInto(jobResult.State, execution.result.State)
+	maps.Copy(jobResult.State, execution.result.State)
 	appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, execution.result.Summary, execution.result.summaryTruncated)
 	jobResult.Artifacts = append(jobResult.Artifacts, execution.result.Artifacts...)
-	status := expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
-	statuses[id] = status
-	if eval.StepStatuses == nil {
-		eval.StepStatuses = make(map[string]expression.StepStatus)
-	}
-	eval.StepStatuses[id] = status
 	if execution.conclusion != "success" {
-		return fmt.Errorf("step %q: %w", execution.step.ID, execution.err)
+		return fmt.Errorf("step %q: %w", execution.id, execution.err)
 	}
 	return nil
 }
@@ -222,35 +248,50 @@ func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *ex
 func commitResultEnvironment(env map[string]string, result Result) {
 	effects := result.Env
 	if len(result.Paths) > 0 {
-		effects = cloneStrings(effects)
+		effects = mergeStringMaps(effects)
 		if result.pathBaseSet {
-			effects["PATH"] = result.pathBase
+			mergeEnvironmentInto(effects, map[string]string{"PATH": result.pathBase})
 		} else {
-			delete(effects, "PATH")
+			deleteEnvironment(effects, "PATH")
 		}
 	}
-	mergeInto(env, effects)
+	mergeEnvironmentInto(env, effects)
 	applyPaths(env, result.Paths)
 }
 
 func cloneExpressionContext(in expression.Context) expression.Context {
+	var inputs map[string]string
+	if in.Inputs != nil {
+		inputs = cloneStrings(in.Inputs)
+	}
 	return expression.Context{
-		Inputs:           cloneStrings(in.Inputs),
+		Inputs:           inputs,
+		WorkflowInputs:   cloneAnyMap(in.WorkflowInputs),
 		Matrix:           cloneAnyMap(in.Matrix),
-		Steps:            cloneNestedStrings(in.Steps),
-		StepStatuses:     cloneStepStatuses(in.StepStatuses),
-		Needs:            cloneNestedStrings(in.Needs),
-		NeedResults:      cloneStrings(in.NeedResults),
+		Steps:            cloneStepStatuses(in.Steps),
+		Needs:            cloneNeedStatuses(in.Needs),
 		Secrets:          cloneStrings(in.Secrets),
 		Vars:             cloneStrings(in.Vars),
 		Env:              cloneStrings(in.Env),
 		GitHub:           cloneAnyMap(in.GitHub),
 		Runner:           cloneStrings(in.Runner),
-		Services:         cloneNestedStrings(in.Services),
+		Services:         cloneServiceContexts(in.Services),
 		JobStatus:        in.JobStatus,
 		HashFiles:        in.HashFiles,
 		HashFilesContext: in.HashFilesContext,
 	}
+}
+
+func cloneServiceContexts(in map[string]expression.ServiceContext) map[string]expression.ServiceContext {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]expression.ServiceContext, len(in))
+	for name, service := range in {
+		service.Ports = cloneStrings(service.Ports)
+		out[name] = service
+	}
+	return out
 }
 
 func cloneStepStatuses(in map[string]expression.StepStatus) map[string]expression.StepStatus {
@@ -262,10 +303,11 @@ func cloneStepStatuses(in map[string]expression.StepStatus) map[string]expressio
 	return out
 }
 
-func cloneNestedStrings(in map[string]map[string]string) map[string]map[string]string {
-	out := make(map[string]map[string]string, len(in))
-	for name, values := range in {
-		out[name] = cloneStrings(values)
+func cloneNeedStatuses(in map[string]expression.NeedStatus) map[string]expression.NeedStatus {
+	out := make(map[string]expression.NeedStatus, len(in))
+	for name, status := range in {
+		status.Outputs = cloneStrings(status.Outputs)
+		out[name] = status
 	}
 	return out
 }

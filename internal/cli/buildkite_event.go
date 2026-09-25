@@ -2,17 +2,23 @@ package cli
 
 import (
 	"bytes"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
+	"github.com/buildkite/buildkite-gha/internal/git"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
+
+const githubEventNameEnvironment = "GITHUB_EVENT_NAME"
 
 var githubEventNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,99}$`)
 
@@ -22,15 +28,12 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	if getenv("BUILDKITE") != "true" {
 		return nil, fmt.Errorf("BUILDKITE must be true")
 	}
-	if strings.TrimSpace(getenv("BUILDKITE_STEP_KEY")) == "" {
-		return nil, fmt.Errorf("BUILDKITE_STEP_KEY is required")
-	}
 	provider, owner, name, cloneURL, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
 	if err != nil {
 		return nil, fmt.Errorf("BUILDKITE_REPO: %w", err)
 	}
 	sha := getenv("BUILDKITE_COMMIT")
-	if !validBuildkiteCommit(sha) {
+	if !git.ValidObjectID(sha) {
 		return nil, fmt.Errorf("BUILDKITE_COMMIT must be a full lowercase 40-hex commit, not a symbolic ref")
 	}
 	branch, tag, pullRequest := getenv("BUILDKITE_BRANCH"), getenv("BUILDKITE_TAG"), getenv("BUILDKITE_PULL_REQUEST")
@@ -43,14 +46,12 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	}
 
 	event, ref := "push", ""
-	switch getenv("BUILDKITE_SOURCE") {
-	case "schedule":
+	if getenv("BUILDKITE_SOURCE") == "schedule" {
 		event = "schedule"
-	case "ui", "api":
-		event = "workflow_dispatch"
 	}
 	payload := map[string]any{}
-	if pullRequest != "" && pullRequest != "false" {
+	switch {
+	case pullRequest != "" && pullRequest != "false":
 		number, parseErr := strconv.Atoi(pullRequest)
 		if parseErr != nil || number <= 0 {
 			return nil, fmt.Errorf("BUILDKITE_PULL_REQUEST must be false or a positive integer")
@@ -85,24 +86,94 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		if base := getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH"); base != "" {
 			pr["base"].(map[string]any)["ref"] = base
 		}
-		// A Buildkite environment fallback represents a build of the current PR
-		// head rather than a distinct GitHub delivery. Use synchronize to give
-		// that compatibility snapshot deterministic head-update semantics.
-		payload["action"], payload["number"], payload["pull_request"] = "synchronize", number, pr
-	} else if strings.TrimSpace(tag) != "" {
+		// Pipeline Triggers provide the selected GitHub action. Other Buildkite
+		// PR builds retain deterministic head-update semantics.
+		action := "synchronize"
+		if getenv(pipelineTriggerWorkflowPathEnvironment) != "" {
+			if selectedAction := strings.TrimSpace(getenv("BUILDKITE_GITHUB_ACTION")); selectedAction != "" {
+				action = selectedAction
+			}
+		}
+		payload["action"], payload["number"], payload["pull_request"] = action, number, pr
+	case strings.TrimSpace(tag) != "":
 		ref = "refs/tags/" + tag
 		payload["ref"] = ref
-	} else {
+	default:
 		if strings.TrimSpace(branch) == "" {
 			return nil, fmt.Errorf("BUILDKITE_BRANCH or BUILDKITE_TAG is required")
 		}
 		ref = "refs/heads/" + branch
 		payload["ref"] = ref
 	}
+	githubEvent, err := buildkiteGitHubEventName(getenv)
+	if err != nil {
+		return nil, err
+	}
+	if githubEvent != "" {
+		switch githubEvent {
+		case "push", "pull_request", "workflow_dispatch", "schedule":
+			event = githubEvent
+			// Rebuilds retain the original GitHub event even though Buildkite reports
+			// their source as UI. A push may also be associated with an open pull
+			// request, so restore its authoritative branch or tag ref.
+			if event == "push" {
+				if strings.TrimSpace(tag) != "" {
+					ref = "refs/tags/" + tag
+				} else if strings.TrimSpace(branch) != "" {
+					ref = "refs/heads/" + branch
+				}
+				payload = map[string]any{"ref": ref}
+			}
+		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release", "merge_group", "deployment", "deployment_status", "create", "delete", "label", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment":
+			if (githubEvent == "issues" || githubEvent == "release" || githubEvent == "merge_group") && getenv(pipelineTriggerWorkflowPathEnvironment) == "" &&
+				getenv(githubWorkflowRefEnvironment) == "" && getenv(githubWorkflowSHAEnvironment) == "" {
+				break
+			}
+			if getenv(pipelineTriggerWorkflowPathEnvironment) == "" ||
+				getenv(githubWorkflowRefEnvironment) == "" ||
+				getenv(githubWorkflowSHAEnvironment) == "" {
+				return nil, fmt.Errorf("%s requires GitHub Actions Pipeline Trigger workflow path, ref, and SHA identity", githubEvent)
+			}
+			if getenv(githubWorkflowSHAEnvironment) != sha {
+				return nil, fmt.Errorf("%s does not match BUILDKITE_COMMIT", githubWorkflowSHAEnvironment)
+			}
+			event = githubEvent
+		}
+	}
+	if workflowRef := getenv(githubWorkflowRefEnvironment); workflowRef != "" {
+		_, ref, err = parsePipelineTriggerWorkflowRef(workflowRef, event, getenv("BUILDKITE_REPO"))
+		if err != nil {
+			return nil, err
+		}
+	}
+	if event == "deployment" || event == "deployment_status" {
+		if githubEvent != getenv("BUILDKITE_GITHUB_EVENT") || pullRequest != "" && pullRequest != "false" {
+			return nil, fmt.Errorf("deployment event identity is contradictory")
+		}
+		if git.ValidObjectID(ref) {
+			if ref != sha || branch != sha || tag != "" {
+				return nil, fmt.Errorf("SHA-only deployment workflow ref must match BUILDKITE_COMMIT and BUILDKITE_BRANCH, without a tag")
+			}
+			ref = ""
+		} else if branch != plan.EventRefName(ref) || (plan.EventRefType(event, ref) == "tag" && tag != branch) || (plan.EventRefType(event, ref) == "branch" && tag != "") {
+			return nil, fmt.Errorf("deployment workflow ref does not match the Buildkite branch and tag")
+		}
+	}
 
 	repository := map[string]any{"owner": owner, "name": name, "clone_url": cloneURL}
 	if defaultBranch := strings.TrimSpace(getenv("BUILDKITE_PIPELINE_DEFAULT_BRANCH")); defaultBranch != "" {
 		repository["default_branch"] = defaultBranch
+	}
+	if event == "discussion_comment" || event == "discussion" || event == "branch_protection_rule" || event == "milestone" || event == "watch" || event == "create" || event == "delete" || event == "label" || event == "fork" || event == "public" || event == "gollum" || event == "page_build" {
+		if pullRequest != "" && pullRequest != "false" || branch != plan.EventRefName(ref) ||
+			(plan.EventRefType(event, ref) == "tag" && tag != branch) || (plan.EventRefType(event, ref) == "branch" && tag != "") {
+			return nil, fmt.Errorf("%s workflow ref does not match the Buildkite branch and tag", event)
+		}
+		if event == "discussion_comment" || event == "discussion" || event == "branch_protection_rule" || event == "milestone" || event == "watch" || event == "delete" || event == "label" || event == "fork" || event == "public" || event == "gollum" || event == "page_build" {
+			// The server resolved this branch at ingestion; neither pipeline settings
+			// nor the older webhook's repository metadata can replace that identity.
+			repository["default_branch"] = branch
+		}
 	}
 	snapshot := struct {
 		Provider string         `json:"provider"`
@@ -118,11 +189,6 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		return nil, fmt.Errorf("encode Buildkite compatibility snapshot: %w", err)
 	}
 	return result, nil
-}
-
-func validBuildkiteCommit(commit string) bool {
-	decoded, err := hex.DecodeString(commit)
-	return err == nil && len(decoded) == 20 && commit == strings.ToLower(commit)
 }
 
 // buildkiteWebhookEventSource overlays untrusted trigger data onto the
@@ -143,22 +209,45 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 		return nil, fmt.Errorf("decode Buildkite compatibility snapshot: %w", err)
 	}
 	snapshot["payload"] = payload
-	if event := strings.TrimSpace(getenv("BUILDKITE_GITHUB_EVENT")); githubEventNamePattern.MatchString(event) {
+	event, err := buildkiteGitHubEventName(getenv)
+	if err != nil {
+		return nil, err
+	}
+	if event != "" {
 		snapshot["event"] = event
-		// Buildkite can associate a push-created build with an open pull
-		// request. Keep the authoritative execution ref consistent with the
-		// linked webhook event rather than retaining refs/pull/<n>/head.
-		if event == "push" {
-			if tag := strings.TrimSpace(getenv("BUILDKITE_TAG")); tag != "" {
-				snapshot["ref"] = "refs/tags/" + tag
-			} else if branch := strings.TrimSpace(getenv("BUILDKITE_BRANCH")); branch != "" {
-				snapshot["ref"] = "refs/heads/" + branch
-			}
-		}
+	}
+	if (event == "label" || event == "watch" || event == "milestone" || event == "branch_protection_rule" || event == "discussion" || event == "discussion_comment") && payload["action"] != getenv("BUILDKITE_GITHUB_ACTION") {
+		return nil, fmt.Errorf("%s action does not match BUILDKITE_GITHUB_ACTION", event)
 	}
 	if sender, ok := payload["sender"].(map[string]any); ok {
 		if login, ok := sender["login"].(string); ok && safeGitHubLogin(login) {
 			snapshot["actor"] = login
+		}
+	}
+	if snapshot["event"] == "merge_group" {
+		if err := validateBuildkiteMergeGroup(snapshot, getenv); err != nil {
+			return nil, err
+		}
+	}
+	if _, hasRelease := payload["release"]; hasRelease && snapshot["event"] != "release" {
+		return nil, fmt.Errorf("release webhook payload does not match BUILDKITE_GITHUB_EVENT")
+	}
+	if _, hasDeployment := payload["deployment"]; hasDeployment && snapshot["event"] != "deployment" && snapshot["event"] != "deployment_status" {
+		return nil, fmt.Errorf("deployment webhook payload does not match BUILDKITE_GITHUB_EVENT")
+	}
+	if snapshot["event"] == "release" {
+		if err := validateBuildkiteRelease(snapshot, getenv); err != nil {
+			return nil, err
+		}
+	}
+	if snapshot["event"] == "issues" || snapshot["event"] == "issue_comment" {
+		if err := validateBuildkiteIssueEvent(snapshot, getenv); err != nil {
+			return nil, err
+		}
+	}
+	if snapshot["event"] == "pull_request_review" || snapshot["event"] == "pull_request_review_comment" {
+		if err := validateBuildkiteReviewEvent(snapshot, getenv); err != nil {
+			return nil, err
 		}
 	}
 	result, err := json.Marshal(snapshot)
@@ -166,6 +255,207 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 		return nil, fmt.Errorf("encode Buildkite webhook snapshot: %w", err)
 	}
 	return result, nil
+}
+
+func buildkiteGitHubEventName(getenv func(string) string) (string, error) {
+	if event := getenv(githubEventNameEnvironment); event != "" {
+		if event != strings.TrimSpace(event) || !githubEventNamePattern.MatchString(event) {
+			return "", fmt.Errorf("%s must be a lowercase GitHub event name", githubEventNameEnvironment)
+		}
+		return event, nil
+	}
+	event := strings.TrimSpace(getenv("BUILDKITE_GITHUB_EVENT"))
+	if githubEventNamePattern.MatchString(event) {
+		return event, nil
+	}
+	return "", nil
+}
+
+func validateBuildkiteMergeGroup(snapshot map[string]any, getenv func(string) string) error {
+	payload := snapshot["payload"].(map[string]any)
+	mergeGroup, ok := payload["merge_group"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("merge_group webhook requires payload.merge_group")
+	}
+	if action, _ := payload["action"].(string); action != "checks_requested" {
+		return fmt.Errorf("merge_group webhook action must be checks_requested")
+	}
+	if getenv(pipelineTriggerWorkflowPathEnvironment) != "" {
+		if getenv("BUILDKITE_GITHUB_ACTION") != "checks_requested" || snapshot["ref"] != "refs/heads/"+getenv("BUILDKITE_BRANCH") {
+			return fmt.Errorf("merge_group workflow ref or action does not match the Buildkite build")
+		}
+		repository, _ := payload["repository"].(map[string]any)
+		fullName, _ := repository["full_name"].(string)
+		provider, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+		if err != nil || provider != "github" || !strings.EqualFold(fullName, owner+"/"+name) {
+			return fmt.Errorf("merge_group webhook repository does not match BUILDKITE_REPO")
+		}
+	}
+	ref, _ := snapshot["ref"].(string)
+	sha, _ := snapshot["sha"].(string)
+	if headRef, _ := mergeGroup["head_ref"].(string); headRef != ref {
+		return fmt.Errorf("merge_group webhook head_ref does not match the Buildkite build branch")
+	}
+	if headSHA, _ := mergeGroup["head_sha"].(string); headSHA != sha {
+		return fmt.Errorf("merge_group webhook head_sha does not match BUILDKITE_COMMIT")
+	}
+	baseBranch := strings.TrimSpace(getenv("BUILDKITE_MERGE_QUEUE_BASE_BRANCH"))
+	if baseBranch == "" {
+		return fmt.Errorf("BUILDKITE_MERGE_QUEUE_BASE_BRANCH is required for a merge_group webhook")
+	}
+	if baseRef, _ := mergeGroup["base_ref"].(string); baseRef != "refs/heads/"+baseBranch {
+		return fmt.Errorf("merge_group webhook base_ref does not match BUILDKITE_MERGE_QUEUE_BASE_BRANCH")
+	}
+	baseCommit := getenv("BUILDKITE_MERGE_QUEUE_BASE_COMMIT")
+	if !git.ValidObjectID(baseCommit) {
+		return fmt.Errorf("BUILDKITE_MERGE_QUEUE_BASE_COMMIT must be a full lowercase 40-hex commit")
+	}
+	if baseSHA, _ := mergeGroup["base_sha"].(string); baseSHA != baseCommit {
+		return fmt.Errorf("merge_group webhook base_sha does not match BUILDKITE_MERGE_QUEUE_BASE_COMMIT")
+	}
+	return nil
+}
+
+func validateBuildkiteRelease(snapshot map[string]any, getenv func(string) string) error {
+	if snapshot["provider"] != "github" {
+		return fmt.Errorf("release webhook requires a GitHub repository")
+	}
+	payload := snapshot["payload"].(map[string]any)
+	action, _ := payload["action"].(string)
+	if action == "" || action != strings.TrimSpace(getenv("BUILDKITE_GITHUB_ACTION")) {
+		return fmt.Errorf("release webhook payload.action does not match BUILDKITE_GITHUB_ACTION")
+	}
+	if !buildkitepipeline.SupportedReleaseAction(action) {
+		return fmt.Errorf("release webhook action %q is unsupported", action)
+	}
+	release, ok := payload["release"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("release webhook requires payload.release")
+	}
+	tag, tagOK := release["tag_name"].(string)
+	draft, draftOK := release["draft"].(bool)
+	_, prereleaseOK := release["prerelease"].(bool)
+	if !tagOK || strings.TrimSpace(tag) == "" || !draftOK || !prereleaseOK {
+		return fmt.Errorf("release webhook requires payload.release tag_name, draft, and prerelease")
+	}
+	if draft && slices.Contains([]string{"created", "edited", "deleted", "unpublished"}, action) {
+		return fmt.Errorf("release webhook draft %s activity does not trigger GitHub Actions", action)
+	}
+	if tag != getenv("BUILDKITE_TAG") || tag != getenv("BUILDKITE_BRANCH") {
+		return fmt.Errorf("release webhook tag_name does not match BUILDKITE_TAG and BUILDKITE_BRANCH")
+	}
+	if getenv(pipelineTriggerWorkflowPathEnvironment) != "" {
+		if snapshot["ref"] != "refs/tags/"+tag {
+			return fmt.Errorf("release workflow ref does not match the Buildkite build tag")
+		}
+		repository, _ := payload["repository"].(map[string]any)
+		fullName, _ := repository["full_name"].(string)
+		_, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+		if err != nil || !strings.EqualFold(fullName, owner+"/"+name) {
+			return fmt.Errorf("release webhook repository does not match BUILDKITE_REPO")
+		}
+	}
+	snapshot["ref"] = "refs/tags/" + tag
+	return nil
+}
+
+func validateBuildkiteIssueEvent(snapshot map[string]any, getenv func(string) string) error {
+	event := snapshot["event"].(string)
+	if snapshot["provider"] != "github" {
+		return fmt.Errorf("%s webhook requires a GitHub repository", event)
+	}
+	payload := snapshot["payload"].(map[string]any)
+	action, _ := payload["action"].(string)
+	if action == "" || action != strings.TrimSpace(getenv("BUILDKITE_GITHUB_ACTION")) {
+		return fmt.Errorf("%s webhook payload.action does not match BUILDKITE_GITHUB_ACTION", event)
+	}
+	supported := map[string]bool{
+		"opened": true, "edited": true, "deleted": true, "transferred": true,
+		"field_added": true, "field_removed": true,
+		"pinned": true, "unpinned": true, "closed": true, "reopened": true,
+		"assigned": true, "unassigned": true, "labeled": true, "unlabeled": true,
+		"locked": true, "unlocked": true, "milestoned": true, "demilestoned": true,
+		"typed": true, "untyped": true,
+	}
+	if event == "issue_comment" {
+		supported = map[string]bool{"created": true, "edited": true, "deleted": true}
+	}
+	if !supported[action] {
+		return fmt.Errorf("%s webhook action %q is unsupported", event, action)
+	}
+	issue, ok := payload["issue"].(map[string]any)
+	if !ok || !positiveJSONInteger(issue["number"]) {
+		return fmt.Errorf("%s webhook requires payload.issue.number", event)
+	}
+	if event == "issue_comment" {
+		comment, ok := payload["comment"].(map[string]any)
+		if !ok || !positiveJSONInteger(comment["id"]) {
+			return fmt.Errorf("issue_comment webhook requires payload.comment.id")
+		}
+	}
+	repository, _ := payload["repository"].(map[string]any)
+	fullName, _ := repository["full_name"].(string)
+	provider, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+	if err != nil || provider != "github" || !strings.EqualFold(fullName, owner+"/"+name) || !positiveJSONInteger(repository["id"]) {
+		return fmt.Errorf("%s webhook repository does not match BUILDKITE_REPO", event)
+	}
+	ref, _ := snapshot["ref"].(string)
+	if ref != "refs/heads/"+getenv("BUILDKITE_BRANCH") {
+		return fmt.Errorf("%s webhook ref does not match the Buildkite build branch", event)
+	}
+	return nil
+}
+
+func validateBuildkiteReviewEvent(snapshot map[string]any, getenv func(string) string) error {
+	event := snapshot["event"].(string)
+	payload := snapshot["payload"].(map[string]any)
+	action, _ := payload["action"].(string)
+	if !buildkitepipeline.SupportedPullRequestReviewAction(event, action) || action != getenv("BUILDKITE_GITHUB_ACTION") {
+		return fmt.Errorf("%s webhook action is unsupported or does not match BUILDKITE_GITHUB_ACTION", event)
+	}
+	key := "review"
+	if event == "pull_request_review_comment" {
+		key = "comment"
+	}
+	object, _ := payload[key].(map[string]any)
+	if !positiveJSONInteger(object["id"]) {
+		return fmt.Errorf("%s webhook requires payload.%s.id", event, key)
+	}
+	pr, _ := payload["pull_request"].(map[string]any)
+	if !positiveJSONInteger(pr["number"]) || fmt.Sprint(pr["number"]) != getenv("BUILDKITE_PULL_REQUEST") {
+		return fmt.Errorf("%s webhook pull request number does not match BUILDKITE_PULL_REQUEST", event)
+	}
+	if snapshot["ref"] != "refs/pull/"+getenv("BUILDKITE_PULL_REQUEST")+"/merge" {
+		return fmt.Errorf("%s workflow ref does not match BUILDKITE_PULL_REQUEST", event)
+	}
+	head, _ := pr["head"].(map[string]any)
+	base, _ := pr["base"].(map[string]any)
+	if head["sha"] != snapshot["sha"] || head["ref"] != getenv("BUILDKITE_BRANCH") || base["ref"] != getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH") {
+		return fmt.Errorf("%s webhook head SHA or branches do not match the Buildkite build", event)
+	}
+	provider, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+	if err != nil || provider != "github" {
+		return fmt.Errorf("%s webhook requires a GitHub repository", event)
+	}
+	repository, _ := payload["repository"].(map[string]any)
+	headRepository, _ := head["repo"].(map[string]any)
+	baseRepository, _ := base["repo"].(map[string]any)
+	for _, repo := range []map[string]any{repository, headRepository, baseRepository} {
+		fullName, _ := repo["full_name"].(string)
+		if !strings.EqualFold(fullName, owner+"/"+name) {
+			return fmt.Errorf("%s webhook requires the build repository for repository, PR head, and PR base; forks are unsupported", event)
+		}
+	}
+	return nil
+}
+
+func positiveJSONInteger(value any) bool {
+	number, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+	parsed, err := strconv.ParseInt(number.String(), 10, 64)
+	return err == nil && parsed > 0
 }
 
 func parseWebhookPayload(source []byte) (map[string]any, error) {
@@ -259,8 +549,8 @@ func parseBuildkiteRepository(raw string) (provider, owner, name, cloneURL strin
 		return "", "", "", "", fmt.Errorf("is required")
 	}
 	path := ""
-	if strings.HasPrefix(raw, "git@github.com:") {
-		path = strings.TrimPrefix(raw, "git@github.com:")
+	if after, ok := strings.CutPrefix(raw, "git@github.com:"); ok {
+		path = after
 		provider = "github"
 	} else {
 		u, parseErr := url.Parse(raw)

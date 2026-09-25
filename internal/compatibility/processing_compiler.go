@@ -1,24 +1,15 @@
 package compatibility
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
-)
-
-const (
-	stageWorkflowParsing = string(compiler.StageWorkflowParsing)
-	stageEventValidation = string(compiler.StageEventValidation)
-	stageGraph           = string(compiler.StageGraph)
-	stageMatrix          = string(compiler.StageMatrix)
-	stageExpressions     = string(compiler.StageExpressions)
-	stageDiscovery       = string(compiler.StageDiscovery)
-	stageResolution      = string(compiler.StageResolution)
-	stagePlans           = string(compiler.StagePlans)
-	stagePipeline        = string(compiler.StagePipeline)
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 var locatedDiagnosticPattern = regexp.MustCompile(`^(.+):(\d+):(\d+): (.*)$`)
@@ -28,6 +19,7 @@ var locatedDiagnosticPattern = regexp.MustCompile(`^(.+):(\d+):(\d+): (.*)$`)
 // diagnostics, and warnings.
 func InitialProcessingReport(path, profile string, eventEvaluated bool, report compiler.Report, processingErr error) ProcessingReport {
 	out := NewProcessingReport(path, profile)
+	out.Sources = report.Sources
 	out.LogicalJobs = report.LogicalJobs
 	out.Instances = report.Instances
 	out.Compile = Stage{Result: "compilable", LogicalJobs: report.LogicalJobs, Instances: report.Instances}
@@ -64,57 +56,71 @@ func InitialProcessingReport(path, profile string, eventEvaluated bool, report c
 	}
 
 	if processingErr == nil {
-		out.SetStage(stageWorkflowParsing, Passed)
+		out.SetStage(workflowprocessing.StageWorkflowParsing, Passed)
 		if eventEvaluated {
-			out.SetStage(stageEventValidation, Passed)
+			out.SetStage(workflowprocessing.StageEventValidation, Passed)
 		}
-		out.SetStage(stageGraph, Passed)
-		out.SetStage(stageMatrix, Passed)
-		out.SetStage(stageExpressions, Passed)
-		out.SetStage(stageDiscovery, Passed)
+		out.SetStage(workflowprocessing.StageGraph, Passed)
+		out.SetStage(workflowprocessing.StageMatrix, Passed)
+		out.SetStage(workflowprocessing.StageExpressions, Passed)
+		out.SetStage(workflowprocessing.StageDiscovery, Passed)
 		if len(out.Actions) == 0 {
-			out.SetStage(stageResolution, Passed)
+			out.SetStage(workflowprocessing.StageResolution, Passed)
 		}
 	} else {
 		out.Compile.Result = "incompatible"
-		failed := map[string]bool{}
+		failed := map[workflowprocessing.Stage]bool{}
 		for _, err := range flattenErrors(processingErr) {
-			stage, code, category := processingErrorDetails(err, stageGraph, compiler.CodeGraphInvalid, "compatibility")
+			stage, code, category := processingErrorDetails(err, workflowprocessing.StageGraph, workflowprocessing.CodeGraphInvalid, "compatibility")
 			failed[stage] = true
 			out.Diagnostics = append(out.Diagnostics, diagnosticFromError(path, stage, code, category, err))
 		}
 		markFailedJobs(&out)
 		setInitialStageResults(&out, eventEvaluated, failed)
 	}
-	for _, warning := range report.Warnings {
-		out.Diagnostics = append(out.Diagnostics, Diagnostic{
-			Level: "warning", Code: warning.Code, Category: "compatibility", Stage: stageExpressions,
-			Message: fmt.Sprintf("%s:%d:%d: %s", path, warning.Line, warning.Column, warning.Message), Location: sourceLocation(path, warning.Line, warning.Column),
-		})
-	}
+	out.ApplyWarnings(path, report.Warnings)
 	return out
 }
 
-func setInitialStageResults(report *ProcessingReport, eventEvaluated bool, failed map[string]bool) {
-	workflowFailed := failed[stageWorkflowParsing]
-	if workflowFailed {
-		report.SetStage(stageWorkflowParsing, Failed)
-	} else {
-		report.SetStage(stageWorkflowParsing, Passed)
+// ApplyWarnings adds compiler warnings to the processing report.
+func (r *ProcessingReport) ApplyWarnings(path string, warnings []compiler.Warning) {
+	for _, warning := range warnings {
+		warningPath := warning.Path
+		if warningPath == "" {
+			warningPath = path
+		}
+		r.Diagnostics = append(r.Diagnostics, Diagnostic{
+			Level: "warning", Code: warning.Code, Category: "compatibility", Stage: workflowprocessing.StageExpressions,
+			Message:  fmt.Sprintf("%s:%d:%d: %s", warningPath, warning.Line, warning.Column, warning.Message),
+			Location: sourceLocation(warningPath, warning.Line, warning.Column), Job: warning.Job, Step: warning.Step,
+			Blocker: warning.Blocker, BlockerDetail: warning.BlockerDetail,
+		})
+	}
+}
+
+func setInitialStageResults(report *ProcessingReport, eventEvaluated bool, failed map[workflowprocessing.Stage]bool) {
+	for stage := range failed {
+		report.SetStage(stage, Failed)
+	}
+	workflowFailed := failed[workflowprocessing.StageWorkflowParsing]
+	if !workflowFailed {
+		report.SetStage(workflowprocessing.StageWorkflowParsing, Passed)
 	}
 	eventFailed := false
 	if eventEvaluated {
-		eventFailed = failed[stageEventValidation]
-		if eventFailed {
-			report.SetStage(stageEventValidation, Failed)
-		} else {
-			report.SetStage(stageEventValidation, Passed)
+		eventFailed = failed[workflowprocessing.StageEventValidation]
+		if !eventFailed {
+			report.SetStage(workflowprocessing.StageEventValidation, Passed)
 		}
 	}
 	blocked := workflowFailed || eventFailed || failed[""]
-	for _, stage := range []string{stageGraph, stageMatrix, stageExpressions, stageDiscovery} {
+	for _, stage := range []workflowprocessing.Stage{
+		workflowprocessing.StageGraph,
+		workflowprocessing.StageMatrix,
+		workflowprocessing.StageExpressions,
+		workflowprocessing.StageDiscovery,
+	} {
 		if failed[stage] {
-			report.SetStage(stage, Failed)
 			blocked = true
 			continue
 		}
@@ -126,7 +132,7 @@ func setInitialStageResults(report *ProcessingReport, eventEvaluated bool, faile
 
 // AddFailure records every finding in err as a failed-stage diagnostic and
 // marks the jobs those findings implicate.
-func (r *ProcessingReport) AddFailure(path, stage, code, category string, err error) {
+func (r *ProcessingReport) AddFailure(path string, stage workflowprocessing.Stage, code, category string, err error) {
 	for _, item := range flattenErrors(err) {
 		itemStage, itemCode, itemCategory := processingErrorDetails(item, stage, code, category)
 		r.SetStage(itemStage, Failed)
@@ -166,9 +172,9 @@ func EventInputProcessingReport(path, profile string, source []byte, message str
 		})
 	}
 	if parseErr != nil {
-		report.AddFailure(path, stageWorkflowParsing, compiler.CodeWorkflowSyntax, "syntax", parseErr)
+		report.AddFailure(path, workflowprocessing.StageWorkflowParsing, workflowprocessing.CodeWorkflowSyntax, "syntax", parseErr)
 	} else {
-		report.SetStage(stageWorkflowParsing, Passed)
+		report.SetStage(workflowprocessing.StageWorkflowParsing, Passed)
 	}
 	report.Result = "indeterminate"
 	report.AddEnvironmentFailure(message)
@@ -187,7 +193,7 @@ func markFailedJobs(report *ProcessingReport) {
 			report.Jobs[i].Result = Failed
 		}
 		for _, diagnostic := range report.Diagnostics {
-			if diagnostic.Level != "error" || diagnostic.Stage == stageResolution || report.Jobs[i].Instance == "" {
+			if diagnostic.Level != "error" || diagnostic.Stage == workflowprocessing.StageResolution || report.Jobs[i].Instance == "" {
 				continue
 			}
 			if diagnostic.Instance == report.Jobs[i].Instance || (diagnostic.Instance == "" && diagnostic.Job == report.Jobs[i].ID) {
@@ -217,9 +223,9 @@ func (r *ProcessingReport) ApplyEvidence(evidence compiler.ProcessingEvidence) {
 		}
 	}
 	if resolutionFailed {
-		r.SetStage(stageResolution, Failed)
+		r.SetStage(workflowprocessing.StageResolution, Failed)
 	} else if evidence.ActionResolutionComplete {
-		r.SetStage(stageResolution, Passed)
+		r.SetStage(workflowprocessing.StageResolution, Passed)
 	}
 	for _, evaluation := range evidence.Plans {
 		for i := range r.Jobs {
@@ -237,10 +243,10 @@ func (r *ProcessingReport) ApplyEvidence(evidence compiler.ProcessingEvidence) {
 		}
 	}
 	if evidence.PlansConstructed {
-		r.SetStage(stagePlans, Passed)
+		r.SetStage(workflowprocessing.StagePlans, Passed)
 	}
 	if evidence.PipelineGenerated {
-		r.SetStage(stagePipeline, Passed)
+		r.SetStage(workflowprocessing.StagePipeline, Passed)
 	}
 }
 
@@ -269,14 +275,14 @@ func flattenErrors(err error) []error {
 	return []error{err}
 }
 
-func processingErrorDetails(err error, fallbackStage, fallbackCode, fallbackCategory string) (stage, code, category string) {
+func processingErrorDetails(err error, fallbackStage workflowprocessing.Stage, fallbackCode, fallbackCategory string) (stage workflowprocessing.Stage, code, category string) {
 	if finding, ok := err.(*compiler.ProcessingFinding); ok {
-		return string(finding.Stage), finding.Code, finding.Category
+		return finding.Stage, finding.Code, finding.Category
 	}
 	return fallbackStage, fallbackCode, fallbackCategory
 }
 
-func diagnosticFromError(defaultPath, stage, code, category string, err error) Diagnostic {
+func diagnosticFromError(defaultPath string, stage workflowprocessing.Stage, code, category string, err error) Diagnostic {
 	message := err.Error()
 	detail := ""
 	location := (*SourceLocation)(nil)
@@ -301,34 +307,51 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) D
 			}
 		}
 	}
+	var trigger *buildkite.TriggerError
+	if errors.As(err, &trigger) && defaultPath != "" {
+		location = sourceLocation(defaultPath, trigger.Position.Line, trigger.Position.Column)
+	}
 	diagnostic := Diagnostic{
 		Level: "error", Code: code, Category: category, Stage: stage,
 		Message: message, Detail: detail, Location: location,
 	}
 	if finding != nil {
+		diagnostic.Blocker = finding.Blocker
+		diagnostic.BlockerDetail = finding.BlockerDetail
 		diagnostic.Job = finding.Job
 		diagnostic.Instance = finding.Instance
 		diagnostic.Action = finding.Action
 		diagnostic.Step = finding.Step
 	}
-	if diagnostic.Location == nil && defaultPath != "" && stage != "" && stage != stageEventValidation {
+	if diagnostic.Location == nil && defaultPath != "" && stage != "" && stage != workflowprocessing.StageEventValidation {
 		diagnostic.Location = sourceLocation(defaultPath, 1, 1)
 	}
 	if diagnostic.Job == "" {
-		if start := strings.Index(message, `job "`); start >= 0 {
-			rest := message[start+len(`job "`):]
-			if end := strings.Index(rest, `"`); end >= 0 {
-				diagnostic.Job = rest[:end]
+		if _, after, ok := strings.Cut(message, `job "`); ok {
+			rest := after
+			if before, _, ok := strings.Cut(rest, `"`); ok {
+				diagnostic.Job = before
 			}
 		}
 	}
 	if diagnostic.Action == "" {
-		if start := strings.Index(message, `action "`); start >= 0 {
-			rest := message[start+len(`action "`):]
-			if end := strings.Index(rest, `"`); end >= 0 {
-				diagnostic.Action = rest[:end]
+		if _, after, ok := strings.Cut(message, `action "`); ok {
+			rest := after
+			if before, _, ok := strings.Cut(rest, `"`); ok {
+				diagnostic.Action = before
 			}
 		}
+	}
+	if diagnostic.Blocker == "" {
+		var blocker interface {
+			CompatibilityBlocker() (string, string)
+		}
+		if errors.As(err, &blocker) {
+			diagnostic.Blocker, diagnostic.BlockerDetail = blocker.CompatibilityBlocker()
+		}
+	}
+	if diagnostic.Blocker == "" && diagnostic.Code == workflowprocessing.CodeExpressionInvalid {
+		diagnostic.Blocker = "expression"
 	}
 	return diagnostic
 }

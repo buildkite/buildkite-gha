@@ -1,0 +1,12 @@
+name: Compatibility gap - custom shell templates
+on: push
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash -l {0}
+        run: test -n "$BASH_VERSION"
+      - shell: Rscript {0}
+        run: echo R-compatible
+      - shell: julia --color=yes {0}
+        run: echo Julia-compatible

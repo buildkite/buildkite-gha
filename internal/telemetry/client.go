@@ -1,9 +1,9 @@
-// Package telemetry emits bounded, best-effort buildkite-gha product events.
 package telemetry
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,16 +12,27 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
 	EventCommandCompleted = "pipelines:buildkite_gha:command_completed"
 
-	defaultTimeout        = 1500 * time.Millisecond
-	responseDrainLimit    = 32 << 10
-	maxClientVersionBytes = 64
-	maxDurationMS         = int64(1<<31 - 1)
-	maxDiagnostics        = 20
+	defaultTimeout         = 1500 * time.Millisecond
+	responseDrainLimit     = 32 << 10
+	maxClientVersionBytes  = 64
+	maxBlockerDetailBytes  = 1024
+	maxDiagnosticTextBytes = 1024
+	maxDurationMS          = int64(1<<31 - 1)
+	maxDiagnostics         = 20
+
+	// MaxErrorMessageBytes bounds the error message sent on unsuccessful
+	// commands. Over-long messages keep their final bytes, where a failing
+	// command's last error output lands.
+	MaxErrorMessageBytes = 1024
 )
 
 type Command string
@@ -73,6 +84,10 @@ const (
 	FailureCodePipelineGeneration FailureCode = "E_PIPELINE_GENERATION"
 	FailureCodeEnvironment        FailureCode = "E_ENVIRONMENT"
 	FailureCodeProfile            FailureCode = "E_PROFILE"
+	FailureCodeStepProcessExit    FailureCode = "E_STEP_PROCESS_EXIT"
+	FailureCodeUnsupportedFeature FailureCode = "E_UNSUPPORTED_FEATURE"
+	FailureCodeRuntimeIntegrity   FailureCode = "E_RUNTIME_INTEGRITY"
+	FailureCodeSecretUnavailable  FailureCode = "E_SECRET_UNAVAILABLE"
 )
 
 type Severity string
@@ -83,24 +98,37 @@ const (
 )
 
 type Diagnostic struct {
-	Code     string   `json:"code"`
-	Severity Severity `json:"severity"`
+	Code             string   `json:"code"`
+	Severity         Severity `json:"severity"`
+	Blocker          string   `json:"blocker,omitempty"`
+	BlockerDetail    string   `json:"blocker_detail,omitempty"`
+	Message          string   `json:"message,omitempty"`
+	MessageTruncated bool     `json:"message_truncated,omitempty"`
+	WorkflowPath     string   `json:"workflow_path,omitempty"`
 }
 
 type Details struct {
-	FailurePhase FailurePhase
-	FailureCode  FailureCode
-	Diagnostics  []Diagnostic
+	FailurePhase          FailurePhase
+	FailureCode           FailureCode
+	ErrorMessage          string
+	ErrorMessageTruncated bool
+	Diagnostics           []Diagnostic
+	Blocker               string
+	BlockerDetail         string
 }
 
 type Properties struct {
-	Command       Command      `json:"command"`
-	Outcome       Outcome      `json:"outcome"`
-	ClientVersion string       `json:"client_version"`
-	DurationMS    int64        `json:"duration_ms,omitempty"`
-	FailurePhase  FailurePhase `json:"failure_phase,omitempty"`
-	FailureCode   FailureCode  `json:"failure_code,omitempty"`
-	Diagnostics   []Diagnostic `json:"diagnostics,omitempty"`
+	Command               Command      `json:"command"`
+	Outcome               Outcome      `json:"outcome"`
+	ClientVersion         string       `json:"client_version"`
+	DurationMS            int64        `json:"duration_ms,omitempty"`
+	FailurePhase          FailurePhase `json:"failure_phase,omitempty"`
+	FailureCode           FailureCode  `json:"failure_code,omitempty"`
+	ErrorMessage          string       `json:"error_message,omitempty"`
+	ErrorMessageTruncated bool         `json:"error_message_truncated,omitempty"`
+	Diagnostics           []Diagnostic `json:"diagnostics,omitempty"`
+	Blocker               string       `json:"blocker,omitempty"`
+	BlockerDetail         string       `json:"blocker_detail,omitempty"`
 }
 
 type Config struct {
@@ -117,6 +145,7 @@ type Client struct {
 	eventsURL     string
 	jobToken      string
 	clientVersion string
+	userAgent     string
 	client        *http.Client
 	timeout       time.Duration
 }
@@ -149,16 +178,22 @@ func New(config Config) (*Client, error) {
 	if timeout <= 0 || timeout > defaultTimeout {
 		timeout = defaultTimeout
 	}
+	clientVersion := boundedClientVersion(config.ClientVersion)
 	return &Client{
 		eventsURL:     u.String(),
 		jobToken:      config.JobToken,
-		clientVersion: boundedClientVersion(config.ClientVersion),
+		clientVersion: clientVersion,
+		userAgent:     useragent.FromVersion(config.ClientVersion),
 		client:        &bounded,
 		timeout:       timeout,
 	}, nil
 }
 
 func (c *Client) Emit(command Command, outcome Outcome, duration time.Duration, details Details) error {
+	return c.EmitContext(context.Background(), command, outcome, duration, details)
+}
+
+func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outcome, duration time.Duration, details Details) error {
 	if c == nil {
 		return nil
 	}
@@ -174,10 +209,16 @@ func (c *Client) Emit(command Command, outcome Outcome, duration time.Duration, 
 	if details.FailureCode != "" && !validFailureCode(details.FailureCode) {
 		return fmt.Errorf("invalid telemetry failure code")
 	}
-	diagnostics, err := boundedDiagnostics(details.Diagnostics)
+	diagnostics, err := BoundedDiagnostics(details.Diagnostics)
 	if err != nil {
 		return err
 	}
+	blocker, blockerDetail, err := boundedBlocker(details.Blocker, details.BlockerDetail)
+	if err != nil {
+		return err
+	}
+	errorMessage, errorMessageTruncated := boundedErrorMessage(details.ErrorMessage)
+	errorMessageTruncated = errorMessage != "" && (errorMessageTruncated || details.ErrorMessageTruncated)
 	durationMS := duration.Milliseconds()
 	if durationMS < 0 {
 		durationMS = 0
@@ -191,20 +232,23 @@ func (c *Client) Emit(command Command, outcome Outcome, duration time.Duration, 
 		Event: EventCommandCompleted,
 		Properties: Properties{
 			Command: command, Outcome: outcome, ClientVersion: c.clientVersion, DurationMS: durationMS,
-			FailurePhase: details.FailurePhase, FailureCode: details.FailureCode, Diagnostics: diagnostics,
+			FailurePhase: details.FailurePhase, FailureCode: details.FailureCode,
+			ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated, Diagnostics: diagnostics,
+			Blocker: blocker, BlockerDetail: blockerDetail,
 		},
 	})
 	if err != nil {
 		return fmt.Errorf("encode telemetry event: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.eventsURL, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.eventsURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create telemetry request: %v", err)
 	}
 	request.Header.Set("Authorization", "Token "+c.jobToken)
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", c.userAgent)
 	response, err := c.client.Do(request)
 	if err != nil {
 		return fmt.Errorf("send telemetry event: %w", err)
@@ -233,31 +277,82 @@ func validFailureCode(code FailureCode) bool {
 	case FailureCodeUnknown, FailureCodeWorkflowSyntax, FailureCodeEventInvalid, FailureCodeGraphInvalid,
 		FailureCodeMatrixInvalid, FailureCodeExpressionInvalid, FailureCodeActionDiscovery,
 		FailureCodeActionResolution, FailureCodePlanConstruction, FailureCodePipelineGeneration,
-		FailureCodeEnvironment, FailureCodeProfile:
+		FailureCodeEnvironment, FailureCodeProfile, FailureCodeStepProcessExit,
+		FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable:
 		return true
 	default:
 		return false
 	}
 }
 
-func boundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
-	seen := make(map[string]bool, min(len(in), maxDiagnostics))
+// BoundedDiagnostics normalizes diagnostic text and deduplicates by wire identity
+// before applying the diagnostic count limit. It does not modify in.
+func BoundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
+	seen := make(map[Diagnostic]int, min(len(in), maxDiagnostics))
 	out := make([]Diagnostic, 0, min(len(in), maxDiagnostics))
 	for _, diagnostic := range in {
 		severity, ok := diagnosticSeverity(diagnostic.Code)
 		if !ok || diagnostic.Severity != severity {
 			return nil, fmt.Errorf("invalid telemetry diagnostic")
 		}
-		if seen[diagnostic.Code] {
+		blocker, blockerDetail, err := boundedBlocker(diagnostic.Blocker, diagnostic.BlockerDetail)
+		if err != nil {
+			return nil, err
+		}
+		diagnostic.Blocker, diagnostic.BlockerDetail = blocker, blockerDetail
+		diagnostic.Message = normalizedTelemetryText(diagnostic.Message)
+		if len(diagnostic.Message) > maxDiagnosticTextBytes {
+			end := maxDiagnosticTextBytes
+			for !utf8.RuneStart(diagnostic.Message[end]) {
+				end--
+			}
+			diagnostic.Message = strings.TrimSpace(diagnostic.Message[:end])
+			diagnostic.MessageTruncated = true
+		}
+		if diagnostic.Message == "" {
+			diagnostic.MessageTruncated = false
+		}
+		// A shortened or normalized path could name a different workflow.
+		if len(diagnostic.WorkflowPath) > maxDiagnosticTextBytes || !utf8.ValidString(diagnostic.WorkflowPath) || strings.ContainsFunc(diagnostic.WorkflowPath, unicode.IsControl) {
+			diagnostic.WorkflowPath = ""
+		}
+		identity := diagnostic
+		identity.MessageTruncated = false
+		if index, exists := seen[identity]; exists {
+			out[index].MessageTruncated = out[index].MessageTruncated || diagnostic.MessageTruncated
 			continue
 		}
-		seen[diagnostic.Code] = true
-		out = append(out, diagnostic)
 		if len(out) == maxDiagnostics {
-			break
+			continue
 		}
+		seen[identity] = len(out)
+		out = append(out, diagnostic)
 	}
 	return out, nil
+}
+
+func boundedBlocker(blocker, detail string) (string, string, error) {
+	switch blocker {
+	case "":
+		if detail != "" {
+			return "", "", fmt.Errorf("telemetry blocker detail requires a blocker")
+		}
+		return "", "", nil
+	case "runner_label", "environment", "shell", "action_ref", "expression", "trigger":
+	default:
+		return "", "", fmt.Errorf("invalid telemetry blocker")
+	}
+	detail = normalizedTelemetryText(detail)
+	if len(detail) > maxBlockerDetailBytes {
+		digest := sha256.Sum256([]byte(detail))
+		suffix := fmt.Sprintf("…#%x", digest[:6])
+		detail = detail[:maxBlockerDetailBytes-len(suffix)]
+		for !utf8.ValidString(detail) {
+			detail = detail[:len(detail)-1]
+		}
+		detail += suffix
+	}
+	return blocker, detail, nil
 }
 
 func diagnosticSeverity(code string) (Severity, bool) {
@@ -267,7 +362,7 @@ func diagnosticSeverity(code string) (Severity, bool) {
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
 		string(FailureCodeEnvironment), string(FailureCodeProfile):
 		return SeverityError, true
-	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED":
+	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED", "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED":
 		return SeverityWarning, true
 	default:
 		return "", false
@@ -300,6 +395,28 @@ func boundedClientVersion(version string) string {
 		}
 	}
 	return version
+}
+
+func normalizedTelemetryText(message string) string {
+	message = strings.Map(func(character rune) rune {
+		if unicode.IsControl(character) {
+			return ' '
+		}
+		return character
+	}, strings.ToValidUTF8(message, "�"))
+	return strings.Join(strings.Fields(message), " ")
+}
+
+func boundedErrorMessage(message string) (string, bool) {
+	message = normalizedTelemetryText(message)
+	if len(message) <= MaxErrorMessageBytes {
+		return message, false
+	}
+	start := len(message) - MaxErrorMessageBytes
+	for !utf8.RuneStart(message[start]) {
+		start++
+	}
+	return strings.TrimSpace(message[start:]), true
 }
 
 func validAgentURL(u *url.URL) bool {

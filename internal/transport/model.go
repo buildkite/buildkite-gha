@@ -1,6 +1,3 @@
-// Package transport owns the Buildkite artifact and dynamic-pipeline
-// contracts. It deliberately depends on a narrow command boundary instead of
-// the Buildkite API so its behavior can be proved without a live build.
 package transport
 
 import (
@@ -28,7 +25,6 @@ const (
 	MaxResultArtifactNameBytes = 255
 	MaxResultArtifactIDBytes   = 20
 	MaxResultArtifactFileCount = 10_000
-	MaxResultArtifactSizeBytes = int64(1 << 30)
 )
 
 var (
@@ -102,7 +98,7 @@ func (a ResultArtifact) validate() error {
 	if !digestPattern.MatchString(a.Digest) {
 		return fmt.Errorf("invalid result artifact digest %q", a.Digest)
 	}
-	if a.Size <= 0 || a.Size > MaxResultArtifactSizeBytes {
+	if a.Size <= 0 {
 		return fmt.Errorf("invalid result artifact size %d", a.Size)
 	}
 	if a.FileCount <= 0 || a.FileCount > MaxResultArtifactFileCount {
@@ -139,6 +135,9 @@ func MarshalResultManifest(manifest ResultManifest) ([]byte, error) {
 	case "success", "failure", "cancelled", "skipped":
 	default:
 		return nil, fmt.Errorf("invalid logical result %q", manifest.Result)
+	}
+	if manifest.Result == "skipped" && (len(manifest.Outputs) != 0 || len(manifest.Artifacts) != 0) {
+		return nil, errors.New("skipped result manifest must have empty outputs and artifacts")
 	}
 	if len(manifest.Outputs) > MaxResultOutputs {
 		return nil, fmt.Errorf("result manifest has %d outputs, maximum is %d", len(manifest.Outputs), MaxResultOutputs)

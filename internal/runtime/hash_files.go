@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -24,7 +25,8 @@ const (
 	maxHashFilePatternBytesTotal = 64 << 10
 	maxHashFileMatches           = 10_000
 	maxHashFileBytes             = 1 << 30
-	maxHashFileEntries           = 100_000
+	maxHashFileEntries           = 1_000_000
+	maxHashFileDuration          = 30 * time.Second
 )
 
 type hashFilesLimits struct {
@@ -34,6 +36,7 @@ type hashFilesLimits struct {
 	matches             int
 	bytes               int64
 	entries             int
+	duration            time.Duration
 	beforeOpen          func(string)
 	beforeDirectoryOpen func(string)
 	afterFileHash       func(string)
@@ -42,7 +45,7 @@ type hashFilesLimits struct {
 var defaultHashFilesLimits = hashFilesLimits{
 	patterns: maxHashFilePatterns, patternBytes: maxHashFilePatternBytes,
 	totalPatternBytes: maxHashFilePatternBytesTotal, matches: maxHashFileMatches,
-	bytes: maxHashFileBytes, entries: maxHashFileEntries,
+	bytes: maxHashFileBytes, entries: maxHashFileEntries, duration: maxHashFileDuration,
 }
 
 type hashFilePattern struct {
@@ -70,14 +73,31 @@ func hashWorkspaceFilesWithLimits(ctx context.Context, workspace string, sources
 	return hashWorkspaceRootFilesWithLimits(ctx, root, sources, limits, caseInsensitive)
 }
 
-func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, sources []string, limits hashFilesLimits, caseInsensitive bool) (string, error) {
+func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, sources []string, limits hashFilesLimits, caseInsensitive bool) (digest string, retErr error) {
+	parent := ctx
+	var patterns []hashFilePattern
+	if limits.duration > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, limits.duration)
+		defer cancel()
+	}
+	defer func() {
+		if err := ctx.Err(); err != nil {
+			digest = ""
+			if parent.Err() != nil {
+				retErr = parent.Err()
+			} else {
+				retErr = fmt.Errorf("hashFiles exceeded its %s execution limit (%w) while searching %s", limits.duration, err, hashFilesBudgetHint(patterns))
+			}
+		}
+	}()
 	patterns, err := parseHashFilePatterns(sources, limits)
 	if err != nil {
 		return "", err
 	}
 	var selected []string
 	directories := make(map[string]fs.FileInfo)
-	err = walkHashFilesRoot(ctx, root, limits.entries, limits.beforeDirectoryOpen, directories, func(name string, entry fs.DirEntry) error {
+	err = walkHashFilesRoot(ctx, root, limits.entries, limits.beforeDirectoryOpen, directories, patterns, caseInsensitive, func(name string, entry fs.DirEntry) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -204,18 +224,91 @@ func hashWorkspaceFile(ctx context.Context, root *os.Root, directoryInfo fs.File
 	return fileHash.Sum(nil), read, nil
 }
 
-func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen func(string), directories map[string]fs.FileInfo, visit func(string, fs.DirEntry) error) error {
+func hashFilesBudgetHint(patterns []hashFilePattern) string {
+	var positive []string
+	for _, pattern := range patterns {
+		if !pattern.negative {
+			positive = append(positive, pattern.pattern)
+		}
+	}
+	return fmt.Sprintf("positive patterns %q; use more specific paths to reduce traversal and hashing", positive)
+}
+
+// hashFileSearchPrefixes derives literal search paths using the same library as
+// matching. Below the first wildcard, traverse conservatively: character classes
+// can consume separators, so matching individual components is not equivalent.
+func hashFileSearchPrefixes(patterns []hashFilePattern, caseInsensitive bool) []string {
+	var prefixes []string
+	for _, pattern := range patterns {
+		if pattern.negative {
+			continue
+		}
+		base, rest := doublestar.SplitPattern(pattern.pattern)
+		if !strings.ContainsAny(rest, "*?[\\") {
+			base = path.Join(base, rest)
+		}
+		// SplitPattern unescapes metacharacters in the base, but leaves other
+		// escapes intact. Let whole-pattern matching handle those paths.
+		if base == "." || strings.Contains(base, `\`) {
+			return []string{"."}
+		}
+		if caseInsensitive {
+			base = strings.ToLower(base)
+		}
+		prefixes = append(prefixes, base)
+	}
+	return prefixes
+}
+
+func hashFileSearchChildren(prefixes []string, directory string, caseInsensitive bool) ([]string, bool) {
+	if caseInsensitive {
+		directory = strings.ToLower(directory)
+	}
+	names := make(map[string]bool)
+	for _, prefix := range prefixes {
+		if prefix == "." || directory == prefix || strings.HasPrefix(directory, prefix+"/") {
+			return nil, true
+		}
+		rest := prefix
+		if directory != "." {
+			var ok bool
+			rest, ok = strings.CutPrefix(prefix, directory+"/")
+			if !ok {
+				continue
+			}
+		}
+		// macOS volumes commonly fold case even though hashFiles matching does
+		// not. Enumerate to retain the actual spelling on those filesystems.
+		if caseInsensitive || runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+			return nil, true
+		}
+		name, _, _ := strings.Cut(rest, "/")
+		names[name] = true
+	}
+	result := make([]string, 0, len(names))
+	for name := range names {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result, false
+}
+
+func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen func(string), directories map[string]fs.FileInfo, patterns []hashFilePattern, caseInsensitive bool, visit func(string, fs.DirEntry) error) error {
 	const readBatch = 256
+	prefixes := hashFileSearchPrefixes(patterns, caseInsensitive)
 	entriesRead := 0
 	rootInfo, err := root.Lstat(".")
 	if err != nil {
 		return fmt.Errorf("inspect hashFiles workspace: %w", err)
 	}
 	directories["."] = rootInfo
-	var walk func(string, *os.Root, fs.FileInfo) error
-	walk = func(directory string, current *os.Root, currentInfo fs.FileInfo) error {
+	var walk func(string, *os.Root, fs.FileInfo, []string, bool) error
+	walk = func(directory string, current *os.Root, currentInfo fs.FileInfo, names []string, enumerate bool) error {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if !enumerate && len(names) == 0 {
+			return nil
 		}
 		handle, err := current.Open(".")
 		if err != nil {
@@ -228,11 +321,30 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen
 		}
 		var entries []fs.DirEntry
 		for {
-			batch, readErr := handle.ReadDir(readBatch)
+			var batch []fs.DirEntry
+			var readErr error
+			if enumerate {
+				batch, readErr = handle.ReadDir(readBatch)
+			} else {
+				for _, name := range names {
+					if err := ctx.Err(); err != nil {
+						return errors.Join(err, handle.Close())
+					}
+					info, err := current.Lstat(name)
+					if errors.Is(err, fs.ErrNotExist) {
+						continue
+					}
+					if err != nil {
+						return errors.Join(fmt.Errorf("inspect hashFiles path %q: %w", path.Join(directory, name), err), handle.Close())
+					}
+					batch = append(batch, fs.FileInfoToDirEntry(info))
+				}
+				readErr = io.EOF
+			}
 			for _, entry := range batch {
 				entriesRead++
 				if entriesRead > limit {
-					return errors.Join(fmt.Errorf("hashFiles workspace has more than %d entries", limit), handle.Close())
+					return errors.Join(fmt.Errorf("hashFiles traversal inspected more than %d entries while searching %s", limit, hashFilesBudgetHint(patterns)), handle.Close())
 				}
 				entries = append(entries, entry)
 			}
@@ -260,6 +372,10 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen
 				return err
 			}
 			if entry.IsDir() {
+				children, scan := hashFileSearchChildren(prefixes, name, caseInsensitive)
+				if !scan && len(children) == 0 {
+					continue
+				}
 				before, err := current.Lstat(entry.Name())
 				if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
 					return fmt.Errorf("hashFiles directory %q changed before traversal", name)
@@ -277,7 +393,7 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen
 					return fmt.Errorf("hashFiles directory %q changed before traversal", name)
 				}
 				directories[name] = before
-				walkErr := walk(name, childRoot, before)
+				walkErr := walk(name, childRoot, before, children, scan)
 				if closeErr := childRoot.Close(); walkErr != nil || closeErr != nil {
 					return errors.Join(walkErr, closeErr)
 				}
@@ -285,7 +401,8 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen
 		}
 		return nil
 	}
-	return walk(".", root, rootInfo)
+	names, enumerate := hashFileSearchChildren(prefixes, ".", caseInsensitive)
+	return walk(".", root, rootInfo, names, enumerate)
 }
 
 func verifyHashFileDirectories(ctx context.Context, root *os.Root, directories map[string]fs.FileInfo, name string) error {

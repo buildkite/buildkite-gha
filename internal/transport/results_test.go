@@ -44,8 +44,12 @@ func TestPublishResultCoversTerminalConclusionsAndKeepsMetadataAdvisory(t *testi
 	for _, conclusion := range []string{"success", "failure", "skipped"} {
 		t.Run(conclusion, func(t *testing.T) {
 			runner := &resultRunner{failMetadata: true}
-			manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), conclusion, Output{Name: "message", Value: "bounded"})
-			publication, err := PublishResult(context.Background(), Agent{Runner: runner}, t.TempDir(), "shell", "producer", manifest)
+			var outputs []Output
+			if conclusion != "skipped" {
+				outputs = []Output{{Name: "message", Value: "bounded"}}
+			}
+			manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), conclusion, outputs...)
+			publication, err := PublishResult(t.Context(), Agent{Runner: runner}, t.TempDir(), "shell", "producer", manifest)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -64,6 +68,18 @@ func TestPublishResultCoversTerminalConclusionsAndKeepsMetadataAdvisory(t *testi
 	}
 }
 
+func TestSkippedResultManifestRejectsOutputsAndArtifacts(t *testing.T) {
+	manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), "skipped", Output{Name: "leaked", Value: "value"})
+	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "empty outputs and artifacts") {
+		t.Fatalf("MarshalResultManifest() error = %v", err)
+	}
+	manifest.Outputs = nil
+	manifest.Artifacts = []ResultArtifact{resultArtifact("leaked", "1", strings.Repeat("a", 64))}
+	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "empty outputs and artifacts") {
+		t.Fatalf("MarshalResultManifest() artifact error = %v", err)
+	}
+}
+
 func TestDownloadResultSelectsExactStepThenExactProducerJob(t *testing.T) {
 	planDigest := Digest([]byte("producer-plan"))
 	path := ResultPath("gha-producer", planDigest)
@@ -72,7 +88,7 @@ func TestDownloadResultSelectsExactStepThenExactProducerJob(t *testing.T) {
 		jobByStep:  map[string]string{"gha-producer": testJobID},
 		dataByPath: map[string][]byte{path: encoded},
 	}
-	manifest, err := DownloadResult(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, ResultSource{StepKey: "gha-producer", PlanDigest: planDigest})
+	manifest, err := DownloadResult(t.Context(), Agent{Runner: runner}, t.TempDir(), testBuildID, ResultSource{StepKey: "gha-producer", PlanDigest: planDigest})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +126,7 @@ func TestDownloadResultRejectsTamperWrongProducerAndSize(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &resultRunner{jobByStep: map[string]string{"gha-producer": testJobID}, dataByPath: map[string][]byte{path: test.data}}
-			_, err := DownloadResult(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, ResultSource{StepKey: "gha-producer", PlanDigest: planDigest})
+			_, err := DownloadResult(t.Context(), Agent{Runner: runner}, t.TempDir(), testBuildID, ResultSource{StepKey: "gha-producer", PlanDigest: planDigest})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("DownloadResult() error = %v, want %q", err, test.want)
 			}
@@ -132,7 +148,7 @@ func TestLoadNeedsMapsLogicalFanInToVerifiedProducers(t *testing.T) {
 			secondPath: mustManifest(t, resultManifest(testJobID2, second.StepKey, second.PlanDigest, "failure", Output{Name: "second", Value: "two"})),
 		},
 	}
-	needs, err := LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"reusable.build": {second, first}}, nil)
+	needs, err := LoadNeeds(t.Context(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"reusable.build": {second, first}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,14 +158,14 @@ func TestLoadNeedsMapsLogicalFanInToVerifiedProducers(t *testing.T) {
 	if got := needs["reusable.build"].Artifacts[0]; got.Artifact != firstManifest.Artifacts[0] || got.Producer != firstManifest.Producer {
 		t.Fatalf("retained artifact authority = %#v", got)
 	}
-	projected, err := LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"delegated": {second, first}}, map[string][]OutputProjection{"delegated": {}})
+	projected, err := LoadNeeds(t.Context(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"delegated": {second, first}}, map[string][]OutputProjection{"delegated": {}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if projected["delegated"].Result != "failure" || len(projected["delegated"].Outputs) != 0 || len(projected["delegated"].Producers) != 2 {
 		t.Fatalf("projected reusable need = %#v, want aggregate failure without internal outputs", projected["delegated"])
 	}
-	projected, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"delegated": {second, first}}, map[string][]OutputProjection{
+	projected, err = LoadNeeds(t.Context(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"delegated": {second, first}}, map[string][]OutputProjection{
 		"delegated": {{Name: "selected", StepKey: first.StepKey, Output: "first"}},
 	})
 	if err != nil {
@@ -158,7 +174,7 @@ func TestLoadNeedsMapsLogicalFanInToVerifiedProducers(t *testing.T) {
 	if !reflect.DeepEqual(projected["delegated"].Outputs, map[string]string{"selected": "one"}) {
 		t.Fatalf("selected reusable output = %#v", projected["delegated"].Outputs)
 	}
-	_, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"delegated": {second, first}}, map[string][]OutputProjection{
+	_, err = LoadNeeds(t.Context(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"delegated": {second, first}}, map[string][]OutputProjection{
 		"delegated": {
 			{Name: "selected", StepKey: first.StepKey, Output: "first"},
 			{Name: "selected", StepKey: second.StepKey, Output: "second"},
@@ -169,11 +185,11 @@ func TestLoadNeedsMapsLogicalFanInToVerifiedProducers(t *testing.T) {
 	}
 
 	runner.dataByPath[secondPath] = mustManifest(t, resultManifest(testJobID2, second.StepKey, second.PlanDigest, "success", Output{Name: "first", Value: "different"}))
-	_, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"build": {first, second}}, nil)
+	_, err = LoadNeeds(t.Context(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"build": {first, second}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "conflicting matrix output") {
 		t.Fatalf("LoadNeeds() error = %v, want ambiguous matrix output rejection", err)
 	}
-	_, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"reusable/build": {first}}, nil)
+	_, err = LoadNeeds(t.Context(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"reusable/build": {first}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "has no valid producers") {
 		t.Fatalf("LoadNeeds() error = %v, want invalid logical need rejection", err)
 	}
@@ -191,7 +207,7 @@ func TestLoadNeedsRetainsOneConditionalMatrixArtifact(t *testing.T) {
 			ResultPath(second.StepKey, second.PlanDigest): mustManifest(t, resultManifest(testJobID2, second.StepKey, second.PlanDigest, "success")),
 		},
 	}
-	needs, err := LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"build": {first, second}}, nil)
+	needs, err := LoadNeeds(t.Context(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"build": {first, second}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +218,9 @@ func TestLoadNeedsRetainsOneConditionalMatrixArtifact(t *testing.T) {
 }
 
 func TestAggregateResultTreatsMixedSuccessAndSkippedAsSuccess(t *testing.T) {
+	if got := aggregateResult("skipped", "skipped"); got != "skipped" {
+		t.Fatalf("aggregateResult() = %q, want skipped", got)
+	}
 	if got := aggregateResult("skipped", "success"); got != "success" {
 		t.Fatalf("aggregateResult() = %q, want success", got)
 	}

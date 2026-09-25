@@ -1,0 +1,418 @@
+package compiler
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
+
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/git"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
+)
+
+const (
+	// MaxReusableWorkflowBytes bounds every workflow document parsed during
+	// reusable-workflow expansion, including the top-level workflow.
+	MaxReusableWorkflowBytes = 1 << 20
+)
+
+// WorkflowSourceReference identifies the bytes parsed for diagnostic links.
+// LocalPath and Digest identify local input; Repository and Commit identify
+// fetched GitHub input independently of its requested ref.
+type WorkflowSourceReference struct {
+	Repository string
+	Path       string
+	Commit     string
+	LocalPath  string
+	Digest     string
+	Excerpt    *workflow.DiagnosticSource
+}
+
+func localSourceReference(path string, source []byte) WorkflowSourceReference {
+	reference := WorkflowSourceReference{Excerpt: workflow.CaptureDiagnosticSource(source)}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return reference
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return reference
+	}
+	reference.LocalPath, reference.Digest = canonical, "sha256:"+sha256Sum(source)
+	return reference
+}
+
+func retainRootSource(sources map[string]WorkflowSourceReference, path string, source []byte) map[string]WorkflowSourceReference {
+	if sources == nil {
+		sources = make(map[string]WorkflowSourceReference)
+	}
+	sources[path] = localSourceReference(path, source)
+	return sources
+}
+
+// RemoteWorkflowSource is immutable provenance for a remote reusable workflow.
+// Digest on the containing workflow identifies the selected file; SourceDigest
+// identifies the complete repository tree.
+type RemoteWorkflowSource struct {
+	Repository   string `json:"repository"`
+	RequestedRef string `json:"requested_ref"`
+	Commit       string `json:"commit"`
+	SourceDigest string `json:"source_digest"`
+}
+
+type reusableSourceIdentity struct {
+	kind       string
+	repository string
+	commit     string
+	path       string
+}
+
+func (identity reusableSourceIdentity) key() string {
+	return identity.kind + "\x00" + identity.repository + "\x00" + identity.commit + "\x00" + identity.path
+}
+
+type reusableWorkflowSource struct {
+	identity       reusableSourceIdentity
+	repositoryRoot string
+	displayPath    string
+	digest         string
+	remote         *RemoteWorkflowSource
+	// rootSecretScope is forwarding eligibility, not storage or cycle identity.
+	// Local and verified self source retain it; explicit remote calls clear it.
+	rootSecretScope bool
+}
+
+func cloneRemoteWorkflowSource(source *RemoteWorkflowSource) *RemoteWorkflowSource {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
+	return &cloned
+}
+
+func reusableSourceIdentityDisplay(identity reusableSourceIdentity) string {
+	if identity.kind == "github" {
+		return identity.repository + "/" + identity.path + "@" + identity.commit
+	}
+	return identity.path
+}
+
+func localReusableWorkflowSource(workflowPath string) (reusableWorkflowSource, error) {
+	root, canonicalPath, err := workflowRepository(workflowPath)
+	if err != nil {
+		return reusableWorkflowSource{}, err
+	}
+	relativePath, err := filepath.Rel(root, canonicalPath)
+	if err != nil {
+		return reusableWorkflowSource{}, fmt.Errorf("locate workflow %q in repository: %w", canonicalPath, err)
+	}
+	relativePath = filepath.ToSlash(relativePath)
+	return reusableWorkflowSource{
+		identity:        reusableSourceIdentity{kind: "workspace", repository: root, path: relativePath},
+		repositoryRoot:  root,
+		displayPath:     "./" + relativePath,
+		rootSecretScope: true,
+	}, nil
+}
+
+// selfRepositoryReference names the containing source, never the event or
+// checkout repository. The caller still selects the ordinary action or
+// reusable-workflow access path; this syntax grants no repository access.
+func selfRepositoryReference(uses string, containing *RemoteWorkflowSource) (string, error) {
+	p := strings.TrimPrefix(uses, "$/")
+	if p != "" && (path.Clean(p) != p || p == "." || p == ".." || strings.HasPrefix(p, "../") || strings.HasPrefix(p, "/")) || strings.ContainsAny(p, "@\\") {
+		return "", fmt.Errorf("invalid self-repository path %q", uses)
+	}
+	if containing == nil || !git.ValidObjectID(containing.Commit) {
+		err := fmt.Errorf("self-repository reference %q requires the containing workflow repository and immutable commit", uses)
+		return "", &ProcessingFinding{Stage: StageResolution, Code: CodeContextRequired, Category: "context", Message: err.Error(), Err: err}
+	}
+	raw := containing.Repository
+	if p != "" {
+		raw += "/" + p
+	}
+	raw += "@" + containing.Commit
+	if _, err := actionsource.Parse(raw); err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+// verifyWorkflowSource promotes a candidate repository/commit to source
+// provenance only after the selected file matches the bytes being compiled.
+func (resolver *reusableResolver) verifyWorkflowSource(ctx context.Context, workflowPath, digest string) (reusableWorkflowSource, error) {
+	candidate := resolver.workflowSource
+	var containing *RemoteWorkflowSource
+	if candidate != nil {
+		containing = &RemoteWorkflowSource{Repository: candidate.Repository, Commit: candidate.Commit}
+	}
+	raw, err := selfRepositoryReference("$/"+strings.TrimPrefix(workflowPath, "./"), containing)
+	if err != nil {
+		return reusableWorkflowSource{}, err
+	}
+	loaded, data, err := resolver.loadRemoteReusableWorkflow(ctx, raw)
+	if err != nil {
+		return reusableWorkflowSource{}, err
+	}
+	if "sha256:"+sha256Sum(data) != digest {
+		return reusableWorkflowSource{}, fmt.Errorf("workflow %q does not match its candidate repository commit", workflowPath)
+	}
+	if loaded.remote.Commit != candidate.Commit {
+		return reusableWorkflowSource{}, fmt.Errorf("workflow source returned a different commit")
+	}
+	loaded.rootSecretScope = true
+	return loaded, nil
+}
+
+func workflowSourceResolver(instance JobInstance, options Options) func(context.Context) (*RemoteWorkflowSource, error) {
+	return func(ctx context.Context) (*RemoteWorkflowSource, error) {
+		if instance.RemoteWorkflow != nil {
+			return instance.RemoteWorkflow, nil
+		}
+		resolver := reusableResolver{repositorySource: options.RepositorySource, workflowSource: options.WorkflowSource}
+		defer func() {
+			for _, materialized := range resolver.materialized {
+				materialized.Release()
+			}
+		}()
+		loaded, err := resolver.verifyWorkflowSource(ctx, instance.SourcePath, instance.SourceDigest)
+		return loaded.remote, err
+	}
+}
+
+func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, parent reusableWorkflowSource, uses string) (loaded reusableWorkflowSource, source []byte, err error) {
+	defer func() {
+		if err == nil {
+			if resolver.scan.sources == nil {
+				resolver.scan.sources = make(map[string]WorkflowSourceReference)
+			}
+			if loaded.remote != nil {
+				resolver.scan.sources[loaded.displayPath] = WorkflowSourceReference{
+					Repository: loaded.identity.repository, Path: loaded.identity.path, Commit: loaded.identity.commit,
+					Excerpt: workflow.CaptureDiagnosticSource(source),
+				}
+			} else {
+				resolver.scan.sources[loaded.displayPath] = localSourceReference(filepath.Join(loaded.repositoryRoot, loaded.identity.path), source)
+			}
+		}
+	}()
+	if strings.Contains(uses, "${{") {
+		return reusableWorkflowSource{}, nil, &ProcessingFinding{
+			Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
+			Message: fmt.Sprintf("Reusable workflow path cannot be an expression. %q is only known once the build is running, and the workflow file has to be read before that. Name the file directly, for example ./.github/workflows/ci.yml, or org/shared/.github/workflows/ci.yml@v1. If you need a computed workflow path, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.", uses),
+			Err:     fmt.Errorf("reusable workflow path cannot be an expression: %q", uses),
+		}
+	}
+	if strings.HasPrefix(uses, "./") {
+		return resolver.loadLocalReusableWorkflow(parent, uses)
+	}
+	if strings.HasPrefix(uses, "$/") {
+		if parent.remote == nil {
+			parent, err = resolver.verifyWorkflowSource(ctx, parent.displayPath, parent.digest)
+			if err != nil {
+				return reusableWorkflowSource{}, nil, err
+			}
+		}
+		if _, err := selfRepositoryReference(uses, parent.remote); err != nil {
+			return reusableWorkflowSource{}, nil, err
+		}
+		if _, err := reusableWorkflowPath(strings.TrimPrefix(uses, "$/"), true); err != nil {
+			return reusableWorkflowSource{}, nil, fmt.Errorf("self-repository workflow %q %w", uses, err)
+		}
+		// The containing remote workflow already authorized and pinned this
+		// repository tree. Keep its identity and the existing cycle/depth checks.
+		return resolver.loadLocalReusableWorkflow(parent, uses)
+	}
+	return resolver.loadRemoteReusableWorkflow(ctx, uses)
+}
+
+func (resolver *reusableResolver) loadLocalReusableWorkflow(parent reusableWorkflowSource, uses string) (reusableWorkflowSource, []byte, error) {
+	prefix := "./"
+	if strings.HasPrefix(uses, "$/") {
+		prefix = "$/"
+	}
+	relativePath, err := reusableWorkflowPath(strings.TrimPrefix(uses, prefix), false)
+	if err != nil {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("local reusable workflow %q %w", uses, err)
+	}
+	candidate := filepath.Join(parent.repositoryRoot, filepath.FromSlash(relativePath))
+	if err := requireWithinRepository(parent.repositoryRoot, candidate); err != nil {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve local reusable workflow %q: %w", uses, err)
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve local reusable workflow %q: %w", uses, err)
+	}
+	if err := requireWithinRepository(parent.repositoryRoot, resolved); err != nil {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve local reusable workflow %q: %w", uses, err)
+	}
+	canonicalRelative, err := filepath.Rel(parent.repositoryRoot, resolved)
+	if err != nil {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("locate local reusable workflow %q: %w", uses, err)
+	}
+	canonicalRelative = filepath.ToSlash(canonicalRelative)
+	child := reusableWorkflowSource{
+		identity:        parent.identity,
+		repositoryRoot:  parent.repositoryRoot,
+		displayPath:     "./" + canonicalRelative,
+		rootSecretScope: parent.rootSecretScope,
+	}
+	child.identity.path = canonicalRelative
+	if parent.remote != nil {
+		remote := *parent.remote
+		child.remote = &remote
+		child.displayPath = remote.Repository + "/" + canonicalRelative + "@" + remote.RequestedRef
+	}
+	source, err := readReusableWorkflowFile(resolved)
+	if err != nil {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("read local reusable workflow %q: %w", uses, err)
+	}
+	child.digest = "sha256:" + sha256Sum(source)
+	return child, source, nil
+}
+
+func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context, uses string) (reusableWorkflowSource, []byte, error) {
+	if len(uses) > 1024 {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("remote reusable workflow reference exceeds 1024 bytes")
+	}
+	ref, err := actionsource.Parse(uses)
+	if err != nil {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("invalid remote reusable workflow %q: %w", uses, err)
+	}
+	workflowPath, err := reusableWorkflowPath(ref.Path, true)
+	if err != nil {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("remote reusable workflow %q %w", uses, err)
+	}
+	if resolver.repositorySource == nil {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("remote reusable workflow source is not configured")
+	}
+	ref.RepositoryRoot = true
+	resolved, materialized, err := resolver.repositorySource.Fetch(ctx, ref)
+	if err != nil {
+		var notPublic *actionsource.NotPublicError
+		if errors.As(err, &notPublic) {
+			return reusableWorkflowSource{}, nil, unavailableReusableWorkflowError(uses)
+		}
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: %w", uses, err)
+	}
+	resolver.materialized = append(resolver.materialized, materialized)
+	commit := resolved.Commit
+	if !git.ValidObjectID(commit) {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: source returned a non-immutable commit", uses)
+	}
+	if len(materialized.SourceDigest) != 71 || !strings.HasPrefix(materialized.SourceDigest, "sha256:") || strings.Trim(materialized.SourceDigest[7:], "0123456789abcdef") != "" {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: source returned an invalid repository digest", uses)
+	}
+	repositoryRoot, err := canonicalMaterializedRepositoryRoot(materialized.RepositoryRoot)
+	if err != nil {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: %w", uses, err)
+	}
+	filePath := filepath.Join(repositoryRoot, filepath.FromSlash(workflowPath))
+	if err := requireWithinRepository(repositoryRoot, filePath); err != nil {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: %w", uses, err)
+	}
+	info, err := os.Lstat(filePath)
+	if err != nil || !info.Mode().IsRegular() {
+		// A missing, non-regular, or unreadable selection is reported exactly
+		// like a denied or nonexistent repository so callers cannot enumerate
+		// private repository contents.
+		return reusableWorkflowSource{}, nil, unavailableReusableWorkflowError(uses)
+	}
+	source, err := readReusableWorkflowFile(filePath)
+	if err != nil {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("read reusable workflow %q: %w", uses, err)
+	}
+	repository := strings.ToLower(ref.Owner + "/" + ref.Repository)
+	remote := &RemoteWorkflowSource{
+		Repository: repository, RequestedRef: ref.Ref, Commit: commit, SourceDigest: materialized.SourceDigest,
+	}
+	return reusableWorkflowSource{
+		identity:       reusableSourceIdentity{kind: "github", repository: repository, commit: commit, path: workflowPath},
+		repositoryRoot: repositoryRoot,
+		displayPath:    repository + "/" + workflowPath + "@" + ref.Ref,
+		remote:         remote,
+	}, source, nil
+}
+
+// unavailableReusableWorkflowError reports every missing or denied remote
+// workflow identically. Missing repositories, refs, and files, private
+// repositories, and repositories Buildkite has not approved for this pipeline
+// must remain indistinguishable to the caller.
+func unavailableReusableWorkflowError(uses string) error {
+	return &ProcessingFinding{
+		Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
+		Message: fmt.Sprintf("Reusable workflow could not be read. %q is private, is not accessible to this pipeline, or does not exist. Check the path. Public workflows can be called across repositories. Private workflows also need the plugin's private-reusable-workflows setting and Buildkite code access to that repository. Otherwise copy the workflow into this repository's .github/workflows and call it with a ./ path.", uses),
+		Err:     fmt.Errorf("remote reusable workflow %q could not be read", uses),
+	}
+}
+
+func reusableWorkflowPath(value string, requireYAML bool) (string, error) {
+	if value == "" || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || path.Clean(value) != value || path.Dir(value) != ".github/workflows" {
+		return "", fmt.Errorf("must name a file directly under .github/workflows")
+	}
+	if requireYAML && path.Ext(value) != ".yml" && path.Ext(value) != ".yaml" {
+		return "", fmt.Errorf("must end in .yml or .yaml")
+	}
+	return value, nil
+}
+
+func readReusableWorkflowFile(workflowPath string) ([]byte, error) {
+	file, err := os.Open(workflowPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("workflow is not a regular file")
+	}
+	if info.Size() > MaxReusableWorkflowBytes {
+		return nil, fmt.Errorf("workflow exceeds %d-byte limit", MaxReusableWorkflowBytes)
+	}
+	source, err := io.ReadAll(io.LimitReader(file, MaxReusableWorkflowBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(source) > MaxReusableWorkflowBytes {
+		return nil, fmt.Errorf("workflow exceeds %d-byte limit", MaxReusableWorkflowBytes)
+	}
+	return source, nil
+}
+
+func parseReusableWorkflow(workflowPath string, source []byte) (parsed *workflow.Workflow, err error) {
+	defer func() {
+		err = attributedProcessingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", workflowPath, 0, 0, "", "", "", 0, err)
+	}()
+	if len(source) > MaxReusableWorkflowBytes {
+		return nil, fmt.Errorf("%s: workflow exceeds %d-byte limit", workflowPath, MaxReusableWorkflowBytes)
+	}
+	return workflow.Parse(workflowPath, source)
+}
+
+func canonicalMaterializedRepositoryRoot(value string) (string, error) {
+	repositoryRoot, err := filepath.Abs(value)
+	if err != nil {
+		return "", fmt.Errorf("resolve materialized repository root: %w", err)
+	}
+	logicalInfo, err := os.Lstat(repositoryRoot)
+	if err != nil || !logicalInfo.IsDir() || logicalInfo.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("materialized repository root is not a non-symlink directory")
+	}
+	repositoryRoot, err = filepath.EvalSymlinks(repositoryRoot)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize materialized repository root: %w", err)
+	}
+	canonicalInfo, err := os.Stat(repositoryRoot)
+	if err != nil || !os.SameFile(logicalInfo, canonicalInfo) {
+		return "", fmt.Errorf("materialized repository root changed while canonicalizing")
+	}
+	return repositoryRoot, nil
+}

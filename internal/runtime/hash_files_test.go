@@ -16,7 +16,7 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
-	"golang.org/x/sys/unix"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
 
 func TestHashWorkspaceFilesConformance(t *testing.T) {
@@ -36,6 +36,7 @@ func TestHashWorkspaceFilesConformance(t *testing.T) {
 	}{
 		{name: "known digest and stable order", patterns: []string{"*.txt"}, contents: []string{"alpha", "bravo"}},
 		{name: "multiple patterns", patterns: []string{"a.txt", "nested/*.txt"}, contents: []string{"alpha", "charlie", "skip"}},
+		{name: "literal search order", patterns: []string{"b.txt", "a.txt", "b.txt"}, contents: []string{"alpha", "bravo"}},
 		{name: "ordered negation", patterns: []string{"**", "!nested/**"}, contents: []string{"dot-directory", "hidden", "alpha", "bravo", "braces"}},
 		{name: "ordered re-inclusion", patterns: []string{"**", "!nested/**", "nested/c.txt"}, contents: []string{"dot-directory", "hidden", "alpha", "bravo", "braces", "charlie"}},
 		{name: "later exclusion", patterns: []string{"nested/c.txt", "!nested/**"}},
@@ -51,7 +52,7 @@ func TestHashWorkspaceFilesConformance(t *testing.T) {
 		{name: "spaced double negation", patterns: []string{"!! nested/c.txt"}, contents: []string{"charlie"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := hashWorkspaceFiles(context.Background(), workspace, test.patterns)
+			got, err := hashWorkspaceFiles(t.Context(), workspace, test.patterns)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -65,12 +66,12 @@ func TestHashWorkspaceFilesConformance(t *testing.T) {
 		})
 	}
 
-	first, err := hashWorkspaceFiles(context.Background(), workspace, []string{"**"})
+	first, err := hashWorkspaceFiles(t.Context(), workspace, []string{"**"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range 5 {
-		got, err := hashWorkspaceFiles(context.Background(), workspace, []string{"**"})
+		got, err := hashWorkspaceFiles(t.Context(), workspace, []string{"**"})
 		if err != nil || got != first {
 			t.Fatalf("repeated hash = %q, %v; want %q", got, err, first)
 		}
@@ -80,7 +81,7 @@ func TestHashWorkspaceFilesConformance(t *testing.T) {
 func TestHashWorkspaceFilesDirectoryPatternDoesNotMatchRegularFile(t *testing.T) {
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, "plain", "regular")
-	if got, err := hashWorkspaceFiles(context.Background(), workspace, []string{"plain/"}); err != nil || got != "" {
+	if got, err := hashWorkspaceFiles(t.Context(), workspace, []string{"plain/"}); err != nil || got != "" {
 		t.Fatalf("directory-only regular file hash = %q, %v", got, err)
 	}
 }
@@ -105,13 +106,13 @@ func TestHashWorkspaceFilesRejectsEscapesAndUnsafeFiles(t *testing.T) {
 	writeFixtureFile(t, outside, "outside.txt", "outside")
 	for _, pattern := range []string{"/etc/passwd", "../outside", "safe/../../outside", `C:\outside`, "./safe/../outside"} {
 		t.Run(pattern, func(t *testing.T) {
-			if _, err := hashWorkspaceFiles(context.Background(), workspace, []string{pattern}); err == nil || !strings.Contains(err.Error(), "hashFiles pattern") {
+			if _, err := hashWorkspaceFiles(t.Context(), workspace, []string{pattern}); err == nil || !strings.Contains(err.Error(), "hashFiles pattern") {
 				t.Fatalf("escape pattern error = %v", err)
 			}
 		})
 	}
 	for _, pattern := range []string{"safe\n", "safe\t", "safe\x1b", "safe\x7f"} {
-		if _, err := hashWorkspaceFiles(context.Background(), workspace, []string{pattern}); err == nil || !strings.Contains(err.Error(), "control character") {
+		if _, err := hashWorkspaceFiles(t.Context(), workspace, []string{pattern}); err == nil || !strings.Contains(err.Error(), "control character") {
 			t.Fatalf("control pattern error = %v", err)
 		}
 	}
@@ -124,17 +125,17 @@ func TestHashWorkspaceFilesRejectsEscapesAndUnsafeFiles(t *testing.T) {
 		if err := os.Symlink(target, filepath.Join(workspace, name)); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
-		if _, err := hashWorkspaceFiles(context.Background(), workspace, []string{name}); err == nil || !strings.Contains(err.Error(), "symlink") {
+		if _, err := hashWorkspaceFiles(t.Context(), workspace, []string{name}); err == nil || !strings.Contains(err.Error(), "symlink") {
 			t.Fatalf("%s error = %v", name, err)
 		}
 	}
 
 	if runtime.GOOS != "windows" {
 		fifo := filepath.Join(workspace, "pipe")
-		if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		if err := testMkfifo(fifo, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := hashWorkspaceFiles(context.Background(), workspace, []string{"pipe"}); err == nil || !strings.Contains(err.Error(), "non-regular") {
+		if _, err := hashWorkspaceFiles(t.Context(), workspace, []string{"pipe"}); err == nil || !strings.Contains(err.Error(), "non-regular") {
 			t.Fatalf("special file error = %v", err)
 		}
 	}
@@ -165,7 +166,7 @@ func TestHashWorkspaceRootRemainsPinnedAfterPathReplacement(t *testing.T) {
 	if err := os.Symlink(outside, workspace); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	got, err := hashWorkspaceRootFilesWithLimits(context.Background(), root, []string{"value"}, defaultHashFilesLimits, false)
+	got, err := hashWorkspaceRootFilesWithLimits(t.Context(), root, []string{"value"}, defaultHashFilesLimits, false)
 	if err != nil || got != githubHash("inside") {
 		t.Fatalf("pinned workspace hash = %q, %v", got, err)
 	}
@@ -181,11 +182,11 @@ func TestRunJobPinsHashWorkspaceBeforePathReplacement(t *testing.T) {
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: pinned hash workspace\n")
 	writeFixtureFile(t, workspace, "value", "inside")
 	writeFixtureFile(t, outside, "value", "outside")
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{
 		{ID: "replace", Kind: "run", Shell: "sh", Env: map[string]string{"OUTSIDE": outside}, Command: `mv "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE-moved" && ln -s "$OUTSIDE" "$GITHUB_WORKSPACE"`},
 		{ID: "hash", Kind: "run", Shell: "sh", Env: map[string]string{"VALUE_HASH": "${{ hashFiles('value') }}"}, Command: "test \"$VALUE_HASH\" = " + githubHash("inside")},
 	})
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() pinned workspace result = %#v, %v", result, err)
 	}
@@ -196,7 +197,7 @@ func TestRunJobHashFilesArgumentsUseStepEnvironment(t *testing.T) {
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: hashFiles step environment\n")
 	writeFixtureFile(t, workspace, "value", "contents")
 	digest := githubHash("contents")
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{
 		ID:        "hash",
 		Kind:      "run",
 		Shell:     "sh",
@@ -204,7 +205,7 @@ func TestRunJobHashFilesArgumentsUseStepEnvironment(t *testing.T) {
 		Condition: "hashFiles(env.PATTERN) != ''",
 		Command:   `test "${{ hashFiles(env.PATTERN) }}" = "` + digest + `"`,
 	}})
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() step environment hashFiles result = %#v, %v", result, err)
 	}
@@ -222,23 +223,47 @@ func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 		{name: "job default working directory", change: func(job *plan.Job) { job.DefaultWorkingDirectory = "${{ hashFiles('value') }}" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
+			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "run", Kind: "run", Command: "true"}})
 			test.change(&job)
-			if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "unsupported expression reference") {
+			if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime function "hashFiles"`) {
 				t.Fatalf("RunJob() default hashFiles error = %v", err)
 			}
 		})
 	}
 
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "name", Name: "${{ hashFiles('value') }}", Kind: "run", Shell: "sh", Command: "true"}})
-	if result, err := (Runner{}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "name", Name: "${{ hashFiles('value') }}", Kind: "run", Shell: "sh", Command: "true"}})
+	if result, err := (Runner{}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("step name unexpectedly evaluated hashFiles: %#v, %v", result, err)
 	}
 
 	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "runs:\n  using: composite\n  steps:\n    - shell: sh\n      run: echo \"${{ hashFiles('value') }}\"\n")
-	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
-	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "unsupported expression reference") {
-		t.Fatalf("composite metadata hashFiles error = %v", err)
+	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+	if err := synthesizeTestLocalActionLocks(&job, workspace); err != nil {
+		t.Fatal(err)
+	}
+	attachTestProgram(&job)
+	if err := attachTestActionPrograms(&job, workspace, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := job.Program.Actions[job.Actions[0].ID].Steps[0].Run.Command.Source; got != "echo \"${{ hashFiles('value') }}\"" {
+		t.Fatalf("normalized composite command = %q", got)
+	}
+	action := job.Program.Actions[job.Actions[0].ID]
+	if value, err := executionprogram.EvaluateSite(action.Steps[0].Condition, executionprogram.EvaluationContext{}); err != nil || value != true {
+		t.Fatalf("normalized composite condition = %#v, %v", value, err)
+	}
+	if _, err := executionprogram.EvaluateSite(action.Steps[0].Run.Command, executionprogram.EvaluationContext{}); err == nil {
+		t.Fatal("normalized action command admitted unavailable hashFiles")
+	}
+	if result, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `runtime function "hashFiles" is unavailable`) {
+		t.Fatalf("composite metadata hashFiles result/error = %#v / %v", result, err)
+	}
+
+	writeFixtureFile(t, workspace, ".github/actions/child/action.yml", "inputs:\n  value:\n    required: false\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: true\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "runs:\n  using: composite\n  steps:\n    - shell: sh\n      run: printf 'TEMPLATE=$%s\\n' \"{{ false && hashFiles('value') || 'ok' }}\" >> \"$GITHUB_ENV\"\n    - uses: ./.github/actions/child\n      with:\n        value: ${{ env.TEMPLATE }}\n")
+	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+	if result, err := (Runner{}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("nested composite input was evaluated twice: %#v, %v", result, err)
 	}
 }
 
@@ -258,10 +283,10 @@ func TestHashWorkspaceFilesEnforcesEveryBound(t *testing.T) {
 		{name: "total pattern length", patterns: []string{"one", "two"}, limits: withHashLimits(base, func(l *hashFilesLimits) { l.totalPatternBytes = 5 }), want: "exceed 5 total bytes"},
 		{name: "matched files", patterns: []string{"*"}, limits: withHashLimits(base, func(l *hashFilesLimits) { l.matches = 1 }), want: "more than 1 files"},
 		{name: "hashed bytes", patterns: []string{"*"}, limits: withHashLimits(base, func(l *hashFilesLimits) { l.bytes = 2 }), want: "selected bytes exceed 2"},
-		{name: "workspace entries", patterns: []string{"missing"}, limits: withHashLimits(base, func(l *hashFilesLimits) { l.entries = 1 }), want: "more than 1 entries"},
+		{name: "workspace entries", patterns: []string{"missing*"}, limits: withHashLimits(base, func(l *hashFilesLimits) { l.entries = 1 }), want: "more than 1 entries"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := hashWorkspaceFilesWithLimits(context.Background(), workspace, test.patterns, test.limits, false)
+			_, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, test.patterns, test.limits, false)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("bound error = %v, want %q", err, test.want)
 			}
@@ -276,8 +301,134 @@ func TestHashWorkspaceFilesBoundsSingleDirectoryEnumeration(t *testing.T) {
 	}
 	limits := defaultHashFilesLimits
 	limits.entries = 10
-	if _, err := hashWorkspaceFilesWithLimits(context.Background(), workspace, []string{"missing"}, limits, false); err == nil || !strings.Contains(err.Error(), "more than 10 entries") {
+	if _, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"missing*"}, limits, false); err == nil || !strings.Contains(err.Error(), "more than 10 entries") {
 		t.Fatalf("single-directory entry bound error = %v", err)
+	}
+}
+
+func TestHashWorkspaceFilesPrunesUnrelatedEntries(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "packages/service/value", "value")
+	for i := range 30 {
+		writeFixtureFile(t, workspace, fmt.Sprintf("unrelated-%02d", i), "ignored")
+		writeFixtureFile(t, workspace, fmt.Sprintf("packages/other/entry-%02d", i), "ignored")
+	}
+	for _, patterns := range [][]string{
+		{"packages/service/value"},
+		{"packages/service/*"},
+		{"packages/service/**"},
+		{"packages/service/", "!packages/**", "packages/service/value"},
+	} {
+		limits := defaultHashFilesLimits
+		limits.entries = 5
+		if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+			limits.entries = 40 // These platforms enumerate to preserve path spelling.
+		}
+		limits.beforeDirectoryOpen = func(name string) {
+			if name == "packages/other" {
+				t.Fatal("opened an unrelated subtree")
+			}
+		}
+		got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, patterns, limits, false)
+		if err != nil || got != githubHash("value") {
+			t.Fatalf("hashFiles(%v) = %q, %v", patterns, got, err)
+		}
+	}
+	limits := defaultHashFilesLimits
+	limits.entries = 1
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		limits.entries = 40
+	}
+	for _, patterns := range [][]string{{"missing"}, {"!**"}, {"# comment"}} {
+		if got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, patterns, limits, false); err != nil || got != "" {
+			t.Fatalf("hashFiles(%v) = %q, %v", patterns, got, err)
+		}
+	}
+}
+
+func TestHashWorkspaceFilesPruningPreservesMatches(t *testing.T) {
+	workspace := t.TempDir()
+	for _, name := range []string{"root", "a/value", "a/nested/value", "b/value", "b/deep/c/value", "c/other", ".hidden/value", "literal/{name}"} {
+		writeFixtureFile(t, workspace, name, name)
+	}
+	for _, pattern := range []string{"a", "a/", "a/*", "*/value", "[ab]/value", "**/value", "a/**/value", "*/**/c/*", ".hidden", "literal/{name}", "A/VALUE", `a\/value`, "a[/]value", "a[!x]value", "a[.-0]value"} {
+		for _, insensitive := range []bool{false, true} {
+			got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{pattern}, defaultHashFilesLimits, insensitive)
+			// An excluded broad positive forces a full walk while leaving the
+			// selected set unchanged, providing an oracle for traversal pruning.
+			want, wantErr := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"**", "!**", pattern}, defaultHashFilesLimits, insensitive)
+			if err != nil || wantErr != nil || got != want {
+				t.Fatalf("pattern %q (insensitive %v): %q, %v; full walk %q, %v", pattern, insensitive, got, err, want, wantErr)
+			}
+		}
+	}
+}
+
+func TestHashWorkspaceFilesCharacterClassesAcrossDirectories(t *testing.T) {
+	for _, prefix := range []string{"", "packages/", "literal{}/"} {
+		t.Run(prefix, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeFixtureFile(t, workspace, prefix+"a/value", "value")
+			for _, pattern := range []string{"a[/]value", "a[!x]value", "a[.-0]value"} {
+				got, err := hashWorkspaceFiles(t.Context(), workspace, []string{prefix + pattern})
+				if err != nil || got != githubHash("value") {
+					t.Fatalf("hashFiles(%q) = %q, %v; want %q", prefix+pattern, got, err, githubHash("value"))
+				}
+			}
+		})
+	}
+}
+
+func TestHashWorkspaceFilesExecutionBudget(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "nested/value", "value")
+	for _, phase := range []string{"traversal", "hashing", "verification"} {
+		t.Run(phase, func(t *testing.T) {
+			limits := defaultHashFilesLimits
+			limits.duration = 20 * time.Millisecond
+			pause := func(string) { time.Sleep(2 * limits.duration) }
+			switch phase {
+			case "traversal":
+				limits.beforeDirectoryOpen = pause
+			case "hashing":
+				limits.beforeOpen = pause
+			case "verification":
+				limits.afterFileHash = pause
+			}
+			got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"nested/value", "!nested/skip", "other/*.txt"}, limits, false)
+			if got != "" || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "hashFiles exceeded its 20ms execution limit") {
+				t.Fatalf("budget result = %q, %v", got, err)
+			}
+			wantHint := `positive patterns ["nested/value" "other/*.txt"]; use more specific paths to reduce traversal and hashing`
+			if !strings.Contains(err.Error(), wantHint) {
+				t.Fatalf("budget error = %v, want %q", err, wantHint)
+			}
+		})
+	}
+	for _, expired := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(t.Context())
+		if expired {
+			cancel()
+			ctx, cancel = context.WithTimeout(t.Context(), -time.Second)
+		}
+		cancel()
+		_, err := hashWorkspaceFiles(ctx, workspace, []string{"missing"})
+		if !errors.Is(err, ctx.Err()) || strings.Contains(err.Error(), "execution limit") {
+			t.Fatalf("parent cancellation = %v, want %v", err, ctx.Err())
+		}
+	}
+}
+
+func TestHashWorkspaceFilesEntryBudgetDiagnostic(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "nested/value", "value")
+	writeFixtureFile(t, workspace, "other/value.txt", "value")
+	limits := defaultHashFilesLimits
+	limits.entries = 1
+	got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"nested/*", "!nested/skip", "other/*.txt"}, limits, false)
+	want := `hashFiles traversal inspected more than 1 entries while searching positive patterns ["nested/*" "other/*.txt"]; use more specific paths to reduce traversal and hashing`
+	if got != "" || err == nil || err.Error() != want {
+		t.Fatalf("entry budget result = %q, %v; want %q", got, err, want)
 	}
 }
 
@@ -290,11 +441,11 @@ func TestHashWorkspaceFilesDetectsMutationAndCancellation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := hashWorkspaceFilesWithLimits(context.Background(), workspace, []string{"mutable"}, limits, false); err == nil || !strings.Contains(err.Error(), "changed") {
+	if _, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"mutable"}, limits, false); err == nil || !strings.Contains(err.Error(), "changed") {
 		t.Fatalf("mutation error = %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := hashWorkspaceFiles(ctx, workspace, []string{"mutable"}); err == nil {
 		t.Fatal("cancelled hashFiles succeeded")
@@ -319,7 +470,7 @@ func TestHashWorkspaceFilesDetectsDirectoryReplacementBeforeTraversal(t *testing
 			t.Skipf("symlinks unavailable: %v", err)
 		}
 	}
-	if _, err := hashWorkspaceFilesWithLimits(context.Background(), workspace, []string{"nested/**"}, limits, false); err == nil || !strings.Contains(err.Error(), "changed before traversal") {
+	if _, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"nested/**"}, limits, false); err == nil || !strings.Contains(err.Error(), "changed before traversal") {
 		t.Fatalf("directory replacement error = %v", err)
 	}
 }
@@ -351,7 +502,7 @@ func TestHashWorkspaceFilesOpensMatchesThroughPinnedDirectories(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	digest, err := hashWorkspaceFilesWithLimits(context.Background(), workspace, []string{"nested/value"}, limits, false)
+	digest, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"nested/value"}, limits, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +515,7 @@ func TestHashWorkspaceFilesOpensMatchesThroughPinnedDirectories(t *testing.T) {
 func TestHashWorkspaceFilesFinalVerificationObservesCancellation(t *testing.T) {
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, "nested/value", "value")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	limits := defaultHashFilesLimits
 	limits.afterFileHash = func(string) { cancel() }
 	if _, err := hashWorkspaceFilesWithLimits(ctx, workspace, []string{"nested/value"}, limits, false); !errors.Is(err, context.Canceled) {
@@ -384,11 +535,11 @@ func TestHashWorkspaceFilesRejectsFIFORacedIntoMatch(t *testing.T) {
 		if err := os.Remove(file); err != nil {
 			t.Fatal(err)
 		}
-		if err := unix.Mkfifo(file, 0o600); err != nil {
+		if err := testMkfifo(file, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	if _, err := hashWorkspaceFilesWithLimits(ctx, workspace, []string{"value"}, limits, false); err == nil || !strings.Contains(err.Error(), "changed before hashing") {
 		t.Fatalf("FIFO race error = %v", err)
@@ -403,11 +554,11 @@ func TestHashFilesStepEnvironmentFailureUsesStepConclusion(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	marker := filepath.Join(workspace, "continued")
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{
 		{ID: "invalid", Kind: "run", Shell: "sh", ContinueOnError: true, Env: map[string]string{"HASH": "${{ hashFiles('link') }}"}, Command: "exit 99"},
 		{ID: "after", Kind: "run", Shell: "sh", Condition: "steps.invalid.outcome == 'failure' && steps.invalid.conclusion == 'success'", Command: "touch " + marker},
 	})
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -424,11 +575,11 @@ func TestHashFilesStepConditionFailureRunsFailureCleanup(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	marker := filepath.Join(workspace, "cleaned")
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{
 		{ID: "invalid", Kind: "run", Shell: "sh", Condition: "hashFiles('link') != ''", Command: "exit 99"},
 		{ID: "cleanup", Kind: "run", Shell: "sh", Condition: "failure()", Command: "touch " + marker},
 	})
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -447,13 +598,13 @@ func TestHashFilesSkippedStepsDoNotAccessWorkspace(t *testing.T) {
 	envMarker := filepath.Join(workspace, "env-ran")
 	conditionMarker := filepath.Join(workspace, "condition-ran")
 	cleanupMarker := filepath.Join(workspace, "cleaned")
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{
 		{ID: "fails", Kind: "run", Shell: "sh", Command: "exit 1"},
 		{ID: "env", Kind: "run", Shell: "sh", Env: map[string]string{"HASH": "${{ hashFiles('link') }}"}, Command: "touch " + envMarker},
 		{ID: "condition", Kind: "run", Shell: "sh", Condition: "hashFiles('link') != ''", Command: "touch " + conditionMarker},
 		{ID: "cleanup", Kind: "run", Shell: "sh", Condition: "always()", Command: "touch " + cleanupMarker},
 	})
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -482,7 +633,7 @@ func TestHashFilesRemotePreFailureUsesStepConclusion(t *testing.T) {
 	digest := digestTree(t, remote)
 	lockID := remoteLifecycleLockID(1)
 	marker := filepath.Join(workspace, "continued")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
 		{ID: "invalid", Kind: "uses", Uses: remoteLifecycleUses("action"), Action: &plan.ActionSelector{Lock: lockID}, ContinueOnError: true, Env: map[string]string{"HASH": "${{ hashFiles('link') }}"}},
 		{ID: "after", Kind: "run", Shell: "sh", Condition: "steps.invalid.outcome == 'failure' && steps.invalid.conclusion == 'success'", Command: "touch " + marker},
 	})
@@ -490,7 +641,7 @@ func TestHashFilesRemotePreFailureUsesStepConclusion(t *testing.T) {
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "action", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Actions: materializer}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -523,7 +674,7 @@ func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 			if err := file.Close(); err != nil {
 				t.Fatal(err)
 			}
-			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{
+			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{
 				ID:             "hash",
 				Kind:           "run",
 				Shell:          "sh",
@@ -533,7 +684,7 @@ func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 				Command:        "true",
 			}})
 			started := time.Now()
-			_, err = (Runner{}).RunJob(context.Background(), job, workspace)
+			_, err = (Runner{}).runTestJob(t.Context(), job, workspace)
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("RunJob() timeout error = %v", err)
 			}
@@ -565,7 +716,7 @@ func TestHashFilesPrePhaseUsesStepTimeoutContext(t *testing.T) {
 	writeFixtureFile(t, remote, "action/main.js", "")
 	digest := digestTree(t, remote)
 	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID:             "hash",
 		Kind:           "uses",
 		Uses:           remoteLifecycleUses("action"),
@@ -578,7 +729,7 @@ func TestHashFilesPrePhaseUsesStepTimeoutContext(t *testing.T) {
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "action", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	started := time.Now()
-	_, err = (Runner{Actions: materializer}).RunJob(context.Background(), job, workspace)
+	_, err = (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("RunJob() pre timeout error = %v", err)
 	}

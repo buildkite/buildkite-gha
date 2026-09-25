@@ -1,18 +1,20 @@
 package buildkite
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"go.yaml.in/yaml/v4"
 )
 
-func TestEmitExperimentalRunnerUserIsExplicitAndLinuxOnly(t *testing.T) {
+func TestEmitRunnerUserIsDefaultForLinuxOnly(t *testing.T) {
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
 	pipeline := Pipeline{
-		CompilerStep:           "importer",
-		DistributionDigest:     testDigest("distribution"),
-		ExperimentalRunnerUser: true,
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
 		Jobs: []Job{
 			{Key: "linux", Label: "Linux", Queue: "hosted", Platform: "linux/amd64", RuntimeImage: image, PlanDigest: testDigest("linux plan"), RequiresMise: true},
 			{Key: "darwin", Label: "Darwin", Queue: "macos", Platform: "darwin/arm64", PlanDigest: testDigest("darwin plan")},
@@ -39,6 +41,9 @@ func TestEmitExperimentalRunnerUserIsExplicitAndLinuxOnly(t *testing.T) {
 		commands[step.Key] = step.Command
 	}
 	linux := commands["linux"]
+	// Normalize single quotes escaped inside the bash -c argument so these
+	// assertions continue to describe the privileged setup script itself.
+	linuxSetup := strings.ReplaceAll(linux, `'"'"'`, `'`)
 	for _, required := range []string{
 		"useradd --create-home --home-dir '/home/runner'",
 		"runner ALL=(ALL) NOPASSWD: ALL",
@@ -56,25 +61,244 @@ func TestEmitExperimentalRunnerUserIsExplicitAndLinuxOnly(t *testing.T) {
 		"sudo -n --preserve-env --user runner -- env HOME='/home/runner' TMPDIR='/tmp/buildkite-gha-runner'",
 		`BUILDKITE_GHA_PLAN_DIGEST='` + testDigest("linux plan") + `' "$distribution" run-job --plan "$plan"`,
 	} {
-		if !strings.Contains(linux, required) {
-			t.Errorf("experimental Linux command does not contain %q:\n%s", required, linux)
+		if !strings.Contains(linuxSetup, required) {
+			t.Errorf("Linux runner-user command does not contain %q:\n%s", required, linux)
 		}
 	}
-	for _, forbidden := range []string{"chmod -R 0777", "chmod -R a+w", "chmod o+", "chown -R runner:\"$runner_group\" /", `chown runner:"$runner_group" "$distribution"`, `run-job --plan-digest`} {
+	for _, forbidden := range []string{"chmod -R 0777", "chmod -R a+w", "chmod o+", "chown -R runner:\"$runner_group\" /", `chown runner:"$runner_group" "$distribution"`, `run-job --plan-digest`, "BUILDKITE_BUILD_CHECKOUT_PATH", "GITHUB_WORKSPACE"} {
 		if strings.Contains(linux, forbidden) {
-			t.Errorf("experimental Linux command contains broad permission change %q:\n%s", forbidden, linux)
+			t.Errorf("Linux runner-user command contains forbidden workspace or permission change %q:\n%s", forbidden, linux)
 		}
 	}
-	if darwin := commands["darwin"]; strings.Contains(darwin, "useradd") || strings.Contains(darwin, "sudo -n") {
-		t.Fatalf("Darwin command selected Linux experiment:\n%s", darwin)
+	if darwin := commands["darwin"]; strings.Contains(darwin, "useradd") || strings.Contains(darwin, "--user runner") {
+		t.Fatalf("Darwin command selected Linux runner user:\n%s", darwin)
 	}
 
-	pipeline.ExperimentalRunnerUser = false
+	pipeline.DisableRunnerUser = true
 	output, err = Emit(pipeline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(output), "useradd") || strings.Contains(string(output), "sudo -n") {
-		t.Fatalf("default pipeline selected runner-user experiment:\n%s", output)
+	if strings.Contains(string(output), "useradd") || strings.Contains(string(output), "--user runner") {
+		t.Fatalf("opt-out pipeline selected runner user:\n%s", output)
 	}
+}
+
+func TestExperimentalRunnerUserBootstrapStartsPrivilegedSetup(t *testing.T) {
+	tests := []struct {
+		name     string
+		uid      string
+		user     string
+		wantSudo bool
+	}{
+		{name: "root", uid: "0", user: "root"},
+		{name: "runner", uid: "1001", user: "runner", wantSudo: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bin := t.TempDir()
+			logPath := filepath.Join(t.TempDir(), "commands")
+			writeTestCommand(t, bin, "id", `case "$1" in -u) printf '%s\n' "$TEST_UID";; -un) printf '%s\n' "$TEST_USER";; *) exit 2;; esac`)
+			writeTestCommand(t, bin, "bash", `printf 'bash\n'; printf '%s\n' "$@" >> "$TEST_LOG"`)
+			writeTestCommand(t, bin, "sudo", `printf 'sudo\n' >> "$TEST_LOG"; if [ "$#" -eq 2 ] && [ "$1" = -n ] && [ "$2" = true ]; then exit 0; fi; printf '%s\n' "$@" >> "$TEST_LOG"`)
+
+			script := "bootstrap_dir='bootstrap dir'\ndistribution='distribution path'\nplan='plan path'\n" + strings.Join(experimentalRunnerUserBootstrap(false, false, nil), "\n")
+			command := exec.Command("/bin/bash", "-euo", "pipefail", "-c", script)
+			command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "TEST_UID="+test.uid, "TEST_USER="+test.user, "TEST_LOG="+logPath)
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("bootstrap routing failed: %v: %s", err, output)
+			}
+			log, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(log)
+			if test.wantSudo != strings.Contains(got, "sudo\n") {
+				t.Fatalf("command log = %q, want sudo = %t", got, test.wantSudo)
+			}
+			for _, want := range []string{"buildkite-gha-runner-bootstrap\n", "bootstrap dir\n", "distribution path\n", "plan path\n"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("command log = %q, want %q", got, want)
+				}
+			}
+			if test.wantSudo && !strings.Contains(got, "--preserve-env\n") {
+				t.Fatalf("command log = %q, want preserved environment", got)
+			}
+		})
+	}
+}
+
+func TestExperimentalRunnerUserBootstrapRejectsUnavailablePasswordlessSudo(t *testing.T) {
+	bin := t.TempDir()
+	writeTestCommand(t, bin, "id", `case "$1" in -u) echo 1001;; -un) echo runner;; *) exit 2;; esac`)
+	writeTestCommand(t, bin, "sudo", `exit 1`)
+	command := exec.Command("/bin/bash", "-euo", "pipefail", "-c", strings.Join(experimentalRunnerUserBootstrap(false, false, nil), "\n"))
+	command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "runner user bootstrap requires passwordless sudo") {
+		t.Fatalf("bootstrap failure = %v, %q", err, output)
+	}
+}
+
+func TestExperimentalRunnerUserCommandPreservesNativeToolPath(t *testing.T) {
+	bin := t.TempDir()
+	writeTestCommand(t, bin, "native-tool", `printf 'native tool available\n'`)
+	// Model sudo's secure_path: --preserve-env alone does not retain PATH.
+	writeTestCommand(t, bin, "sudo", `while [ "$1" != -- ]; do shift; done
+shift
+PATH=/usr/bin:/bin
+export PATH
+exec "$@"`)
+	command := exec.Command("/bin/bash", "-euo", "pipefail", "-c", experimentalRunnerUserCommand("native-tool"))
+	command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+	output, err := command.CombinedOutput()
+	if err != nil || string(output) != "native tool available\n" {
+		t.Fatalf("native tool lookup = %v, %q", err, output)
+	}
+}
+
+func writeTestCommand(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExperimentalRunnerCacheOwnershipAcceptsDirectHostedVolumePathsWithoutRootMount(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "bkcache")
+	anchor := filepath.Join(root, "buildkite-gha", "mise", "linux-amd64")
+	runnerHome := filepath.Join(t.TempDir(), "runner")
+	gradleCaches := filepath.Join(runnerHome, ".gradle", "caches")
+	gradleWrapper := filepath.Join(runnerHome, ".gradle", "wrapper")
+	for _, path := range []string{anchor, gradleCaches, gradleWrapper} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	volumePaths := strings.Join([]string{anchor, gradleCaches, gradleWrapper}, "\n")
+	output, err := runExperimentalRunnerCacheOwnership(t, root, anchor, []string{gradleCaches, gradleWrapper}, volumePaths, volumePaths)
+	if err != nil {
+		t.Fatalf("cache validation failed: %v: %s", err, output)
+	}
+}
+
+func TestExperimentalRunnerCacheOwnershipAcceptsDocumentedRootMount(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "bkcache")
+	anchor := filepath.Join(root, "buildkite-gha", "validation", "linux-amd64")
+	if err := os.MkdirAll(anchor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runExperimentalRunnerCacheOwnership(t, root, anchor, []string{anchor}, root, root+"\n"+anchor)
+	if err != nil {
+		t.Fatalf("cache validation failed: %v: %s", err, output)
+	}
+}
+
+func TestExperimentalRunnerCacheOwnershipRejectsOrdinaryAnchor(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "bkcache")
+	anchor := filepath.Join(root, "buildkite-gha", "validation", "linux-amd64")
+	if err := os.MkdirAll(anchor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runExperimentalRunnerCacheOwnership(t, root, anchor, []string{anchor}, "", anchor)
+	if err == nil || !strings.Contains(output, "Buildkite cache volume anchor is not mounted") {
+		t.Fatalf("ordinary anchor validation = %v, %q", err, output)
+	}
+}
+
+func TestExperimentalRunnerCacheOwnershipRejectsUnsafePaths(t *testing.T) {
+	tests := []struct {
+		name        string
+		path        func(root string) string
+		createPath  bool
+		mountpoints func(root, path string) string
+		cachePaths  func(root, path string) string
+		want        string
+	}{
+		{
+			name:        "ordinary directory on cache filesystem",
+			path:        func(string) string { return filepath.Join(t.TempDir(), "ordinary") },
+			createPath:  true,
+			mountpoints: func(root, _ string) string { return root },
+			cachePaths:  func(root, path string) string { return root + "\n" + path },
+			want:        "configured cache path is not a Buildkite cache volume mount",
+		},
+		{
+			name:        "mount on another filesystem",
+			path:        func(string) string { return filepath.Join(t.TempDir(), "other-volume") },
+			createPath:  true,
+			mountpoints: func(root, path string) string { return root + "\n" + path },
+			cachePaths:  func(root, _ string) string { return root },
+			want:        "configured cache path does not target the Buildkite cache volume",
+		},
+		{
+			name:        "entire cache root",
+			path:        func(root string) string { return root },
+			createPath:  true,
+			mountpoints: func(root, _ string) string { return root },
+			cachePaths:  func(root, _ string) string { return root },
+			want:        "configured cache path is unsafe",
+		},
+		{
+			name:        "unavailable path",
+			path:        func(string) string { return filepath.Join(t.TempDir(), "missing", "cache") },
+			mountpoints: func(root, _ string) string { return root },
+			cachePaths:  func(root, _ string) string { return root },
+			want:        "configured cache path is unavailable",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "bkcache")
+			anchor := filepath.Join(root, "buildkite-gha", "validation", "linux-amd64")
+			path := test.path(root)
+			dirs := []string{root, anchor}
+			if test.createPath {
+				dirs = append(dirs, path)
+			}
+			for _, dir := range dirs {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mountpoints := anchor + "\n" + test.mountpoints(root, path)
+			cachePaths := anchor + "\n" + test.cachePaths(root, path)
+			output, err := runExperimentalRunnerCacheOwnership(t, root, anchor, []string{path}, mountpoints, cachePaths)
+			if err == nil {
+				t.Fatalf("cache validation unexpectedly succeeded: %s", output)
+			}
+			if !strings.Contains(output, test.want) {
+				t.Fatalf("cache validation output = %q, want %q", output, test.want)
+			}
+		})
+	}
+}
+
+func runExperimentalRunnerCacheOwnership(t *testing.T, root, anchor string, paths []string, mountpoints, cachePaths string) (string, error) {
+	t.Helper()
+	bin := t.TempDir()
+	writeExecutable := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExecutable("mountpoint", `for argument do target="$argument"; done
+printf '%s\n' "$TEST_MOUNTPOINTS" | grep -Fx -- "$target" >/dev/null`)
+	writeExecutable("stat", `for argument do target="$argument"; done
+if printf '%s\n' "$TEST_CACHE_PATHS" | grep -Fx -- "$target" >/dev/null; then printf '2049\n'; else printf '1\n'; fi`)
+	writeExecutable("readlink", `for argument do target="$argument"; done
+test -d "$target" && printf '%s\n' "$target"`)
+	writeExecutable("chown", "exit 0\n")
+	writeExecutable("chmod", "exit 0\n")
+
+	command := exec.Command("bash", "-c", "set -euo pipefail\nrunner_group=runner\n"+strings.Join(experimentalRunnerCacheOwnershipCommands(root, anchor, paths), "\n"))
+	command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "TEST_MOUNTPOINTS="+mountpoints, "TEST_CACHE_PATHS="+cachePaths)
+	output, err := command.CombinedOutput()
+	return string(output), err
 }
