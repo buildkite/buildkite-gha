@@ -94,6 +94,24 @@ selection requires both implementations, including the
 Explicit client mappings bypass automatic resolution. Backend eligibility and
 label mapping remain server-owned.
 
+## Prerequisite status API contract
+
+Recovery uses public commands supported by agent v3.129. `artifact search
+--allow-empty-results --format '%j\n'` establishes absence only on success
+with zero stdout bytes; recovery also searches `--include-retried-jobs=true`.
+`step get --step <key> --build <build-id> --format json` provides the
+[step attributes](https://buildkite.com/docs/agent/cli/reference/step), including
+the generated `env.BUILDKITE_GHA_PLAN_DIGEST`. This evidence describes a step,
+not a REST job or individual retry. See [result handling](compatibility.md#results-retries-and-cancellation)
+for the accepted states and receipt boundaries.
+
+Live agent v3.129.0 captures confirmed these mappings and search results:
+
+| Producer | Step state / outcome | Result search across attempts |
+| --- | --- | --- |
+| Docker command-hook failure, exit 125; job exit -1 (`process_run_error`) | `finished` / `hard_failed` | Exit 0, empty stdout |
+| Completed producer with a receipt | `finished` / `passed` | Exit 0, exact producer job UUID |
+
 ## Monitor dependency security
 
 Renovate uses the shared `buildkite/renovate-config` preset and runs every four

@@ -803,8 +803,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if job.SoftFail {
 			_, _ = fmt.Fprintf(out, "%ssoft_fail:\n%s  - exit_status: %d\n", attributeIndent, attributeIndent, ContinueOnErrorExitStatus)
 		}
+		_, _ = fmt.Fprintf(out, "%senv:\n", attributeIndent)
+		_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_PLAN_DIGEST: %s\n", attributeIndent, yamlScalar(job.PlanDigest))
 		if job.RequiresMise && platform != "windows/amd64" {
-			_, _ = fmt.Fprintf(out, "%senv:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir(platform)))
 		}
 		if job.Concurrency != 0 {

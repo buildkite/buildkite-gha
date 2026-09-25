@@ -282,8 +282,9 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}()
 	}
 	var runErr error
+	var terminalNeeds []transport.TerminalNeedResult
 	if len(job.NeedSources) != 0 {
-		job.Needs, runErr = gharuntime.ResolveNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources, job.NeedOutputs)
+		job.Needs, terminalNeeds, runErr = gharuntime.ResolveRuntimeNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources, job.NeedOutputs)
 		if runErr != nil {
 			details.setFailurePhase(telemetry.FailurePhaseSourceResolution)
 			runErr = fmt.Errorf("hydrate prerequisite results: %w", runErr)
@@ -299,11 +300,24 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 	}
 	if runErr == nil && len(job.CallGuards) != 0 {
-		job.CallGuards, runErr = gharuntime.ResolveCallGuards(ctx, agent, artifactRoot, producer.BuildID, job.CallGuards)
+		var guardResults []transport.TerminalNeedResult
+		job.CallGuards, guardResults, runErr = gharuntime.ResolveCallGuards(ctx, agent, artifactRoot, producer.BuildID, job.CallGuards)
+		terminalNeeds = append(terminalNeeds, guardResults...)
 		if runErr != nil {
 			details.setFailurePhase(telemetry.FailurePhaseSourceResolution)
 			runErr = fmt.Errorf("hydrate reusable-workflow call guards: %w", runErr)
 		}
+	}
+	if len(terminalNeeds) != 0 {
+		_, _ = fmt.Fprintln(stdout, "^^^ +++")
+	}
+	warned := map[transport.ResultSource]bool{}
+	for _, result := range terminalNeeds {
+		if warned[result.Source] {
+			continue
+		}
+		warned[result.Source] = true
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: prerequisite step %q has no result artifact; using Buildkite state %q (outcome %q) as %q with outputs and artifacts unavailable\n", result.Source.StepKey, result.State, result.Outcome, result.Result)
 	}
 	if runErr == nil {
 		result, runErr = runner.RunJob(ctx, job, "")
