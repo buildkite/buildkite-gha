@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -415,6 +416,27 @@ func TestCommandRunnerBoundsOutputWhileReading(t *testing.T) {
 	stdout, _, err := (CommandRunner{}).RunBounded(t.Context(), "", "sh", []string{"-c", "printf 123456789"}, nil, 8)
 	if err == nil || !strings.Contains(err.Error(), "exceeds 8 bytes") || len(stdout) != 0 {
 		t.Fatalf("runBounded() stdout = %q, error = %v", stdout, err)
+	}
+}
+
+func TestCommandRunnerRunWithEnv(t *testing.T) {
+	if os.Getenv("TEST_CHILD_ENV") == "1" {
+		_, _ = fmt.Fprint(os.Stdout, os.Getenv("BUILDKITE_ORGANIZATION_SLUG"))
+		return
+	}
+	t.Setenv("BUILDKITE_ORGANIZATION_SLUG", "wrong-org")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := (CommandRunner{}).RunWithEnv(t.Context(), "", executable,
+		[]string{"-test.run=^TestCommandRunnerRunWithEnv$"}, nil,
+		[]string{"TEST_CHILD_ENV=1", "BUILDKITE_ORGANIZATION_SLUG=acme"})
+	if err != nil || !strings.HasPrefix(string(output), "acme") {
+		t.Fatalf("child output = %q, error = %v", output, err)
+	}
+	if got := os.Getenv("BUILDKITE_ORGANIZATION_SLUG"); got != "wrong-org" {
+		t.Fatalf("parent organization = %q", got)
 	}
 }
 

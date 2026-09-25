@@ -42,9 +42,17 @@ type CommandRunner struct {
 }
 
 func (r CommandRunner) Run(ctx context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
+	return r.RunWithEnv(ctx, dir, name, args, stdin, nil)
+}
+
+// RunWithEnv sets child-only environment overrides without changing the parent process.
+func (r CommandRunner) RunWithEnv(ctx context.Context, dir, name string, args []string, stdin []byte, env []string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, args...)
 	command.Dir = dir
 	command.Stdin = bytes.NewReader(stdin)
+	if len(env) > 0 {
+		command.Env = append(os.Environ(), env...)
+	}
 	var stdout bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = r.Stderr

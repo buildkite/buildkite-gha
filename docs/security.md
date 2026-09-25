@@ -235,6 +235,27 @@ export `GITHUB_TOKEN` to later steps through `GITHUB_ENV`. Masking reduces
 accidental disclosure; it is not access control and cannot catch transformed
 values.
 
+### OIDC secrets migration
+
+`migrate-secrets` generates a reviewed GitHub Actions workflow with a static
+secret allowlist. After the workflow is committed to the default branch, the
+CLI creates a short-lived Buildkite migration grant bound to the immutable
+GitHub repository IDs, exact workflow path and commit, default branch,
+destination cluster, names, and non-empty access policy. The workflow proves
+its identity with a GitHub-signed OIDC token and consumes the grant once.
+
+GitHub OIDC authenticates the workflow; it does not choose its Buildkite
+authority. The authenticated Buildkite user fixes that authority when creating
+the grant. The workflow receives no Buildkite API token and cannot change the
+destination, policy, or allowlist. It sends values only in one in-memory HTTPS
+request, and Buildkite errors and audit data must never include them.
+
+Anyone who can change and run the default-branch workflow can read the selected
+GitHub secrets. Binding the grant to the reviewed commit prevents another
+workflow revision from using its authority. Remove the migration workflow
+after the run succeeds. This migration-specific OIDC path does not add OIDC
+support to imported Buildkite jobs.
+
 ### GitHub token
 
 Token issuance requires a Buildkite organization feature and a default-off

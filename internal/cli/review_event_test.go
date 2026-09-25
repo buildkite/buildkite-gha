@@ -97,7 +97,7 @@ func TestReviewTriggerActivities(t *testing.T) {
 		"pull_request_review":         {"submitted", "edited", "dismissed"},
 		"pull_request_review_comment": {"created", "edited", "deleted"},
 	} {
-		for _, declaration := range []string{event, "[push, " + event + "]", "{" + event + ": null}", "{" + event + ": {}}", "{" + event + ": {types: []}}", "{" + event + ": {types: [edited]}}", "{" + event + ": {types: edited}}"} {
+		for _, declaration := range []string{event, "[push, " + event + "]", "{" + event + ": null}", "{" + event + ": {}}", "{" + event + ": {types: null}}", "{" + event + ": {types: []}}", "{" + event + ": {types: [edited]}}", "{" + event + ": {types: edited}}"} {
 			t.Run(declaration, func(t *testing.T) {
 				parsed, err := workflow.Parse("review.yml", []byte("on: "+declaration+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 				if err != nil {
