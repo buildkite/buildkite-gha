@@ -2407,6 +2407,18 @@ On Windows, `RUNNER_TOOL_CACHE` is job-private. Windows container images are uns
 - Cancellation targets the complete process tree. Linux and macOS send `SIGINT`, `SIGTERM` after 7.5 seconds, then `SIGKILL` after another 2.5 seconds. Windows terminates the process tree through a Job Object without a signal grace period.
 - Summary, annotation, or skipped-label publication failure produces a warning and does not change a completed job result.
 
+Runtime job and reusable-workflow call conditions can recover
+`needs.<job>.result: failure` when no attempt has the expected result artifact
+and the matching Buildkite step remains `finished` with outcome `hard_failed`
+across the absence check. Recovery emits a warning and supplies no outputs or
+artifacts; it never publishes a replacement producer receipt.
+
+Missing receipts remain errors for successful, skipped, canceled, active, or
+unclassified steps. Artifact query, download, and verification errors also stop
+the job. Needs-derived reusable-workflow inputs, matrices, and runner selection
+still require verified receipts. Recovery does not change the producer's
+Buildkite failure or its [dependency scheduling](https://buildkite.com/docs/pipelines/configure/depends-on#allowing-dependency-failures).
+
 ### Key limits
 
 | Item | Limit |

@@ -158,6 +158,8 @@ type cliCaptureRunner struct {
 	// stepAttributes answers `step get <attribute> --step <key>` for steps
 	// that already exist in the build; unknown steps fail.
 	stepAttributes map[string]map[string]string
+	// stepSnapshots answers full JSON step reads scoped to the fixture build.
+	stepSnapshots map[string][]byte
 }
 
 type cliActionSourceTokenProvider struct {
@@ -215,6 +217,13 @@ func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []str
 		}
 		return []byte(value + "\n"), nil
 	}
+	if len(args) == 8 && slices.Equal(args[:3], []string{"step", "get", "--step"}) && args[4] == "--build" && args[5] == cliTestBuildID && slices.Equal(args[6:], []string{"--format", "json"}) {
+		snapshot, ok := r.stepSnapshots[args[3]]
+		if !ok {
+			return nil, errors.New("step not found")
+		}
+		return bytes.Clone(snapshot), nil
+	}
 	if slices.Equal(args, []string{"meta-data", "get", "buildkite:webhook"}) {
 		if r.webhookErr != nil {
 			return nil, r.webhookErr
@@ -225,7 +234,11 @@ func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []str
 		return bytes.Clone(r.webhook), nil
 	}
 	if len(args) >= 2 && args[0] == "artifact" && args[1] == "search" {
-		return []byte(r.jobByStep[args[4]] + "\n"), nil
+		jobID := r.jobByStep[args[4]]
+		if jobID == "" {
+			return nil, nil
+		}
+		return []byte(jobID + "\n"), nil
 	}
 	if len(args) >= 2 && args[0] == "artifact" && args[1] == "download" {
 		info, err := os.Stat(args[3])

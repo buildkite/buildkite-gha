@@ -324,7 +324,7 @@ func TestRunJobHydratesNeedsAndPublishesAuthoritativeResult(t *testing.T) {
 	if !strings.Contains(stdout.String(), "~~~ :package: Publish GitHub Actions result\n") || !strings.Contains(stdout.String(), "^^^ +++\n") {
 		t.Fatalf("stdout = %q, want expanded result publication group", stdout.String())
 	}
-	if len(runner.commands) < 3 || strings.Join(runner.commands[0].args, " ") != strings.Join([]string{"artifact", "search", producerPath, "--step", producerStep, "--format", "%j"}, " ") {
+	if len(runner.commands) < 3 || strings.Join(runner.commands[0].args, " ") != strings.Join([]string{"artifact", "search", producerPath, "--step", producerStep, "--format", "%j\\n", "--allow-empty-results", "--include-retried-jobs=false"}, " ") {
 		t.Fatalf("commands = %#v, want exact producer search first", runner.commands)
 	}
 	if got := runner.commands[1].args[len(runner.commands[1].args)-1]; got != cliTestProducerJobID {
@@ -569,6 +569,52 @@ func TestRunJobPublishesWorkflowCommandsAsAdvisoryJobAnnotations(t *testing.T) {
 			for _, contextErr := range runner.contextErrors[len(runner.contextErrors)-len(want):] {
 				if contextErr != nil {
 					t.Fatalf("annotation inherited cancelled context: %v", contextErr)
+				}
+			}
+		})
+	}
+}
+
+func TestRunJobUsesTerminalNeedResultBeforeConditions(t *testing.T) {
+	for _, test := range []struct{ name, condition, guard, wantResult string }{
+		{"default", "", "always()", "skipped"},
+		{"always", "always()", "always()", "success"},
+		{"not cancelled", "!cancelled()", "always()", "success"},
+		{"failure", "failure()", "always()", "success"},
+		{"failure guard", "always()", "failure()", "success"},
+		{"success guard", "always()", "success()", "skipped"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			producer := transport.ResultSource{StepKey: "gha-producer", PlanDigest: transport.Digest([]byte("producer-plan"))}
+			job := cliRunJobPlan()
+			job.Dependencies = []string{producer.StepKey}
+			job.NeedSources = map[string][]plan.NeedSource{"producer": {{StepKey: producer.StepKey, PlanDigest: producer.PlanDigest}}}
+			job.Condition = test.condition
+			job.CallGuards = []plan.CallGuard{{Condition: test.guard, NeedSources: job.NeedSources}}
+			job.Outputs = map[string]string{"observed": "${{ needs.producer.result }}"}
+			planPath, planDigest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, planDigest)
+			snapshot := []byte(fmt.Sprintf(`{"key":%q,"type":"command","state":"finished","outcome":"hard_failed","env":{"BUILDKITE_GHA_PLAN_DIGEST":%q}}`, producer.StepKey, producer.PlanDigest))
+			runner := &cliCaptureRunner{stepSnapshots: map[string][]byte{producer.StepKey: snapshot}}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 0 {
+				t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+			}
+			manifest := publishedCLIManifest(t, runner, job, planDigest)
+			if manifest.Result != test.wantResult || len(runner.uploaded) != 1 {
+				t.Fatalf("published result = %#v, uploads = %#v; want only the dependent's %s result", manifest, runner.uploaded, test.wantResult)
+			}
+			if test.wantResult == "success" && !reflect.DeepEqual(manifest.Outputs, []transport.Output{{Name: "observed", Value: "failure"}}) {
+				t.Fatalf("dependent outputs = %#v, want observed failure", manifest.Outputs)
+			}
+			if strings.Count(stderr.String(), "prerequisite step") != 1 || !strings.Contains(stderr.String(), "outputs and artifacts unavailable") {
+				t.Fatalf("stderr = %q; want one warning for the direct and guard prerequisite", stderr.String())
+			}
+			if test.name == "always" {
+				guard := job.CallGuards[0]
+				guard.DeferredInputs = map[string]plan.DeferredInput{"version": {Template: "${{ needs.producer.outputs.version || 'default' }}", NeedSources: job.NeedSources}}
+				if _, _, err := gharuntime.ResolveCallGuards(t.Context(), transport.Agent{Runner: runner}, t.TempDir(), cliTestBuildID, []plan.CallGuard{guard}); !errors.Is(err, transport.ErrResultNotFound) {
+					t.Fatalf("deferred input error = %v, want missing verified result", err)
 				}
 			}
 		})
