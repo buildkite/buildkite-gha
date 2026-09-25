@@ -146,6 +146,17 @@ func TestParseNullActivityTypes(t *testing.T) {
 	}
 }
 
+func TestParseNullActivityTypesThroughTriggerAlias(t *testing.T) {
+	source := "on:\n  issues: &activities\n    types: null\n  issue_comment: *activities\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	parsed, err := Parse("types.yml", []byte(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Triggers) != 2 || parsed.Triggers[0].Types != nil || parsed.Triggers[1].Types != nil {
+		t.Fatalf("triggers = %#v, want two default-activity triggers", parsed.Triggers)
+	}
+}
+
 func TestParsePullRequestNullAndEmptyTypes(t *testing.T) {
 	for _, test := range []struct {
 		types string
