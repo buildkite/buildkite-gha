@@ -21,6 +21,7 @@ steps:
       "$$distribution_root/buildkite-gha" upload \
         --event-path testdata/public-actions/events/public-checkout.json \
         --runner-queue ubuntu-latest=hosted \
+        --runner-image ubuntu-latest=public.registry.namespace.systems/namespacelabs.dev/internal/service/githubrunner/container/ubuntu2404@sha256:e4e92abbe1406415902d8e007277a6b3f4294e647745d36f7054bcd7d83c17a8 \
         testdata/public-actions/.github/workflows/public-actions.yml
 
   - label: ":pipeline: Public actions proof continuation loader"
