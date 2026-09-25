@@ -975,6 +975,15 @@ func TestGitHubRefGlobEscapesSlashInsideWildcardClass(t *testing.T) {
 	}
 }
 
+func TestPullRequestNullAndEmptyTypesUseDefaultActivities(t *testing.T) {
+	for _, action := range []string{"opened", "synchronize", "reopened", "edited", "closed"} {
+		reason, err := TriggerFilterMismatchReason([]workflow.Trigger{{Event: "pull_request"}}, "pull_request", TriggerEventSnapshot{PullRequestAction: &action})
+		if err != nil || (reason != "") != (action == "edited" || action == "closed") {
+			t.Errorf("action %q mismatch = %q, %v", action, reason, err)
+		}
+	}
+}
+
 func TestTranslatePullRequestUsesBaseBranchAndExplicitTypes(t *testing.T) {
 	condition, err := TranslateTriggerCondition([]workflow.Trigger{{Event: "pull_request", BranchesIgnore: []string{"docs/**"}, Types: []string{"labeled", "ready_for_review"}}})
 	if err != nil {

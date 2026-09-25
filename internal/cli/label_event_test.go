@@ -26,7 +26,7 @@ func TestLabelDeclarationsAndSnapshot(t *testing.T) {
 	}
 	expressions, snapshot := snapshotTriggerState(event)
 	expressions.EventPredicate = "true"
-	for _, declaration := range []string{"label", "[push, label]", "{label: null}", "{label: {}}", "{label: {types: []}}", "{label: {types: [created, edited]}}"} {
+	for _, declaration := range []string{"label", "[push, label]", "{label: null}", "{label: {}}", "{label: {types: null}}", "{label: {types: []}}", "{label: {types: [created, edited]}}"} {
 		parsed, err := workflow.Parse("label.yml", []byte("on: "+declaration+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 		if err != nil {
 			t.Fatal(err)
@@ -34,11 +34,14 @@ func TestLabelDeclarationsAndSnapshot(t *testing.T) {
 		if _, applicable, err := buildkite.TranslateEventTriggerCondition(parsed.Triggers, "label", expressions, snapshot); err != nil || !applicable {
 			t.Fatalf("%s: %v, %v", declaration, applicable, err)
 		}
+		if reason, err := buildkite.TriggerFilterMismatchReason(parsed.Triggers, "label", snapshot); err != nil || reason != "" {
+			t.Fatalf("%s: mismatch %q, %v", declaration, reason, err)
+		}
 	}
 	if reason, err := buildkite.TriggerFilterMismatchReason([]workflow.Trigger{{Event: "label", Types: []string{"edited"}}}, "label", snapshot); err != nil || reason == "" {
 		t.Fatalf("created matched edited: %q, %v", reason, err)
 	}
-	for _, config := range []string{"types: null", "types: [labeled]", "branches: [main]", "paths: [src/**]"} {
+	for _, config := range []string{"types: [null]", "types: [labeled]", "branches: [main]", "paths: [src/**]"} {
 		parsed, err := workflow.Parse("label.yml", []byte("on: {label: {"+config+"}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 		if err == nil && buildkite.ValidateTriggerConditions(parsed.Triggers) == nil {
 			t.Fatalf("accepted %s", config)
