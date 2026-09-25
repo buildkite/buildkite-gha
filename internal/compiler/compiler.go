@@ -266,7 +266,7 @@ func ValidateWithOptionsContext(ctx context.Context, path string, source []byte,
 	context := compileContext(event, nil, path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	context.GitHub["head_ref"] = "validation"
-	runNameErr := validateWorkflowRunName(path, parsed)
+	runNameErr := ValidateWorkflowRunName(path, parsed)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
@@ -421,10 +421,10 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 }
 
 // ResolveWorkflowRunName evaluates one parsed workflow's explicit run-name
-// against the event snapshot used for compilation. Dispatch inputs are only
-// available when the workflow applies to the event.
-func ResolveWorkflowRunName(path string, parsed *workflow.Workflow, event Event, applicable bool) (string, error) {
-	context := compileContext(event, nil, path, parsed.Name)
+// against the event and pre-environment variable snapshots used for compilation.
+// Dispatch inputs are only available when the workflow applies to the event.
+func ResolveWorkflowRunName(path string, parsed *workflow.Workflow, event Event, vars VariableSources, applicable bool) (string, error) {
+	context := compileContext(event, vars.CompileTimeVars(), path, parsed.Name)
 	if applicable {
 		context.Inputs = workflowDispatchInputs(parsed, event)
 	}
@@ -448,7 +448,9 @@ func resolveWorkflowRunName(path string, parsed *workflow.Workflow, context expr
 		fmt.Errorf("%s:%d:%d: workflow run-name: %w", path, position.Line, position.Column, err))
 }
 
-func validateWorkflowRunName(path string, parsed *workflow.Workflow) error {
+// ValidateWorkflowRunName validates the authored run-name's expression surface
+// without evaluating event inputs or variable values.
+func ValidateWorkflowRunName(path string, parsed *workflow.Workflow) error {
 	if strings.TrimSpace(parsed.RunName) == "" {
 		return nil
 	}

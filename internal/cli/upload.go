@@ -273,9 +273,22 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			workflows[i].SkipReason = selection.SkipReason
 			workflows[i].AnnotationReason = selection.AnnotationReason
 		}
-		runName, runNameErr := compiler.ResolveWorkflowRunName(workflows[i].Path, workflows[i].Parsed, effectiveEvent.Event, workflows[i].Applicable)
+		if workflows[i].Applicable && !processingReportHasErrors(processingReports[i]) {
+			if err := compiler.ValidateWorkflowRunName(workflows[i].Path, workflows[i].Parsed); err != nil {
+				processingReports[i] = triggerProcessingReport(workflows[i].Path, workflows[i].Source)
+				processingReports[i].AddFailure(workflows[i].Path, workflowprocessing.StageExpressions, workflowprocessing.CodeExpressionInvalid, "compatibility", err)
+				processingReports[i].Result = "incompatible"
+			}
+		}
+	}
+	vars := resolveUploadVariables(ctx, uploadArguments.variableSource, workflows, processingReports, effectiveEvent.Event)
+	for i := range workflows {
+		if workflows[i].ReusableOnly {
+			continue
+		}
+		runName, runNameErr := compiler.ResolveWorkflowRunName(workflows[i].Path, workflows[i].Parsed, effectiveEvent.Event, vars, workflows[i].Applicable)
 		if runNameErr != nil {
-			if workflows[i].Applicable {
+			if workflows[i].Applicable && !processingReportHasErrors(processingReports[i]) {
 				if len(processingReports[i].Stages) == 0 {
 					processingReports[i] = triggerProcessingReport(workflows[i].Path, workflows[i].Source)
 				}
@@ -286,7 +299,6 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		workflows[i].RunName = runName
 	}
-	vars := resolveUploadVariables(ctx, uploadArguments.variableSource, workflows, processingReports, effectiveEvent.Event)
 	// Every workflow that reaches compilation is validated, preflighted, and
 	// compiled from one request, so those passes cannot disagree about the
 	// event, runner policy, variables, or repository source. A nil entry is

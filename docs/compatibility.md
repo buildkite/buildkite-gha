@@ -35,7 +35,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 
 | Area | Status | Initial release boundary |
 | --- | --- | --- |
-| [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name`, explicit `run-name`, and job names are retained. `run-name` supports expressions over `github` and `inputs`. |
+| [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name`, explicit `run-name`, and job names are retained. `run-name` supports expressions over `github`, `inputs`, and `vars`. |
 | [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. `workflow_call` is supported for composition. |
 | [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64. The Agent API can map compatible selectors to hosted Linux, native macOS arm64, or explicitly enabled experimental Windows x86-64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
@@ -49,7 +49,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs and locally inherited or explicitly mapped reusable jobs resolve through the destination job's Buildkite secret authority. |
 | [Job and service containers](#containers-and-services) | 🟡 Supported subset | Linux job containers and broadly compatible service definitions, including explicit registry credentials. |
 | [Environments and snapshots](#deployment-environments) | 🟡 Supported subset | Literal environments on top-level jobs, with required-reviewer approval gates and environment-scoped secret names. Wait timers, branch policies, and custom rules are rejected. Snapshots are accepted with no effect. |
-| [Variables](#repository-and-organization-variables) | 🟡 Supported subset | Repository, organization, and environment `vars` resolve inside a Buildkite job with GitHub's per-position scoping. `run-name` rejects `vars`. |
+| [Variables](#repository-and-organization-variables) | 🟡 Supported subset | Repository, organization, and environment `vars` resolve inside a Buildkite job with GitHub's per-position scoping. |
 | [OIDC](#other-secrets-and-oidc) | 🟡 Supported subset | Host JavaScript and composite actions can request Buildkite OIDC tokens in jobs with `id-token: write`. |
 | [Windows jobs](#experimental-windows-jobs) | 🟡 Experimental subset | Windows Server 2022 x86-64 requires explicit opt-in and a compatible Windows queue. No default Windows mapping. |
 | [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows arm64, Windows Server 2025, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers. |
@@ -379,7 +379,7 @@ preserve both fields. GitHub check summaries show only the concise message.
 | Key | Status | Behavior |
 | --- | --- | --- |
 | `name` | ✅ Supported | Available as `github.workflow` and used to name generated work. |
-| `run-name` | 🟡 Supported subset | An explicit non-empty value is appended to the workflow group label, when grouped. Compile-time `github` and `inputs` expressions are supported. The importer label, Buildkite build message, and provider-check names do not change. |
+| `run-name` | 🟡 Supported subset | An explicit non-empty value is appended to the workflow group label, when grouped. Compile-time `github`, `inputs`, and `vars` expressions are supported. The importer label, Buildkite build message, and provider-check names do not change. |
 | `on` | 🟡 Supported subset | Does not create a Buildkite build. Selects and filters workflows for the effective event as described below. |
 
 A workflow name is retained in generated work:
@@ -407,10 +407,10 @@ Absent properties in a known input set are empty, so expressions such as
 groups, and container images. Inputs waiting for job outputs remain unresolved
 until those outputs are available.
 
-GitHub also documents `vars` in its context-availability reference, but
-`run-name` has no `vars` source here and a reference is rejected. See
-[Repository and organization variables](#repository-and-organization-variables)
-for every other position.
+`run-name` uses [repository and organization variables](#repository-and-organization-variables),
+never environment-scoped variables. Upload resolves those scopes before evaluating
+applicable workflow names, even when `run-name` is the workflow's only `vars`
+reference, such as `run-name: Deploy ${{ vars.TARGET }}`.
 
 Buildkite controls when a build starts. The trigger declaration controls whether and under which condition the workflow group participates in that existing build:
 
@@ -1101,7 +1101,7 @@ and runtime build the `vars` context per position the way GitHub does:
 | --- | --- |
 | `jobs.<id>.if` and reusable-workflow call `if` | Repository over organization variables. GitHub evaluates these before the job's environment applies, so environment variables are never visible here. Check environment variables in a step `if`. |
 | Job `env`, `defaults.run`, `outputs`, service credentials, every step field, and action input defaults | Environment over repository over organization variables. |
-| Compile-time fields (`runs-on`, `strategy`, `concurrency`, job names, container images, reusable-workflow inputs) | Repository over organization variables. Without a source, such as `compile` outside a Buildkite job, a reference fails to compile. `environment` names must stay literal. See [Compile-time expressions](#compile-time-expressions). |
+| Compile-time fields (`run-name`, `runs-on`, `strategy`, `concurrency`, job names, container images, reusable-workflow inputs) | Repository over organization variables. Without a source, such as `compile` outside a Buildkite job, a reference fails to compile. `environment` names must stay literal. See [Compile-time expressions](#compile-time-expressions). |
 
 Names match case-insensitively, and a higher scope replaces a lower scope's
 name spelled differently. A name no scope defines evaluates to an empty
