@@ -26,6 +26,9 @@ const (
 	node16LinuxAMD64Digest   = "8440cffda5a21bf7cfda43d2c396f79777585a4c5e03ed2801fe226953a7aa11"
 	node20LinuxAMD64Digest   = "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"
 	node24LinuxAMD64Digest   = "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
+	node16LinuxARM64Digest   = "d09c34f17626ab66c8906508a831ea91dab4e5982b20c4d7a567ceaed42121bb"
+	node20LinuxARM64Digest   = "05a69ccdcb795f2a8b86c145e71a6a37cce84fccef5aaf25a8fe38bc9423e732"
+	node24LinuxARM64Digest   = "6bf69d0eda41a12030d5f28d958cd09ce323bc0c13f1ab4d8bb426933aa08812"
 	node16DarwinARM64Digest  = "83325958463d59cb0b16433eefab0a03fd1ce7d565a27e0274f507b1f3839a6e"
 	node20DarwinARM64Digest  = "38de4fc456c0c439bac48c727d378f749abb4e31f4116703bb1ee9a746fccbb6"
 	node24DarwinARM64Digest  = "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a"
@@ -180,6 +183,15 @@ func nodeDigest(goos, goarch string, major int) string {
 			return node20LinuxAMD64Digest
 		case 24:
 			return node24LinuxAMD64Digest
+		}
+	case "linux/arm64":
+		switch major {
+		case 16:
+			return node16LinuxARM64Digest
+		case 20:
+			return node20LinuxARM64Digest
+		case 24:
+			return node24LinuxARM64Digest
 		}
 	case "darwin/arm64":
 		switch major {

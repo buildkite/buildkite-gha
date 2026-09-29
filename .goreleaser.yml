@@ -13,6 +13,18 @@ builds:
       - -trimpath
     ldflags:
       - -s -w -X main.version={{.Version}}
+  - id: buildkite-gha-linux-arm64
+    main: ./cmd/buildkite-gha
+    binary: buildkite-gha
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [arm64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
   - id: buildkite-gha-darwin
     main: ./cmd/buildkite-gha
     binary: buildkite-gha
@@ -58,6 +70,21 @@ archives:
     ids: [buildkite-gha-darwin]
     formats: [tar.gz]
     name_template: buildkite-gha_Darwin_arm64
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+      owner: root
+      group: root
+    files:
+      - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+          mode: 0644
+          owner: root
+          group: root
+  - id: buildkite-gha-linux-arm64-archive
+    ids: [buildkite-gha-linux-arm64]
+    formats: [tar.gz]
+    name_template: buildkite-gha_Linux_arm64
     builds_info:
       mtime: "{{ .CommitDate }}"
       owner: root

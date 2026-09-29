@@ -43,6 +43,7 @@ type Platform struct {
 
 var (
 	PlatformLinuxAMD64   = Platform{OS: OperatingSystemLinux, Arch: ArchitectureAMD64}
+	PlatformLinuxARM64   = Platform{OS: OperatingSystemLinux, Arch: ArchitectureARM64}
 	PlatformDarwinARM64  = Platform{OS: OperatingSystemDarwin, Arch: ArchitectureARM64}
 	PlatformWindowsAMD64 = Platform{OS: OperatingSystemWindows, Arch: ArchitectureAMD64}
 )
@@ -56,6 +57,8 @@ func ParsePlatform(value string) (Platform, error) {
 	switch value {
 	case PlatformLinuxAMD64.String():
 		return PlatformLinuxAMD64, nil
+	case PlatformLinuxARM64.String():
+		return PlatformLinuxARM64, nil
 	case PlatformDarwinARM64.String():
 		return PlatformDarwinARM64, nil
 	case PlatformWindowsAMD64.String():

@@ -162,6 +162,7 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		request.DistributionDigest = distributionDigest
 		request.RuntimeDistributions = map[compiler.Platform]string{
 			compiler.PlatformLinuxAMD64:  distributionDigest,
+			compiler.PlatformLinuxARM64:  distributionDigest,
 			compiler.PlatformDarwinARM64: distributionDigest,
 		}
 		preflight, profileErr := compileHostedRequest(ctx, request)

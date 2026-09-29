@@ -5,7 +5,7 @@ Run GitHub Actions workflows as native Buildkite jobs without creating a GitHub 
 `buildkite-gha` turns each supported workflow job and matrix entry into a Buildkite job. A matrix taken from another job's output expands inside the build after that job runs. Steps run in a compatibility runtime inside that job. Buildkite owns scheduling, logs, retries, cancellation, and the build UI.
 
 > [!IMPORTANT]
-> `buildkite-gha` is an experimental pre-1.0 preview. The released plugin path supports Linux x86-64 and native macOS arm64. The production path supports local and public actions, static Buildkite job-accessible secrets, and narrowly scoped, job-bound checkout, `GITHUB_TOKEN`, OIDC, artifact, and cache integrations. Private actions and GitHub-issued OIDC claims are unsupported.
+> `buildkite-gha` is an experimental pre-1.0 preview. The released plugin path supports Linux x86-64, Linux arm64 with an explicit queue, and native macOS arm64. The production path supports local and public actions, static Buildkite job-accessible secrets, and narrowly scoped, job-bound checkout, `GITHUB_TOKEN`, OIDC, artifact, and cache integrations. Private actions and GitHub-issued OIDC claims are unsupported.
 
 ## How it works
 
@@ -48,9 +48,10 @@ GitHub Actions Pipeline Trigger integration is available only in private preview
 
 GitHub Actions Pipeline Triggers accept all seven `release` activities and apply GitHub's draft-release suppression before starting workflows. For native release builds, open the pipeline's GitHub settings, select **Additional Webhooks** > **Releases**, and use **Code** trigger mode. Native builds deliver only `published`, `created`, and `released`; affected workflows emit a compatibility warning.
 
-The importer can run on Linux x86-64 or native macOS arm64. Its agent targeting
-is independent of `runners`: each runner mapping selects the queue for generated
-workflow jobs, not the importer step.
+The importer can run on Linux x86-64, Linux arm64, or native macOS arm64. Its
+agent targeting is independent of `runners`: each runner mapping selects the
+queue for generated workflow jobs, not the importer step. Linux arm64 has no
+built-in queue or image mapping.
 
 To hold the CLI at a specific release instead, set `version` to an exact stable release from `0.9.0` onward:
 
@@ -100,7 +101,7 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 
 | Good fit | Not currently supported |
 | --- | --- |
-| Linux x86-64 and native macOS arm64 jobs; [experimental Windows x86-64 jobs](docs/compatibility.md#experimental-windows-jobs) with explicit opt-in | Windows arm64/Server 2025, Linux arm64, or macOS x86-64 |
+| Linux x86-64, explicitly queued Linux arm64, and native macOS arm64 jobs; [experimental Windows x86-64 jobs](docs/compatibility.md#experimental-windows-jobs) with explicit opt-in | Windows arm64/Server 2025 or macOS x86-64 |
 | Local and public JavaScript and composite actions; verified Dockerfile and public prebuilt-image actions on Linux | Private actions, private container images, and Docker actions on macOS |
 | Static matrices, matrices from `fromJSON(needs.<job>.outputs.<name>)`, `needs`, outputs, and local, public, or approved private reusable workflows | Dynamic reusable calls, matrices, and expressions outside the documented subset |
 | Exact-commit checkout, including managed private repository access | GitHub-issued OIDC claims or protected queues |

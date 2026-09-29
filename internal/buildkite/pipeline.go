@@ -651,7 +651,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if err != nil {
 			return fmt.Errorf("job %q: %w", job.Key, err)
 		}
-		if platform != "linux/amd64" && platform != "darwin/arm64" && platform != "windows/amd64" {
+		if platform != "linux/amd64" && platform != "linux/arm64" && platform != "darwin/arm64" && platform != "windows/amd64" {
 			return fmt.Errorf("job %q has unsupported runtime platform %q", job.Key, platform)
 		}
 		if runtimeImage != "" && !runtimeImagePattern.MatchString(runtimeImage) {
@@ -730,7 +730,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if platform == "windows/amd64" {
 			commands = windowsBootstrapCommands(distributionPath, distributionDigest, distributionProducer, artifactProducer, job)
 		}
-		experimentalRunnerUser := !pipeline.DisableRunnerUser && platform == "linux/amd64"
+		experimentalRunnerUser := !pipeline.DisableRunnerUser && strings.HasPrefix(platform, "linux/")
 		runJob := `"$distribution" run-job --plan-digest ` + shellQuote(job.PlanDigest) + " --plan-producer " + shellQuote(artifactProducer)
 		if job.EventPayload {
 			runJob += " --artifact-producer " + shellQuote(artifactProducer)
@@ -746,7 +746,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 				`if command -v sha256sum >/dev/null 2>&1; then actual_plan_digest="$(sha256sum "$plan" | awk '{print "sha256:" $1}')"; elif command -v shasum >/dev/null 2>&1; then actual_plan_digest="$(shasum -a 256 "$plan" | awk '{print "sha256:" $1}')"; else echo 'buildkite-gha: no SHA-256 tool available' >&2; exit 1; fi`,
 				"test \"$actual_plan_digest\" = "+shellQuote(job.PlanDigest),
 			)
-			commands = append(commands, experimentalRunnerUserBootstrap(job.RequiresMise, hostedToolCache, job.Cache)...)
+			commands = append(commands, experimentalRunnerUserBootstrap(platform, job.RequiresMise, hostedToolCache, job.Cache)...)
 			runJob = "BUILDKITE_GHA_PLAN_DIGEST=" + shellQuote(job.PlanDigest) + ` "$distribution" run-job --plan "$plan"`
 			if job.EventPayload {
 				runJob += " --artifact-producer " + shellQuote(artifactProducer)

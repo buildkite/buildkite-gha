@@ -36,7 +36,7 @@ func TestPluginDevCounterpartInjectionIsRequiredAndReleaseRejectsIt(t *testing.T
 }
 
 func TestPluginAcquiresVerifiedLinuxRuntimeForDarwinHost(t *testing.T) {
-	linux := pluginTestLinuxExecutable()
+	linux := pluginTestLinuxExecutable(62)
 	archive := pluginTestArchive(t, linux, false)
 	archiveDigest := sha256.Sum256(archive)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -62,6 +62,30 @@ func TestPluginAcquiresVerifiedLinuxRuntimeForDarwinHost(t *testing.T) {
 	}
 }
 
+func TestPluginAcquiresVerifiedLinuxARM64Runtime(t *testing.T) {
+	linux := pluginTestLinuxExecutable(183)
+	archive := pluginTestArchive(t, linux, false)
+	archiveDigest := sha256.Sum256(archive)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch filepath.Base(request.URL.Path) {
+		case "checksums.txt":
+			_, _ = fmt.Fprintf(response, "%x  %s\n", archiveDigest, pluginLinuxARM64Asset)
+		case pluginLinuxARM64Asset:
+			_, _ = response.Write(archive)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	distribution, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformLinuxARM64, server.Client(), server.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if distribution.digest != transport.Digest(linux) || !bytes.Equal(distribution.contents, linux) {
+		t.Fatalf("Linux ARM64 distribution = %q, %d bytes", distribution.digest, len(distribution.contents))
+	}
+}
+
 func TestPluginWindowsSelectionIsLazy(t *testing.T) {
 	host := runtimeDistribution{contents: []byte("host"), digest: "sha256:host"}
 	t.Setenv(pluginDevWindowsRuntimeEnvironment, "")
@@ -77,14 +101,14 @@ func TestPluginWindowsSelectionIsLazy(t *testing.T) {
 	}
 }
 
-func pluginTestLinuxExecutable() []byte {
+func pluginTestLinuxExecutable(machine uint16) []byte {
 	contents := make([]byte, 64)
 	copy(contents, []byte("\x7fELF"))
-	contents[4] = 2                                    // ELFCLASS64
-	contents[5] = 1                                    // ELFDATA2LSB
-	contents[6] = 1                                    // EV_CURRENT
-	binary.LittleEndian.PutUint16(contents[16:18], 2)  // ET_EXEC
-	binary.LittleEndian.PutUint16(contents[18:20], 62) // EM_X86_64
+	contents[4] = 2                                   // ELFCLASS64
+	contents[5] = 1                                   // ELFDATA2LSB
+	contents[6] = 1                                   // EV_CURRENT
+	binary.LittleEndian.PutUint16(contents[16:18], 2) // ET_EXEC
+	binary.LittleEndian.PutUint16(contents[18:20], machine)
 	binary.LittleEndian.PutUint32(contents[20:24], 1)  // EV_CURRENT
 	binary.LittleEndian.PutUint16(contents[52:54], 64) // ELF header size
 	return contents

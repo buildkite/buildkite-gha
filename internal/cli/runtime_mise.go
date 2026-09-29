@@ -26,6 +26,8 @@ import (
 const (
 	runtimeMiseArchiveDigest             = "bd0930c0b619f51ddb60e32e5cce18a5533567b2f1ba9fc4875b9f39a2bb3ed8"
 	runtimeMiseBinaryDigest              = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
+	runtimeMiseLinuxARM64ArchiveDigest   = "67c2bd96da9c6da030db4174b2dd0f8e6636c25519b23a15f0b734556e6e5ee0"
+	runtimeMiseLinuxARM64BinaryDigest    = "fd2d5227a8ad0b1e359c70527a8345a9ada72077f8dcbb559371653c3d95464f"
 	runtimeMiseDarwinARM64ArchiveDigest  = "5b883c868a0748dd0c595d30fd000ec5138dfabdeef2c30222866ebf34af1ae3"
 	runtimeMiseDarwinARM64BinaryDigest   = "e777070540ffe22cf8b2b9f88aed88b461d0887d940c4f1c1a97359463cde6e1"
 	runtimeMiseWindowsAMD64ArchiveDigest = "f366c72d65ca27eec6e61801b949a63b20d6a3a4cd9277521fc01623ac050164"
@@ -175,6 +177,15 @@ func selectRuntimeMiseRelease(goos, goarch string) (runtimeMiseRelease, error) {
 			executable:    "mise",
 			archiveDigest: runtimeMiseArchiveDigest,
 			binaryDigest:  runtimeMiseBinaryDigest,
+		}, nil
+	case "linux/arm64":
+		return runtimeMiseRelease{
+			asset:         "linux-arm64",
+			cacheKey:      "linux-arm64",
+			archiveFormat: "tar.gz",
+			executable:    "mise",
+			archiveDigest: runtimeMiseLinuxARM64ArchiveDigest,
+			binaryDigest:  runtimeMiseLinuxARM64BinaryDigest,
 		}, nil
 	case "darwin/arm64":
 		return runtimeMiseRelease{

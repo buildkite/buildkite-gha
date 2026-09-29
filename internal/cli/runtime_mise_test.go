@@ -406,6 +406,7 @@ func TestSelectRuntimeMiseRelease(t *testing.T) {
 		goos, goarch, asset, cacheKey, archiveDigest, binaryDigest string
 	}{
 		{"linux", "amd64", "linux-x64", "linux-amd64", runtimeMiseArchiveDigest, runtimeMiseBinaryDigest},
+		{"linux", "arm64", "linux-arm64", "linux-arm64", runtimeMiseLinuxARM64ArchiveDigest, runtimeMiseLinuxARM64BinaryDigest},
 		{"darwin", "arm64", "macos-arm64", "darwin-arm64", runtimeMiseDarwinARM64ArchiveDigest, runtimeMiseDarwinARM64BinaryDigest},
 		{"windows", "amd64", "windows-x64", "windows-amd64", runtimeMiseWindowsAMD64ArchiveDigest, runtimeMiseWindowsAMD64BinaryDigest},
 	} {
@@ -417,7 +418,7 @@ func TestSelectRuntimeMiseRelease(t *testing.T) {
 			t.Fatalf("selectRuntimeMiseRelease(%s/%s) = %#v", test.goos, test.goarch, selected)
 		}
 	}
-	if _, err := selectRuntimeMiseRelease("linux", "arm64"); err == nil || !strings.Contains(err.Error(), "unavailable") {
+	if _, err := selectRuntimeMiseRelease("linux", "386"); err == nil || !strings.Contains(err.Error(), "unavailable") {
 		t.Fatalf("selectRuntimeMiseRelease() unsupported platform error = %v", err)
 	}
 }

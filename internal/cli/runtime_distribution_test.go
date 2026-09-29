@@ -24,6 +24,7 @@ func TestImporterPlatform(t *testing.T) {
 		want         compiler.Platform
 	}{
 		{goos: "linux", goarch: "amd64", want: compiler.PlatformLinuxAMD64},
+		{goos: "linux", goarch: "arm64", want: compiler.PlatformLinuxARM64},
 		{goos: "darwin", goarch: "arm64", want: compiler.PlatformDarwinARM64},
 	} {
 		got, err := importerPlatform(test.goos, test.goarch)
@@ -31,8 +32,28 @@ func TestImporterPlatform(t *testing.T) {
 			t.Fatalf("importerPlatform(%q, %q) = %s, %v", test.goos, test.goarch, got, err)
 		}
 	}
-	if _, err := importerPlatform("linux", "arm64"); err == nil || !strings.Contains(err.Error(), "linux/amd64 or darwin/arm64") {
+	if _, err := importerPlatform("linux", "386"); err == nil || !strings.Contains(err.Error(), "linux/arm64") {
 		t.Fatalf("unsupported importer error = %v", err)
+	}
+}
+
+func TestLinuxARM64RuntimeDistributionValidatesELFArchitecture(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "buildkite-gha")
+	command := exec.Command("go", "build", "-o", path, "../../cmd/buildkite-gha")
+	command.Env = append(os.Environ(), "GOOS=linux", "GOARCH=arm64", "CGO_ENABLED=0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("cross-build Linux ARM64 runtime: %v\n%s", err, output)
+	}
+	distributions, err := loadRuntimeDistributions(map[compiler.Platform]string{compiler.PlatformLinuxARM64: path})
+	if err != nil || len(distributions) != 1 {
+		t.Fatalf("load Linux ARM64 distribution = %#v, %v", distributions, err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRuntimeDistributionBinary(compiler.PlatformLinuxAMD64, contents); err == nil || !strings.Contains(err.Error(), "linux/amd64") {
+		t.Fatalf("Linux AMD64 accepted ARM64 executable: %v", err)
 	}
 }
 
@@ -232,10 +253,10 @@ func TestUploadRejectsUnsupportedImporterBeforeProcessing(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &cliCaptureRunner{}
 			var stdout, stderr bytes.Buffer
-			if code := uploadFromPlatform("linux", "arm64", test.args, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner}); code != 1 {
+			if code := uploadFromPlatform("darwin", "amd64", test.args, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner}); code != 1 {
 				t.Fatalf("uploadFromPlatform() code = %d, want 1", code)
 			}
-			if got := stderr.String(); got != "buildkite-gha: upload: importer requires linux/amd64 or darwin/arm64, running on linux/arm64\n" {
+			if got := stderr.String(); got != "buildkite-gha: upload: importer requires linux/amd64, linux/arm64, or darwin/arm64, running on darwin/amd64\n" {
 				t.Fatalf("stderr = %q", got)
 			}
 			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {

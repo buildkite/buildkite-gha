@@ -441,7 +441,8 @@ The IR lists the deferred step and its jobs under `continuations`.
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
-The importer must run on Linux/amd64 or Darwin/arm64 with Buildkite agent v3.129 or newer, `BUILDKITE=true`, and `BUILDKITE_STEP_KEY`.
+The importer must run on Linux/amd64, Linux/arm64, or Darwin/arm64 with
+Buildkite agent v3.129 or newer, `BUILDKITE=true`, and `BUILDKITE_STEP_KEY`.
 
 The hidden, zero-argument `buildkite-gha plugin` entry point reads plugin
 configuration from `BUILDKITE_PLUGIN_CONFIGURATION`. It accepts:
@@ -699,10 +700,17 @@ Use repeatable mappings before the workflow path:
 ```sh
 buildkite-gha upload \
   --runner-queue ubuntu-latest=hosted \
+  --runner-queue ubuntu-24.04-arm=my-linux-arm64-queue \
   --runner-queue macos-14=macos-sonoma-arm64 \
+  --runtime-distribution linux/arm64=/opt/buildkite-gha-linux-arm64 \
   --runtime-distribution darwin/arm64=/opt/buildkite-gha-darwin \
   .github/workflows/ci.yml
 ```
+
+Linux arm64 mappings always require an explicit queue and never fall back to an
+amd64 image or emulation. The release plugin acquires and verifies
+`buildkite-gha_Linux_arm64.tar.gz` when a selected workflow needs that runtime.
+This artifact does not enable a Buildkite Hosted Linux ARM64 queue.
 
 The hosted preset accepts runner labels case-insensitively, so aliases such as
 `macOS-latest` and `Ubuntu-Latest` are equivalent to their lowercase forms.

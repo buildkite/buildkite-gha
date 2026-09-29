@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+trap 'rm -rf dist' EXIT
+
+goreleaser release --snapshot --clean --skip=publish
+
+expected="$(printf '%s\n' \
+  buildkite-gha_Darwin_arm64.tar.gz \
+  buildkite-gha_Linux_arm64.tar.gz \
+  buildkite-gha_Linux_x86_64.tar.gz \
+  buildkite-gha_Windows_x86_64.tar.gz \
+  checksums.txt | sort)"
+actual="$(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name checksums.txt \) -printf '%f\n' | sort)"
+[[ "$actual" == "$expected" ]] || {
+  printf 'unexpected release assets:\n%s\n' "$actual" >&2
+  exit 1
+}
+
+(cd dist && sha256sum --check checksums.txt)
+for archive in dist/*.tar.gz; do
+  members="$(tar -tzf "$archive" | sort)"
+  binary=buildkite-gha
+  [[ "$archive" != *Windows* ]] || binary=buildkite-gha.exe
+  [[ "$members" == "$(printf '%s\n' LICENSE "$binary" | sort)" ]] || {
+    printf 'unexpected members in %s:\n%s\n' "$archive" "$members" >&2
+    exit 1
+  }
+done
+
+work="$(mktemp -d)"
+trap 'rm -rf dist "$work"' EXIT
+tar -xzf dist/buildkite-gha_Linux_arm64.tar.gz -C "$work" buildkite-gha
+go version -m "$work/buildkite-gha" | grep -F $'\tbuild\tGOARCH=arm64' >/dev/null
+go version -m "$work/buildkite-gha" | grep -F $'\tbuild\tGOOS=linux' >/dev/null
+
+printf '%s\n' 'release artifact tests passed'

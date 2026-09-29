@@ -490,11 +490,17 @@ func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
 	case "macos-15", "macos-14":
 		// These remain available as local fallbacks when the Agent API is absent.
 		return canonical, compiler.PlatformDarwinARM64, nil
+	case "ubuntu-24.04-arm", "ubuntu-22.04-arm", "ubuntu-24.04-arm64", "ubuntu-22.04-arm64":
+		// ARM Linux requires an explicit queue. It has no built-in Hosted preset.
+		return canonical, compiler.PlatformLinuxARM64, nil
 	case "windows-latest", "windows-2022":
 		return canonical, compiler.PlatformWindowsAMD64, nil
 	default:
 		if canonical == "windows" || strings.HasPrefix(canonical, "windows-") {
 			return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q; Windows mappings support windows-latest and windows-2022", label)
+		}
+		if canonical == "arm64" || canonical == "aarch64" || strings.HasSuffix(canonical, "-arm64") || strings.HasSuffix(canonical, "-aarch64") {
+			return canonical, compiler.PlatformLinuxARM64, nil
 		}
 		// Configuring an otherwise unknown selector explicitly maps it to the
 		// supported Linux/amd64 platform. The Agent API owns compatibility
