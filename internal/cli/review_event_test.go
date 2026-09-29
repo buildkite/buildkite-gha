@@ -156,9 +156,7 @@ func TestReviewWebhookIdentity(t *testing.T) {
 func TestReviewFiltersFailClosed(t *testing.T) {
 	for _, event := range []string{"pull_request_review", "pull_request_review_comment"} {
 		for name, trigger := range map[string]workflow.Trigger{
-			"branch":       {Event: event, Branches: []string{"release"}},
-			"path":         {Event: event, Paths: []string{"src/**"}},
-			"tag":          {Event: event, TagsIgnore: []string{"v*"}},
+			"workflow":     {Event: event, Workflows: []string{"CI"}},
 			"unknown type": {Event: event, Types: []string{"approved"}},
 		} {
 			if _, err := buildkitepipeline.TranslateTriggerCondition([]workflow.Trigger{trigger}); err == nil {

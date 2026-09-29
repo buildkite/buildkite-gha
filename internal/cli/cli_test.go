@@ -171,11 +171,11 @@ func TestRunValidateAndCompile(t *testing.T) {
 			{name: "pull request tag filter", trigger: "pull_request:\n    tags: [v1]", want: "pull_request does not support the tags filter"},
 			{name: "pull request activity", trigger: "pull_request:\n    types: [auto_merge_enabled, submitted]", want: `activity type "submitted" cannot be mapped exactly`},
 			{name: "unknown release activity", trigger: "release:\n    types: [not-real]", want: `release activity type "not-real" cannot be mapped exactly`},
-			{name: "release branch filter", trigger: "release:\n    types: [published]\n    branches: [main]", want: "release does not support the branches filter"},
+			{name: "release workflow filter", trigger: "release:\n    types: [published]\n    workflows: [CI]", want: "release does not support the workflows filter"},
 			{name: "unknown issues activity", trigger: "issues:\n    types: [not-real]", want: `issues activity type "not-real" cannot be mapped exactly`},
-			{name: "issues branch filter", trigger: "issues:\n    branches: [main]", want: "issues does not support the branches filter"},
+			{name: "issues workflow filter", trigger: "issues:\n    workflows: [CI]", want: "issues does not support the workflows filter"},
 			{name: "unknown issue comment activity", trigger: "issue_comment:\n    types: [not-real]", want: `issue_comment activity type "not-real" cannot be mapped exactly`},
-			{name: "issue comment branch filter", trigger: "issue_comment:\n    branches: [main]", want: "issue_comment does not support the branches filter"},
+			{name: "issue comment workflow filter", trigger: "issue_comment:\n    workflows: [CI]", want: "issue_comment does not support the workflows filter"},
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {

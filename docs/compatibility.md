@@ -21,6 +21,34 @@ GitHub's [workflow syntax reference](https://docs.github.com/en/actions/referenc
 describes the original syntax. This page describes the subset that runs on
 Buildkite.
 
+## Compatibility policy
+
+Match GitHub Actions' exposed, reproducibly observed behavior, including surprising
+behavior. This applies to all compatibility surfaces, not just triggers. Documentation
+and specifications guide investigation; they must not override reproducible observations
+without a documented intentional exception. Documentation silence is not proof of
+rejection, and our parser, tests, or previous implementation are not a native oracle.
+
+Keep these distinctions explicit:
+
+- **Observed behavior:** record the exact declarations, activities, date, method,
+  execution context, and limits. Update the owning section of this page and regression
+  tests together when new evidence changes understanding; do not silently replace the
+  contract with a conflicting assumption.
+- **Intentional divergence:** require a strong explicit rationale. For example,
+  `pull_request_target` is deliberately excluded: its privileged base-repository
+  execution model needs a separate trust boundary from ordinary PR execution. Merely
+  admitting the event could expose authority to untrusted contributions. Neither the
+  runtime's supported-event set nor the backend's webhook matcher admits it.
+- **Not yet implemented:** native capability without a Buildkite implementation, such
+  as `repository_dispatch`, is a gap, not a security exception or native rejection.
+- **Unresolved:** absent runs, null receipts, and untested combinations do not establish
+  whether GitHub rejected, filtered, or never processed a workflow. Preserve that uncertainty.
+
+Keep private payloads, delivery receipts, seals, and full evidence archives out of this
+repository. Publish a concise behavior record sufficient to reproduce the conclusion;
+local regressions verify our implementation, not new native observations.
+
 ## Support matrix
 
 | Status | Meaning |
@@ -246,8 +274,8 @@ preview.
 
 `label` supports `created`, `edited`, and `deleted` activities, all by default.
 Scalar, array, null, empty-map, `types: null`, and `types: []` declarations select
-all three; explicit `types` selects a subset. Issue/PR `labeled` actions and branch/tag/path
-filters are not label lifecycle events and are rejected.
+all three; explicit `types` selects a subset. Branch, tag, and path filters are
+ignored. Issue/PR `labeled` actions and other filters are rejected.
 
 Pipeline Triggers require a compatible backend and the original linked payload.
 Workflow discovery and checkout use the server-resolved default-branch commit,
@@ -260,7 +288,7 @@ the backend's label subscription defaults.
 ### Branch and tag lifecycle events
 
 `create` and `delete` support scalar, array, null, and empty-map declarations.
-They have no activity types or branch/tag/path filters. These events refer to
+Branch, tag, and path filters are ignored; activity types and other filters are rejected. These events refer to
 Git refs, not repository creation/deletion. GitHub does not deliver them when
 more than three tags are created/deleted at once.
 
@@ -483,9 +511,9 @@ the group condition, and the provider-check suffix.
 | `push` | `branches`, `branches-ignore`, `tags`, and `tags-ignore`, including ordered negative patterns in an include list. Branch and tag filters select their corresponding ref kind. Matching `paths` and `paths-ignore` can be admitted for linked GitHub branch pushes when the bounded local-diff requirements below are met. |
 | `pull_request` | `branches` and `branches-ignore` match the base branch. Omitted `types`, `types: null`, and `types: []` default to `opened`, `synchronize`, and `reopened`, not every activity; explicitly listed activity types must map exactly to a supported Buildkite source action. Matching `paths` and `paths-ignore` can be admitted when the bounded local-diff requirements below are met. |
 | `merge_group` | Pipeline Triggers with a compatible server, and native Buildkite merge queue builds. Native builds require merge queue builds and Merge groups webhook delivery in the pipeline's GitHub settings. `branches` and `branches-ignore` match the base branch. Omitted `types`, `types: null`, or `types: []` selects the only supported activity, `checks_requested`; other types and tag and workflow filters are rejected. One native `destroyed` event with `reason: merged` selected explicit `[destroyed]`, not default forms; Buildkite does not support that activity ([PB-3523](https://linear.app/buildkite/issue/PB-3523)). See the [evidence limits](#activity-defaults-and-native-evidence). `paths` and `paths-ignore` are ignored with a warning, matching GitHub, which does not evaluate path filters for `merge_group` events. The ref and SHA identify the speculative queue head, not the base commit. A push to a queue ref is still a push. |
-| `release` | Pipeline Triggers accept all seven GitHub release activities. Native Buildkite release builds require **Additional Webhooks** > **Releases** and **Code** trigger mode and deliver only `published`, `created`, and `released`; workflows that select other activities emit `W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED`. Bare declarations, `types: null`, and empty `types` lists select all activities. Other explicit `types` preserve exact selection, including a scalar selecting one activity. Malformed types, unknown activities, and branch, tag, path, and workflow filters are rejected. GitHub does not trigger `created`, `edited`, `deleted`, or `unpublished` for draft releases, and Buildkite rejects those deliveries. Pipeline Triggers require the GitHub Code Access App to select the workflow at the immutable peeled tag commit. The ref is `refs/tags/<tag_name>`. The SHA is the server-resolved peeled commit, or the checked-out commit for the native compatibility fallback. Existing hosted release `GITHUB_TOKEN` policy is unchanged. |
-| `deployment`, `deployment_status` | Pipeline Triggers with a compatible server, or explicit event snapshots. Bare, array, null, and empty-map declarations are supported; activity types and event filters are not. Workflows and checkout use the deployment commit. The ref identifies its branch or tag and is empty for SHA-only deployments. Status states `error`, `failure`, `in_progress`, `queued`, `pending`, `success`, and `waiting` are supported ([GitHub status enum](https://docs.github.com/en/graphql/reference/enums#deploymentstatusstate)); `inactive` cannot run a workflow. The genuine payload exposes `github.event.deployment` and `github.event.deployment_status`, including environment, state, `environment_url`, `log_url`, and `target_url` when present. Use job/step conditions on these values, not `types` or environment filters. No deployment creation or environment orchestration is added. |
-| `create`, `delete` | [Branch and tag lifecycle](#branch-and-tag-lifecycle-events). No activity types or filters. Creation uses the exact ref's resolved commit; deletion uses the default branch. |
+| `release` | Pipeline Triggers accept all seven GitHub release activities. Native Buildkite release builds require **Additional Webhooks** > **Releases** and **Code** trigger mode and deliver only `published`, `created`, and `released`; workflows that select other activities emit `W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED`. Bare declarations, `types: null`, and empty `types` lists select all activities. Other explicit `types` preserve exact selection, including a scalar selecting one activity. Branch, tag, and path filters are ignored; malformed types, unknown activities, and workflow filters are rejected. GitHub does not trigger `created`, `edited`, `deleted`, or `unpublished` for draft releases, and Buildkite rejects those deliveries. Pipeline Triggers require the GitHub Code Access App to select the workflow at the immutable peeled tag commit. The ref is `refs/tags/<tag_name>`. The SHA is the server-resolved peeled commit, or the checked-out commit for the native compatibility fallback. Existing hosted release `GITHUB_TOKEN` policy is unchanged. |
+| `deployment`, `deployment_status` | Pipeline Triggers with a compatible server, or explicit event snapshots. Bare, array, null, and empty-map declarations are supported. Branch, tag, and path filters are ignored; activity types and other event filters are rejected. Workflows and checkout use the deployment commit. The ref identifies its branch or tag and is empty for SHA-only deployments. Status states `error`, `failure`, `in_progress`, `queued`, `pending`, `success`, and `waiting` are supported ([GitHub status enum](https://docs.github.com/en/graphql/reference/enums#deploymentstatusstate)); `inactive` cannot run a workflow. The genuine payload exposes `github.event.deployment` and `github.event.deployment_status`, including environment, state, `environment_url`, `log_url`, and `target_url` when present. Use job/step conditions on these values, not `types` or environment filters. No deployment creation or environment orchestration is added. |
+| `create`, `delete` | [Branch and tag lifecycle](#branch-and-tag-lifecycle-events). Branch, tag, and path filters are ignored; activity types and other filters are rejected. Creation uses the exact ref's resolved commit; deletion uses the default branch. |
 | `label` | [Repository label lifecycle](#repository-label-lifecycle-events). `created`, `edited`, and `deleted`, all by default. Workflows and checkout use the resolved default branch. |
 | `fork` | [Repository forks](#repository-fork-events). Null/empty `types` accepted; branch, tag, and path filters ignored; other filters rejected. Workflows and checkout use the source repository's resolved default branch, not the forkee. |
 | `public` | [Repository visibility](#repository-visibility-events). Null/empty `types` accepted; branch, tag, and path filters ignored; other filters rejected. Workflows and checkout use the resolved default branch. |
@@ -496,8 +524,8 @@ the group condition, and the provider-check suffix.
 | `branch_protection_rule` | [Branch protection rules](#branch-protection-rule-events). `created`, `edited`, and `deleted`, all by default. Workflows and checkout use the resolved default branch, not the rule's pattern. |
 | `discussion` | [Discussions](#discussion-events). The 15 supported activities, all by default, including null/empty `types`; branch, tag, and path filters ignored. Each event uses its repository's default branch, including separate source and destination events for transfers. |
 | `discussion_comment` | [Discussion comments](#discussion-events). `created`, `edited`, and `deleted`, all by default, on the source default branch. |
-| `issues` | Omitted `types`, `types: null`, or `types: []` accepts every GitHub Actions issue activity. Nonempty `types` may contain `opened`, `edited`, `deleted`, `transferred`, `pinned`, `unpinned`, `closed`, `reopened`, `assigned`, `unassigned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `milestoned`, `demilestoned`, `typed`, `untyped`, `field_added`, and `field_removed`. Unknown types and branch, tag, path, or workflow filters are rejected. In a GitHub Actions Pipeline Trigger build, Buildkite selects workflows and the checkout from the latest verified default-branch SHA; native issue-build settings, branch/path filters, and comment gating do not participate. Existing native Buildkite issue builds remain supported through linked webhook data and retain their own build-creation settings. |
-| `issue_comment` | Omitted `types`, `types: null`, or `types: []` accepts `created`, `edited`, and `deleted`; nonempty `types` may contain those activities. Both issue and pull request conversation comments are supported. Unknown types and branch, tag, path, or workflow filters are rejected. GitHub Actions Pipeline Trigger builds select workflows and the checkout from the latest verified default-branch SHA and do not inherit native command-word, trusted-commenter, PR-only, branch, or path gating. |
+| `issues` | Omitted `types`, `types: null`, or `types: []` accepts every GitHub Actions issue activity. Nonempty `types` may contain `opened`, `edited`, `deleted`, `transferred`, `pinned`, `unpinned`, `closed`, `reopened`, `assigned`, `unassigned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `milestoned`, `demilestoned`, `typed`, `untyped`, `field_added`, and `field_removed`. Branch, tag, and path filters are ignored; unknown types and workflow filters are rejected. In a GitHub Actions Pipeline Trigger build, Buildkite selects workflows and the checkout from the latest verified default-branch SHA; native issue-build settings, branch/path filters, and comment gating do not participate. Existing native Buildkite issue builds remain supported through linked webhook data and retain their own build-creation settings. |
+| `issue_comment` | Omitted `types`, `types: null`, or `types: []` accepts `created`, `edited`, and `deleted`; nonempty `types` may contain those activities. Both issue and pull request conversation comments are supported. Branch, tag, and path filters are ignored; unknown types and workflow filters are rejected. GitHub Actions Pipeline Trigger builds select workflows and the checkout from the latest verified default-branch SHA and do not inherit native command-word, trusted-commenter, PR-only, branch, or path gating. |
 | `pull_request_review` | Pipeline Triggers support `submitted`, `edited`, and `dismissed`, all by default. Nonempty `types` selects activities, not review states. Use `if: github.event.review.state == 'approved'` on a job or step for approval-only execution. |
 | `pull_request_review_comment` | Pipeline Triggers support inline diff-comment `created`, `edited`, and `deleted` activities, all by default. These are distinct from submitted reviews and `issue_comment` conversation comments. |
 | `workflow_dispatch` | Selected only by an explicit snapshot or authoritative `GITHUB_EVENT_NAME` or `BUILDKITE_GITHUB_EVENT` value. Webhook-style branch, tag, type, and workflow filters are unsupported. |
@@ -512,8 +540,8 @@ the group condition, and the provider-check suffix.
 Supported `pull_request` activity types are `assigned`, `unassigned`, `labeled`, `unlabeled`, `opened`, `edited`, `closed`, `reopened`, `synchronize`, `converted_to_draft`, `locked`, `unlocked`, `enqueued`, `dequeued`, `milestoned`, `demilestoned`, `ready_for_review`, `review_requested`, `review_request_removed`, `auto_merge_enabled`, and `auto_merge_disabled`.
 
 Both review events accept scalar, array, and map `on` declarations, including
-empty maps, `types: null`, and `types: []` for all activities. Unknown types and branch, tag,
-path, and workflow filters are rejected. The workflow and checkout use the PR
+empty maps, `types: null`, and `types: []` for all activities. Branch, tag, and path
+filters are ignored; unknown types and workflow filters are rejected. The workflow and checkout use the PR
 head SHA, not the synthetic merge commit or an older reviewed commit; the event
 ref remains `refs/pull/<number>/merge`. There is no default-branch-only workflow
 requirement. Use `github.event.pull_request.head.ref` and `.base.ref` for branch
@@ -529,6 +557,58 @@ without retained payloads fail explicitly. See the
 [server-selected event contract](cli.md#private-preview-pipeline-trigger-selection).
 
 GitHub defines seven release activities: `published`, `unpublished`, `created`, `edited`, `deleted`, `prereleased`, and `released`. A bare `on: release` selects all seven. Pipeline Triggers accept all seven and apply GitHub's draft-release suppression before starting workflows. Native release builds deliver three and emit `W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED` when a workflow also selects `unpublished`, `edited`, `deleted`, or `prereleased`.
+
+#### Ignored event filters and native evidence
+
+`issues`, `issue_comment`, `label`, `release`, `create`, `delete`, `deployment`,
+`deployment_status`, `pull_request_review`, and `pull_request_review_comment` accept
+but ignore all six branch/tag/path filter keys. Activity selection, default/null
+normalization, unknown-key rejection, provenance and security checks still apply.
+This does not change real `push`/`pull_request` path/ref filters or `merge_group`
+base-branch filters.
+
+On September 29, 2026, isolated native GitHub Actions workflows each declared one
+of these filters, plus the matching `types: [activity]` where shown below:
+
+| Key | Exact tested value |
+| --- | --- |
+| `branches` | `["__lab_never_branch__"]` |
+| `tags` | `["__lab_never_tag__"]` |
+| `paths` | `["__lab_never_path__/**"]` |
+| `branches-ignore`, `tags-ignore`, `paths-ignore` | `["**"]`, tested separately |
+
+| Event | Tested activity/context | Declared `types` |
+| --- | --- | --- |
+| `issues` | `opened` | `[opened]` |
+| `issue_comment` | `created`, issue conversation | `[created]` |
+| `label` | `created`, repository label | `[created]` |
+| `release` | `published` | `[published]` |
+| `create`, `delete` | Tag creation/deletion, not branch lifecycle | Omitted |
+| `deployment` | Payload action `created` | Omitted |
+| `deployment_status` | Payload action `created`, state `success` | Omitted |
+| `pull_request_review` | `submitted`, COMMENT review | `[submitted]` |
+| `pull_request_review_comment` | `created`, inline diff comment | `[created]` |
+
+All 60 native filter workflows and their ten unfiltered positive controls succeeded.
+The pre-fix Buildkite backend selected only those controls with runtime v0.91.1;
+it created no builds for the 60 filter workflows. This is evidence of a selection
+gap, not an intentional difference or proof of a particular failing stage. Exact
+executed workflow bytes, original events, checkout identity, expression probes and
+producer-bound results were checked; native reviews used synthetic merge commits,
+while hosted reviews used PR heads. Offline comparison and corruption tests checked
+source, runtime, producer and event linkage. No incomplete, missing-probe or
+unattributed runs remained.
+
+Limits: this evidence does not prove branch `create`/`delete`, other activities,
+combined filters, malformed values, or unknown keys. The shared implementation
+ignores these keys at the event level, not only for the sampled activity/ref kind.
+Four separate `tags`/`tags-ignore` cases on `pull_request.opened` and
+`merge_group.checks_requested` had no native or hosted runs despite successful
+unfiltered controls. Their cause remains ambiguous; this change does not admit
+those filters. Twenty-three incidental null receipts also remain unresolved;
+a quiet window does not prove per-delivery completion. The comparator intentionally
+reported these limits separately from the 60 proved gaps. This pre-fix experiment
+does not prove post-fix hosted execution or fleet-wide runtime selection.
 
 #### Activity defaults and native evidence
 

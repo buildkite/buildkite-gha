@@ -12,17 +12,16 @@ func TestTriggerFilterErrorLocations(t *testing.T) {
 	for _, test := range []struct {
 		event, filter, value, message string
 	}{
-		{"pull_request_review", "branches", "[main]", "does not support the branches filter"},
-		{"issue_comment", "branches-ignore", "[main]", "does not support the branches-ignore filter"},
+		{"pull_request_review", "workflows", "[CI]", "does not support the workflows filter"},
+		{"issue_comment", "workflows", "[CI]", "does not support the workflows filter"},
 		{"merge_group", "tags-ignore", "[v1]", "does not support the tags-ignore filter"},
 		{"pull_request", "workflows", "[CI]", "does not support the workflows filter"},
 		{"push", "types", "[created]", "does not support the types filter"},
-		{"release", "branches", "[main]", "does not support the branches filter"},
+		{"release", "workflows", "[CI]", "does not support the workflows filter"},
 		{"deployment", "types", "[created]", "does not support the types filter"},
 		{"push", "branches-ignore", "['!main']", "cannot be negated"},
 		{"push", "tags", "['!v1']", "must follow a positive"},
 		{"pull_request", "paths-ignore", "['!src/**']", "cannot be negated"},
-		{"issues", "paths", "['src/**']", "path filters are unsupported"},
 		{"release", "types", "[not-real]", "cannot be mapped exactly"},
 		{"merge_group", "types", "[destroyed]", "checks_requested is the only"},
 	} {
@@ -37,12 +36,6 @@ func TestTriggerFilterErrorLocations(t *testing.T) {
 			var located *TriggerError
 			if !errors.As(err, &located) || located.Position != (workflow.Position{Line: 4, Column: 5}) || !strings.Contains(err.Error(), test.message) {
 				t.Fatalf("error = %v, location = %#v", err, located)
-			}
-			if test.event == "issues" && test.filter == "paths" {
-				var unsupported *UnsupportedPathFiltersError
-				if !errors.As(err, &unsupported) {
-					t.Fatal("lost typed path-filter error")
-				}
 			}
 		})
 	}
@@ -67,8 +60,7 @@ func TestUnfilteredWebhookTriggerConditions(t *testing.T) {
 			}
 			switch event {
 			case "deployment", "deployment_status", "create", "delete":
-				rejected = append(rejected, workflow.Trigger{Types: []string{}}, workflow.Trigger{Branches: []string{"main"}},
-					workflow.Trigger{BranchesIgnore: []string{"main"}}, workflow.Trigger{Tags: []string{"v1"}}, workflow.Trigger{Paths: []string{"src/**"}})
+				rejected = append(rejected, workflow.Trigger{Types: []string{}})
 			}
 			for _, trigger := range rejected {
 				trigger.Event = event
@@ -182,22 +174,23 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 		{name: "unsupported merge group type", triggers: []workflow.Trigger{{Event: "merge_group", Types: []string{"destroyed"}}}, want: `merge_group type "destroyed" is unsupported`},
 		{name: "merge group tags", triggers: []workflow.Trigger{{Event: "merge_group", Tags: []string{"v*"}}}, want: "does not support the tags filter"},
 		{name: "unknown release type", triggers: []workflow.Trigger{{Event: "release", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
-		{name: "release branch filter", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Branches: []string{"main"}}}, want: "does not support the branches filter"},
-		{name: "release paths", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Paths: []string{"src/**"}}}, want: "path filters are unsupported"},
+		{name: "release workflows", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Workflows: []string{"CI"}}}, want: "does not support the workflows filter"},
 		{name: "unknown issues type", triggers: []workflow.Trigger{{Event: "issues", Types: []string{"not-real"}}}, want: `issues activity type "not-real" cannot be mapped exactly`},
-		{name: "issues branches", triggers: []workflow.Trigger{{Event: "issues", Branches: []string{"main"}}}, want: "issues does not support the branches filter"},
-		{name: "issues tags", triggers: []workflow.Trigger{{Event: "issues", Tags: []string{"v*"}}}, want: "issues does not support the tags filter"},
-		{name: "issues paths", triggers: []workflow.Trigger{{Event: "issues", Paths: []string{"src/**"}}}, want: "issues path filters are unsupported"},
 		{name: "issues workflows", triggers: []workflow.Trigger{{Event: "issues", Workflows: []string{"CI"}}}, want: "issues does not support the workflows filter"},
 		{name: "unknown issue comment type", triggers: []workflow.Trigger{{Event: "issue_comment", Types: []string{"not-real"}}}, want: `issue_comment activity type "not-real" cannot be mapped exactly`},
-		{name: "issue comment branches", triggers: []workflow.Trigger{{Event: "issue_comment", Branches: []string{"main"}}}, want: "issue_comment does not support the branches filter"},
-		{name: "issue comment paths", triggers: []workflow.Trigger{{Event: "issue_comment", Paths: []string{"src/**"}}}, want: "issue_comment path filters are unsupported"},
+		{name: "issue comment workflows", triggers: []workflow.Trigger{{Event: "issue_comment", Workflows: []string{"CI"}}}, want: "issue_comment does not support the workflows filter"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := TranslateTriggerCondition(test.triggers)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Errorf("TranslateTriggerCondition(%v) error = %v, want %q", test.triggers, err, test.want)
+			}
+			if test.name == "paths" {
+				var unsupported *UnsupportedPathFiltersError
+				if !errors.As(err, &unsupported) {
+					t.Fatal("lost typed path-filter error")
+				}
 			}
 		})
 	}
