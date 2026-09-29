@@ -755,7 +755,7 @@ jobs:
 		}{Image: step.Image, Agents: step.Agents, Command: step.Command}
 	}
 	selected, defaulted := steps["gha-selected"], steps["gha-default"]
-	if selected.Image != image || selected.Agents["queue"] != "hosted" || !strings.Contains(selected.Command, "--hosted-tool-cache") {
+	if selected.Image != image || selected.Agents["queue"] != "hosted" || !strings.Contains(selected.Command, "--hosted-tool-cache") || strings.Contains(selected.Command, "--docker-build-load") {
 		t.Fatalf("selected profile step = %#v", selected)
 	}
 	if defaulted.Image != defaultJammyRunnerImage || len(defaulted.Agents) != 0 || !strings.Contains(defaulted.Command, "--hosted-tool-cache") {

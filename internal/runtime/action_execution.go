@@ -505,6 +505,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			r.implicitJobPATH = jobResult.Env["PATH"]
 		}
 	}
+	r.enableDockerBuildLoad(processor, jobResult.Env)
 	eval.Env = jobResult.Env
 	r.workspace = workspace
 	r.processor = processor

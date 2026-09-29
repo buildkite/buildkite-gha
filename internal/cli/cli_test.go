@@ -2333,7 +2333,10 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, err := runJobArgs([]string{"--plan", "one", "--hosted-tool-cache", "--hosted-tool-cache"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("runJobArgs() error = %v, want duplicate hosted tool cache error", err)
 	}
-	if options, err := runJobArgs([]string{"--hosted-tool-cache", "--result", "result.json", "--plan", "plan.json"}); err != nil || options.planPath != "plan.json" || options.resultPath != "result.json" || !options.hostedToolCache {
+	if options, err := runJobArgs([]string{"--hosted-tool-cache", "--result", "result.json", "--plan", "plan.json"}); err != nil || options.planPath != "plan.json" || options.resultPath != "result.json" || !options.hostedToolCache || options.dockerBuildLoad {
+		t.Fatalf("unexpected run-job options: %+v %v", options, err)
+	}
+	if options, err := runJobArgs([]string{"--docker-build-load", "--plan", "plan.json"}); err != nil || !options.dockerBuildLoad || options.hostedToolCache {
 		t.Fatalf("runJobArgs() = %#v, %v", options, err)
 	}
 	if _, err := runJobArgs([]string{"--plan", "plan.json", "--plan-digest", "sha256:" + strings.Repeat("0", 64)}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {

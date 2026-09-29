@@ -2392,6 +2392,21 @@ the host's preinstalled tools. Native Namespace targets currently return
 existing `/opt/hostedtoolcache` behavior, including local hosted-toolchains
 presets and explicitly configured images.
 
+On native Namespace runners (`nsc-gha-image`), the Docker CLI routes
+`docker build` to a buildx builder with the `remote` driver, so
+`docker build -t app . && docker run app` would fail with `No output specified
+with remote driver`. At job start, the runtime adds `default-load=true` to the
+runner's stored single-node buildx builders that use the `remote`,
+`docker-container`, or `kubernetes` driver, so plain `docker build` loads the
+image into the Docker daemon as on GitHub-hosted runners. Explicit `--push` or
+`--output` flags still control the output. Builders with more than one node are
+left unchanged, because buildx rejects the load that `default-load` implies
+when a build spans nodes and an output-less multi-platform build that ran
+cache-only would fail; the job log names each skipped builder, and plain
+`docker build` still needs `--load` there. The node count of `nsc-remote`
+depends on the Namespace tenant. Problems print one warning and never fail the
+job.
+
 On macOS, the bootstrap creates `/Users/runner/hostedtoolcache`, makes it owned
 and writable by the agent user, and selects it as `RUNNER_TOOL_CACHE`. This
 requires non-interactive `sudo` and preserves the fixed installation prefix

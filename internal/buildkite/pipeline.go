@@ -762,6 +762,11 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if hostedToolCache {
 			runJob += " --hosted-tool-cache"
 		}
+		// Native Namespace runners route `docker build` to a remote buildx
+		// builder; see runtime.enableDockerBuildLoad.
+		if job.Agents["nsc-gha-image"] != "" {
+			runJob += " --docker-build-load"
+		}
 		if experimentalRunnerUser {
 			runJob = experimentalRunnerUserCommand(runJob)
 		}

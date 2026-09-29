@@ -280,6 +280,12 @@ func mapEnv(values map[string]string) []string {
 }
 
 func processEnv(overrides map[string]string) []string {
+	return mapEnv(processEnvValues(overrides))
+}
+
+// processEnvValues returns the environment a runtime-started process observes:
+// the inherited allowlist below merged with the given overrides.
+func processEnvValues(overrides map[string]string) map[string]string {
 	// This allowlist is also the mise trust boundary: ambient MISE_* values must
 	// never redirect compatibility runtime downloads or verification.
 	values := make(map[string]string, 6+len(overrides))
@@ -306,7 +312,7 @@ func processEnv(overrides map[string]string) []string {
 		values["TMPDIR"] = os.TempDir()
 	}
 	mergeEnvironmentInto(values, overrides)
-	return mapEnv(values)
+	return values
 }
 
 func environmentValue(env map[string]string, name string) string {
