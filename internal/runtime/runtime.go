@@ -47,6 +47,7 @@ type Runner struct {
 	MiseDataDir           string
 	ToolCache             string
 	Docker                string
+	DockerBuildLoad       bool // see enableDockerBuildLoad
 	RuntimeExecutable     string
 	Git                   string
 	GitLFS                string

@@ -26,7 +26,7 @@ var commandUsage = map[string]string{
 	"compile":         "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
 	"upload":          "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--private-reusable-workflows] [--experimental-runner-user=<boolean>] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n       buildkite-gha upload --stage-digest <digest> --stage-producer <job>\n",
 	"migrate-secrets": "Usage:\n  buildkite-gha migrate-secrets prepare [--organization <slug>] [--cluster <id>] [--pipeline <slug>] [--policy-file <path>] [--secret <name>]... [--match <glob>]... [--output <path>]\n  buildkite-gha migrate-secrets run --workflow <path>\n",
-	"run-job":         "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--artifact-producer <job>] [--result <path>] [--hosted-tool-cache]\n",
+	"run-job":         "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--artifact-producer <job>] [--result <path>] [--hosted-tool-cache] [--docker-build-load]\n",
 }
 
 func writeCommandHelp(stdout io.Writer, command string) {

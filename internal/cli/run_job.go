@@ -230,12 +230,13 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 	}
 	runner := gharuntime.Runner{
-		Stdout:      stdout,
-		Stderr:      stderr,
-		MiseDataDir: prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
-		ToolCache:   runnerToolCache,
-		Docker:      os.Getenv("BUILDKITE_GHA_DOCKER"),
-		Git:         os.Getenv("BUILDKITE_GHA_GIT"),
+		Stdout:          stdout,
+		Stderr:          stderr,
+		MiseDataDir:     prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
+		ToolCache:       runnerToolCache,
+		Docker:          os.Getenv("BUILDKITE_GHA_DOCKER"),
+		DockerBuildLoad: options.dockerBuildLoad,
+		Git:             os.Getenv("BUILDKITE_GHA_GIT"),
 		Secrets: gharuntime.AgentSecrets{
 			Executable: os.Getenv("BUILDKITE_GHA_AGENT"),
 			Endpoint:   os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
@@ -548,6 +549,7 @@ type runJobOptions struct {
 	artifactProducer string
 	resultPath       string
 	hostedToolCache  bool
+	dockerBuildLoad  bool
 }
 
 func runJobArgs(args []string) (runJobOptions, error) {
@@ -555,12 +557,16 @@ func runJobArgs(args []string) (runJobOptions, error) {
 	seen := map[string]bool{}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--hosted-tool-cache":
+		case "--hosted-tool-cache", "--docker-build-load":
 			if seen[args[i]] {
 				return runJobOptions{}, fmt.Errorf("%s may only be specified once", args[i])
 			}
 			seen[args[i]] = true
-			options.hostedToolCache = true
+			if args[i] == "--hosted-tool-cache" {
+				options.hostedToolCache = true
+			} else {
+				options.dockerBuildLoad = true
+			}
 		case "--plan", "--plan-digest", "--plan-producer", "--artifact-producer", "--result":
 			option := args[i]
 			if seen[option] {

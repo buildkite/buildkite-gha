@@ -211,7 +211,7 @@ func TestContinueRunsOnPreservesNativeAgentEnvironments(t *testing.T) {
 		if strings.HasSuffix(step.Key, "-build") {
 			want = "ubuntu-22.04"
 		}
-		if step.Image != "" || step.Agents["nsc-gha-image"] != want || step.Agents["queue"] != "native" || strings.Contains(step.Command, "--hosted-tool-cache") {
+		if step.Image != "" || step.Agents["nsc-gha-image"] != want || step.Agents["queue"] != "native" || strings.Contains(step.Command, "--hosted-tool-cache") || !strings.Contains(step.Command, "--docker-build-load") {
 			t.Fatalf("expanded host = %#v, want %s", step, want)
 		}
 	}
