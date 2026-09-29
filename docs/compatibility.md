@@ -480,7 +480,7 @@ the group condition, and the provider-check suffix.
 | --- | --- |
 | `push` | `branches`, `branches-ignore`, `tags`, and `tags-ignore`, including ordered negative patterns in an include list. Branch and tag filters select their corresponding ref kind. Matching `paths` and `paths-ignore` can be admitted for linked GitHub branch pushes when the bounded local-diff requirements below are met. |
 | `pull_request` | `branches` and `branches-ignore` match the base branch. Omitted `types`, `types: null`, and `types: []` default to `opened`, `synchronize`, and `reopened`, not every activity; explicitly listed activity types must map exactly to a supported Buildkite source action. Matching `paths` and `paths-ignore` can be admitted when the bounded local-diff requirements below are met. |
-| `merge_group` | Pipeline Triggers with a compatible server, and native Buildkite merge queue builds. Native builds require merge queue builds and Merge groups webhook delivery in the pipeline's GitHub settings. `branches` and `branches-ignore` match the base branch. Omitted `types`, `types: null`, or `types: []` selects the only supported activity, `checks_requested`; other types and tag and workflow filters are rejected. `destroyed` is not a workflow event. `paths` and `paths-ignore` are ignored with a warning, matching GitHub, which does not evaluate path filters for `merge_group` events. The ref and SHA identify the speculative queue head, not the base commit. A push to a queue ref is still a push. |
+| `merge_group` | Pipeline Triggers with a compatible server, and native Buildkite merge queue builds. Native builds require merge queue builds and Merge groups webhook delivery in the pipeline's GitHub settings. `branches` and `branches-ignore` match the base branch. Omitted `types`, `types: null`, or `types: []` selects the only supported activity, `checks_requested`; other types and tag and workflow filters are rejected. One native `destroyed` event with `reason: merged` selected explicit `[destroyed]`, not default forms; Buildkite does not support that activity ([PB-3523](https://linear.app/buildkite/issue/PB-3523)). See the [evidence limits](#activity-defaults-and-native-evidence). `paths` and `paths-ignore` are ignored with a warning, matching GitHub, which does not evaluate path filters for `merge_group` events. The ref and SHA identify the speculative queue head, not the base commit. A push to a queue ref is still a push. |
 | `release` | Pipeline Triggers accept all seven GitHub release activities. Native Buildkite release builds require **Additional Webhooks** > **Releases** and **Code** trigger mode and deliver only `published`, `created`, and `released`; workflows that select other activities emit `W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED`. Bare declarations, `types: null`, and empty `types` lists select all activities. Other explicit `types` preserve exact selection, including a scalar selecting one activity. Malformed types, unknown activities, and branch, tag, path, and workflow filters are rejected. GitHub does not trigger `created`, `edited`, `deleted`, or `unpublished` for draft releases, and Buildkite rejects those deliveries. Pipeline Triggers require the GitHub Code Access App to select the workflow at the immutable peeled tag commit. The ref is `refs/tags/<tag_name>`. The SHA is the server-resolved peeled commit, or the checked-out commit for the native compatibility fallback. Existing hosted release `GITHUB_TOKEN` policy is unchanged. |
 | `deployment`, `deployment_status` | Pipeline Triggers with a compatible server, or explicit event snapshots. Bare, array, null, and empty-map declarations are supported; activity types and event filters are not. Workflows and checkout use the deployment commit. The ref identifies its branch or tag and is empty for SHA-only deployments. Status states `error`, `failure`, `in_progress`, `queued`, `pending`, `success`, and `waiting` are supported ([GitHub status enum](https://docs.github.com/en/graphql/reference/enums#deploymentstatusstate)); `inactive` cannot run a workflow. The genuine payload exposes `github.event.deployment` and `github.event.deployment_status`, including environment, state, `environment_url`, `log_url`, and `target_url` when present. Use job/step conditions on these values, not `types` or environment filters. No deployment creation or environment orchestration is added. |
 | `create`, `delete` | [Branch and tag lifecycle](#branch-and-tag-lifecycle-events). No activity types or filters. Creation uses the exact ref's resolved commit; deletion uses the default branch. |
@@ -527,6 +527,141 @@ without retained payloads fail explicitly. See the
 [server-selected event contract](cli.md#private-preview-pipeline-trigger-selection).
 
 GitHub defines seven release activities: `published`, `unpublished`, `created`, `edited`, `deleted`, `prereleased`, and `released`. A bare `on: release` selects all seven. Pipeline Triggers accept all seven and apply GitHub's draft-release suppression before starting workflows. Native release builds deliver three and emit `W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED` when a workflow also selects `unpublished`, `edited`, `deleted`, or `prereleased`.
+
+#### Activity defaults and native evidence
+
+For `issues`, `issue_comment`, `label`, `release`, `pull_request_review`,
+`pull_request_review_comment`, `pull_request`, and `merge_group`, these forms
+select the event's default activities listed above:
+
+| Form | Example declaration |
+| --- | --- |
+| Omitted types | `on: {pull_request: {}}` |
+| Literal YAML null | `on: {pull_request: {types: null}}` |
+| Empty sequence | `on: {pull_request: {types: []}}` |
+
+Defaults are not an unconditional match: PR defaults exclude `edited` and `closed`, and
+merge-group defaults exclude `destroyed`. Other event restrictions still apply.
+A nonempty `types` declaration selects its listed supported activities instead.
+This rule does not permit `types` on events that reject it, such as `push`.
+The eight-family null normalization requires v0.90.0 or later and a compatible
+backend; publishing a runtime does not prove that a hosted build selected it.
+
+The table below records GitHub Actions executions observed on September 24 and
+29, 2026, not an exhaustive activity matrix. Other default activities listed above follow
+[GitHub's documented defaults](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)
+and the Buildkite implementation; they were not emitted in this evidence set.
+The retained control matrices are in [PB-3483](https://linear.app/buildkite/issue/PB-3483) and
+[PB-3501](https://linear.app/buildkite/issue/PB-3501). Source links pin the workflow
+bytes; run links identify executions. Neither alone proves the entire matrix.
+
+| Date (2026) | Event | Observed activities selected by omitted/null/empty types | Immutable source and native runs |
+| --- | --- | --- | --- |
+| September 29 | `issues` | `opened` | [Null source][issues-null-source]; [omitted][issues-omitted-run], [null][issues-null-run], [empty][issues-empty-run], [explicit opened][issues-matching-run] |
+| September 24 | `issue_comment` | `created` | [Null source][issue-comment-null-source]; [null run][issue-comment-null-run] |
+| September 24 | `label` | `created` | [Null source][label-null-source]; [null run][label-null-run] |
+| September 24 | `release` | `published`, `released`, `created` | [Null source][release-null-source]; null runs: [published][release-published-run], [released][release-released-run], [created][release-created-run] |
+| September 24 | `pull_request` | `opened` | [Null source][pr-null-source]; [null run][pr-null-run]; [empty source][pr-empty-source] and [run][pr-empty-run] |
+| September 29 | `pull_request` | `synchronize` | [Null source][pr-followup-null-source]; [omitted][pr-sync-omitted-run], [null][pr-sync-null-run], [empty][pr-sync-empty-run], [explicit matching][pr-sync-matching-run] |
+| September 29 | `pull_request` | `reopened` | [Null source][pr-followup-null-source]; [omitted][pr-reopened-omitted-run], [null][pr-reopened-null-run], [empty][pr-reopened-empty-run], [explicit matching][pr-reopened-matching-run] |
+| September 24 | `pull_request_review` | `submitted` | [Null source][review-null-source]; [null run][review-null-run] |
+| September 24 | `pull_request_review_comment` | `created` | [Null source][review-comment-null-source]; [null run][review-comment-null-run] |
+| September 24 | `merge_group` | `checks_requested` | [Null source][merge-null-source]; [null run][merge-null-run] |
+
+The omitted/empty controls select the same observed activities as null;
+explicit controls restrict selection to the configured activities. September 29
+sources retain the complete [issues][issues-followup-sources] and
+[PR][pr-followup-sources] declaration sets. Explicit `[edited]` did not select
+`issues.opened`; `[synchronize, reopened]` selected both PR activities, while
+`[opened]` selected neither. On GitHub, PR `closed` selected none of those five
+declarations, including omitted/null/empty, during the same experiment. This
+does not test an explicit `[closed]` declaration.
+
+Earlier controls also distinguish defaults from all activities: PR `edited`
+ran only with explicit `[opened, edited]`, and
+one merge-group `destroyed` event with `reason: merged` ran only with explicit `[destroyed]`
+([source][merge-destroyed-source], [run][merge-destroyed-run]). Neither selected
+omitted/null/empty declarations. Other destruction reasons were not emitted.
+The GitHub documentation retained with this evidence listed only
+`checks_requested` for `merge_group`; this single `destroyed` observation is
+not a documented support guarantee.
+
+The September 29 hosted check selected all 12 expected workflows, matching the
+12 successful native runs. Eleven Buildkite first attempts completed payload,
+expression, checkout, and v0.90.0 binary probes. The `reopened`/null attempt
+failed during setup before runtime validation or import; its root cause is not
+established. The original no-retry experiment therefore proves selection for
+12/12 cases but completed hosted execution for only 11/12, not full execution
+parity. Its final observation window was over 600 seconds. One subsequent
+same-build failed-job retry completed the remaining execution probes using the
+original reopened payload, unchanged workflow source/head, and verified v0.90.0
+binary. This supplies successful execution evidence for all 12 selected cases
+after one retry, not 12 successful first attempts. It does not erase the initial
+failure or establish its cause. The deployed backend SHA was unavailable, so
+these observations cannot be attributed to a particular backend commit.
+
+Buildkite rejects quoted `'null'` and `[null]` rather than treating them as
+default declarations. It also rejects malformed types and unknown activities.
+These are Buildkite rules, not native results established by this matrix. It
+does not establish native handling of mixed valid/unknown lists either.
+Alternative null spellings (`~`, `NULL`, or a blank `types:`) and YAML aliases
+are not covered by this native evidence. The local regression for an aliased
+trigger mapping (`issue_comment: *activities` referring to `types: null`) proves
+our parser behavior only, not GitHub parity or support for every alias shape.
+
+To extend native evidence, retain the exact workflow bytes at immutable source
+commits, original event payload and delivery identity, selected workflow path,
+and every run/build attempt. Verify event/action, expression values, checkout
+identity and a workflow-specific marker in completed probes on both systems.
+Account for GitHub's synthetic PR merge commit versus Buildkite's head checkout.
+Use omitted/null/empty and explicit matching/nonmatching controls on the same
+occurrence. A negative needs a bounded quiet observation with no pending or
+unattributed runs, not just a missing run on the first poll. Unit tests cannot
+establish native behavior. HTTP 200, `build_created` for a sibling workflow, or
+`failed/build_creation_failed` does not identify this workflow's selection or
+failure stage. A null receipt does not distinguish pending work from a completed
+no-op ([PB-3524](https://linear.app/buildkite/issue/PB-3524)). Record the actual
+runtime binary/version and deployed backend SHA when accessible. If the SHA is
+unavailable, report observed hosted behavior with that provenance limit; do not
+attribute it to a particular backend commit. See the
+[backend webhook contract](https://github.com/buildkite/buildkite/blob/main/docs/apis/pipeline-trigger-webhooks.md#activity-type-defaults).
+
+[issues-null-source]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/blob/49aab983ee3cfca82a21d02f61713746a5eb1af5/.github/workflows/issues--types-null.yml
+[issues-null-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/36511507946
+[issues-omitted-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/36511507937
+[issues-empty-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/36511507815
+[issues-matching-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/36511507962
+[issues-followup-sources]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/tree/49aab983ee3cfca82a21d02f61713746a5eb1af5/.github/workflows
+[issue-comment-null-source]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/blob/8d701e1da74a14aa6d3e638e43973ae45101fc02/.github/workflows/issue_comment--types-null.yml
+[issue-comment-null-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/35953902034
+[label-null-source]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/blob/8d701e1da74a14aa6d3e638e43973ae45101fc02/.github/workflows/label--types-null.yml
+[label-null-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/35954039469
+[release-null-source]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/blob/6adc451d0652b62f90e0ae0aef25203109defa3a/.github/workflows/release--types-null.yml
+[release-published-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/35954414792
+[release-released-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/35954414819
+[release-created-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/35954415115
+[pr-null-source]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/blob/164b07c330d8a0a6dd8a9926f0fc0b79ac1aca5b/.github/workflows/pull_request--types-null.yml
+[pr-null-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/35956122443
+[pr-empty-source]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/blob/164b07c330d8a0a6dd8a9926f0fc0b79ac1aca5b/.github/workflows/pull_request--types-empty.yml
+[pr-empty-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/35956122549
+[pr-followup-null-source]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/blob/0b491588553fce466a273f71659c13dc30571fd3/.github/workflows/pull_request--types-null.yml
+[pr-followup-sources]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/tree/0b491588553fce466a273f71659c13dc30571fd3/.github/workflows
+[pr-sync-omitted-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/36511760353
+[pr-sync-null-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/36511760331
+[pr-sync-empty-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/36511760321
+[pr-sync-matching-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/36511760357
+[pr-reopened-omitted-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/36511997252
+[pr-reopened-null-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/36511997251
+[pr-reopened-empty-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/36511997258
+[pr-reopened-matching-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/36511997245
+[review-null-source]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/blob/164b07c330d8a0a6dd8a9926f0fc0b79ac1aca5b/.github/workflows/pull_request_review--types-null.yml
+[review-null-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/35956427031
+[review-comment-null-source]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/blob/164b07c330d8a0a6dd8a9926f0fc0b79ac1aca5b/.github/workflows/pull_request_review_comment--types-null.yml
+[review-comment-null-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-340732b6e093/actions/runs/35956429071
+[merge-null-source]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-bd6723d4c52e/blob/da2f8aba8c18c35785a95adf9b2e6d2119ace35d/.github/workflows/merge_group--types-null.yml
+[merge-null-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-bd6723d4c52e/actions/runs/35965462107
+[merge-destroyed-source]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-bd6723d4c52e/blob/da2f8aba8c18c35785a95adf9b2e6d2119ace35d/.github/workflows/merge_group--nonmatching.yml
+[merge-destroyed-run]: https://github.com/sj26-testier-org/gha-e2e-onboarding-r-bd6723d4c52e/actions/runs/35965518686
 
 For push and pull-request path filters, once the workflow and checkout are
 verified against the webhook commit, non-path exclusions retain their branch
