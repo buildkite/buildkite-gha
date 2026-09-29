@@ -75,6 +75,9 @@ func validateRuntimeTemplate(template string) error {
 func validateRuntimeReferenceNode(node actionlint.ExprNode) error {
 	validator := newSemanticValidator(runtimeReferenceSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
+		if isRunnerDebugReference(root, path) {
+			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+		}
 		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
 			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
 		}
@@ -576,6 +579,12 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 		if value, ok := findStringValue(context.Runner, path[0]); ok {
 			return value, nil
 		}
+		if isRunnerDebugReference(root, path) {
+			// GitHub adds runner.debug with value "1" only when step debug
+			// logging is enabled. Buildkite cannot enable that mode, so the
+			// optional property remains absent and evaluates to null.
+			return nil, nil
+		}
 		return "", fmt.Errorf("expression references unavailable runner value %q", path[0])
 	case runtimeReferenceServicePort:
 		return resolveServicePort(context.Services, path[1], path[3], "expression")
@@ -676,7 +685,7 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 
 func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 	switch {
-	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") || strings.EqualFold(path[0], "temp")):
+	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") || strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "debug")):
 		return runtimeReferenceRunner
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return runtimeReferenceServicePort
@@ -707,6 +716,10 @@ func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 	default:
 		return runtimeReferenceUnsupported
 	}
+}
+
+func isRunnerDebugReference(root string, path []string) bool {
+	return strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug")
 }
 
 func strategyProperty(name string) bool {

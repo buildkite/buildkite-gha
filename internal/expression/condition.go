@@ -252,14 +252,14 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			if strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") {
 				return nil
 			}
-			if strings.EqualFold(path[0], "temp") && scope != JobCondition && scope != CallCondition {
+			if (strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "debug")) && scope != JobCondition && scope != CallCondition {
 				return nil
 			}
 		}
 		if scope == JobCondition {
 			return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, or runner.environment", reference)
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, runner.environment, or runner.temp", reference)
+		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, runner.environment, runner.temp, or runner.debug", reference)
 	case "github":
 		if len(path) >= 1 && strings.EqualFold(path[0], "event") {
 			return nil
@@ -616,6 +616,9 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 	case len(path) == 1 && strings.EqualFold(root, "runner"):
 		if value, ok := findStringValue(context.Runner, path[0]); ok {
 			return value, nil
+		}
+		if isRunnerDebugReference(root, path) {
+			return nil, nil
 		}
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return resolveServicePort(context.Services, path[1], path[3], "condition")
