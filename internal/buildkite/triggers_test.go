@@ -63,11 +63,12 @@ func TestUnfilteredWebhookTriggerConditions(t *testing.T) {
 			}
 			rejected := []workflow.Trigger{
 				{Types: []string{"created"}}, {Types: []string{"success"}},
-				{BranchesIgnore: []string{"main"}}, {Tags: []string{"v1"}}, {Paths: []string{"src/**"}}, {Workflows: []string{"Deploy"}},
+				{Workflows: []string{"Deploy"}},
 			}
 			switch event {
 			case "deployment", "deployment_status", "create", "delete":
-				rejected = append(rejected, workflow.Trigger{Types: []string{}}, workflow.Trigger{Branches: []string{"main"}})
+				rejected = append(rejected, workflow.Trigger{Types: []string{}}, workflow.Trigger{Branches: []string{"main"}},
+					workflow.Trigger{BranchesIgnore: []string{"main"}}, workflow.Trigger{Tags: []string{"v1"}}, workflow.Trigger{Paths: []string{"src/**"}})
 			}
 			for _, trigger := range rejected {
 				trigger.Event = event
