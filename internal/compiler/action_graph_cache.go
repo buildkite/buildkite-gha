@@ -47,7 +47,7 @@ func (cache *actionGraphCache) compile(ctx context.Context, instance JobInstance
 		}
 		cache.graphs[key] = graph
 	}
-	compiled, err := graph.analyzeInvocations(serverURL, refs, inputs)
+	compiled, err := graph.analyzeInvocations(program.ActionAuthorityOptions{ServerURL: serverURL, Strategy: instance.Strategy}, refs, inputs)
 	if err != nil {
 		return actionCompilation{}, err
 	}

@@ -171,6 +171,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	eval := expression.Context{
 		WorkflowInputs: job.Inputs,
 		Matrix:         job.Matrix,
+		Strategy:       job.Strategy,
 		Steps:          make(map[string]expression.StepStatus, len(executionJob.Steps)),
 		Needs:          needStatuses(job.Needs),
 		Vars:           vars,
@@ -218,6 +219,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		"github.server_url": plan.EventServerURL(job.Event.Provider),
 		"inputs":            planningInputs,
 		"matrix":            job.Matrix,
+		"strategy":          job.Strategy,
 	}})
 	if err != nil {
 		return jobResult, fmt.Errorf("analyze workflow reachability: %w", err)
@@ -681,7 +683,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			continue
 		}
 		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
-		condition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, Steps: eval.Steps, Env: stepEval.Env, Vars: eval.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
+		condition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, Steps: eval.Steps, Env: stepEval.Env, Vars: eval.Vars, Matrix: job.Matrix, Strategy: job.Strategy, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
 		run, err := evaluateProgramTyped[bool](step.Condition, executionprogram.EvaluationContext{Expression: stepEval, Condition: condition})
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("condition: %w", err), stepEval)

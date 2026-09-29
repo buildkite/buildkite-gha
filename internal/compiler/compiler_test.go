@@ -5038,7 +5038,7 @@ func TestResolveCompileServicesKeepsCredentialVariablesResidual(t *testing.T) {
 }
 
 func TestResolveCompileServicesRejectsUnsupportedCredentialContexts(t *testing.T) {
-	for _, value := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ runner.os }}"} {
+	for _, value := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ runner.os }}"} {
 		services := []workflow.Service{{Name: "database", Container: workflow.ServiceContainer{
 			Image: "postgres:16", Credentials: &workflow.ContainerCredentials{Username: value, Password: "literal"},
 		}}}

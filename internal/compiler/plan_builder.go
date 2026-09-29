@@ -575,6 +575,7 @@ func (b planBuilder) authorityReferences(instance JobInstance) map[string]any {
 		"github.server_url": plan.EventServerURL(b.ir.Event.Provider),
 		"inputs":            instance.Inputs,
 		"matrix":            instance.Matrix,
+		"strategy":          instance.Strategy,
 	}
 }
 
@@ -711,6 +712,7 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		OIDC:                 cloneOIDCConfiguration(b.options.OIDC),
 		CacheMode:            instance.CacheMode,
 		Matrix:               instance.Matrix,
+		Strategy:             cloneAnyMap(instance.Strategy),
 		Inputs:               cloneAnyMap(instance.Inputs),
 		DeferredInputs:       deferredInputs,
 		OrganizationVars:     cloneMap(b.ir.OrganizationVars),

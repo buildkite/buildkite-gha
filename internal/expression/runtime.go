@@ -24,6 +24,7 @@ type Context struct {
 	Inputs           map[string]string
 	WorkflowInputs   map[string]any
 	Matrix           map[string]any
+	Strategy         map[string]any
 	Steps            map[string]StepStatus
 	Needs            map[string]NeedStatus
 	Secrets          map[string]string
@@ -52,6 +53,7 @@ const (
 	runtimeReferenceGitHub
 	runtimeReferenceInput
 	runtimeReferenceMatrix
+	runtimeReferenceStrategy
 	runtimeReferenceSecret
 	runtimeReferenceVar
 	runtimeReferenceEnv
@@ -360,11 +362,6 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 		if allowedContexts != nil && !allowedContexts[strings.ToLower(root)] {
 			return fmt.Errorf("runtime context %q is unavailable in this field", root)
 		}
-		// Job controls reduce strategy values during graph expansion, before
-		// the normalized program reaches runtime.
-		if strings.EqualFold(root, "strategy") && len(path) == 1 {
-			return nil
-		}
 		if strings.EqualFold(root, "github") {
 			if len(path) == 0 {
 				return fmt.Errorf("dynamic or whole github access is unsupported")
@@ -424,7 +421,7 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 				return nil
 			}
 			return fmt.Errorf("computed or aggregate %s access is unsupported", root)
-		case "job":
+		case "job", "strategy":
 			referenceRoot, path, err := referencePath(access)
 			if err != nil || classifyRuntimeReference(referenceRoot, path) == runtimeReferenceUnsupported {
 				return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
@@ -498,6 +495,11 @@ func resolveStepRuntimeRoot(root string, context Context) (any, error) {
 		return context.Secrets, nil
 	case "matrix":
 		return context.Matrix, nil
+	case "strategy":
+		if context.Strategy == nil {
+			return nil, fmt.Errorf("runtime context %q is unavailable", root)
+		}
+		return context.Strategy, nil
 	case "vars":
 		return context.Vars, nil
 	case "inputs":
@@ -603,6 +605,12 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 		}
 		value, _, err := objectValue(context.WorkflowInputs, path[0])
 		return value, err
+	case runtimeReferenceStrategy:
+		value, found, err := objectValue(context.Strategy, path[0])
+		if err == nil && !found {
+			err = fmt.Errorf("expression references unavailable strategy value %q", path[0])
+		}
+		return value, err
 	case runtimeReferenceMatrix:
 		for name, value := range context.Matrix {
 			if strings.EqualFold(name, path[0]) {
@@ -678,6 +686,8 @@ func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 		return runtimeReferenceGitHub
 	case len(path) == 1 && strings.EqualFold(root, "inputs"):
 		return runtimeReferenceInput
+	case len(path) == 1 && strings.EqualFold(root, "strategy") && strategyProperty(path[0]):
+		return runtimeReferenceStrategy
 	case len(path) >= 1 && strings.EqualFold(root, "matrix"):
 		return runtimeReferenceMatrix
 	case len(path) == 1 && strings.EqualFold(root, "secrets"):
@@ -696,6 +706,15 @@ func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 		return runtimeReferenceNeedResult
 	default:
 		return runtimeReferenceUnsupported
+	}
+}
+
+func strategyProperty(name string) bool {
+	switch strings.ToLower(name) {
+	case "job-index", "job-total", "fail-fast", "max-parallel":
+		return true
+	default:
+		return false
 	}
 }
 

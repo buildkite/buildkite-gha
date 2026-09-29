@@ -27,6 +27,12 @@
       "step_key": "gha-producer"
     },
     "required_capabilities": [],
+    "strategy": {
+      "fail-fast": true,
+      "job-index": 0,
+      "job-total": 1,
+      "max-parallel": 1
+    },
     "program": {
       "version": 2,
       "job": {
@@ -346,6 +352,12 @@
     "matrix": {
       "variant": "one"
     },
+    "strategy": {
+      "fail-fast": false,
+      "job-index": 0,
+      "job-total": 2,
+      "max-parallel": 2
+    },
     "dependencies": [
       "gha-producer"
     ],
@@ -353,7 +365,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:07e67555df452a299e387007926e71979b99283830ad52b4d262ca30fe0a0bfa"
+          "plan_digest": "sha256:2a34995be54dea25a5fed668c2c255321f2e51f806ed5f63a5735a0c07e40707"
         }
       ]
     },
@@ -579,6 +591,12 @@
     "matrix": {
       "variant": "two"
     },
+    "strategy": {
+      "fail-fast": false,
+      "job-index": 1,
+      "job-total": 2,
+      "max-parallel": 2
+    },
     "dependencies": [
       "gha-producer"
     ],
@@ -586,7 +604,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:07e67555df452a299e387007926e71979b99283830ad52b4d262ca30fe0a0bfa"
+          "plan_digest": "sha256:2a34995be54dea25a5fed668c2c255321f2e51f806ed5f63a5735a0c07e40707"
         }
       ]
     },

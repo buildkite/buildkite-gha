@@ -1284,6 +1284,21 @@ errors never carry values. See
 | `max-parallel` | 🟡 Supported subset | Literal value on ordinary job matrices, or [a limit from the matrix producer's output](#scheduling-from-matrix-producer-outputs). Reusable-workflow call matrices with more than one instance are rejected because flattening cannot preserve invocation-level parallelism. |
 | `fail-fast` | ➖ Accepted, no effect | A failed matrix entry does not cancel its siblings. |
 
+Each expanded job retains four scalar `strategy` values, including jobs in
+called workflows and matrices expanded from job outputs:
+
+| Property | Value |
+| --- | --- |
+| `job-index` | Zero-based position in the final expanded rows, after exclusions and includes. It follows expansion order, not sorted matrix keys. |
+| `job-total` | Number of final expanded rows. |
+| `fail-fast` | Configured Boolean, or `true` when omitted. This reports the setting; it does not enable cancellation. |
+| `max-parallel` | Configured limit, or the number of final expanded rows when omitted. |
+
+A job without a matrix has index `0`, total `1`, and default parallel limit
+`1`. Values follow the runner's [matrix expansion](https://github.com/actions/runner/blob/15231bede4aacecb6686f4b7de25c62398607993/src/Sdk/WorkflowParser/Conversion/WorkflowTemplateConverter.cs#L1006-L1049)
+and [singleton defaults](https://github.com/actions/runner/blob/15231bede4aacecb6686f4b7de25c62398607993/src/Sdk/WorkflowParser/WorkflowTemplateEvaluator.cs#L166-L195).
+See [Runtime interpolation](#runtime-interpolation) for admitted fields.
+
 A strategy can combine parallelism, static matrix values, and exclusions:
 
 ```yaml
@@ -1593,7 +1608,7 @@ Job containers support `image`, `env`, `ports`, `volumes`, and `options`. Servic
 - Job container images can use compile-time `github`, `inputs`, `strategy`, and `matrix` values. A null or exactly empty evaluated image runs the job on the host, including object-form containers, without applying container `env` or `ports`. For example, `container: ${{ matrix.target.container }}` selects host execution when the matrix entry omits `container`. Other results must be strings containing valid image references; whitespace-only results are invalid. Literal images must be non-empty. Secrets, `needs`, step outputs, and whole or dynamic contexts are unsupported.
 - Service fields can use compile-time `github`, `inputs`, `strategy`, and `matrix` values or runtime `needs` outputs, including fallback expressions such as `${{ needs.build.outputs.image || 'redis:7' }}`. An empty evaluated image skips the service.
 - A complete non-credential service map can use `${{ fromJSON(needs.build.outputs.services || '{}') }}`. The argument supports needs-output expressions and pure functions. Declare credentials statically so the compiler can prove their secret authority.
-- Credentials accept values and expressions using `github`, `vars`, `secrets`, `env`, or `needs`, including `${{ needs.auth.outputs.password || secrets.REGISTRY_PASSWORD }}`. Prerequisite results and outputs resolve before service setup. Ordinary secrets remain in the job's required inventory even in an unused fallback. Passwords pass to `docker login` through standard input. Authentication uses a private per-job Docker configuration and never reads ambient Docker credentials.
+- Credentials accept values and expressions using `github`, `vars`, `secrets`, `env`, `needs`, or scalar `strategy` properties, including `${{ needs.auth.outputs.password || secrets.REGISTRY_PASSWORD }}`. Prerequisite results and outputs resolve before service setup. Ordinary secrets remain in the job's required inventory even in an unused fallback. Passwords pass to `docker login` through standard input. Authentication uses a private per-job Docker configuration and never reads ambient Docker credentials.
 - Job container volumes accept `DESTINATION` for an anonymous volume or `SOURCE:DESTINATION[:ro|rw]` for a named volume or bind mount. `DESTINATION` must be absolute. `SOURCE` must be a Docker volume name or absolute host path. A job can define 128 unique declarations. Expressions are unsupported.
 - Job container options pass through to `docker create`, except `--network`, `--net`, and `--entrypoint`, including their `--flag=value` forms. Options split into arguments without a shell. Double quotes group arguments; single quotes are ordinary characters. Expressions, line breaks, NUL bytes, and values over 65,536 bytes are unsupported.
 - Service Docker options pass through except `--network` and its `--net` aliases, which GitHub Actions does not support. Options can grant privileges, mount host paths, publish ports, and change resource settings.
@@ -1806,6 +1821,7 @@ Conditions support computed object indexes, numeric array indexes, whole
 | `runner.temp` | ❌ No | ✅ Yes |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
 | `matrix.<name>` | ✅ Yes | ✅ Yes |
+| [Scalar `strategy` properties](#matrix-strategies) | ❌ No | ✅ Workflow steps only |
 | `vars.<name>` | ✅ Yes, [repository and organization variables](#repository-and-organization-variables) | ✅ Yes, environment over repository over organization variables |
 | `inputs.<name>` and computed input indexes | ✅ Yes | ✅ Yes |
 | `steps.<id>.outcome`, `steps.<id>.conclusion`, `steps.<id>.outputs.<name>` | ❌ No | ✅ Yes |
@@ -1861,20 +1877,35 @@ Job-level expressions support the same operators and pure functions with these f
 | Field | Contexts |
 | --- | --- |
 | `continue-on-error` | `github`, `needs`, `strategy`, `matrix`, `vars`, `inputs` |
-| `env` | `github`, `needs`, `matrix`, `vars`, `secrets`, `inputs` |
-| `defaults.run` | `github`, `needs`, `matrix`, `env`, `vars`, `inputs` |
-| `outputs` | `github`, `needs`, `matrix`, `job`, `runner`, `env`, `vars`, `secrets`, `steps`, `inputs` |
+| `env` | `github`, `needs`, `strategy`, `matrix`, `vars`, `secrets`, `inputs` |
+| `defaults.run` | `github`, `needs`, `strategy`, `matrix`, `env`, `vars`, `inputs` |
+| `outputs` | `github`, `needs`, `strategy`, `matrix`, `job`, `runner`, `env`, `vars`, `secrets`, `steps`, `inputs` |
 
-Workflow-level `env` values use the job `env` expression rules, including
-fallbacks such as `${{ github.head_ref || github.ref_name }}`. Workflow-level
-`defaults.run` remains limited to direct context references.
+Workflow-level `env` values use the job `env` expression rules except for
+`strategy`. Fallbacks such as `${{ github.head_ref || github.ref_name }}` are
+supported. Workflow-level `defaults.run` remains limited to direct context
+references.
 
 Workflow step fields support `hashFiles()`; composite step and job-level fields
 do not. Composite action `run`, `env`, `with`, and `working-directory` fields do
 support the listed operators and pure functions.
 
-Outside `continue-on-error`, the runtime has no equivalent value for
-`strategy`. Job outputs support service IDs, networks, and published ports
+The listed workflow step fields and job fields accept the four
+[scalar `strategy` properties](#matrix-strategies), including static bracket
+access such as `${{ strategy['job-index'] }}`. They can combine strategy with
+runtime values, for example
+`${{ format('{0}-{1}', strategy.job-index, steps.build.outputs.version) }}`.
+Whole, projected, and computed strategy access remains unsupported. This does
+not add strategy to job `if`, workflow-level fields, reusable-call `with`, or
+action-authored metadata, including composite steps.
+
+Admission follows the [GitHub context table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability),
+checked against the [runner schema](https://github.com/actions/runner/blob/15231bede4aacecb6686f4b7de25c62398607993/src/Sdk/DTPipelines/workflow-v1.0.json)
+and [language-services schema](https://github.com/actions/languageservices/blob/4043eda158e16579cc5fb1b0b07a4bce2a76f0b5/workflow-parser/src/workflow-v1.0.json).
+The docs and language-services schema disagree on caller `with` admission;
+that field is unchanged. These source checks are not hosted parity evidence.
+
+Job outputs support service IDs, networks, and published ports
 through `job.services`, such as `${{ job.services.redis.ports[6379] }}`;
 other `job` fields remain unsupported. The listed job-level fields also
 support `toJSON(needs)`, with the same direct-dependency scope and access

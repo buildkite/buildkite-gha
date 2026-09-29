@@ -53,6 +53,41 @@ func TestCacheModePlanBoundary(t *testing.T) {
 	}
 }
 
+func TestStrategyPlanBoundary(t *testing.T) {
+	job := validJob()
+	old, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(old)
+	if err != nil || decoded.Strategy != nil {
+		t.Fatalf("plan without strategy: %+v, %v", decoded.Strategy, err)
+	}
+	job.Strategy = map[string]any{"job-index": 2, "job-total": 5, "fail-fast": false, "max-parallel": 3}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+	decoded, err = Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reencoded, err := Encode(decoded)
+	if err != nil || !bytes.Equal(encoded, reencoded) {
+		t.Fatalf("strategy did not survive encoding: %+v, %v", decoded.Strategy, err)
+	}
+	for field, value := range map[string]any{"job-index": 1, "job-total": 6, "fail-fast": true, "max-parallel": 4} {
+		changed := job
+		changed.Strategy = maps.Clone(job.Strategy)
+		changed.Strategy[field] = value
+		data, err := Encode(changed)
+		if err != nil || sha256.Sum256(data) == sha256.Sum256(encoded) {
+			t.Fatalf("strategy.%s not digest-bound: %v", field, err)
+		}
+	}
+}
+
 func TestDecodePreservesPlanContract(t *testing.T) {
 	fixture := validJob()
 	fixture.Event.HeadRef = "feature/head-ref"

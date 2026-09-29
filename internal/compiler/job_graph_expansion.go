@@ -791,6 +791,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		resolvedContinueOnError, continueOnErrorErr := resolveJobContinueOnError(instanceJob, controlContext)
 		instanceJob = resolvedContinueOnError
 		candidate := newJobCandidate(sourced, instanceJob, matrix, key, resolvedServices)
+		candidate.Strategy = strategy
 
 		valid := true
 		if containerErr != nil {

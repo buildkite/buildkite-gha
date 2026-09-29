@@ -20,6 +20,7 @@ type ConditionContext struct {
 	Env          map[string]string
 	Vars         map[string]string
 	Matrix       map[string]any
+	Strategy     map[string]any
 	GitHub       map[string]any
 	Runner       map[string]string
 	Services     map[string]ServiceContext
@@ -285,6 +286,11 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			return nil
 		}
 		return fmt.Errorf("condition reference %q is unsupported; expected inputs.<name>", reference)
+	case "strategy":
+		if scope == StepCondition && len(path) == 1 && strategyProperty(path[0]) {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported in this field", reference)
 	case "matrix":
 		// Matrix values may be objects or arrays, so nested references such
 		// as matrix.config.os are valid.
@@ -364,6 +370,12 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 			return validator.validate(node.Index)
 		}
 		return fmt.Errorf("unsupported condition access expression")
+	case "strategy":
+		staticRoot, path, err := referencePath(node)
+		if err != nil {
+			return fmt.Errorf("dynamic strategy access is unsupported")
+		}
+		return validateConditionReference(staticRoot, path, scope)
 	case "matrix", "needs":
 	case "vars":
 		if _, whole := node.(*actionlint.VariableNode); whole {
@@ -523,6 +535,8 @@ func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (
 
 func resolveConditionRoot(root string, context ConditionContext) (any, error) {
 	switch strings.ToLower(root) {
+	case "strategy":
+		return resolveStepRuntimeRoot(root, Context{Strategy: context.Strategy})
 	case "matrix":
 		if context.Matrix == nil {
 			return nil, fmt.Errorf("condition context %q is unavailable", root)
@@ -634,6 +648,8 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		return findString(context.Env, path[0]), nil
 	case len(path) == 1 && strings.EqualFold(root, "vars"):
 		return findString(context.Vars, path[0]), nil
+	case len(path) == 1 && strings.EqualFold(root, "strategy"):
+		return resolveRuntimeReference(root, path, Context{Strategy: context.Strategy})
 	case len(path) >= 1 && strings.EqualFold(root, "matrix"):
 		for name, value := range context.Matrix {
 			if strings.EqualFold(name, path[0]) {

@@ -18,6 +18,7 @@ type ActionAuthority struct {
 
 type ActionAuthorityOptions struct {
 	ServerURL string
+	Strategy  map[string]any
 }
 
 // InventoryActionAuthority interprets action input resolution and nested
@@ -73,6 +74,9 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 		known := map[string]any{
 			"github.server_url": options.ServerURL,
 			"job.check_run_id":  "",
+		}
+		if workflowAuthored {
+			known["strategy"] = options.Strategy
 		}
 		for _, binding := range supplied {
 			name := strings.ToLower(binding.Name)

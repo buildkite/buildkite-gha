@@ -175,6 +175,10 @@ func analyzeRuntimeNode(node actionlint.ExprNode, knownReferences map[string]any
 		}
 		if value, ok := knownReferences[name]; ok {
 			analysis.Value = AbstractValue{Known: true, Value: value}
+		} else if strings.EqualFold(root, "strategy") {
+			if value, found := lookupRuntimeValue(knownReferences["strategy"], path); found {
+				analysis.Value = AbstractValue{Known: true, Value: value}
+			}
 		}
 		return analysis, nil
 	}

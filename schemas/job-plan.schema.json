@@ -20,6 +20,7 @@
     "oidc": {"$ref": "#/$defs/oidcConfiguration"},
     "cache_mode": {"enum": ["read", "write", "write-only", "none"]},
     "matrix": {"type": "object"},
+    "strategy": {"type": "object"},
     "inputs": {"type": "object", "maxProperties": 25, "propertyNames": {"minLength": 1, "maxLength": 255}, "additionalProperties": {"type": ["string", "number", "boolean"], "maxLength": 65536}},
     "deferred_inputs": {"type": "object", "maxProperties": 25, "propertyNames": {"minLength": 1, "maxLength": 255}, "additionalProperties": {"$ref": "#/$defs/deferredInput"}},
     "organization_vars": {"$ref": "#/$defs/stringMap"},
