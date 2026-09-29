@@ -332,11 +332,13 @@ func TestRunnerDebugIsAvailableOnlyInRunnerBackedRuntimeProfiles(t *testing.T) {
 	if got, err := EvaluateJobOutput("${{ runner['debug'] || 'disabled' }}", Context{}); err != nil || got != "disabled" {
 		t.Fatalf("EvaluateJobOutput() = %q, %v; want disabled", got, err)
 	}
-	if got, err := EvaluateCondition("runner.debug == '1'", ConditionContext{}); err != nil || got {
-		t.Fatalf("EvaluateCondition() = %v, %v; want false", got, err)
-	}
-	if got, err := EvaluateActionLifecycleCondition("runner.debug == '1'", ConditionContext{}); err != nil || got {
-		t.Fatalf("EvaluateActionLifecycleCondition() = %v, %v; want false", got, err)
+	for _, source := range []string{"runner.debug == '1'", "runner['debug'] == '1'"} {
+		if got, err := EvaluateCondition(source, ConditionContext{}); err != nil || got {
+			t.Errorf("EvaluateCondition(%q) = %v, %v; want false", source, got, err)
+		}
+		if got, err := EvaluateActionLifecycleCondition(source, ConditionContext{}); err != nil || got {
+			t.Errorf("EvaluateActionLifecycleCondition(%q) = %v, %v; want false", source, got, err)
+		}
 	}
 	for _, source := range []string{"${{ runner.debug }}", "${{ runner['debug'] }}"} {
 		if err := ValidateRuntimeTemplate(source); err == nil {

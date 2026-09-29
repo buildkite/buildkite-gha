@@ -1231,6 +1231,7 @@ runs:
 		jobIf     string
 	}{
 		{name: "step", condition: "        if: false\n"},
+		{name: "runner debug", condition: "        if: runner['debug'] == '1'\n"},
 		{name: "job", jobIf: "    if: false\n"},
 		{name: "matrix", condition: "        if: matrix.enabled\n"},
 	} {

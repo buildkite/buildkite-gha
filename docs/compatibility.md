@@ -1899,6 +1899,7 @@ Conditions support computed object indexes, numeric array indexes, whole
 | `github.actor`, `github.base_ref`, `github.event_name`, `github.head_ref`, `github.ref`, `github.ref_name`, `github.ref_type`, `github.repository`, `github.repository_owner`, `github.sha`, `github.workflow_ref`, `github.workflow_sha` | ✅ Yes | ✅ Yes |
 | `runner.os`, `runner.arch`, `runner.environment` | ✅ Yes | ✅ Yes |
 | `runner.temp` | ❌ No | ✅ Yes |
+| `runner.debug` | ❌ No | ✅ Yes, always absent |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
 | `matrix.<name>` | ✅ Yes | ✅ Yes |
 | [Scalar `strategy` properties](#matrix-strategies) | ❌ No | ✅ Workflow steps only |

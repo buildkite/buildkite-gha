@@ -126,6 +126,10 @@ func analyzeActionInputDefault(node actionlint.ExprNode, knownReferences map[str
 	evaluator.policy.resolveStaticIndexedReference = true
 	evaluator.resolve = func(root string, path []string) (Analysis, error) {
 		analysis := Analysis{Effects: abstractReferenceEffects(root, path)}
+		if isRunnerDebugReference(root, path) {
+			analysis.Value = AbstractValue{Known: true}
+			return analysis, nil
+		}
 		if strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "token") {
 			analysis.Effects.GitHubToken = GitHubTokenDirect
 			if value, ok := knownReferences["github.token"]; ok {
@@ -170,6 +174,10 @@ func analyzeRuntimeNode(node actionlint.ExprNode, knownReferences map[string]any
 	evaluator.resolve = func(root string, path []string) (Analysis, error) {
 		name := strings.ToLower(referenceName(root, path))
 		analysis := Analysis{Effects: abstractReferenceEffects(root, path)}
+		if isRunnerDebugReference(root, path) {
+			analysis.Value = AbstractValue{Known: true}
+			return analysis, nil
+		}
 		if strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "token") {
 			analysis.Effects.GitHubToken = GitHubTokenDirect
 		}
@@ -271,6 +279,10 @@ func analyzeConditionNode(node actionlint.ExprNode, known map[string]any) (Analy
 	evaluator := newAbstractEvaluator(conditionSurface)
 	evaluator.resolve = func(root string, path []string) (Analysis, error) {
 		analysis := Analysis{Effects: abstractReferenceEffects(root, path)}
+		if isRunnerDebugReference(root, path) {
+			analysis.Value = AbstractValue{Known: true}
+			return analysis, nil
+		}
 		if strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "token") {
 			analysis.Effects.GitHubToken = GitHubTokenDirect
 		}

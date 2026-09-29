@@ -405,6 +405,28 @@ func TestEngineAnalysisDefersRunnerEnvironmentToRuntime(t *testing.T) {
 	}
 }
 
+func TestEngineAnalysisTreatsRunnerDebugAsKnownDisabled(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		site Site
+		want any
+	}{
+		{name: "condition", site: Site{Source: "runner['debug'] == '1'", Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression}, want: false},
+		{name: "workflow action input", site: Site{Source: "${{ runner.debug == '1' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}, want: ""},
+		{name: "action input default", site: Site{Source: "${{ runner.debug == '1' && github.token || '' }}", Profile: ProfileActionInputDefault, Result: ResultString, Purpose: PurposeExpression}, want: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			analysis, err := NewEngine().Analyze(test.site, AbstractValues{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !analysis.Value.Known || analysis.Value.Value != test.want || analysis.Effects.GitHubToken != 0 {
+				t.Fatalf("Analyze() = %#v, want known %#v without token authority", analysis, test.want)
+			}
+		})
+	}
+}
+
 func TestEngineTemplateAnalysisExcludesKnownFalseTokenBranch(t *testing.T) {
 	engine := NewEngine()
 	site := Site{Source: "${{ false && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}

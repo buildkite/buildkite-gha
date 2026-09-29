@@ -135,8 +135,8 @@ func (v *semanticValidator) validate(node actionlint.ExprNode) error {
 		return v.referenceError(err)
 	case *actionlint.IndexAccessNode:
 		root, path, err := referencePath(node)
-		staticAuthority := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets")
-		if err == nil && (v.validateAccess == nil || staticAuthority || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
+		staticReference := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets") || strings.EqualFold(root, "runner")
+		if err == nil && (v.validateAccess == nil || staticReference || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
 			return v.validateReference(node, root, path)
 		}
 		if v.validateAccess != nil {
@@ -220,11 +220,11 @@ func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
 		return zero, err
 	case *actionlint.IndexAccessNode:
 		root, path, err := referencePath(node)
-		// Mirror the validator: static bracket references to authority
+		// Mirror the validator: static bracket references to restricted
 		// contexts resolve as ordinary references so evaluation never
-		// exposes the whole context root.
-		staticAuthority := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets")
-		if err == nil && (staticAuthority || e.policy.resolveStaticIndexedReference || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
+		// requires access to the whole context root.
+		staticReference := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets") || strings.EqualFold(root, "runner")
+		if err == nil && (staticReference || e.policy.resolveStaticIndexedReference || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
 			return e.resolve(root, path)
 		}
 		if e.resolveRoot != nil {
