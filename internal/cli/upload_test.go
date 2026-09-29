@@ -2141,71 +2141,153 @@ func TestSkippedWorkflowsAnnotation(t *testing.T) {
 	}
 }
 
-func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
+func TestRunUploadInvalidRunNamePrecedesVariableFetchFailure(t *testing.T) {
 	requireImporterHost(t)
-	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"crowdin-upload.yml": "name: Crowdin upload\non:\n  push:\n    paths: [\"crowdin/**\"]\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
-		"success.yml":        "name: Success\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
-	})
-	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repository)
+	variables, variableRequests := agentVariablesHandler(t, http.StatusTooManyRequests, "3600")
+	agent, _ := agentStub(t, "job-secret", http.StatusOK, variables)
+	setAgentResolutionEnvironment(t, agent.URL)
 	t.Setenv("BUILDKITE", "true")
-	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
-	t.Setenv("BUILDKITE_STEP_KEY", "trigger-failure-importer")
+	t.Setenv("BUILDKITE_STEP_KEY", "invalid-run-name-importer")
+	eventPath := pushEventPath(t)
+	jobs := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	workflows := writeUploadWorkflows(t, map[string]string{
+		"build.yml":  "name: Invalid\nrun-name: ${{ vars.TARGET }}-${{ env.BAD }}\n" + jobs,
+		"deploy.yml": "name: Valid\nrun-name: ${{ vars.TARGET }}\n" + jobs,
+		"plain.yml":  "name: Unaffected\n" + jobs,
+	})
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{
-		"upload", "--event-path", eventPath,
-		".github/workflows/crowdin-upload.yml",
-		".github/workflows/success.yml",
-	}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+	if code := run(append([]string{"upload", "--event-path", eventPath}, workflows...), &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 	}
-	var annotationBodies []string
-	for _, command := range runner.commands {
-		if len(command.args) != 0 && command.args[0] == "annotate" {
-			annotationBodies = append(annotationBodies, string(command.stdin))
-		}
-	}
-	if len(annotationBodies) != 0 {
-		t.Fatalf("trigger failure annotated the importer = %#v", annotationBodies)
+	if *variableRequests != 1 {
+		t.Fatalf("variable requests = %d, want 1", *variableRequests)
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group     string             `yaml:"group"`
-			Label     string             `yaml:"label"`
-			Condition string             `yaml:"if"`
-			Command   string             `yaml:"command"`
-			Plugins   failureStepPlugins `yaml:"plugins"`
-			Checkout  struct {
-				Skip bool `yaml:"skip"`
-			} `yaml:"checkout"`
-			Steps []any `yaml:"steps"`
+			Label   string             `yaml:"label"`
+			Group   string             `yaml:"group"`
+			Plugins failureStepPlugins `yaml:"plugins"`
+			Steps   []any              `yaml:"steps"`
 		} `yaml:"steps"`
 	}
-	pipelineCommand := runner.commands[len(runner.commands)-1]
-	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 2 {
-		t.Fatalf("trigger failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
+	if len(pipeline.Steps) != 3 {
+		t.Fatalf("pipeline steps = %#v", pipeline.Steps)
 	}
-	failure := pipeline.Steps[0]
-	message := failureLogText(failureArtifactForStep(failure.Plugins, runner.uploaded, "messages"))
-	annotation := failureArtifactForStep(failure.Plugins, runner.uploaded, "annotations")
-	primary := "Push trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching push history, or remove the path filters."
-	detail := "push path filters are unsupported: push path filters require linked Buildkite webhook data"
-	if failure.Group != "" || failure.Label != ":github: workflow · Crowdin upload" || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(message, primary) || !strings.Contains(message, "detail: "+detail) || !strings.Contains(string(annotation), "<strong>Push trigger path filters could not be evaluated safely.</strong>") || !strings.Contains(string(annotation), "matching push history") || !strings.Contains(string(annotation), detail) || strings.Contains(message, "translate workflow triggers") || !strings.Contains(message, ".github/workflows/crowdin-upload.yml") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
-		t.Fatalf("trigger failure step = %#v, message = %q, annotation = %q", failure, message, annotation)
+	const invalid = `run-name context "env" is unavailable`
+	const unavailable = "variables: variable resolution requests are rate limited; retry after 3600 seconds"
+	for i, test := range []struct{ label, want, notWant string }{
+		{":github: workflow · Invalid", invalid, unavailable},
+		{":github: workflow · Valid", unavailable, invalid},
+	} {
+		step := pipeline.Steps[i]
+		message := failureLogText(failureArtifactForStep(step.Plugins, runner.uploaded, "messages"))
+		annotation := string(failureArtifactForStep(step.Plugins, runner.uploaded, "annotations"))
+		if step.Label != test.label || !strings.Contains(message, test.want) || !strings.Contains(annotation, html.EscapeString(test.want)) || strings.Contains(message, test.notWant) || strings.Contains(annotation, html.EscapeString(test.notWant)) {
+			t.Fatalf("failure label = %q, message = %q, annotation = %q; want %q", step.Label, message, annotation, test.want)
+		}
 	}
-	if success := pipeline.Steps[1]; success.Group != ":github: workflow · Success" || len(success.Steps) != 1 {
-		t.Fatalf("successful workflow after trigger failure = %#v", success)
+	if step := pipeline.Steps[2]; step.Group != ":github: workflow · Unaffected" || len(step.Steps) != 1 {
+		t.Fatalf("unaffected workflow = %#v", step)
 	}
-	if !strings.Contains(stdout.String(), "Pipeline generation: failed") || !strings.Contains(stdout.String(), compiler.CodePipelineGeneration) || !strings.Contains(stdout.String(), primary) || !strings.Contains(stdout.String(), "detail: "+detail) {
-		t.Fatalf("trigger failure omitted processing report: %q", stdout.String())
+	if plans := uploadedPlans(t, runner); len(plans) != 1 || len(plans["test"]) != 1 {
+		t.Fatalf("uploaded plans = %#v, want only the unaffected workflow", plans)
+	}
+}
+
+func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
+	requireImporterHost(t)
+	for _, test := range []struct {
+		name         string
+		runName      string
+		status       int
+		wantRequests int
+		wantLabel    string
+	}{
+		{name: "event contexts", runName: "Upload ${{ inputs.target || 'translations' }} on ${{ github.ref_name }}", status: http.StatusOK, wantLabel: ":github: workflow · Crowdin upload — Upload translations on main"},
+		{name: "vars resolved", runName: "Upload ${{ vars.TARGET }}", status: http.StatusOK, wantRequests: 1, wantLabel: ":github: workflow · Crowdin upload — Upload prod"},
+		{name: "vars fetch failure", runName: "Upload ${{ vars.TARGET }}", status: http.StatusTooManyRequests, wantRequests: 1, wantLabel: ":github: workflow · Crowdin upload"},
+		{name: "invalid name retains trigger error", runName: "${{ vars.TARGET }}-${{ env.BAD }}", status: http.StatusTooManyRequests, wantRequests: 1, wantLabel: ":github: workflow · Crowdin upload"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			variables, variableRequests := agentVariablesHandler(t, test.status, "3600")
+			agent, _ := agentStub(t, "job-secret", http.StatusOK, variables)
+			setAgentResolutionEnvironment(t, agent.URL)
+			repository := writeUploadWorkflowRepository(t, map[string]string{
+				"crowdin-upload.yml": "name: Crowdin upload\nrun-name: " + test.runName + "\non:\n  push:\n    paths: [\"crowdin/**\"]\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+				"success.yml":        "name: Success\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			})
+			eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(repository)
+			t.Setenv("BUILDKITE", "true")
+			t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+			t.Setenv("BUILDKITE_STEP_KEY", "trigger-failure-importer")
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{
+				"upload", "--event-path", eventPath,
+				".github/workflows/crowdin-upload.yml",
+				".github/workflows/success.yml",
+			}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+				t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+			}
+			if *variableRequests != test.wantRequests {
+				t.Errorf("variable requests = %d, want %d", *variableRequests, test.wantRequests)
+			}
+			var annotationBodies []string
+			for _, command := range runner.commands {
+				if len(command.args) != 0 && command.args[0] == "annotate" {
+					annotationBodies = append(annotationBodies, string(command.stdin))
+				}
+			}
+			if len(annotationBodies) != 0 {
+				t.Fatalf("trigger failure annotated the importer = %#v", annotationBodies)
+			}
+			var pipeline struct {
+				Steps []struct {
+					Group     string             `yaml:"group"`
+					Label     string             `yaml:"label"`
+					Condition string             `yaml:"if"`
+					Command   string             `yaml:"command"`
+					Plugins   failureStepPlugins `yaml:"plugins"`
+					Checkout  struct {
+						Skip bool `yaml:"skip"`
+					} `yaml:"checkout"`
+					Steps []any `yaml:"steps"`
+				} `yaml:"steps"`
+			}
+			pipelineCommand := runner.commands[len(runner.commands)-1]
+			if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+				t.Fatal(err)
+			}
+			if len(pipeline.Steps) != 2 {
+				t.Fatalf("trigger failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
+			}
+			failure := pipeline.Steps[0]
+			message := failureLogText(failureArtifactForStep(failure.Plugins, runner.uploaded, "messages"))
+			annotation := failureArtifactForStep(failure.Plugins, runner.uploaded, "annotations")
+			primary := "Push trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching push history, or remove the path filters."
+			detail := "push path filters are unsupported: push path filters require linked Buildkite webhook data"
+			if failure.Group != "" || failure.Label != test.wantLabel || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(message, primary) || !strings.Contains(message, "detail: "+detail) || !strings.Contains(string(annotation), "<strong>Push trigger path filters could not be evaluated safely.</strong>") || !strings.Contains(string(annotation), "matching push history") || !strings.Contains(string(annotation), detail) || strings.Contains(message, "translate workflow triggers") || !strings.Contains(message, ".github/workflows/crowdin-upload.yml") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
+				t.Fatalf("trigger failure step = %#v, message = %q, annotation = %q", failure, message, annotation)
+			}
+			diagnostics := message + string(annotation) + stdout.String()
+			if strings.Contains(diagnostics, "variable resolution") || strings.Contains(diagnostics, "workflow run-name:") {
+				t.Fatalf("variable fetch or run-name error obscured trigger failure: %s", diagnostics)
+			}
+			if success := pipeline.Steps[1]; success.Group != ":github: workflow · Success" || len(success.Steps) != 1 {
+				t.Fatalf("successful workflow after trigger failure = %#v", success)
+			}
+			if !strings.Contains(stdout.String(), "Pipeline generation: failed") || !strings.Contains(stdout.String(), compiler.CodePipelineGeneration) || !strings.Contains(stdout.String(), primary) || !strings.Contains(stdout.String(), "detail: "+detail) {
+				t.Fatalf("trigger failure omitted processing report: %q", stdout.String())
+			}
+		})
 	}
 }
 

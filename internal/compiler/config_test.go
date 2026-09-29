@@ -136,6 +136,48 @@ jobs:
 	}
 }
 
+func TestCompileRunNameVariables(t *testing.T) {
+	source := []byte(`name: Deploy
+run-name: Deploy ${{ vars.TARGET }} via ${{ vars['REGISTRY'] }} (${{ vars.MISSING || 'fallback' }})
+on: push
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	report, err := Validate("deploy.yml", source)
+	if err != nil || !report.ReferencesVars {
+		t.Errorf("ReferencesVars = %t, error = %v; want run-name variable discovery without evaluation", report.ReferencesVars, err)
+	}
+	for _, test := range []struct {
+		name string
+		vars VariableSources
+		want string
+	}{
+		{name: "populated", vars: VariableSources{
+			Organization: map[string]string{"target": "organization", "REGISTRY": "ghcr.io/acme"},
+			Repository:   map[string]string{"TARGET": "production"},
+		}, want: "Deploy production via ghcr.io/acme (fallback)"},
+		{name: "missing", vars: VariableSources{Resolved: true}, want: "Deploy  via  (fallback)"},
+		{name: "unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			options := defaultOptions()
+			options.Vars = test.vars
+			ir, err := CompileIRWithOptionsContext(t.Context(), "deploy.yml", source, pushEvent(t), options)
+			if test.name == "unavailable" {
+				if err == nil || !strings.Contains(err.Error(), `compile-time expression references unavailable value "vars.target"`) {
+					t.Fatalf("unresolved variables error = %v", err)
+				}
+				return
+			}
+			if err != nil || ir.Workflow.RunName != test.want {
+				t.Fatalf("run-name = %q, %v; want %q", ir.Workflow.RunName, err, test.want)
+			}
+		})
+	}
+}
+
 func TestCompileTreatsBlankRunNameAsAbsentAndLocatesUnsupportedContext(t *testing.T) {
 	workflow := []byte("name: CI\nrun-name: '   '\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 	compiled, err := CompileWithOptions("blank.yml", workflow, pushEvent(t), defaultOptions())
@@ -161,12 +203,12 @@ func TestCompileTreatsBlankRunNameAsAbsentAndLocatesUnsupportedContext(t *testin
 		t.Fatalf("resolved blank run-name = %q, want absent", ir.Workflow.RunName)
 	}
 
-	workflow = []byte("name: CI\nrun-name: Run ${{ vars.TARGET }}\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
-	if _, err := Validate("invalid.yml", workflow); err == nil || !strings.Contains(err.Error(), `invalid.yml:2:11: workflow run-name: run-name context "vars" is unavailable`) {
+	workflow = []byte("name: CI\nrun-name: Run ${{ env.TARGET }}\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	if _, err := Validate("invalid.yml", workflow); err == nil || !strings.Contains(err.Error(), `invalid.yml:2:11: workflow run-name: run-name context "env" is unavailable`) {
 		t.Fatalf("unsupported run-name validation error = %v", err)
 	}
 	_, err = CompileWithOptions("invalid.yml", workflow, pushEvent(t), defaultOptions())
-	if err == nil || !strings.Contains(err.Error(), `invalid.yml:2:11: workflow run-name: run-name context "vars" is unavailable`) {
+	if err == nil || !strings.Contains(err.Error(), `invalid.yml:2:11: workflow run-name: run-name context "env" is unavailable`) {
 		t.Fatalf("unsupported run-name error = %v", err)
 	}
 }

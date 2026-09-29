@@ -6,6 +6,7 @@ package expression
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/rhysd/actionlint"
@@ -141,14 +142,14 @@ func validateRunName(template string) error {
 func validateRunNameNode(node actionlint.ExprNode) error {
 	validator := newSemanticValidator(compileTimeSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, _ []string) error {
-		if !strings.EqualFold(root, "github") && !strings.EqualFold(root, "inputs") {
+		if !slices.Contains(profiles[ProfileRunName].Contexts, strings.ToLower(root)) {
 			return fmt.Errorf("run-name context %q is unavailable", root)
 		}
 		return nil
 	}
 	validator.validateAccess = func(node actionlint.ExprNode) error {
 		root := referenceRoot(node)
-		if root != "" && !strings.EqualFold(root, "github") && !strings.EqualFold(root, "inputs") {
+		if root != "" && !slices.Contains(profiles[ProfileRunName].Contexts, strings.ToLower(root)) {
 			return fmt.Errorf("run-name context %q is unavailable", root)
 		}
 		switch node := node.(type) {

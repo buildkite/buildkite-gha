@@ -348,8 +348,12 @@ func TestEngineProfileScopesAreDistinctAndAuthoritative(t *testing.T) {
 	}
 
 	_, err := engine.Validate(Site{Source: "${{ vars.NAME }}", Profile: ProfileRunName, Result: ResultString, Purpose: PurposeExpression})
-	if err == nil || !strings.Contains(err.Error(), `run-name context "vars" is unavailable`) {
+	if err != nil {
 		t.Fatalf("run-name vars error = %v", err)
+	}
+	_, err = engine.Validate(Site{Source: "${{ 'safe' || env.NAME }}", Profile: ProfileRunName, Result: ResultString, Purpose: PurposeExpression})
+	if err == nil || !strings.Contains(err.Error(), `run-name context "env" is unavailable`) {
+		t.Fatalf("run-name env error = %v", err)
 	}
 
 	_, err = engine.Validate(Site{Source: "${{ unsupported.value }}", Profile: ProfilePartialTemplate, Result: ResultString, Purpose: PurposeExpression})

@@ -110,13 +110,14 @@ func resolveActionVariables(ctx context.Context, source variableSource, event co
 
 // resolveUploadVariables resolves the vars scopes once for every applicable
 // workflow that references vars, before validation so compile-time fields
-// see them. A resolution failure fails each workflow that references vars
-// with the backend's error, leaving other workflows to upload; the value
-// scopes never join a diagnostic.
+// and trigger-failure run names see them. A resolution failure fails each
+// otherwise-valid workflow that references vars with the backend's error,
+// preserving existing failures and leaving other workflows to upload. The
+// value scopes never join a diagnostic.
 func resolveUploadVariables(ctx context.Context, source variableSource, workflows []workflowInput, processingReports []compatibility.ProcessingReport, event compiler.Event) compiler.VariableSources {
 	referencesVars := false
-	for i, input := range workflows {
-		if input.Applicable && !processingReportHasErrors(processingReports[i]) && input.ReferencesVars {
+	for _, input := range workflows {
+		if input.Applicable && input.ReferencesVars {
 			referencesVars = true
 		}
 	}

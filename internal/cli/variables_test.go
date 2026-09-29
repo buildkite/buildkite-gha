@@ -217,6 +217,89 @@ func TestRunUploadResolvesVariablesOncePerUpload(t *testing.T) {
 	assertNoVariableValueLeak(t, runner, stdout.String(), stderr.String())
 }
 
+func TestRunUploadRunNameVariables(t *testing.T) {
+	requireImporterHost(t)
+	for _, test := range []struct {
+		name   string
+		status int
+		skip   bool
+		want   string
+	}{
+		{name: "populated", status: http.StatusOK, want: stubRepositoryRegion + " / " + stubOrganizationRegistry + " / fallback"},
+		{name: "missing", status: http.StatusNotFound, want: " /  / fallback"},
+		{name: "fetch failure", status: http.StatusTooManyRequests},
+		{name: "inapplicable", status: http.StatusServiceUnavailable, skip: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			variables, variableRequests := agentVariablesHandler(t, test.status, "3600")
+			agent, environmentRequests := agentStub(t, "job-secret", http.StatusOK, variables)
+			setAgentResolutionEnvironment(t, agent.URL)
+			t.Setenv("BUILDKITE", "true")
+			t.Setenv("BUILDKITE_STEP_KEY", "run-name-variables-importer")
+			eventPath := pushEventPath(t)
+			trigger := "push"
+			if test.skip {
+				trigger = "workflow_dispatch"
+			}
+			workflows := writeUploadWorkflows(t, map[string]string{
+				"build.yml": "name: Deploy\nrun-name: ${{ vars.AWS_REGION }} / ${{ vars['REGISTRY'] }} / ${{ vars.MISSING || 'fallback' }}\non: " + trigger + "\njobs:\n  deploy:\n    environment: production\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+				"plain.yml": "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			})
+			runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+			var stdout, stderr bytes.Buffer
+			if code := run(append([]string{"upload", "--event-path", eventPath}, workflows...), &stdout, &stderr, "dev", runner); code != 0 {
+				t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+			}
+			wantRequests := 1
+			if test.skip {
+				wantRequests = 0
+			}
+			if *variableRequests != wantRequests {
+				t.Fatalf("variable requests = %d, want %d; stderr = %s", *variableRequests, wantRequests, stderr.String())
+			}
+			plans := uploadedPlans(t, runner)
+			if len(plans["test"]) != 1 {
+				t.Fatalf("unaffected workflow plans = %#v", plans)
+			}
+			pipeline := string(runner.commands[len(runner.commands)-1].stdin)
+			switch {
+			case test.skip:
+				if !strings.Contains(pipeline, "This workflow is not triggered by a `push` event") || strings.Contains(pipeline, "Workflow could not be run") {
+					t.Fatalf("inapplicable workflow did not remain skipped:\n%s", pipeline)
+				}
+			case test.status == http.StatusTooManyRequests:
+				failures := 0
+				for path, content := range runner.uploaded {
+					if !strings.HasPrefix(path, ".buildkite-gha/failures/messages/") {
+						continue
+					}
+					failures++
+					if !strings.Contains(string(content), "Error: variables: variable resolution requests are rate limited; retry after 3600 seconds") || strings.Contains(string(content), "workflow run-name:") {
+						t.Fatalf("backend error replaced by run-name evaluation: %s", content)
+					}
+				}
+				if failures != 1 {
+					t.Fatalf("failure artifacts = %d, want 1", failures)
+				}
+				if !strings.Contains(pipeline, `label: ":github: workflow · Deploy"`) {
+					t.Fatalf("unavailable run-name did not retain the static failure label:\n%s", pipeline)
+				}
+			default:
+				if len(plans["deploy"]) != 1 || *environmentRequests != 1 {
+					t.Fatalf("deploy plans = %#v, environment requests = %d", plans, *environmentRequests)
+				}
+				if !strings.Contains(pipeline, `group: ":github: workflow · Deploy — `+test.want+`"`) || strings.Contains(pipeline, stubEnvironmentRegion) {
+					t.Fatalf("run-name did not use pre-environment scopes:\n%s", pipeline)
+				}
+				return
+			}
+			if len(plans["deploy"]) != 0 || *environmentRequests != 0 {
+				t.Fatalf("skipped or failed workflow compiled: %#v, environment requests = %d", plans, *environmentRequests)
+			}
+		})
+	}
+}
+
 // TestRunUploadSkipsVariableResolutionWithoutReferences proves a workflow
 // that never reads vars costs no request against the per-job budget.
 func TestRunUploadSkipsVariableResolutionWithoutReferences(t *testing.T) {
@@ -400,7 +483,7 @@ func TestRunUploadSurfacesVariableResolutionRateLimit(t *testing.T) {
 	t.Setenv("BUILDKITE_STEP_KEY", "variables-agent-limited-importer")
 	eventPath := pushEventPath(t)
 	workflows := writeUploadWorkflows(t, map[string]string{
-		"build.yml":  variablesUploadWorkflow,
+		"build.yml":  "run-name: Build on ${{ github.ref_name }}\n" + variablesUploadWorkflow,
 		"deploy.yml": environmentUploadWorkflow,
 		"plain.yml":  "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo plain\n",
 	})
@@ -429,7 +512,7 @@ func TestRunUploadSurfacesVariableResolutionRateLimit(t *testing.T) {
 		t.Fatalf("failure message artifacts with %q = %d, want 2:\n%s", want, failures, stderr.String())
 	}
 	pipeline := string(runner.commands[len(runner.commands)-1].stdin)
-	for _, want := range []string{`label: ":github: workflow · .github/workflows/build.yml"`, `label: ":github: workflow · .github/workflows/deploy.yml"`, `title: "Workflow could not be run"`} {
+	for _, want := range []string{`label: ":github: workflow · .github/workflows/build.yml — Build on main"`, `label: ":github: workflow · .github/workflows/deploy.yml"`, `title: "Workflow could not be run"`} {
 		if !strings.Contains(pipeline, want) {
 			t.Fatalf("pipeline missing failed workflow step %s:\n%s", want, pipeline)
 		}
