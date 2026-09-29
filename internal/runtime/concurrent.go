@@ -268,6 +268,7 @@ func cloneExpressionContext(in expression.Context) expression.Context {
 		Inputs:           inputs,
 		WorkflowInputs:   cloneAnyMap(in.WorkflowInputs),
 		Matrix:           cloneAnyMap(in.Matrix),
+		Strategy:         cloneAnyMap(in.Strategy),
 		Steps:            cloneStepStatuses(in.Steps),
 		Needs:            cloneNeedStatuses(in.Needs),
 		Secrets:          cloneStrings(in.Secrets),

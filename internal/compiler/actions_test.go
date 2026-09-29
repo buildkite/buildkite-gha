@@ -21,6 +21,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
@@ -944,7 +945,7 @@ runs:
 		if serverURL == "" {
 			serverURL = "https://github.com"
 		}
-		compiled, err := graph.analyzeInvocations(serverURL, refs, test.inputs)
+		compiled, err := graph.analyzeInvocations(program.ActionAuthorityOptions{ServerURL: serverURL}, refs, test.inputs)
 		if err != nil {
 			t.Fatal(err)
 		}

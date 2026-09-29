@@ -180,4 +180,31 @@ func TestValidateDerivesSiteSemanticsInPlace(t *testing.T) {
 	}
 }
 
+func TestStrategyAdmissionFollowsAuthoredPositionAfterDecode(t *testing.T) {
+	for _, condition := range []bool{false, true} {
+		workflow := Program{Version: Version, Job: Job{Steps: []Step{{ID: "run", Kind: "run", Run: &Run{Command: Site{Source: "echo ${{ strategy.job-index }}"}}, Condition: Site{Source: "strategy.job-index == 0"}}}}}
+		if err := workflow.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		step := ActionStep{Run: &ActionRun{Command: Site{Source: "echo ok"}}}
+		if condition {
+			step.Condition.Source = "strategy.job-index == 0"
+		} else {
+			step.Run.Command.Source = "echo ${{ strategy.job-index }}"
+		}
+		workflow.Actions = map[string]Action{"composite": {Runtime: "composite", Steps: []ActionStep{step}}}
+		encoded, err := json.Marshal(workflow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded Program
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if err := decoded.Validate(); err == nil || !strings.Contains(err.Error(), "strategy") {
+			t.Fatalf("action-authored strategy accepted: %v", err)
+		}
+	}
+}
+
 func sitePointer(site Site) *Site { return &site }

@@ -2078,12 +2078,12 @@ func TestEvaluateCompileTemplateUsesGitHubNumberRendering(t *testing.T) {
 }
 
 func TestValidateServiceCredentialTemplateContexts(t *testing.T) {
-	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER || 'user' }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}", "${{ needs.build.outputs.user }}"} {
+	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER || 'user' }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}", "${{ needs.build.outputs.user }}", "${{ strategy.job-index }}"} {
 		if err := ValidateServiceCredentialTemplate(template); err != nil {
 			t.Errorf("ValidateServiceCredentialTemplate(%q) = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ env.USER.extra }}", "${{ secrets }}", "${{ 'safe' || inputs.user }}", "${{ 'safe' || secrets[env.KEY] }}", "${{ 'safe' || secrets[needs.build.outputs.key] }}", "${{ 'safe' || toJSON(github) }}"} {
+	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ env.USER.extra }}", "${{ secrets }}", "${{ 'safe' || inputs.user }}", "${{ 'safe' || secrets[env.KEY] }}", "${{ 'safe' || secrets[needs.build.outputs.key] }}", "${{ 'safe' || toJSON(github) }}"} {
 		if err := ValidateServiceCredentialTemplate(template); err == nil {
 			t.Errorf("ValidateServiceCredentialTemplate(%q) succeeded", template)
 		}

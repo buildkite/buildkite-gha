@@ -180,6 +180,9 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		ProfileJobCondition:          {"always() && inputs.enabled", ResultBoolean, true},
 		ProfileJobControl:            {"${{ matrix.enabled }}", ResultBoolean, true},
 		ProfileStepCondition:         {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileActionStepCondition:   {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileActionStepTemplate:    {"${{ inputs.name }}", ResultString, "value"},
+		ProfileWorkflowEnvironment:   {"${{ inputs.name }}", ResultString, "value"},
 		ProfileCallCondition:         {"always() && inputs.enabled", ResultBoolean, true},
 		ProfileActionLifecycle:       {"${{ always() && inputs.enabled }}", ResultBoolean, true},
 		ProfileJobEnvironment:        {"${{ inputs.name }}", ResultString, "value"},
@@ -886,5 +889,6 @@ func profileIDs() []ProfileID {
 		ProfileStepControl, ProfileReusableStepControl, ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileDeferredInput, ProfileServiceCredential, ProfileServiceMap,
 		ProfileSchedulingGroup, ProfileSchedulingParallel,
 		ProfileActionInputDefault, ProfileDockerActionArg,
+		ProfileActionStepCondition, ProfileActionStepTemplate, ProfileWorkflowEnvironment,
 	}
 }

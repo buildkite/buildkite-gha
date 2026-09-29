@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 // Eight invocations share a composite and its child, but supply distinct inputs.
@@ -61,7 +63,7 @@ runs:
 		}
 		b.ReportAllocs()
 		for b.Loop() {
-			if _, err := graph.analyzeInvocations("https://github.com", refs, inputs); err != nil {
+			if _, err := graph.analyzeInvocations(program.ActionAuthorityOptions{ServerURL: "https://github.com"}, refs, inputs); err != nil {
 				b.Fatal(err)
 			}
 		}

@@ -125,6 +125,7 @@ type JobInstance struct {
 	ToolCache                 *bool                     `json:"tool_cache,omitempty"`
 	Cache                     *CacheVolume              `json:"-"`
 	Matrix                    map[string]any            `json:"matrix,omitempty"`
+	Strategy                  map[string]any            `json:"strategy,omitempty"`
 	Inputs                    map[string]any            `json:"inputs,omitempty"`
 	DeferredInputs            map[string]DeferredInput  `json:"deferred_inputs,omitempty"`
 	FailFast                  *bool                     `json:"fail_fast,omitempty"`

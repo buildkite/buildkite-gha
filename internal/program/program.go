@@ -91,9 +91,18 @@ func (site Site) expressionSite() expression.Site {
 	case site.Purpose == PurposeCompositeActionInput || site.Provenance == ProvenanceAction:
 		purpose = expression.PurposeCompositeActionInput
 	}
+	profile := expression.ProfileID(site.Surface)
+	if site.Provenance == ProvenanceAction {
+		switch site.Surface {
+		case SurfaceStepTemplate:
+			profile = expression.ProfileActionStepTemplate
+		case SurfaceStepCondition:
+			profile = expression.ProfileActionStepCondition
+		}
+	}
 	return expression.Site{
 		Source:  site.Source,
-		Profile: expression.ProfileID(site.Surface),
+		Profile: profile,
 		Result:  expression.ResultType(site.Result),
 		Purpose: purpose,
 		Location: expression.Location{

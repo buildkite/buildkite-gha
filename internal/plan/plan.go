@@ -328,6 +328,7 @@ type Job struct {
 	IDTokenPermission    string                   `json:"id_token_permission,omitempty"`
 	OIDC                 *OIDCConfiguration       `json:"oidc,omitempty"`
 	Matrix               map[string]any           `json:"matrix,omitempty"`
+	Strategy             map[string]any           `json:"strategy,omitempty"`
 	Inputs               map[string]any           `json:"inputs,omitempty"`
 	DeferredInputs       map[string]DeferredInput `json:"deferred_inputs,omitempty"`
 	DeferredInputValues  map[string]any           `json:"-"`
