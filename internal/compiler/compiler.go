@@ -742,7 +742,7 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 			*field = value
 		}
 		for key, value := range container.Env {
-			if err := validateCompileSite(value, expression.ProfileServiceEnvironment, expression.ResultString); err != nil {
+			if err := validateCompileSite(value, expression.ProfileCompileServiceEnvironment, expression.ResultString); err != nil {
 				return nil, fmt.Errorf("service %q environment %q: %w", service.Name, key, err)
 			}
 			resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceEnvironment, context)

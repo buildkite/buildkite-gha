@@ -5123,6 +5123,46 @@ func TestResolveCompileServicesKeepsCredentialVariablesResidual(t *testing.T) {
 	}
 }
 
+func TestResolveCompileServiceEnvironmentVarsSnapshot(t *testing.T) {
+	for _, test := range []struct {
+		source, reduced, want string
+	}{
+		{source: "${{ vars.VALUE }}", reduced: "repo", want: "repo"},
+		{source: "${{ env.NAME }}-${{ vars.VALUE }}", reduced: "${{ env.NAME }}-repo", want: "job-repo"},
+		{source: "${{ needs.build.outputs.name }}-${{ vars.VALUE }}", reduced: "${{ needs.build.outputs.name }}-repo", want: "upstream-repo"},
+		{source: "${{ format('{0}-{1}', env.NAME, vars.VALUE) }}"},
+		{source: "${{ format('{0}-{1}', needs.build.outputs.name, vars.VALUE) }}"},
+	} {
+		t.Run(test.source, func(t *testing.T) {
+			services := []workflow.Service{{Name: "database", Container: workflow.ServiceContainer{
+				Image: "postgres:16", Env: map[string]string{"VALUE": test.source},
+			}}}
+			resolved, err := resolveCompileServices(services, expression.CompileContext{Vars: map[string]string{"VALUE": "repo"}})
+			if test.reduced == "" {
+				if err == nil || !strings.Contains(err.Error(), `runtime context "vars" is unavailable`) {
+					t.Fatalf("residual vars must be rejected: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			reduced := resolved[0].Container.Env["VALUE"]
+			if reduced != test.reduced {
+				t.Fatalf("reduced = %q, want %q", reduced, test.reduced)
+			}
+			got, err := expression.NewEngine().Evaluate(expression.Site{Source: reduced, Profile: expression.ProfileServiceEnvironment, Result: expression.ResultString}, expression.Values{Runtime: expression.Context{
+				Vars:  map[string]string{"VALUE": "environment"},
+				Env:   map[string]string{"NAME": "job"},
+				Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{"name": "upstream"}}},
+			}})
+			if err != nil || got != test.want {
+				t.Fatalf("runtime value = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestResolveCompileServicesRejectsUnsupportedCredentialContexts(t *testing.T) {
 	for _, value := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ runner.os }}"} {
 		services := []workflow.Service{{Name: "database", Container: workflow.ServiceContainer{

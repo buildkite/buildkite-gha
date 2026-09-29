@@ -174,6 +174,36 @@ func TestProgramWireDerivesSiteSemanticsFromPosition(t *testing.T) {
 	}
 }
 
+func TestServiceEnvironmentRejectsResidualVarsAfterDecode(t *testing.T) {
+	for _, source := range []string{
+		"${{ vars.VALUE }}",
+		"${{ format('{0}-{1}', env.NAME, vars.VALUE) }}",
+		"${{ format('{0}-{1}', needs.build.outputs.name, vars.VALUE) }}",
+		"${{ 'safe' || vars.VALUE }}",
+	} {
+		t.Run(source, func(t *testing.T) {
+			program := Program{Version: Version, Job: Job{
+				Services: Services{Static: []Service{{Name: "db", Container: ServiceContainer{
+					Image: Site{Source: "postgres:16"},
+					Env:   []Binding{{Name: "VALUE", Value: Site{Source: source, Surface: SurfaceJobEnvironment}}},
+				}}}},
+				Steps: []Step{{ID: "run", Kind: "run", Run: &Run{Command: Site{Source: "true"}}}},
+			}}
+			encoded, err := json.Marshal(program)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded Program
+			if err := json.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if err := decoded.Validate(); err == nil || !strings.Contains(err.Error(), `runtime context "vars" is unavailable`) {
+				t.Fatalf("decoded service env admitted residual vars: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateDerivesSiteSemanticsInPlace(t *testing.T) {
 	program := Program{Version: Version, Job: Job{
 		Condition: Site{Source: "true"},

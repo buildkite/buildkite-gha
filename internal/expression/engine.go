@@ -13,41 +13,42 @@ import (
 type ProfileID string
 
 const (
-	ProfileCompile               ProfileID = "compile"
-	ProfileCompileTemplate       ProfileID = "compile-template"
-	ProfileCompileContainerImage ProfileID = "compile-container-image"
-	ProfileRunsOn                ProfileID = "runs-on"
-	ProfileRunsOnTemplate        ProfileID = "runs-on-template"
-	ProfilePartialTemplate       ProfileID = "partial-template"
-	ProfileCompileJobCondition   ProfileID = "compile-job-condition"
-	ProfileCompileStepCondition  ProfileID = "compile-step-condition"
-	ProfileCompileCallCondition  ProfileID = "compile-call-condition"
-	ProfileReusableStepControl   ProfileID = "reusable-step-control"
-	ProfileReusableInput         ProfileID = "reusable-input"
-	ProfileRunName               ProfileID = "run-name"
-	ProfileJobCondition          ProfileID = "job-condition"
-	ProfileJobControl            ProfileID = "job-control"
-	ProfileStepCondition         ProfileID = "step-condition"
-	ProfileActionStepCondition   ProfileID = "action-step-condition"
-	ProfileActionStepTemplate    ProfileID = "action-step-template"
-	ProfileCallCondition         ProfileID = "call-condition"
-	ProfileActionLifecycle       ProfileID = "action-lifecycle"
-	ProfileJobEnvironment        ProfileID = "job-environment"
-	ProfileWorkflowEnvironment   ProfileID = "workflow-environment"
-	ProfileJobDefault            ProfileID = "job-default"
-	ProfileJobOutput             ProfileID = "job-output"
-	ProfileStepTemplate          ProfileID = "step-template"
-	ProfileStepControl           ProfileID = "step-control"
-	ProfileRuntimeTemplate       ProfileID = "runtime-template"
-	ProfileServiceTemplate       ProfileID = "service-template"
-	ProfileServiceEnvironment    ProfileID = "service-environment"
-	ProfileDeferredInput         ProfileID = "deferred-input"
-	ProfileSchedulingGroup       ProfileID = "scheduling-group"
-	ProfileSchedulingParallel    ProfileID = "scheduling-parallel"
-	ProfileServiceCredential     ProfileID = "service-credential"
-	ProfileServiceMap            ProfileID = "service-map"
-	ProfileActionInputDefault    ProfileID = "action-input-default"
-	ProfileDockerActionArg       ProfileID = "docker-action-arg"
+	ProfileCompile                   ProfileID = "compile"
+	ProfileCompileTemplate           ProfileID = "compile-template"
+	ProfileCompileContainerImage     ProfileID = "compile-container-image"
+	ProfileCompileServiceEnvironment ProfileID = "compile-service-environment"
+	ProfileRunsOn                    ProfileID = "runs-on"
+	ProfileRunsOnTemplate            ProfileID = "runs-on-template"
+	ProfilePartialTemplate           ProfileID = "partial-template"
+	ProfileCompileJobCondition       ProfileID = "compile-job-condition"
+	ProfileCompileStepCondition      ProfileID = "compile-step-condition"
+	ProfileCompileCallCondition      ProfileID = "compile-call-condition"
+	ProfileReusableStepControl       ProfileID = "reusable-step-control"
+	ProfileReusableInput             ProfileID = "reusable-input"
+	ProfileRunName                   ProfileID = "run-name"
+	ProfileJobCondition              ProfileID = "job-condition"
+	ProfileJobControl                ProfileID = "job-control"
+	ProfileStepCondition             ProfileID = "step-condition"
+	ProfileActionStepCondition       ProfileID = "action-step-condition"
+	ProfileActionStepTemplate        ProfileID = "action-step-template"
+	ProfileCallCondition             ProfileID = "call-condition"
+	ProfileActionLifecycle           ProfileID = "action-lifecycle"
+	ProfileJobEnvironment            ProfileID = "job-environment"
+	ProfileWorkflowEnvironment       ProfileID = "workflow-environment"
+	ProfileJobDefault                ProfileID = "job-default"
+	ProfileJobOutput                 ProfileID = "job-output"
+	ProfileStepTemplate              ProfileID = "step-template"
+	ProfileStepControl               ProfileID = "step-control"
+	ProfileRuntimeTemplate           ProfileID = "runtime-template"
+	ProfileServiceTemplate           ProfileID = "service-template"
+	ProfileServiceEnvironment        ProfileID = "service-environment"
+	ProfileDeferredInput             ProfileID = "deferred-input"
+	ProfileSchedulingGroup           ProfileID = "scheduling-group"
+	ProfileSchedulingParallel        ProfileID = "scheduling-parallel"
+	ProfileServiceCredential         ProfileID = "service-credential"
+	ProfileServiceMap                ProfileID = "service-map"
+	ProfileActionInputDefault        ProfileID = "action-input-default"
+	ProfileDockerActionArg           ProfileID = "docker-action-arg"
 )
 
 // Form identifies whether a site is one expression or an interpolated
@@ -154,14 +155,17 @@ var profiles = map[ProfileID]Profile{
 	ProfileRuntimeTemplate:       {Form: FormTemplate, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsRuntimeTemplate},
 	ProfileWorkflowEnvironment:   {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "secrets", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
 	ProfileServiceTemplate:       {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsServiceTemplate},
-	ProfileServiceEnvironment:    {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
-	ProfileDeferredInput:         {Form: FormTemplate, Scope: ScopeCall, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDeferredInput},
-	ProfileSchedulingGroup:       {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsDeferredInput},
-	ProfileSchedulingParallel:    {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: FunctionSet{"fromJSON"}, Missing: MissingError, Token: TokenDenied, semantics: semanticsJobControl},
-	ProfileServiceCredential:     {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsServiceCredential},
-	ProfileServiceMap:            {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsServiceMap},
-	ProfileActionInputDefault:    {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsActionInputDefault},
-	ProfileDockerActionArg:       {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"inputs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsDockerActionArg},
+	// Authored service env may use compile-known vars, but normalized runtime
+	// sites must not read the environment-overlaid vars context.
+	ProfileCompileServiceEnvironment: {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
+	ProfileServiceEnvironment:        {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "secrets", "strategy"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
+	ProfileDeferredInput:             {Form: FormTemplate, Scope: ScopeCall, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDeferredInput},
+	ProfileSchedulingGroup:           {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsDeferredInput},
+	ProfileSchedulingParallel:        {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: FunctionSet{"fromJSON"}, Missing: MissingError, Token: TokenDenied, semantics: semanticsJobControl},
+	ProfileServiceCredential:         {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsServiceCredential},
+	ProfileServiceMap:                {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsServiceMap},
+	ProfileActionInputDefault:        {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsActionInputDefault},
+	ProfileDockerActionArg:           {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"inputs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsDockerActionArg},
 }
 
 // Profiles returns a copy of the closed profile table for exhaustive tests.
