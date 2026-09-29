@@ -2123,6 +2123,37 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 	}
 }
 
+func TestApplyStaticInputsPreservesRuntimeActionInputs(t *testing.T) {
+	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
+	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
+		Span: span,
+		With: map[string]string{
+			"cache-from": "${{ inputs.cache && format('type=gha,scope={0}', hashFiles(inputs.file)) || '' }}",
+		},
+	}}}
+
+	resolved, err := applyStaticInputs("workflow.yml", job, map[string]any{"cache": true, "file": "Dockerfile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "${{ true && format('type=gha,scope={0}', hashFiles('Dockerfile')) || '' }}"
+	if got := resolved.Steps[0].With["cache-from"]; got != want {
+		t.Fatalf("cache-from = %q, want %q", got, want)
+	}
+	if err := rejectUnresolvedInputExpressions("workflow.yml", resolved, nil); err != nil {
+		t.Fatalf("rejectUnresolvedInputExpressions() error = %v", err)
+	}
+
+	job.Name = "cache-${{ hashFiles(inputs.file) }}"
+	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"cache": true, "file": "Dockerfile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnresolvedInputExpressions("workflow.yml", resolved, nil); err == nil || !strings.Contains(err.Error(), "not statically resolvable") {
+		t.Fatalf("rejectUnresolvedInputExpressions() error = %v, want runtime job name rejection", err)
+	}
+}
+
 func TestRejectUnresolvedIndexedInputsInCompileTimeFields(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
 	for _, test := range []struct {

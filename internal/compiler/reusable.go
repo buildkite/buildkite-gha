@@ -1265,7 +1265,7 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 		}
 		step.If = replaceStaticInputCondition(step.If, inputs)
 		step.Env = replaceMapInputs(step.Env, inputs)
-		step.With = replaceMapInputs(step.With, inputs)
+		step.With = replaceRuntimeMapInputs(step.With, inputs)
 	}
 	return job, nil
 }
@@ -1565,6 +1565,17 @@ func replaceMapInputs(values map[string]string, inputs map[string]any) map[strin
 	return out
 }
 
+func replaceRuntimeMapInputs(values map[string]string, inputs map[string]any) map[string]string {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for name, value := range values {
+		out[name] = replaceRuntimeInputs(value, inputs)
+	}
+	return out
+}
+
 func replaceStaticInputCondition(value string, inputs map[string]any) string {
 	match := staticInputCondition.FindStringSubmatch(value)
 	if match == nil {
@@ -1605,6 +1616,14 @@ func replaceStaticInputCondition(value string, inputs map[string]any) string {
 }
 
 func replaceStaticInputs(value string, inputs map[string]any) string {
+	return replaceInputs(value, inputs, false)
+}
+
+func replaceRuntimeInputs(value string, inputs map[string]any) string {
+	return replaceInputs(value, inputs, true)
+}
+
+func replaceInputs(value string, inputs map[string]any, preserveRuntime bool) string {
 	resolved, err := expression.SubstituteCompileInputs(value, inputs)
 	if err != nil || resolved == value {
 		return value
@@ -1614,6 +1633,9 @@ func replaceStaticInputs(value string, inputs map[string]any) string {
 			return reduced.Value.(string)
 		}
 		return reduced.Source
+	}
+	if preserveRuntime {
+		return resolved
 	}
 	return value
 }
