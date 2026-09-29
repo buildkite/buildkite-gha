@@ -40,6 +40,7 @@ const (
 	ProfileStepControl           ProfileID = "step-control"
 	ProfileRuntimeTemplate       ProfileID = "runtime-template"
 	ProfileServiceTemplate       ProfileID = "service-template"
+	ProfileServiceEnvironment    ProfileID = "service-environment"
 	ProfileDeferredInput         ProfileID = "deferred-input"
 	ProfileSchedulingGroup       ProfileID = "scheduling-group"
 	ProfileSchedulingParallel    ProfileID = "scheduling-parallel"
@@ -153,6 +154,7 @@ var profiles = map[ProfileID]Profile{
 	ProfileRuntimeTemplate:       {Form: FormTemplate, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsRuntimeTemplate},
 	ProfileWorkflowEnvironment:   {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "secrets", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
 	ProfileServiceTemplate:       {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsServiceTemplate},
+	ProfileServiceEnvironment:    {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
 	ProfileDeferredInput:         {Form: FormTemplate, Scope: ScopeCall, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDeferredInput},
 	ProfileSchedulingGroup:       {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsDeferredInput},
 	ProfileSchedulingParallel:    {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: FunctionSet{"fromJSON"}, Missing: MissingError, Token: TokenDenied, semantics: semanticsJobControl},

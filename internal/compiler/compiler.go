@@ -710,7 +710,7 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 	// Credentials are runner-evaluated after the job's environment applies, so
 	// their vars context is not known here. Keep vars residual so the runtime
 	// evaluates them with environment variables laid over the pre-environment
-	// scopes. Every other service field is compile-time and keeps the context.
+	// scopes. Other service fields retain their existing compile-time vars snapshot.
 	credentialContext := context
 	credentialContext.Vars = nil
 	resolved := make([]workflow.Service, 0, len(services))
@@ -742,7 +742,10 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 			*field = value
 		}
 		for key, value := range container.Env {
-			resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceTemplate, context)
+			if err := validateCompileSite(value, expression.ProfileServiceEnvironment, expression.ResultString); err != nil {
+				return nil, fmt.Errorf("service %q environment %q: %w", service.Name, key, err)
+			}
+			resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceEnvironment, context)
 			if err != nil {
 				return nil, fmt.Errorf("service %q environment %q: %w", service.Name, key, err)
 			}
@@ -757,7 +760,7 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 				values[j] = resolvedValue
 			}
 		}
-		for _, value := range append(append(append([]string{container.Image, container.Options, container.Command, container.Entrypoint}, container.Ports...), container.Volumes...), mapValues(container.Env)...) {
+		for _, value := range append(append([]string{container.Image, container.Options, container.Command, container.Entrypoint}, container.Ports...), container.Volumes...) {
 			if strings.Contains(value, "${{") {
 				if err := validateCompileSite(value, expression.ProfileServiceTemplate, expression.ResultString); err != nil {
 					return nil, fmt.Errorf("service %q: %w", service.Name, err)
@@ -771,14 +774,6 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 		resolved = append(resolved, service)
 	}
 	return resolved, nil
-}
-
-func mapValues(values map[string]string) []string {
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		result = append(result, value)
-	}
-	return result
 }
 
 func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, context expression.CompileContext, matrix map[string]any) (string, error) {

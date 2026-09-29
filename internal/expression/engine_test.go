@@ -192,6 +192,7 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		ProfileStepControl:           {"${{ true }}", ResultBoolean, true},
 		ProfileRuntimeTemplate:       {"${{ env.NAME }}", ResultString, "value"},
 		ProfileServiceTemplate:       {"${{ needs.build.outputs.value || 'fallback' }}", ResultString, `{"name":"value"}`},
+		ProfileServiceEnvironment:    {"${{ format('{0}-{1}', env.NAME, needs.build.outputs.value) }}", ResultString, `value-{"name":"value"}`},
 		ProfileDeferredInput:         {"type=raw,value=${{ needs.build.outputs.value }}", ResultString, `type=raw,value={"name":"value"}`},
 		ProfileSchedulingGroup:       {"group-${{ needs.build.outputs.value }}", ResultString, `group-{"name":"value"}`},
 		ProfileSchedulingParallel:    {"${{ fromJSON('2') }}", ResultNumber, float64(2)},
@@ -670,6 +671,18 @@ func TestEngineAbstractEvaluationNarrowsMonotonicallyToConcrete(t *testing.T) {
 			values:     Values{Runtime: Context{Vars: map[string]string{"ENABLED": "yes"}, GitHub: map[string]any{"token": "ghs_scoped"}}},
 		},
 		{
+			name:       "service env uses job value",
+			site:       Site{Source: "${{ env.PASSWORD || secrets.DB_PASSWORD }}", Profile: ProfileServiceEnvironment, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"env.password": "supplied", "secrets.db_password": "secret-value"},
+			values:     Values{Runtime: Context{Env: map[string]string{"PASSWORD": "supplied"}, Secrets: map[string]string{"DB_PASSWORD": "secret-value"}}},
+		},
+		{
+			name:       "service env falls back to named secret",
+			site:       Site{Source: "${{ env.PASSWORD || secrets.DB_PASSWORD }}", Profile: ProfileServiceEnvironment, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"env.password": "", "secrets.db_password": "secret-value"},
+			values:     Values{Runtime: Context{Env: map[string]string{"PASSWORD": ""}, Secrets: map[string]string{"DB_PASSWORD": "secret-value"}}},
+		},
+		{
 			name:       "service credential uses supplied value",
 			site:       Site{Source: "${{ env.PASSWORD || github.token }}", Profile: ProfileServiceCredential, Result: ResultString, Purpose: PurposeExpression},
 			references: map[string]any{"env.password": "supplied"},
@@ -846,7 +859,7 @@ func TestEngineCaseFunctionPolicyIsClosedByProfile(t *testing.T) {
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileStepCondition,
 		ProfileCallCondition, ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault,
 		ProfileJobOutput, ProfileStepTemplate, ProfileStepControl, ProfileReusableStepControl, ProfileDeferredInput, ProfileActionInputDefault, ProfileDockerActionArg,
-		ProfileServiceTemplate, ProfileServiceMap, ProfileServiceCredential,
+		ProfileServiceTemplate, ProfileServiceMap, ProfileServiceCredential, ProfileServiceEnvironment,
 	} {
 		if !containsFold(profiles[id].Functions, "case") {
 			t.Errorf("profile %q does not admit case", id)
@@ -887,6 +900,7 @@ func profileIDs() []ProfileID {
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileJobControl, ProfileStepCondition, ProfileCallCondition,
 		ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput, ProfileStepTemplate,
 		ProfileStepControl, ProfileReusableStepControl, ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileDeferredInput, ProfileServiceCredential, ProfileServiceMap,
+		ProfileServiceEnvironment,
 		ProfileSchedulingGroup, ProfileSchedulingParallel,
 		ProfileActionInputDefault, ProfileDockerActionArg,
 		ProfileActionStepCondition, ProfileActionStepTemplate, ProfileWorkflowEnvironment,
