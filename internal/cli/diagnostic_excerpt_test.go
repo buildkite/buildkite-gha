@@ -23,7 +23,7 @@ func TestTriggerFailureLinksFilterAfterLicenseHeader(t *testing.T) {
 	const displayPath = "pr-reviewed.yml"
 	path := filepath.Join(root, displayPath)
 	// The rejected filter is at 21:5, not the review event or the selected PR trigger.
-	source := []byte(strings.Repeat("# License header\n", 15) + "\nname: Reviewed\non:\n  pull_request_review:\n    types: [submitted, edited, dismissed]\n    branches:\n      - private-branch\n  pull_request:\n    types: [opened]\n    branches: [trunk]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hello\n")
+	source := []byte(strings.Repeat("# License header\n", 15) + "\nname: Reviewed\non:\n  pull_request_review:\n    types: [submitted, edited, dismissed]\n    workflows:\n      - private-workflow\n  pull_request:\n    types: [opened]\n    branches: [trunk]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hello\n")
 	if err := os.WriteFile(path, source, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -49,15 +49,15 @@ func TestTriggerFailureLinksFilterAfterLicenseHeader(t *testing.T) {
 				for _, want := range []string{
 					displayPath + ":21:5",
 					"/blob/" + sha + "/" + displayPath + "#L21",
-					"pull_request_review does not support the branches filter",
-					"21 |     branches:\n     |     ^^^^^^^^",
+					"pull_request_review does not support the workflows filter",
+					"21 |     workflows:\n     |     ^^^^^^^^^",
 					"move the check into a job or step condition",
 				} {
 					if !strings.Contains(text, want) {
 						t.Errorf("diagnostic missing %q: %s", want, text)
 					}
 				}
-				for _, unwanted := range []string{root, "private-branch"} {
+				for _, unwanted := range []string{root, "private-workflow"} {
 					if strings.Contains(text, unwanted) {
 						t.Errorf("diagnostic exposed %q: %s", unwanted, text)
 					}

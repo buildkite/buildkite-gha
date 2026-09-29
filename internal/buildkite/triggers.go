@@ -539,7 +539,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 	pathFilters := t.Paths != nil || t.PathsIgnore != nil
 	if pathFilters {
 		switch t.Event {
-		case "merge_group", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment":
+		case "merge_group", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment",
+			"issues", "issue_comment", "label", "release", "create", "delete", "deployment", "deployment_status", "pull_request_review", "pull_request_review_comment":
 		case "push", "pull_request":
 			if _, err := pathFiltersMatch(nil, t.Paths, t.PathsIgnore); err != nil {
 				return "", false, triggerFilterError(t, fmt.Errorf("%s paths: %w", t.Event, err), "paths", "paths-ignore")
@@ -560,8 +561,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate, true, nil
 	case "deployment", "deployment_status", "create", "delete":
-		if hasWebhookFilters(t) {
-			return "", false, unsupportedEventFilter(t, "types", "branches", "branches-ignore", "tags", "tags-ignore", "paths", "paths-ignore", "workflows")
+		if t.Types != nil || t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "types", "workflows")
 		}
 		if expressions.EventPredicate == "" {
 			return "", false, fmt.Errorf("%s requires an effective event predicate", t.Event)
@@ -739,8 +740,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return strings.Join(parts, " && "), true, nil
 	case "release":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Paths != nil || t.PathsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.ReleaseAction == "" {
 			return "", false, fmt.Errorf("release requires effective event and action expressions")
@@ -827,8 +828,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "label":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.LabelAction == "" || expressions.LabelAction == "null" {
 			return "", false, fmt.Errorf("label requires effective event and action expressions")
@@ -845,8 +846,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "issues":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.IssuesAction == "" {
 			return "", false, fmt.Errorf("issues requires effective event and action expressions")
@@ -866,8 +867,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "pull_request_review", "pull_request_review_comment":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.PullRequestReviewAction == "" || expressions.PullRequestReviewAction == "null" {
 			return "", false, fmt.Errorf("%s requires effective event and action expressions", t.Event)
@@ -887,8 +888,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "issue_comment":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.IssueCommentAction == "" {
 			return "", false, fmt.Errorf("issue_comment requires effective event and action expressions")

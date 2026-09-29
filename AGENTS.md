@@ -40,6 +40,10 @@ product but not the subsystem.
 
 ## Architecture
 
+- For every GitHub Actions compatibility change, follow the
+  [compatibility policy and behavior record](docs/compatibility.md#compatibility-policy).
+  Match exposed, reproducibly observed GitHub behavior; update that record and
+  regression tests together when evidence changes the contract.
 - Read package documentation before assigning ownership. Name packages and
   files for their full responsibility rather than generic activity.
 - Before changing expression evaluation, lifecycle ordering, or token

@@ -9,6 +9,61 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
+func TestNativeOlderEventsIgnoreRefAndPathFilters(t *testing.T) {
+	for _, test := range []struct{ event, action, ref string }{
+		{"issues", "opened", "refs/heads/main"},
+		{"issue_comment", "created", "refs/heads/main"},
+		{"label", "created", "refs/heads/main"},
+		{"release", "published", "refs/tags/v1"},
+		{"create", "", "refs/tags/v1"},
+		{"delete", "", "refs/heads/main"},
+		{"deployment", "", "refs/heads/main"},
+		{"deployment_status", "", "refs/heads/main"},
+		{"pull_request_review", "submitted", "refs/pull/42/merge"},
+		{"pull_request_review_comment", "created", "refs/pull/42/merge"},
+	} {
+		for _, filter := range []string{
+			"branches: [__lab_never_branch__]", "branches-ignore: ['**']",
+			"tags: [__lab_never_tag__]", "tags-ignore: ['**']",
+			"paths: ['__lab_never_path__/**']", "paths-ignore: ['**']",
+		} {
+			t.Run(test.event+"/"+filter, func(t *testing.T) {
+				config := filter
+				if test.action != "" {
+					config = "types: [" + test.action + "], " + config
+				}
+				parsed, err := workflow.Parse("native.yml", []byte("on: {"+test.event+": {"+config+"}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := buildkite.ValidateTriggerConditions(parsed.Triggers); err != nil {
+					t.Fatal(err)
+				}
+				actions := []string{test.action}
+				if test.action != "" {
+					actions = append(actions, "edited")
+				}
+				for _, action := range actions {
+					event := compiler.Event{Event: test.event, Ref: test.ref, Payload: map[string]any{"action": action}}
+					expressions, snapshot := snapshotTriggerState(event)
+					condition, applicable, err := buildkite.TranslateEventTriggerCondition(parsed.Triggers, test.event, expressions, snapshot)
+					want := "(true)"
+					if test.action != "" {
+						want = `(true && ("` + action + `" == "` + test.action + `"))`
+					}
+					if err != nil || !applicable || condition != want {
+						t.Fatalf("condition=%q, want=%q, applicable=%v: %v", condition, want, applicable, err)
+					}
+					reason, err := buildkite.TriggerFilterMismatchReason(parsed.Triggers, test.event, snapshot)
+					if err != nil || (reason != "") != (action != test.action) {
+						t.Fatalf("action=%s: reason=%q: %v", action, reason, err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestNativeDefaultBranchEventsIgnoreRefAndPathFilters(t *testing.T) {
 	for _, test := range []struct{ event, action string }{
 		{"fork", ""}, {"public", ""}, {"gollum", ""}, {"page_build", ""},
