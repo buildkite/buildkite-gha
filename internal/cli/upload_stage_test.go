@@ -2304,10 +2304,11 @@ func TestContinuationArtifactRebuildsTheImporterRequest(t *testing.T) {
 			{Label: "ubuntu-latest", Queue: "custom-linux", Platform: compiler.PlatformLinuxAMD64.String(), Image: "ubuntu", Cache: cache},
 			{Label: "native", Queue: "native-linux", Platform: compiler.PlatformLinuxAMD64.String(), Agents: map[string]string{"nsc-gha-image": "ubuntu-22.04"}, ToolCache: &toolCache},
 		},
-		Vars:         stageVars{Organization: map[string]string{"REGION": "us-east-1"}, Repository: map[string]string{"TEAM": "pipelines"}, Resolved: true},
-		OIDC:         oidc,
-		Continuation: compiler.RuntimeContinuation{Descriptor: compiler.RuntimeOutputDescriptor{Job: "test"}, ActionLocks: []plan.ActionLock{ownLock}},
-		Others:       []compiler.RuntimeContinuation{{Descriptor: compiler.RuntimeOutputDescriptor{Job: "publish"}, ActionLocks: []plan.ActionLock{otherLock}}},
+		Vars:             stageVars{Organization: map[string]string{"REGION": "us-east-1"}, Repository: map[string]string{"TEAM": "pipelines"}, Resolved: true},
+		OIDC:             oidc,
+		UpstreamCheckout: true,
+		Continuation:     compiler.RuntimeContinuation{Descriptor: compiler.RuntimeOutputDescriptor{Job: "test"}, ActionLocks: []plan.ActionLock{ownLock}},
+		Others:           []compiler.RuntimeContinuation{{Descriptor: compiler.RuntimeOutputDescriptor{Job: "publish"}, ActionLocks: []plan.ActionLock{otherLock}}},
 	}
 	// Explicit false must survive omitempty and decoding rather than become
 	// the legacy absent-field default.
@@ -2337,6 +2338,7 @@ func TestContinuationArtifactRebuildsTheImporterRequest(t *testing.T) {
 		},
 		OIDC:                     oidc,
 		Vars:                     compiler.VariableSources{Organization: map[string]string{"REGION": "us-east-1"}, Repository: map[string]string{"TEAM": "pipelines"}, Resolved: true},
+		UpstreamCheckout:         true,
 		RepositorySource:         source,
 		RuntimeMatrixRows:        map[string][]map[string]any{"test": rows},
 		RuntimeMatrixSkipped:     map[string]bool{},

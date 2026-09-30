@@ -202,6 +202,10 @@ type Options struct {
 	// access. ActionSource is required only when a workflow uses remote actions.
 	ResolveActions bool
 	ActionSource   ActionSource
+	// UpstreamCheckout runs the upstream actions/checkout JavaScript instead
+	// of the native adapter for GitHub events when the resolved release
+	// declares a supported Node.js runtime. The lock records the decision.
+	UpstreamCheckout bool
 	// GroupLabel merges generated jobs into the Buildkite group containing the
 	// importer. It affects pipeline presentation only, not compiler IR or plans.
 	GroupLabel string

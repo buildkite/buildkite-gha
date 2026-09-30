@@ -909,6 +909,20 @@ func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 	}
 }
 
+func TestUpstreamActionLockIsOnlyForCheckout(t *testing.T) {
+	lock := func(repository string) ActionLock {
+		return ActionLock{ID: "a-0000000000000001", Source: "github", Repository: repository, RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("a", 64), Upstream: true}
+	}
+	if _, err := ValidateActionLockList([]ActionLock{lock("actions/checkout")}); err != nil {
+		t.Fatalf("upstream checkout lock rejected: %v", err)
+	}
+	for _, rejected := range []ActionLock{lock("actions/upload-artifact"), lock("owner/action"), {ID: "a-0000000000000001", Source: "workspace", Path: "checkout", SourceDigest: "sha256:" + strings.Repeat("a", 64), Upstream: true}} {
+		if _, err := ValidateActionLockList([]ActionLock{rejected}); err == nil || !strings.Contains(err.Error(), "upstream is allowed only for actions/checkout") {
+			t.Fatalf("upstream %s lock error = %v", rejected.Repository, err)
+		}
+	}
+}
+
 func TestActionExecutablePathsAggregateBudget(t *testing.T) {
 	paths := make([]string, 128)
 	for i := range paths {

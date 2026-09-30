@@ -137,6 +137,57 @@ func TestHostedPreflightCompilesPublicReusableWorkflowWithSharedSource(t *testin
 	}
 }
 
+func TestHostedUpstreamCheckoutUsesWorkflowToken(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), ".github", "workflows", "ci.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte("on: push\npermissions:\n  contents: write\njobs:\n  push:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v7\n      - run: git push\n")
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checkoutRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(checkoutRoot, "action.yml"), []byte("name: checkout\ninputs:\n  token:\n    default: ${{ github.token }}\nruns:\n  using: node24\n  main: index.js\n  post: index.js\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkoutRoot, "index.js"), []byte("// fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := actionsource.DigestTree(checkoutRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	distributionDigest := "sha256:" + strings.Repeat("d", 64)
+	compile := func(upstream bool) compiler.Bundle {
+		t.Helper()
+		compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{
+			WorkflowPath: workflowPath, WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: distributionDigest, ImporterStep: "importer",
+			RuntimeDistributions: map[compiler.Platform]string{compiler.PlatformLinuxAMD64: distributionDigest},
+			RepositorySource:     compiler.MemoizeRepositorySource(&batchCountingActionSource{root: checkoutRoot, digest: digest}),
+			UpstreamCheckout:     upstream,
+		})
+		if err != nil || !compiled.Admitted || len(compiled.Bundle.Plans) != 1 {
+			t.Fatalf("compileHostedRequest(upstream=%t) = %#v, %v", upstream, compiled, err)
+		}
+		return compiled.Bundle
+	}
+
+	bundle := compile(true)
+	job := bundle.Plans[0].Job
+	if len(job.Actions) != 1 || !job.Actions[0].Upstream || job.GitHubToken == nil || job.GitHubToken.Permissions["contents"] != "write" ||
+		job.HasCapability("provider-token-read") || !bundleRunsUnprovenActions(bundle) {
+		t.Fatalf("upstream checkout plan = %#v", job)
+	}
+	native := compile(false)
+	if job := native.Plans[0].Job; job.Actions[0].Upstream || job.GitHubToken != nil || !job.HasCapability("provider-token-read") || bundleRunsUnprovenActions(native) {
+		t.Fatalf("native checkout plan = %#v", job)
+	}
+}
+
 func TestHostedPreflightDoesNotMarkPartialJobGraphComplete(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), ".github", "workflows", "partial.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {

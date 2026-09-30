@@ -2406,8 +2406,19 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if err != nil || !slices.Equal(workflows, []string{"workflow.yml"}) || event != "" {
 		t.Fatalf("uploadArgs() default = %q, %q, %v", workflows, event, err)
 	}
-	if parsed, err := parseUploadArgs([]string{"workflow.yml"}); err != nil || parsed.privateReusableWorkflows {
-		t.Fatalf("parseUploadArgs() enabled private reusable workflows by default: %#v, %v", parsed, err)
+	if parsed, err := parseUploadArgs([]string{"workflow.yml"}); err != nil || parsed.privateReusableWorkflows || parsed.upstreamCheckout {
+		t.Fatalf("parseUploadArgs() enabled an opt-in setting by default: %#v, %v", parsed, err)
+	}
+	for args, want := range map[string]bool{"--upstream-checkout": true, "--upstream-checkout=true": true, "--upstream-checkout=false": false} {
+		if parsed, err := parseUploadArgs([]string{args, "workflow.yml"}); err != nil || parsed.upstreamCheckout != want {
+			t.Fatalf("parseUploadArgs(%q) = %#v, %v", args, parsed, err)
+		}
+	}
+	if _, err := parseUploadArgs([]string{"--upstream-checkout=yes", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "must be true or false") {
+		t.Fatalf("parseUploadArgs() error = %v, want boolean upstream checkout error", err)
+	}
+	if _, err := parseUploadArgs([]string{"--upstream-checkout", "--upstream-checkout=false", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("parseUploadArgs() error = %v, want duplicate upstream checkout error", err)
 	}
 	if _, _, err := uploadArgs([]string{"--runtime-queue", "custom-runners", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
 		t.Fatalf("uploadArgs() error = %v, want legacy runtime queue error", err)

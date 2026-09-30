@@ -166,8 +166,8 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 				continue
 			}
 			for _, lock := range reachableActionLocks(locks, step.Invocation.Lock) {
-				descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-				switch descriptor.Adapter {
+				adapter, _, _ := lock.NativeAdapter()
+				switch adapter {
 				case actionintegration.AdapterCheckoutExactEventSHA:
 					if actionintegration.CheckoutUsesFallbackContract(lock.Commit) {
 						if warnedUnknownCheckout[lock.Commit] {

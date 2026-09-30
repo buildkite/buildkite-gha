@@ -1790,6 +1790,41 @@ func TestProviderTokenReadRuntimeAuthorityIsCheckoutOnly(t *testing.T) {
 	}
 }
 
+func TestUpstreamCheckoutLockRunsItsJavaScriptLifecycle(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: upstream checkout\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "action.yml", "inputs:\n  repository:\n    default: ${{ github.repository }}\nruns:\n  using: node24\n  main: dist/index.js\n  post: dist/index.js\n")
+	writeFixtureFile(t, remote, "dist/index.js", "")
+	remoteDigest, err := source.DigestTree(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", "#!/bin/sh\nset -eu\nif [ \"${1:-}\" = --version ]; then echo v24.0.0; exit 0; fi\nprintf '%s %s\\n' \"$INPUT_REPOSITORY\" \"${STATE_ran:-main}\" >> \"$GITHUB_WORKSPACE/lifecycle.log\"\nprintf 'ran=post\\n' >> \"$GITHUB_STATE\"\n")
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	checkoutID := "a-0000000000000001"
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &plan.ActionSelector{Lock: checkoutID}}})
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: actionintegration.CheckoutV7Commit, SourceDigest: remoteDigest, Upstream: true}}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
+	attachTestProgram(&job)
+	if err := attachTestActionPrograms(&job, workspace, materializer); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	if _, err := (Runner{Actions: materializer, Node24: fakeNode, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace); err != nil {
+		t.Fatalf("RunJob() error = %v\nlogs: %s", err, logs.String())
+	}
+	if got, err := os.ReadFile(filepath.Join(workspace, "lifecycle.log")); err != nil || string(got) != "buildkite/buildkite-gha main\nbuildkite/buildkite-gha post\n" {
+		t.Fatalf("upstream checkout lifecycle = %q, %v\nlogs: %s", got, err, logs.String())
+	}
+}
+
 func TestCompositeCheckoutPreservesDynamicRefProvenance(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

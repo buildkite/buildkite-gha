@@ -450,7 +450,8 @@ configuration from `BUILDKITE_PLUGIN_CONFIGURATION`. It accepts:
 - either one `workflow` path or a non-empty `workflows` array
 - `runners` and `oidc`
 - plugin-owned `version`, `source-ref`, and `minimum-release-age` fields
-- the Boolean `experimental-runner-user` and `private-reusable-workflows` fields
+- the Boolean `experimental-runner-user`, `private-reusable-workflows`, and
+  `upstream-checkout` fields
 
 ### Private-preview Pipeline Trigger selection
 
@@ -809,7 +810,8 @@ A stage step runs inside a Buildkite job with `BUILDKITE=true`,
    [Matrices from job outputs](compatibility.md#matrices-from-job-outputs)),
    recompiles the
    workflow with the recorded event, variables, runner mappings, OIDC, and
-   `private-reusable-workflows` settings and the recorded rows of earlier
+   `private-reusable-workflows` and `upstream-checkout` settings and the
+   recorded rows of earlier
    stages, reads remote reusable workflows and
    actions through the same repository source as `upload`, resolves runners
    through the Agent API as `upload` does,
@@ -874,6 +876,26 @@ steps:
 For a custom importer, pass `upload --experimental-runner-user=false`. The bare
 `--experimental-runner-user` form and a plugin value of `true` remain accepted.
 The plugin value must be a YAML boolean, not a quoted string.
+
+### Run upstream actions/checkout
+
+By default, `actions/checkout` runs through a native adapter. To run the
+upstream action instead, set the plugin field to `true`:
+
+```yaml
+steps:
+  - label: ":github: CI"
+    plugins:
+      - github-actions#latest:
+          workflow: .github/workflows/ci.yml
+          upstream-checkout: true
+```
+
+For a custom importer, pass `upload --upstream-checkout`. The
+`--upstream-checkout=<boolean>` form is also accepted. The plugin value must be
+a YAML boolean. The setting defaults to `false`. See
+[Upstream checkout](compatibility.md#upstream-checkout) for which checkouts
+switch and the token each job requests.
 
 ## Disable telemetry
 

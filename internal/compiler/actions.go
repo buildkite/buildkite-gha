@@ -63,6 +63,7 @@ func (s PublicActionSource) Fetch(ctx context.Context, ref source.Reference) (so
 
 type actionLockBuilder struct {
 	workspace             string
+	upstreamCheckout      bool
 	workflowSource        *RemoteWorkflowSource
 	resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)
 	source                ActionSource
@@ -248,21 +249,27 @@ func unsupportedMetadataFields(reason string) string {
 }
 
 func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
-	return compileWorkflowActionInvocations(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil)
+	return compileWorkflowActionInvocations(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil, false)
 }
 
-func compileWorkflowActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)) (actionCompilation, error) {
+func compileWorkflowActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error), upstreamCheckout bool) (actionCompilation, error) {
 	if suppliedInputs != nil && len(suppliedInputs) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
 	}
-	graph, err := buildActionGraph(ctx, workspace, actionSource, refs, resolveWorkflowSource)
+	graph, err := buildActionGraph(ctx, workspace, actionSource, refs, resolveWorkflowSource, upstreamCheckout)
 	if err != nil {
 		return actionCompilation{}, err
 	}
 	return graph.analyzeInvocations(program.ActionAuthorityOptions{ServerURL: serverURL}, refs, suppliedInputs)
 }
 
-func buildActionGraph(ctx context.Context, workspace string, actionSource ActionSource, refs []string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)) (actionGraph, error) {
+// upstreamCheckoutEnabled reports whether a compilation for serverURL may run
+// upstream actions/checkout. Each lock still decides from its release runtime.
+func upstreamCheckoutEnabled(options Options, serverURL string) bool {
+	return options.UpstreamCheckout && serverURL == plan.EventServerURL("github")
+}
+
+func buildActionGraph(ctx context.Context, workspace string, actionSource ActionSource, refs []string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error), upstreamCheckout bool) (actionGraph, error) {
 	if workspace == "" {
 		return actionGraph{}, fmt.Errorf("workflow path must identify a repository root")
 	}
@@ -270,7 +277,7 @@ func buildActionGraph(ctx context.Context, workspace string, actionSource Action
 	if err != nil {
 		return actionGraph{}, fmt.Errorf("resolve workspace: %w", err)
 	}
-	b := &actionLockBuilder{workspace: abs, source: actionSource, resolveWorkflowSource: resolveWorkflowSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
+	b := &actionLockBuilder{workspace: abs, upstreamCheckout: upstreamCheckout, source: actionSource, resolveWorkflowSource: resolveWorkflowSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
 	defer func() {
 		for _, materialized := range b.materialized {
 			materialized.Release()
@@ -382,8 +389,7 @@ func validateActionAdapterInputs(root *actionNode) error {
 		if child == nil {
 			return fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
 		}
-		descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: child.lock.Source, Repository: child.lock.Repository, Path: child.lock.Path})
-		if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
+		if adapter, _, _ := child.lock.NativeAdapter(); adapter == actionintegration.AdapterUploadArtifactBuildkite {
 			if err := actionintegration.ValidateUploadArtifactInputs(child.lock.Commit, step.With); err != nil {
 				return fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
 			}
@@ -417,6 +423,8 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, cont
 		}
 		return n, nil
 	}
+	// Decide before hashing: Upstream is part of lock identity.
+	lock.Upstream = b.runsUpstreamCheckout(lock, root, loadPath)
 	// Charge each distinct lock before retaining or serializing it. The same
 	// repository-wide provenance is serialized again for every remote child.
 	for _, executable := range lock.ExecutablePaths {
@@ -438,7 +446,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, cont
 	b.active[key] = true
 	defer delete(b.active, key)
 
-	_, native, err := actionintegration.AdmitNativeAdapter(actionintegration.Identity{Source: n.lock.Source, Repository: n.lock.Repository, Path: n.lock.Path}, n.lock.Commit)
+	_, native, err := n.lock.NativeAdapter()
 	if err != nil {
 		return nil, err
 	}
@@ -511,6 +519,24 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, cont
 		}
 	}
 	return n, nil
+}
+
+// runsUpstreamCheckout reports whether an admitted actions/checkout release
+// runs its upstream JavaScript. Releases that declare an unsupported runtime,
+// such as node12 in v1 and v2, keep the native adapter.
+func (b *actionLockBuilder) runsUpstreamCheckout(lock plan.ActionLock, root, loadPath string) bool {
+	if !b.upstreamCheckout || lock.Source != "github" {
+		return false
+	}
+	if adapter, native, _ := lock.NativeAdapter(); !native || adapter != actionintegration.AdapterCheckoutExactEventSHA {
+		return false
+	}
+	m, err := metadata.Load(root, loadPath)
+	if err != nil {
+		return false
+	}
+	runtime, err := m.Runtime()
+	return err == nil && (runtime == metadata.RuntimeNode16 || runtime == metadata.RuntimeNode24)
 }
 
 func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing *RemoteWorkflowSource, containingActionRef string) (string, plan.ActionLock, string, string, error) {

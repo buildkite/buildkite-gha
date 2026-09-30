@@ -185,7 +185,8 @@ func resolveContinuationActions(ctx context.Context, ir IR, options Options) (co
 	for i := range continuations {
 		locks := map[string]plan.ActionLock{}
 		for _, action := range ir.deferredActions[continuations[i].Descriptor.Job] {
-			compiled, err := compileWorkflowActionInvocations(ctx, action.workspace, options.ActionSource, plan.EventServerURL(ir.Event.Provider), []string{action.uses}, []map[string]string{action.with}, action.workflowSourceResolver(options))
+			serverURL := plan.EventServerURL(ir.Event.Provider)
+			compiled, err := compileWorkflowActionInvocations(ctx, action.workspace, options.ActionSource, serverURL, []string{action.uses}, []map[string]string{action.with}, action.workflowSourceResolver(options), upstreamCheckoutEnabled(options, serverURL))
 			if err != nil {
 				message, detail, actionName := actionResolutionMessage(action.uses, err)
 				blockerDetail := action.uses

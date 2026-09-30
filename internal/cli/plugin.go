@@ -79,6 +79,7 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		oidc:                     configuration.OIDC,
 		experimentalRunnerUser:   configuration.ExperimentalRunnerUser,
 		privateReusableWorkflows: configuration.PrivateReusableWorkflows,
+		upstreamCheckout:         configuration.UpstreamCheckout,
 		pluginAcquisition:        &pluginRuntimeAcquisition{version: version},
 		importerPlatform:         importerPlatform,
 		telemetry:                details,
@@ -89,6 +90,7 @@ type pluginConfiguration struct {
 	Workflows                []string
 	ExperimentalRunnerUser   bool
 	PrivateReusableWorkflows bool
+	UpstreamCheckout         bool
 	OIDC                     *plan.OIDCConfiguration
 	runnerTargets            map[string]compiler.RunnerTarget
 }
@@ -114,7 +116,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	for key := range encoded {
 		switch key {
-		case "workflow", "workflows", "runners", "oidc", "version", "source-ref", "minimum-release-age", "experimental-runner-user", "private-reusable-workflows":
+		case "workflow", "workflows", "runners", "oidc", "version", "source-ref", "minimum-release-age", "experimental-runner-user", "private-reusable-workflows", "upstream-checkout":
 		default:
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
 		}
@@ -133,6 +135,14 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 		privateReusableWorkflows, ok = value.(bool)
 		if !ok {
 			return pluginConfiguration{}, fmt.Errorf("%s private-reusable-workflows must be a boolean", pluginConfigurationEnvironment)
+		}
+	}
+	upstreamCheckout := false
+	if value, configured := encoded["upstream-checkout"]; configured {
+		var ok bool
+		upstreamCheckout, ok = value.(bool)
+		if !ok {
+			return pluginConfiguration{}, fmt.Errorf("%s upstream-checkout must be a boolean", pluginConfigurationEnvironment)
 		}
 	}
 	workflowValue, hasWorkflow := encoded["workflow"]
@@ -226,7 +236,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	return pluginConfiguration{
 		Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, PrivateReusableWorkflows: privateReusableWorkflows,
-		OIDC: oidc, runnerTargets: targets,
+		UpstreamCheckout: upstreamCheckout, OIDC: oidc, runnerTargets: targets,
 	}, nil
 }
 

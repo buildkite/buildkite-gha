@@ -223,6 +223,7 @@ admission before any deferred job is uploaded.
 | Credential | Boundary |
 | --- | --- |
 | Repository checkout | The native adapter checks the event repository and exact commit. Buildkite authorizes private access. Credentials apply only to Git commands and are not persisted. |
+| Upstream checkout | With the [opt-in](compatibility.md#upstream-checkout), `actions/checkout` receives the job's `GITHUB_TOKEN`, or an explicit secret, through its `token` input. By default it persists the token in the job's Git configuration until its post step, so later steps can use it. It receives no repository-provider credential. |
 | Private reusable workflow source | Git uses the importer's existing HTTPS credential helpers only while resolving an approved source. The importer passes no authenticated URL, captures no credential, and suppresses Git output. Credentials never reach plans, pipeline YAML, or runtime jobs. |
 | `GITHUB_TOKEN` | A short-lived token for the event repository. Buildkite enforces the top-level workflow permission map and build provenance. The token is not ambient. |
 | Cache token | A fresh job-bound token for each compatible JavaScript or Docker action lifecycle. Shell steps do not receive it. |
@@ -354,6 +355,10 @@ and GitHub's issuer are not emulated. Plugin OIDC configuration can add
 Buildkite claims without granting `id-token: write`.
 
 ## Checkout and submodules
+
+This section describes the native checkout adapter.
+[Upstream checkout](compatibility.md#upstream-checkout) runs GitHub's action
+code with GitHub's credential behavior instead.
 
 Buildkite authorizes managed GitHub and Origin repositories through Git's
 credential protocol. A checked-in `.gitmodules` file can select another
