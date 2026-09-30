@@ -1287,7 +1287,7 @@ claim.
 
 ### Repository and organization variables
 
-`${{ vars.NAME }}` follows GitHub's scoping. Inside a Buildkite job, `upload`
+`${{ vars.NAME }}` reads configuration variables by scope. Inside a Buildkite job, `upload`
 and `compile` read the event repository's repository and organization
 variables through the job-scoped Agent API (`github-actions/variables`) when
 any applicable workflow, a reusable workflow it calls, or an input default of
@@ -1312,13 +1312,20 @@ strings, and compile-time fields that reference `vars` fail to compile.
 
 Each job's plan carries the scopes as `organization_vars`, `repository_vars`,
 and, for jobs that declare an environment, `environment_vars`. The compiler
-and runtime build the `vars` context per position the way GitHub does:
+and runtime use these scopes:
 
 | Position | `vars` context |
 | --- | --- |
 | `jobs.<id>.if` and reusable-workflow call `if` | Repository over organization variables. GitHub evaluates these before the job's environment applies, so environment variables are never visible here. Check environment variables in a step `if`. |
 | Job `env`, `defaults.run`, `outputs`, service `env` and credentials, every step field, and action input defaults | Environment over repository over organization variables. |
 | Compile-time fields (`run-name`, `runs-on`, `strategy`, `concurrency`, job names, container images, reusable-workflow inputs) | Repository over organization variables. Without a source, such as `compile` outside a Buildkite job, a reference fails to compile. `environment` names must stay literal. See [Compile-time expressions](#compile-time-expressions). |
+
+GitHub's [variable reference](https://docs.github.com/en/actions/reference/workflows-and-actions/variables#configuration-variable-precedence)
+documents environment-over-repository-over-organization precedence, but also
+says environment-level variables arrive after job start and "won't overwrite
+variables in the `env` and `vars` contexts." The table records Buildkite's
+behavior. GitHub's server-side scope merge remains unconfirmed by a native run;
+runner source establishes evaluation order, not that merge.
 
 Names match case-insensitively, and a higher scope replaces a lower scope's
 name spelled differently. A name no scope defines evaluates to an empty
@@ -1697,7 +1704,7 @@ Job containers support `image`, `env`, `ports`, `volumes`, and `options`. Servic
 - Service named, anonymous, and absolute bind volumes are supported.
 - A job can define 32 services. Each service can define 256 environment entries and 128 ports or volumes.
 
-Service `env` admission follows the [GitHub context table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability). On 2026-09-30, source inspection confirmed that GitHub's runner [evaluates services after job env](https://github.com/actions/runner/blob/2009b20729fdf49c50a88e0ca368906c16a3129c/src/Runner.Worker/JobExtension.cs#L235-L259), using [server-supplied contexts](https://github.com/actions/runner/blob/2009b20729fdf49c50a88e0ca368906c16a3129c/src/Runner.Worker/ExecutionContext.cs#L1000-L1048). Scope precedence follows [GitHub's variable reference](https://docs.github.com/en/actions/reference/workflows-and-actions/variables#configuration-variable-precedence); the runner source does not expose the server-side scope merge. Local compiler, snapshot, and fake-Docker tests cover variable precedence and job isolation, runtime-dependent values, named-secret inventory, exact startup environment values, and log redaction for host and container jobs. These checks are not native GitHub or hosted execution evidence. Startup `runner` and `job` contexts remain unimplemented despite their documented GitHub admission.
+Service `env` admission follows the [GitHub context table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability). On 2026-09-30, source inspection confirmed that GitHub's runner [evaluates services after job env with the same expression context](https://github.com/actions/runner/blob/2009b20729fdf49c50a88e0ca368906c16a3129c/src/Runner.Worker/JobExtension.cs#L235-L259), populated from [server-supplied contexts](https://github.com/actions/runner/blob/2009b20729fdf49c50a88e0ca368906c16a3129c/src/Runner.Worker/ExecutionContext.cs#L1000-L1048). See the [variable-scope evidence and limits](#repository-and-organization-variables). Local compiler, snapshot, and fake-Docker tests cover variable precedence and job isolation, runtime-dependent values, named-secret inventory, exact startup environment values, and log redaction for host and container jobs. These checks are not native GitHub or hosted execution evidence. Startup `runner` and `job` contexts remain unimplemented despite their documented GitHub admission.
 
 Implicit GHCR authentication is unsupported; provide explicit credentials. Mutable tags resolve at job start. Use a digest when image immutability matters. Job container images must provide `sh` and run the mounted self-contained Linux runtime executable.
 
