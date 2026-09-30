@@ -140,7 +140,11 @@ func populateSiteFields(value reflect.Value, marker *int) {
 
 func TestProgramWireDerivesSiteSemanticsFromPosition(t *testing.T) {
 	program := Program{Version: Version, Job: Job{
-		Condition: Site{Source: "true"}, Defaults: Defaults{}, Services: Services{},
+		Condition: Site{Source: "true"}, Defaults: Defaults{},
+		Services: Services{Static: []Service{{Name: "db", Container: ServiceContainer{
+			Image: Site{Source: "postgres:16"},
+			Env:   []Binding{{Name: "PASSWORD", Value: Site{Source: "${{ env.PASSWORD || secrets.DB_PASSWORD }}"}}},
+		}}}},
 		Steps: []Step{{ID: "step", Kind: "run", Condition: Site{Source: "true"}, Run: &Run{Command: Site{Source: "echo ok"}}}},
 	}, Actions: map[string]Action{"action": {Runtime: "node24", Main: "index.js", PreIf: Site{Source: "always()"}}}}
 	encoded, err := json.Marshal(program)
@@ -159,8 +163,44 @@ func TestProgramWireDerivesSiteSemanticsFromPosition(t *testing.T) {
 	if got := decoded.Job.Condition; got.Surface != SurfaceJobCondition || got.Result != ResultBoolean || got.Provenance != ProvenanceWorkflow || got.Purpose != PurposeExpression {
 		t.Fatalf("job condition semantics = %#v", got)
 	}
+	if got := decoded.Job.Services.Static[0].Container.Env[0].Value; got.Surface != SurfaceServiceEnvironment || got.Result != ResultString || got.Provenance != ProvenanceWorkflow || got.Purpose != PurposeExpression {
+		t.Fatalf("service env semantics = %#v", got)
+	}
+	if got := decoded.Job.Services.Static[0].Container.Image; got.Surface != SurfaceServiceTemplate {
+		t.Fatalf("service image semantics = %#v", got)
+	}
 	if got := decoded.Actions["action"].PreIf; got.Surface != SurfaceActionLifecycle || got.Result != ResultBoolean || got.Provenance != ProvenanceAction || got.Purpose != PurposeExpression {
 		t.Fatalf("action pre-if semantics = %#v", got)
+	}
+}
+
+func TestServiceEnvironmentRejectsResidualVarsAfterDecode(t *testing.T) {
+	for _, source := range []string{
+		"${{ vars.VALUE }}",
+		"${{ format('{0}-{1}', env.NAME, vars.VALUE) }}",
+		"${{ format('{0}-{1}', needs.build.outputs.name, vars.VALUE) }}",
+		"${{ 'safe' || vars.VALUE }}",
+	} {
+		t.Run(source, func(t *testing.T) {
+			program := Program{Version: Version, Job: Job{
+				Services: Services{Static: []Service{{Name: "db", Container: ServiceContainer{
+					Image: Site{Source: "postgres:16"},
+					Env:   []Binding{{Name: "VALUE", Value: Site{Source: source, Surface: SurfaceJobEnvironment}}},
+				}}}},
+				Steps: []Step{{ID: "run", Kind: "run", Run: &Run{Command: Site{Source: "true"}}}},
+			}}
+			encoded, err := json.Marshal(program)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded Program
+			if err := json.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if err := decoded.Validate(); err == nil || !strings.Contains(err.Error(), `runtime context "vars" is unavailable`) {
+				t.Fatalf("decoded service env admitted residual vars: %v", err)
+			}
+		})
 	}
 }
 

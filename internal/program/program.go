@@ -16,19 +16,20 @@ var stepIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 type Surface string
 
 const (
-	SurfaceJobCondition      Surface = "job-condition"
-	SurfaceJobControl        Surface = "job-control"
-	SurfaceCallCondition     Surface = "call-condition"
-	SurfaceStepCondition     Surface = "step-condition"
-	SurfaceJobEnvironment    Surface = "job-environment"
-	SurfaceJobDefault        Surface = "job-default"
-	SurfaceJobOutput         Surface = "job-output"
-	SurfaceStepTemplate      Surface = "step-template"
-	SurfaceStepControl       Surface = "step-control"
-	SurfaceRuntimeTemplate   Surface = "runtime-template"
-	SurfaceServiceTemplate   Surface = "service-template"
-	SurfaceServiceCredential Surface = "service-credential"
-	SurfaceServiceMap        Surface = "service-map"
+	SurfaceJobCondition       Surface = "job-condition"
+	SurfaceJobControl         Surface = "job-control"
+	SurfaceCallCondition      Surface = "call-condition"
+	SurfaceStepCondition      Surface = "step-condition"
+	SurfaceJobEnvironment     Surface = "job-environment"
+	SurfaceJobDefault         Surface = "job-default"
+	SurfaceJobOutput          Surface = "job-output"
+	SurfaceStepTemplate       Surface = "step-template"
+	SurfaceStepControl        Surface = "step-control"
+	SurfaceRuntimeTemplate    Surface = "runtime-template"
+	SurfaceServiceTemplate    Surface = "service-template"
+	SurfaceServiceEnvironment Surface = "service-environment"
+	SurfaceServiceCredential  Surface = "service-credential"
+	SurfaceServiceMap         Surface = "service-map"
 )
 
 // ResultType records the value shape required by an expression site.

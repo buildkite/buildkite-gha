@@ -5037,6 +5037,91 @@ jobs:
 	}
 }
 
+func TestCompilePlansServiceEnvironmentAuthority(t *testing.T) {
+	for _, value := range []string{
+		"${{ env.DATABASE }}",
+		"${{ secrets.DB_PASSWORD }}",
+		"${{ format('{0}-{1}', env.DATABASE, needs.build.outputs.suffix) }}",
+		"${{ needs.build.outputs.password || secrets.DB_PASSWORD }}",
+		"${{ 'public' || secrets.DB_PASSWORD }}",
+	} {
+		t.Run(value, func(t *testing.T) {
+			source := []byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    env: {DATABASE: app}
+    services:
+      database:
+        image: postgres:16
+        env:
+          VALUE: ` + value + `
+    steps: [{run: true}]
+`)
+			plans, err := compilePlansForTest(t.Context(), "services.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := plans[1]
+			var wantSecrets []string
+			if strings.Contains(value, "secrets.") {
+				wantSecrets = []string{"DB_PASSWORD"}
+			}
+			if !slices.Equal(job.RequiredSecrets, wantSecrets) || job.HasCapability("secrets") != (len(wantSecrets) != 0) || job.GitHubToken != nil {
+				t.Fatalf("service env authority: secrets=%v capabilities=%v token=%#v", job.RequiredSecrets, job.RequiredCapabilities, job.GitHubToken)
+			}
+			if job.Services["database"].Env["VALUE"] != value {
+				t.Fatalf("service env lost runtime expression: %q", job.Services["database"].Env["VALUE"])
+			}
+		})
+	}
+}
+
+func TestCompilePlansServiceEnvironmentBoundaries(t *testing.T) {
+	for _, value := range []string{
+		"secrets[env.KEY]", "secrets", "runner.os", "runner.temp",
+		"job.services.database.id", "steps.build.outputs.value", "github.token",
+		"toJSON(github)", "hashFiles('**')",
+	} {
+		t.Run(value, func(t *testing.T) {
+			services := []workflow.Service{{Name: "database", Container: workflow.ServiceContainer{
+				Image: "postgres:16", Env: map[string]string{"VALUE": "${{ 'safe' || " + value + " }}"},
+			}}}
+			if _, err := resolveCompileServices(services, expression.CompileContext{}); err == nil {
+				t.Fatalf("service env admitted unreachable %s", value)
+			}
+		})
+	}
+	for _, value := range []string{"${{ env.IMAGE }}", "${{ secrets.IMAGE }}"} {
+		for _, field := range []string{"image", "options", "ports", "volumes", "command", "entrypoint"} {
+			t.Run(field+value, func(t *testing.T) {
+				container := workflow.ServiceContainer{Image: "postgres:16"}
+				switch field {
+				case "image":
+					container.Image = value
+				case "options":
+					container.Options = value
+				case "ports":
+					container.Ports = []string{value}
+				case "volumes":
+					container.Volumes = []string{value}
+				case "command":
+					container.Command = value
+				case "entrypoint":
+					container.Entrypoint = value
+				}
+				if _, err := resolveCompileServices([]workflow.Service{{Name: "database", Container: container}}, expression.CompileContext{}); err == nil {
+					t.Fatalf("service %s admitted %s", field, value)
+				}
+			})
+		}
+	}
+}
+
 func TestResolveCompileServicesRejectsVariableIntroducedExpressionSyntax(t *testing.T) {
 	services := []workflow.Service{{
 		Name:      "database",
@@ -5056,6 +5141,7 @@ func TestResolveCompileServicesKeepsCredentialVariablesResidual(t *testing.T) {
 		Name: "database",
 		Container: workflow.ServiceContainer{
 			Image: "postgres:${{ vars.tag }}",
+			Env:   map[string]string{"USER": "${{ vars.user }}"},
 			Credentials: &workflow.ContainerCredentials{
 				Username: "${{ vars.user }}",
 				Password: "${{ secrets.REGISTRY_PASSWORD }}",
@@ -5066,8 +5152,48 @@ func TestResolveCompileServicesKeepsCredentialVariablesResidual(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if container := resolved[0].Container; container.Image != "postgres:16" || container.Credentials.Username != "${{ vars.user }}" {
+	if container := resolved[0].Container; container.Image != "postgres:16" || container.Env["USER"] != "registry-user" || container.Credentials.Username != "${{ vars.user }}" {
 		t.Fatalf("resolved service = %#v", container)
+	}
+}
+
+func TestResolveCompileServiceEnvironmentVarsSnapshot(t *testing.T) {
+	for _, test := range []struct {
+		source, reduced, want string
+	}{
+		{source: "${{ vars.VALUE }}", reduced: "repo", want: "repo"},
+		{source: "${{ env.NAME }}-${{ vars.VALUE }}", reduced: "${{ env.NAME }}-repo", want: "job-repo"},
+		{source: "${{ needs.build.outputs.name }}-${{ vars.VALUE }}", reduced: "${{ needs.build.outputs.name }}-repo", want: "upstream-repo"},
+		{source: "${{ format('{0}-{1}', env.NAME, vars.VALUE) }}"},
+		{source: "${{ format('{0}-{1}', needs.build.outputs.name, vars.VALUE) }}"},
+	} {
+		t.Run(test.source, func(t *testing.T) {
+			services := []workflow.Service{{Name: "database", Container: workflow.ServiceContainer{
+				Image: "postgres:16", Env: map[string]string{"VALUE": test.source},
+			}}}
+			resolved, err := resolveCompileServices(services, expression.CompileContext{Vars: map[string]string{"VALUE": "repo"}})
+			if test.reduced == "" {
+				if err == nil || !strings.Contains(err.Error(), `runtime context "vars" is unavailable`) {
+					t.Fatalf("residual vars must be rejected: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			reduced := resolved[0].Container.Env["VALUE"]
+			if reduced != test.reduced {
+				t.Fatalf("reduced = %q, want %q", reduced, test.reduced)
+			}
+			got, err := expression.NewEngine().Evaluate(expression.Site{Source: reduced, Profile: expression.ProfileServiceEnvironment, Result: expression.ResultString}, expression.Values{Runtime: expression.Context{
+				Vars:  map[string]string{"VALUE": "environment"},
+				Env:   map[string]string{"NAME": "job"},
+				Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{"name": "upstream"}}},
+			}})
+			if err != nil || got != test.want {
+				t.Fatalf("runtime value = %q, %v; want %q", got, err, test.want)
+			}
+		})
 	}
 }
 
@@ -5271,11 +5397,11 @@ jobs:
       optional:
         image: ${{ matrix.image }}
         env:
-          INVALID: ${{ needs.producer.result }}
+          INVALID: ${{ steps.producer.outputs.value }}
     steps: [{run: true}]
 `)
 	_, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
-	if err == nil || !strings.Contains(err.Error(), "service runtime expression must directly reference needs") {
+	if err == nil || !strings.Contains(err.Error(), `runtime context "steps" is unavailable`) {
 		t.Fatalf("error = %v", err)
 	}
 }

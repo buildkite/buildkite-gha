@@ -355,6 +355,8 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceServiceTemplate:
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
+		case program.SurfaceServiceEnvironment:
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceServiceCredential:
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceServiceMap:
@@ -372,19 +374,20 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 // compileReductionProfile is the single admission policy for event reduction.
 // Program.Validate applies the destination runtime profile to every residual.
 var compileReductionProfiles = map[program.Surface]expression.ProfileID{
-	program.SurfaceJobCondition:      expression.ProfileCompileJobCondition,
-	program.SurfaceJobControl:        expression.ProfileJobControl,
-	program.SurfaceCallCondition:     expression.ProfileCompileCallCondition,
-	program.SurfaceStepCondition:     expression.ProfileCompileStepCondition,
-	program.SurfaceStepControl:       expression.ProfileStepControl,
-	program.SurfaceJobEnvironment:    expression.ProfileJobEnvironment,
-	program.SurfaceJobDefault:        expression.ProfileJobDefault,
-	program.SurfaceJobOutput:         expression.ProfileJobOutput,
-	program.SurfaceStepTemplate:      expression.ProfileStepTemplate,
-	program.SurfaceRuntimeTemplate:   expression.ProfileRuntimeTemplate,
-	program.SurfaceServiceTemplate:   expression.ProfileServiceTemplate,
-	program.SurfaceServiceCredential: expression.ProfileServiceCredential,
-	program.SurfaceServiceMap:        expression.ProfileStepTemplate,
+	program.SurfaceJobCondition:       expression.ProfileCompileJobCondition,
+	program.SurfaceJobControl:         expression.ProfileJobControl,
+	program.SurfaceCallCondition:      expression.ProfileCompileCallCondition,
+	program.SurfaceStepCondition:      expression.ProfileCompileStepCondition,
+	program.SurfaceStepControl:        expression.ProfileStepControl,
+	program.SurfaceJobEnvironment:     expression.ProfileJobEnvironment,
+	program.SurfaceJobDefault:         expression.ProfileJobDefault,
+	program.SurfaceJobOutput:          expression.ProfileJobOutput,
+	program.SurfaceStepTemplate:       expression.ProfileStepTemplate,
+	program.SurfaceRuntimeTemplate:    expression.ProfileRuntimeTemplate,
+	program.SurfaceServiceTemplate:    expression.ProfileServiceTemplate,
+	program.SurfaceServiceEnvironment: expression.ProfileServiceEnvironment,
+	program.SurfaceServiceCredential:  expression.ProfileServiceCredential,
+	program.SurfaceServiceMap:         expression.ProfileStepTemplate,
 }
 
 func compileReductionProfile(surface program.Surface) (expression.ProfileID, error) {

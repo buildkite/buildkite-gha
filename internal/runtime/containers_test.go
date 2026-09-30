@@ -1477,6 +1477,105 @@ func TestEvaluateProgramServicesResolvesCredentialVarsWithEnvironment(t *testing
 	}
 }
 
+func TestRunCompiledServiceEnvironment(t *testing.T) {
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, containerized := range []bool{false, true} {
+		for _, passwordOutput := range []string{"", "output-password"} {
+			t.Run(fmt.Sprintf("container=%t/output=%s", containerized, passwordOutput), func(t *testing.T) {
+				f := newJobDocker(t, "")
+				workspace := t.TempDir()
+				const path = ".github/workflows/services.yml"
+				container := ""
+				if containerized {
+					container = "    container: alpine:3.20\n"
+				}
+				source := []byte(`on: push
+env:
+  DATABASE: workflow-db
+  WORKFLOW_ONLY: inherited
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+` + container + `    env:
+      DATABASE: job-db
+      SUFFIX: ${{ format('job-{0}', needs.build.outputs.suffix) }}
+    services:
+      database:
+        image: postgres:16
+        env:
+          DATABASE: service-db
+          FROM_JOB: ${{ env.DATABASE }}
+          FROM_WORKFLOW: ${{ env.WORKFLOW_ONLY }}
+          RUNTIME: ${{ format('{0}-{1}', env.SUFFIX, needs.build.outputs.suffix) }}
+          PASSWORD: ${{ secrets.DB_PASSWORD }}
+          FALLBACK: ${{ needs.build.outputs.password || secrets.DB_PASSWORD }}
+          SNAPSHOT: ${{ env.GITHUB_WORKSPACE || 'not-yet-set' }}
+    steps: [{run: true}]
+`)
+				writeFixtureFile(t, workspace, path, string(source))
+				jobs, err := compileUntrustedPlans(path, source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+				if err != nil {
+					t.Fatal(err)
+				}
+				job := jobs[1]
+				job.Needs = map[string]plan.Need{"build": {Result: "success", Outputs: map[string]string{"suffix": "runtime-tail", "password": passwordOutput}}}
+				// The fake Docker logs contain this canary. Resolving it from the
+				// service env inventory must register both agent and local masking.
+				var logs bytes.Buffer
+				redactor := &testRedactor{}
+				result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Stdout: &logs, Stderr: &logs,
+					Secrets: testSecretResolver{"DB_PASSWORD": "sibling-secret"}, Redactor: redactor,
+				}).RunJob(t.Context(), job, workspace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantFallback := passwordOutput
+				if wantFallback == "" {
+					wantFallback = "sibling-secret"
+				}
+				wantEnv := []string{"DATABASE=service-db", "FALLBACK=" + wantFallback, "FROM_JOB=job-db", "FROM_WORKFLOW=inherited", "PASSWORD=sibling-secret", "RUNTIME=job-runtime-tail-runtime-tail", "SNAPSHOT=not-yet-set"}
+				creates, serviceCreates := 0, 0
+				for _, call := range f.calls(t) {
+					if call.Args[0] != "create" {
+						continue
+					}
+					creates++
+					if !slices.Contains(call.Args, "--network-alias") {
+						continue
+					}
+					serviceCreates++
+					var gotEnv []string
+					for i, arg := range call.Args {
+						if arg == "--env" {
+							gotEnv = append(gotEnv, call.Args[i+1])
+						}
+					}
+					if !slices.Equal(gotEnv, wantEnv) {
+						t.Fatalf("service startup env = %q, want %q", gotEnv, wantEnv)
+					}
+				}
+				wantCreates := 1
+				if containerized {
+					wantCreates++
+				}
+				if creates != wantCreates || serviceCreates != 1 || result.Env["DATABASE"] != "job-db" || result.Env["SUFFIX"] != "job-runtime-tail" || result.Env["GITHUB_WORKSPACE"] == "" {
+					t.Fatalf("job setup changed: creates=%d serviceCreates=%d env=%v", creates, serviceCreates, result.Env)
+				}
+				if !slices.Equal(redactor.values, []string{"sibling-secret"}) || strings.Contains(logs.String(), "sibling-secret") || !strings.Contains(logs.String(), "diagnostic ***") {
+					t.Fatalf("service secret redaction: registered=%q logs=%q", redactor.values, logs.String())
+				}
+			})
+		}
+	}
+}
+
 func TestCompiledServiceCredentialsResolveNeeds(t *testing.T) {
 	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
 	if err != nil {
@@ -1552,7 +1651,7 @@ func testProgramServices(services map[string]plan.ServiceContainer) executionpro
 		service := services[name]
 		container := executionprogram.ServiceContainer{
 			Image:      testProgramSite(service.Image, executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),
-			Env:        testProgramBindings(service.Env, executionprogram.SurfaceServiceTemplate),
+			Env:        testProgramBindings(service.Env, executionprogram.SurfaceServiceEnvironment),
 			Ports:      testProgramSites(service.Ports, executionprogram.SurfaceServiceTemplate),
 			Volumes:    testProgramSites(service.Volumes, executionprogram.SurfaceServiceTemplate),
 			Options:    testProgramSite(service.Options, executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),

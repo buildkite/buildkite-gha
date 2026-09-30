@@ -59,7 +59,7 @@ func TestWorkflowProgramInventoriesEveryExecutionField(t *testing.T) {
 		"job.services.db.image|service-template|string|expression",
 		"job.services.db.credentials.username|service-credential|string|expression",
 		"job.services.db.credentials.password|service-credential|string|expression",
-		"job.services.db.env.S|service-template|string|expression",
+		"job.services.db.env.S|service-environment|string|expression",
 		"job.services.db.ports[0]|service-template|string|expression",
 		"job.services.db.volumes[0]|service-template|string|expression",
 		"job.services.db.options|service-template|string|expression",
