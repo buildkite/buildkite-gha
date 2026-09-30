@@ -281,6 +281,15 @@ with an admitted release, not run under an adapter fallback. Preserve the
 requested and selected identities and their diagnostics. The
 [integration catalog](../internal/action/integration/catalog.go) owns that split.
 
+Skip native adapter input validation only when the whole job is proven false
+after reusable inputs and matrix values resolve. Retain its skipped plan and
+action locks. Reachable jobs, runtime-dependent job conditions, and false
+individual steps still require adapter validation. The
+[compiler regression](../internal/compiler/actions_test.go) covers checkout and
+both artifact adapters, including an unreachable download to
+`${{ runner.temp }}/digests`. This is local compilation evidence, not native
+GitHub or hosted execution evidence.
+
 The GHES `upload-artifact` contracts for
 [v3.2.2](https://github.com/actions/upload-artifact/blob/c6a366c94c3e0affe28c06c8df20a878f24da3cf/action.yml)
 and [v3.2.2-node20](https://github.com/actions/upload-artifact/blob/c6a3b2bd78b3985e4b2f15397fec357f0fd808de/action.yml)

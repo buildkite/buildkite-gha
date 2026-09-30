@@ -578,7 +578,7 @@ func (b planBuilder) authorityValues(instance JobInstance) expression.AbstractVa
 
 func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, jobReachable, stepReachable bool, built *builtPlanActions) error {
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-	if descriptor.Adapter == "" || descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA && !jobReachable {
+	if descriptor.Adapter == "" || !jobReachable {
 		return nil
 	}
 	// Adapters validate a resolved view, never rewriting the emitted source.

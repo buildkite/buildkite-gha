@@ -2006,6 +2006,79 @@ jobs:
 	}
 }
 
+func TestStaticallySkippedReusableJobDoesNotValidateArtifactAdapterInputs(t *testing.T) {
+	repository, remote := t.TempDir(), t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", "")
+	writeAction(t, remote, "", "name: artifact action\nruns:\n  using: node24\n  main: index.js\n")
+	options := Options{
+		EventTrust:     EventUntrusted,
+		Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	}
+	for _, adapter := range []struct{ name, commit, inputs string }{
+		{"download-artifact", actionintegration.DownloadArtifactV7Commit, "name: payload\n          path: ${{ runner.temp }}/digests"},
+		{"upload-artifact", actionintegration.UploadArtifactCommit, "path: payload\n          retention-days: -1"},
+	} {
+		for _, test := range []struct {
+			name, condition, stepCondition string
+			enabled, wantError             bool
+		}{
+			{name: "false input", condition: "inputs.enabled"},
+			{name: "true input", condition: "inputs.enabled", enabled: true, wantError: true},
+			{name: "false matrix", condition: "matrix.enabled"},
+			{name: "true matrix", condition: "matrix.enabled", enabled: true, wantError: true},
+			{name: "runtime condition", condition: "vars.RUNTIME_FLAG == 'yes'", wantError: true},
+			{name: "false step", condition: "true", stepCondition: "false", wantError: true},
+		} {
+			t.Run(adapter.name+"/"+test.name, func(t *testing.T) {
+				if test.stepCondition == "" {
+					test.stepCondition = "true"
+				}
+				writeWorkflow(t, repository, "reusable.yml", fmt.Sprintf(`on:
+  workflow_call:
+    inputs:
+      enabled: {type: boolean, required: true}
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo producer
+  merge:
+    needs: producer
+    if: %s
+    strategy:
+      matrix:
+        enabled: ["${{ inputs.enabled }}"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/%s@%s
+        if: %s
+        with:
+          %s
+`, test.condition, adapter.name, adapter.commit, test.stepCondition, adapter.inputs))
+				source := []byte(fmt.Sprintf("on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    with:\n      enabled: %t\n", test.enabled))
+				if err := os.WriteFile(caller, source, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				bundle, err := CompileBundleWithOptions(caller, source, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", options)
+				if test.wantError {
+					if err == nil || !strings.Contains(err.Error(), "bounded "+adapter.name+" adapter") {
+						t.Fatalf("reachable adapter error = %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(bundle.Plans) != 2 || bundle.Plans[1].Job.Workflow.LogicalJobID != "call.merge" || len(bundle.Plans[1].Job.Actions) != 1 {
+					t.Fatalf("skipped job and action lock not retained: %#v", bundle.Plans)
+				}
+			})
+		}
+	}
+}
+
 func TestCompileReusableInputAuthorityUsesWorkflowScope(t *testing.T) {
 	repository := t.TempDir()
 	caller := writeWorkflow(t, repository, "caller.yml", `on: push
