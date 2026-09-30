@@ -707,12 +707,11 @@ func resolveCompileContainer(container *workflow.Container, context expression.C
 }
 
 func resolveCompileServices(services []workflow.Service, context expression.CompileContext) ([]workflow.Service, error) {
-	// Credentials are runner-evaluated after the job's environment applies, so
-	// their vars context is not known here. Keep vars residual so the runtime
-	// evaluates them with environment variables laid over the pre-environment
-	// scopes. Other service fields retain their existing compile-time vars snapshot.
-	credentialContext := context
-	credentialContext.Vars = nil
+	// Credentials and env are runner-evaluated after the job's environment
+	// applies. Keep vars residual so both read the environment-overlaid scopes.
+	// Other service fields retain their compile-time vars snapshot.
+	runtimeContext := context
+	runtimeContext.Vars = nil
 	resolved := make([]workflow.Service, 0, len(services))
 	for _, service := range services {
 		container := service.Container
@@ -726,7 +725,7 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 				if err := validateCompileSite(*field, expression.ProfileServiceCredential, expression.ResultString); err != nil {
 					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
 				}
-				value, err := reducePartialTemplateString(*field, expression.ProfileServiceCredential, credentialContext)
+				value, err := reducePartialTemplateString(*field, expression.ProfileServiceCredential, runtimeContext)
 				if err != nil {
 					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
 				}
@@ -742,10 +741,10 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 			*field = value
 		}
 		for key, value := range container.Env {
-			if err := validateCompileSite(value, expression.ProfileCompileServiceEnvironment, expression.ResultString); err != nil {
+			if err := validateCompileSite(value, expression.ProfileServiceEnvironment, expression.ResultString); err != nil {
 				return nil, fmt.Errorf("service %q environment %q: %w", service.Name, key, err)
 			}
-			resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceEnvironment, context)
+			resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceEnvironment, runtimeContext)
 			if err != nil {
 				return nil, fmt.Errorf("service %q environment %q: %w", service.Name, key, err)
 			}

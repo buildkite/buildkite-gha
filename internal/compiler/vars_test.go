@@ -152,8 +152,8 @@ jobs:
 	if mixed := deployExecution.Steps[1]; mixed.Run.Command.Source != "echo ${{ format('{0}-{1}', 'refs/heads/main', vars.region) }}" || mixed.Condition.Source != "(true && (vars.region == 'base'))" {
 		t.Fatalf("mixed event and vars expressions were reduced with repository values: command=%q condition=%q", mixed.Run.Command.Source, mixed.Condition.Source)
 	}
-	// Service credentials are runner-evaluated too, while the other service
-	// fields are compile-time and do reduce with the repository value.
+	// Service credentials are runner-evaluated too, while the image is
+	// compile-time and does reduce with the repository value.
 	if registry := deploy.Services["registry"]; registry.Image != "registry:shared" || registry.Credentials == nil || registry.Credentials.Username != "${{ vars.REGION }}" {
 		t.Fatalf("service = %#v, want compile-time image and residual credential vars", registry)
 	}

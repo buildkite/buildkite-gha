@@ -1503,6 +1503,8 @@ jobs:
   test:
     needs: build
     runs-on: ubuntu-latest
+    environment: production
+    if: vars.VALUE == 'repository'
 ` + container + `    env:
       DATABASE: job-db
       SUFFIX: ${{ format('job-{0}', needs.build.outputs.suffix) }}
@@ -1517,10 +1519,24 @@ jobs:
           PASSWORD: ${{ secrets.DB_PASSWORD }}
           FALLBACK: ${{ needs.build.outputs.password || secrets.DB_PASSWORD }}
           SNAPSHOT: ${{ env.GITHUB_WORKSPACE || 'not-yet-set' }}
+          VAR_DIRECT: ${{ vars.VALUE }}
+          VAR_SEPARATE: ${{ env.DATABASE }}-${{ vars.VALUE }}
+          VAR_MIXED: ${{ format('{0}-{1}-{2}', env.DATABASE, needs.build.outputs.suffix, vars.VALUE) }}
+          VAR_SECRET: ${{ vars.VALUE || secrets.DB_PASSWORD }}
+          VAR_MISSING: ${{ vars.MISSING }}
     steps: [{run: true}]
 `)
 				writeFixtureFile(t, workspace, path, string(source))
-				jobs, err := compileUntrustedPlans(path, source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+				jobs, err := compilePlansForTest(t.Context(), path, source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
+					EventTrust: compiler.EventUntrusted,
+					Runners: compiler.RunnerPolicy{
+						Labels: map[string]string{"ubuntu-latest": "gha-untrusted"}, UntrustedQueues: []string{"gha-untrusted"},
+					},
+					Vars: compiler.VariableSources{
+						Organization: map[string]string{"VALUE": "organization"}, Repository: map[string]string{"VALUE": "repository"},
+					},
+					EnvironmentSource: serviceEnvironmentSource{"production": {Variables: map[string]string{"value": "environment"}}},
+				})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1540,7 +1556,8 @@ jobs:
 				if wantFallback == "" {
 					wantFallback = "sibling-secret"
 				}
-				wantEnv := []string{"DATABASE=service-db", "FALLBACK=" + wantFallback, "FROM_JOB=job-db", "FROM_WORKFLOW=inherited", "PASSWORD=sibling-secret", "RUNTIME=job-runtime-tail-runtime-tail", "SNAPSHOT=not-yet-set"}
+				wantEnv := []string{"DATABASE=service-db", "FALLBACK=" + wantFallback, "FROM_JOB=job-db", "FROM_WORKFLOW=inherited", "PASSWORD=sibling-secret", "RUNTIME=job-runtime-tail-runtime-tail", "SNAPSHOT=not-yet-set",
+					"VAR_DIRECT=environment", "VAR_MISSING=", "VAR_MIXED=job-db-runtime-tail-environment", "VAR_SECRET=environment", "VAR_SEPARATE=job-db-environment"}
 				creates, serviceCreates := 0, 0
 				for _, call := range f.calls(t) {
 					if call.Args[0] != "create" {
@@ -1574,6 +1591,16 @@ jobs:
 			})
 		}
 	}
+}
+
+type serviceEnvironmentSource map[string]compiler.EnvironmentProtection
+
+func (s serviceEnvironmentSource) ResolveEnvironment(_ context.Context, _, _, name string) (compiler.EnvironmentProtection, error) {
+	value, ok := s[name]
+	if !ok {
+		return compiler.EnvironmentProtection{}, fmt.Errorf("unknown environment %q", name)
+	}
+	return value, nil
 }
 
 func TestCompiledServiceCredentialsResolveNeeds(t *testing.T) {

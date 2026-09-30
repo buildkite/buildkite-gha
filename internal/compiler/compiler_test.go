@@ -5041,6 +5041,7 @@ func TestCompilePlansServiceEnvironmentAuthority(t *testing.T) {
 	for _, value := range []string{
 		"${{ env.DATABASE }}",
 		"${{ secrets.DB_PASSWORD }}",
+		"${{ vars.PASSWORD || secrets.DB_PASSWORD }}",
 		"${{ format('{0}-{1}', env.DATABASE, needs.build.outputs.suffix) }}",
 		"${{ needs.build.outputs.password || secrets.DB_PASSWORD }}",
 		"${{ 'public' || secrets.DB_PASSWORD }}",
@@ -5062,7 +5063,9 @@ jobs:
           VALUE: ` + value + `
     steps: [{run: true}]
 `)
-			plans, err := compilePlansForTest(t.Context(), "services.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+			options := defaultOptions()
+			options.Vars.Repository = map[string]string{"PASSWORD": "repository-value"}
+			plans, err := compilePlansForTest(t.Context(), "services.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), options)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -5133,15 +5136,17 @@ func TestResolveCompileServicesRejectsVariableIntroducedExpressionSyntax(t *test
 	}
 }
 
-// TestResolveCompileServicesKeepsCredentialVariablesResidual proves service
-// credentials are not reduced with the pre-environment vars: the runtime
-// evaluates them after the job's environment applies.
+// Credentials and env retain vars for runtime; all other service fields keep
+// the compile-time snapshot.
 func TestResolveCompileServicesKeepsCredentialVariablesResidual(t *testing.T) {
 	services := []workflow.Service{{
 		Name: "database",
 		Container: workflow.ServiceContainer{
-			Image: "postgres:${{ vars.tag }}",
-			Env:   map[string]string{"USER": "${{ vars.user }}"},
+			Image:   "postgres:${{ vars.tag }}",
+			Env:     map[string]string{"USER": "${{ vars.user }}"},
+			Options: "--label version=${{ vars.tag }}",
+			Command: "echo ${{ vars.tag }}", Entrypoint: "/bin/${{ vars.user }}",
+			Ports: []string{"${{ vars.tag }}"}, Volumes: []string{"data:/v${{ vars.tag }}"},
 			Credentials: &workflow.ContainerCredentials{
 				Username: "${{ vars.user }}",
 				Password: "${{ secrets.REGISTRY_PASSWORD }}",
@@ -5152,38 +5157,36 @@ func TestResolveCompileServicesKeepsCredentialVariablesResidual(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if container := resolved[0].Container; container.Image != "postgres:16" || container.Env["USER"] != "registry-user" || container.Credentials.Username != "${{ vars.user }}" {
+	if container := resolved[0].Container; container.Image != "postgres:16" || container.Env["USER"] != "${{ vars.user }}" || container.Credentials.Username != "${{ vars.user }}" {
 		t.Fatalf("resolved service = %#v", container)
+	}
+	container := resolved[0].Container
+	if container.Options != "--label version=16" || container.Command != "echo 16" || container.Entrypoint != "/bin/registry-user" || !slices.Equal(container.Ports, []string{"16"}) || !slices.Equal(container.Volumes, []string{"data:/v16"}) {
+		t.Fatalf("non-env service fields lost compile-time vars: %#v", container)
 	}
 }
 
 func TestResolveCompileServiceEnvironmentVarsSnapshot(t *testing.T) {
 	for _, test := range []struct {
-		source, reduced, want string
+		source, want string
 	}{
-		{source: "${{ vars.VALUE }}", reduced: "repo", want: "repo"},
-		{source: "${{ env.NAME }}-${{ vars.VALUE }}", reduced: "${{ env.NAME }}-repo", want: "job-repo"},
-		{source: "${{ needs.build.outputs.name }}-${{ vars.VALUE }}", reduced: "${{ needs.build.outputs.name }}-repo", want: "upstream-repo"},
-		{source: "${{ format('{0}-{1}', env.NAME, vars.VALUE) }}"},
-		{source: "${{ format('{0}-{1}', needs.build.outputs.name, vars.VALUE) }}"},
+		{source: "${{ vars.VALUE }}", want: "environment"},
+		{source: "${{ env.NAME }}-${{ vars.VALUE }}", want: "job-environment"},
+		{source: "${{ needs.build.outputs.name }}-${{ vars.VALUE }}", want: "upstream-environment"},
+		{source: "${{ format('{0}-{1}', env.NAME, vars.VALUE) }}", want: "job-environment"},
+		{source: "${{ format('{0}-{1}', needs.build.outputs.name, vars.VALUE) }}", want: "upstream-environment"},
 	} {
 		t.Run(test.source, func(t *testing.T) {
 			services := []workflow.Service{{Name: "database", Container: workflow.ServiceContainer{
 				Image: "postgres:16", Env: map[string]string{"VALUE": test.source},
 			}}}
 			resolved, err := resolveCompileServices(services, expression.CompileContext{Vars: map[string]string{"VALUE": "repo"}})
-			if test.reduced == "" {
-				if err == nil || !strings.Contains(err.Error(), `runtime context "vars" is unavailable`) {
-					t.Fatalf("residual vars must be rejected: %v", err)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			reduced := resolved[0].Container.Env["VALUE"]
-			if reduced != test.reduced {
-				t.Fatalf("reduced = %q, want %q", reduced, test.reduced)
+			if reduced != test.source {
+				t.Fatalf("reduced = %q, want residual %q", reduced, test.source)
 			}
 			got, err := expression.NewEngine().Evaluate(expression.Site{Source: reduced, Profile: expression.ProfileServiceEnvironment, Result: expression.ResultString}, expression.Values{Runtime: expression.Context{
 				Vars:  map[string]string{"VALUE": "environment"},
