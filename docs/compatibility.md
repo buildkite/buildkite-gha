@@ -2257,7 +2257,7 @@ Pre conditions use the status and action-scoped environment available when prepa
 | v7.0.0 corpus pin | [`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`](https://github.com/actions/checkout/tree/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0) |
 | v7.0.1 | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/tree/3d3c42e5aac5ba805825da76410c181273ba90b1) |
 
-Every resolved immutable commit uses the native adapter; the upstream JavaScript doesn't run. Commits in the frozen snapshots retain their exact inputs, full-history default, and outputs. For example, early v2 commits reject later v2 inputs, and v4.0 and v4.1 commits don't expose the `ref` and `commit` outputs.
+By default, every resolved immutable commit uses the native adapter; the upstream JavaScript doesn't run. [Upstream checkout](#upstream-checkout) is an opt-in alternative. Commits in the frozen snapshots retain their exact inputs, full-history default, and outputs. For example, early v2 commits reject later v2 inputs, and v4.0 and v4.1 commits don't expose the `ref` and `commit` outputs.
 
 An immutable commit absent from the snapshots uses the stable v7.0.1 contract as a compatibility fallback. Compilation emits one `W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK` warning for each distinct unknown commit. This higher-risk fallback can differ from the commit's upstream manifest, but it doesn't widen the native adapter: repository, ref, path, credentials, and every other input still use the restrictions below. Known snapshotted commits never use the fallback. Compilation emits `W_CHECKOUT_LEGACY_RELEASE` for v1.2.0 and v2.8.0 to nudge an upgrade to v4 or later.
 
@@ -2327,7 +2327,37 @@ Sparse checkout applies `blob:none` automatically unless `filter` is explicit. C
 
 See the [security model](security.md#checkout-and-submodules) for credential, Git, and job-isolation boundaries.
 
-Alternate repositories, tags, non-event dynamic commits, GitHub Enterprise Server, credential persistence, and existing-directory reuse remain unsupported. Commit and branch checkouts remain detached and confined to the event repository.
+The native adapter doesn't support alternate repositories, tags, non-event dynamic commits, GitHub Enterprise Server, credential persistence, or existing-directory reuse. Commit and branch checkouts remain detached and confined to the event repository.
+
+#### Upstream checkout
+
+**🟡 Experimental opt-in.** Set the plugin's `upstream-checkout: true` field, or pass `upload --upstream-checkout`, to run the upstream `actions/checkout` JavaScript as an ordinary [JavaScript action](#actions). The setting defaults to `false`; see the [CLI guide](cli.md#run-upstream-actionscheckout).
+
+The upstream action runs only when both conditions hold. Otherwise the native adapter runs.
+
+| Condition | Otherwise |
+| --- | --- |
+| The event provider is GitHub. | Origin repositories keep the native adapter. |
+| The resolved commit declares Node.js 16 or later. | v1.2.0 and v2.8.0 keep the native adapter and `W_CHECKOUT_LEGACY_RELEASE`. |
+
+Upstream checkout accepts every input its release declares, such as `repository`, `ref: v1.2.3`, `token`, `ssh-key`, and `persist-credentials: true`. The native input restrictions and fallback warnings don't apply.
+
+Upstream's `token` input defaults to `${{ github.token }}`, so each job with an upstream checkout requests a [`GITHUB_TOKEN`](#github-token) with the top-level workflow permissions. Compilation fails when the workflow sets `permissions: {}`. The job fails when token issuance is unavailable. An explicit `token: ${{ secrets.NAME }}` uses [other secrets](#other-secrets-and-oidc). The job doesn't use Buildkite repository-provider Git credentials.
+
+As on GitHub, `persist-credentials` defaults to `true`: later steps in the job can use the token through the Git configuration until the post step removes it.
+
+```yaml
+permissions:
+  contents: write
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git tag v1.2.3 && git push origin v1.2.3
+```
+
+Hosted runs haven't yet verified private repositories, `persist-credentials` pushes, submodules, LFS, sparse checkout, job containers, the non-root runner user, or macOS.
 
 ### Upload artifact action
 
@@ -2498,7 +2528,7 @@ JavaScript and Docker actions with compatible bundled cache clients also receive
 | Public GitHub event repository | ✅ Supported | No additional boundary. |
 | Private GitHub event repository | 🟡 Supported subset | Buildkite must authorize repository-provider Git credentials. |
 | Internal or private Origin event repository | 🟡 Supported subset | `BUILDKITE_REPO` must be the pipeline's exact `https://origin.cursor.com/git/<namespace>/<repository>.git` URL. Buildkite must authorize repository-provider Git credentials. |
-| Alternate repository in `actions/checkout` | ❌ Unsupported | Not available. |
+| Alternate repository in `actions/checkout` | 🟡 Experimental opt-in | [Upstream checkout](#upstream-checkout) only. The token must have access to the repository. |
 | Public GitHub action | 🟡 Supported subset | Subject to the action boundaries above. |
 | Private reusable workflow | 🟡 Supported subset | Same-repository or explicitly approved cross-repository source. Resolved by the importer only. |
 | Private action | ❌ Unsupported | No private action source access. |
@@ -2515,7 +2545,8 @@ event repository when it:
 
 A `github.server_url == 'https://github.com'` guard skips the token branch for
 an Origin repository. Native adapters ignore upstream input defaults, so
-`actions/checkout` alone does not request a token.
+`actions/checkout` alone does not request a token unless
+[upstream checkout](#upstream-checkout) runs it.
 
 The top-level workflow's `permissions` set the scope. Token issuance needs a
 Buildkite organization feature and a pipeline setting; both are off by default.

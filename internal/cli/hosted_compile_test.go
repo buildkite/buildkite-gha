@@ -42,6 +42,7 @@ func TestHostedCompileRequestOptionsCarryEveryInputExactlyOnce(t *testing.T) {
 		OIDC:                 oidc,
 		EnvironmentSource:    stubEnvironmentSource{},
 		Vars:                 vars,
+		UpstreamCheckout:     true,
 		RuntimeMatrixRows:    map[string][]map[string]any{"test": {{"os": "ubuntu-latest"}}},
 		RuntimeMatrixActionLocks: []plan.ActionLock{
 			{ID: "actions/checkout@v4", Source: "github", Repository: "actions/checkout", RequestedRef: "v4", Commit: strings.Repeat("c", 40)},
@@ -65,6 +66,7 @@ func TestHostedCompileRequestOptionsCarryEveryInputExactlyOnce(t *testing.T) {
 		OIDC:                     oidc,
 		EnvironmentSource:        stubEnvironmentSource{},
 		Vars:                     vars,
+		UpstreamCheckout:         true,
 		RuntimeMatrixRows:        request.RuntimeMatrixRows,
 		RuntimeMatrixActionLocks: request.RuntimeMatrixActionLocks,
 		Runners: compiler.RunnerPolicy{

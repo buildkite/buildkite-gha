@@ -57,7 +57,7 @@ runs:
 		}
 	})
 	b.Run("analysis", func(b *testing.B) {
-		graph, err := buildActionGraph(b.Context(), workspace, nil, refs, nil)
+		graph, err := buildActionGraph(b.Context(), workspace, nil, refs, nil, false)
 		if err != nil {
 			b.Fatal(err)
 		}

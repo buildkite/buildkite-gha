@@ -20,7 +20,7 @@ type actionGraphCache struct {
 type actionGraphKey struct {
 	workspace, workflowPath, workflowDigest, refs string
 	remote                                        RemoteWorkflowSource
-	isRemote                                      bool
+	isRemote, upstreamCheckout                    bool
 }
 
 func newActionGraphCache(options Options) *actionGraphCache {
@@ -34,14 +34,15 @@ func (cache *actionGraphCache) compile(ctx context.Context, instance JobInstance
 	}
 	// JSON preserves reference order, duplicates, and string boundaries.
 	encoded, _ := json.Marshal(refs)
-	key := actionGraphKey{workspace: instance.RepositoryRoot, workflowPath: instance.SourcePath, workflowDigest: instance.SourceDigest, refs: string(encoded)}
+	upstreamCheckout := upstreamCheckoutEnabled(cache.options, serverURL)
+	key := actionGraphKey{workspace: instance.RepositoryRoot, workflowPath: instance.SourcePath, workflowDigest: instance.SourceDigest, refs: string(encoded), upstreamCheckout: upstreamCheckout}
 	if instance.RemoteWorkflow != nil {
 		key.remote, key.isRemote = *instance.RemoteWorkflow, true
 	}
 	graph, ok := cache.graphs[key]
 	if !ok {
 		var err error
-		graph, err = buildActionGraph(ctx, instance.RepositoryRoot, cache.options.ActionSource, refs, workflowSourceResolver(instance, cache.options))
+		graph, err = buildActionGraph(ctx, instance.RepositoryRoot, cache.options.ActionSource, refs, workflowSourceResolver(instance, cache.options), upstreamCheckout)
 		if err != nil {
 			return actionCompilation{}, err
 		}

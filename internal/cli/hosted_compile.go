@@ -55,6 +55,8 @@ type hostedCompileRequest struct {
 	OIDC                 *plan.OIDCConfiguration
 	EnvironmentSource    compiler.EnvironmentSource
 	Vars                 compiler.VariableSources
+	// UpstreamCheckout records the importer's upstream-checkout setting.
+	UpstreamCheckout bool
 
 	// RepositorySource reads remote reusable workflows and actions; see
 	// hostedRepositorySource. When nil, compileHostedRequest reads public
@@ -86,6 +88,7 @@ func (r hostedCompileRequest) validationOptions() compiler.Options {
 	options.StepKeyNamespace = r.StepKeyNamespace
 	options.RepositorySource = r.RepositorySource
 	options.Vars = r.Vars
+	options.UpstreamCheckout = r.UpstreamCheckout
 	options.RuntimeMatrixRows = r.RuntimeMatrixRows
 	options.RuntimeMatrixSkipped = r.RuntimeMatrixSkipped
 	options.RuntimeSchedulingOutputs = r.RuntimeSchedulingOutputs
@@ -104,6 +107,7 @@ func (r hostedCompileRequest) options() compiler.Options {
 	options.OIDC = r.OIDC
 	options.EnvironmentSource = r.EnvironmentSource
 	options.Vars = r.Vars
+	options.UpstreamCheckout = r.UpstreamCheckout
 	options.RuntimeMatrixRows = r.RuntimeMatrixRows
 	options.RuntimeMatrixSkipped = r.RuntimeMatrixSkipped
 	options.RuntimeMatrixActionLocks = r.RuntimeMatrixActionLocks

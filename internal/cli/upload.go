@@ -319,6 +319,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			OIDC:              uploadArguments.oidc,
 			EnvironmentSource: uploadArguments.environmentSource,
 			Vars:              vars,
+			UpstreamCheckout:  uploadArguments.upstreamCheckout,
 			RepositorySource:  repositorySource,
 		}
 	}
@@ -1127,6 +1128,7 @@ type parsedUploadArgs struct {
 	variableSource           variableSource
 	experimentalRunnerUser   bool
 	privateReusableWorkflows bool
+	upstreamCheckout         bool
 	pluginAcquisition        *pluginRuntimeAcquisition
 	importerPlatform         compiler.Platform
 	telemetry                *commandTelemetryDetails
@@ -1146,6 +1148,8 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 	experimentalRunnerUserSeen := false
 	privateReusableWorkflows := false
 	privateReusableWorkflowsSeen := false
+	upstreamCheckout := false
+	upstreamCheckoutSeen := false
 	optionsEnded := false
 	for i := 0; i < len(args); i++ {
 		if optionsEnded {
@@ -1195,6 +1199,18 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 				}
 				experimentalRunnerUser = value == "true"
 			}
+			continue
+		}
+		if args[i] == "--upstream-checkout" || strings.HasPrefix(args[i], "--upstream-checkout=") {
+			if upstreamCheckoutSeen {
+				return parsedUploadArgs{}, fmt.Errorf("--upstream-checkout may only be specified once")
+			}
+			upstreamCheckoutSeen = true
+			value, configured := strings.CutPrefix(args[i], "--upstream-checkout=")
+			if configured && value != "true" && value != "false" {
+				return parsedUploadArgs{}, fmt.Errorf("--upstream-checkout must be true or false")
+			}
+			upstreamCheckout = !configured || value == "true"
 			continue
 		}
 		if args[i] == "--runtime-distribution" {
@@ -1286,5 +1302,6 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 	return parsedUploadArgs{
 		workflowOperands: workflowOperands, eventPath: eventPath, runtimeDistributionPaths: runtimeDistributionPaths,
 		runnerTargets: runnerTargets, experimentalRunnerUser: experimentalRunnerUser, privateReusableWorkflows: privateReusableWorkflows,
+		upstreamCheckout: upstreamCheckout,
 	}, nil
 }

@@ -102,6 +102,20 @@ type ActionLock struct {
 	ExecutablePaths []string                  `json:"executable_paths,omitzero"`
 	DockerImage     string                    `json:"docker_image,omitempty"`
 	Children        map[string]ActionSelector `json:"children,omitempty"`
+	// Upstream runs the action's own lifecycle although the integration
+	// catalog names a native adapter for it. Only actions/checkout may set it.
+	Upstream bool `json:"upstream,omitempty"`
+}
+
+// NativeAdapter reports the Buildkite-native adapter that replaces the lock's
+// upstream lifecycle. It returns the catalog adapter even when admission
+// fails, and no adapter for an upstream lock. Every native-adapter decision
+// must use it so the plan's Upstream field is honored everywhere.
+func (lock ActionLock) NativeAdapter() (integration.Adapter, bool, error) {
+	if lock.Upstream {
+		return "", false, nil
+	}
+	return integration.AdmitNativeAdapter(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
 }
 
 type Compiler struct {
@@ -1463,6 +1477,11 @@ func ValidateActionLockList(actions []ActionLock) (map[string]ActionLock, error)
 		if err := validateLockIdentity(lock); err != nil {
 			return nil, fmt.Errorf("action lock %q: %w", lock.ID, err)
 		}
+		if lock.Upstream {
+			if descriptor, _ := integration.Lookup(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}); descriptor.Adapter != integration.AdapterCheckoutExactEventSHA {
+				return nil, fmt.Errorf("action lock %q: upstream is allowed only for actions/checkout", lock.ID)
+			}
+		}
 		for uses, child := range lock.Children {
 			if len(uses) == 0 || len(uses) > 2048 || !utf8.ValidString(uses) || hasControl(uses) || !actionLockIDPattern.MatchString(child.Lock) {
 				return nil, fmt.Errorf("action lock %q has invalid child selector", lock.ID)
@@ -1591,10 +1610,13 @@ func validateActionLocks(job Job) error {
 	}
 	for _, lock := range job.Actions {
 		id := lock.ID
+		if lock.Upstream && job.Event.Provider != "github" {
+			return fmt.Errorf("action lock %q: upstream actions/checkout requires a GitHub event", id)
+		}
 		if _, ok := job.Program.Actions[id]; ok {
 			continue
 		}
-		if _, native, err := integration.AdmitNativeAdapter(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit); err != nil {
+		if _, native, err := lock.NativeAdapter(); err != nil {
 			return fmt.Errorf("action lock %q is not an admitted native-adapter release: %w", id, err)
 		} else if native {
 			continue

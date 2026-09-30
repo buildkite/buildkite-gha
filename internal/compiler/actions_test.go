@@ -916,7 +916,7 @@ runs:
         token: ${{ inputs.token }}
 `)
 	refs := []string{"./child", "./parent"}
-	graph, err := buildActionGraph(t.Context(), workspace, nil, refs, nil)
+	graph, err := buildActionGraph(t.Context(), workspace, nil, refs, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2445,6 +2445,130 @@ func TestNativeCheckoutIgnoresUpstreamTokenDefaultForOrigin(t *testing.T) {
 		!reflect.DeepEqual(bundle.Plans[0].Job.RequiredCapabilities, []string{"network", "provider-token-read"}) {
 		t.Fatalf("Origin checkout plan = %#v", bundle.Plans)
 	}
+}
+
+func TestUpstreamCheckoutRunsAsJavaScriptAction(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const upstreamManifest = "name: checkout\ninputs:\n  repository:\n    default: ${{ github.repository }}\n  token:\n    default: ${{ github.token }}\n  persist-credentials:\n    default: true\nruns:\n  using: node24\n  main: index.js\n  post: index.js\n"
+	header := "on: push\n"
+	compile := func(t *testing.T, commit, with string, upstream bool, provider string) (Bundle, error) {
+		t.Helper()
+		workflow := []byte(header + "jobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@" + commit + "\n" + with)
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		event := bytes.Replace(pushEvent(t), []byte(`"provider": "github"`), []byte(`"provider": "`+provider+`"`), 1)
+		return CompileBundleWithOptions(workflowPath, workflow, event, "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions:   true,
+			ActionSource:     &fakeActionSource{root: remote, calls: map[string]int{}},
+			UpstreamCheckout: upstream,
+		})
+	}
+	onlyLock := func(t *testing.T, bundle Bundle) (PlanArtifact, plan.ActionLock) {
+		t.Helper()
+		if len(bundle.Plans) != 1 || len(bundle.Plans[0].Job.Actions) != 1 {
+			t.Fatalf("plans = %#v", bundle.Plans)
+		}
+		return bundle.Plans[0], bundle.Plans[0].Job.Actions[0]
+	}
+	assertNative := func(t *testing.T, artifact PlanArtifact, lock plan.ActionLock) {
+		t.Helper()
+		if lock.Upstream || artifact.Job.GitHubToken != nil || artifact.Job.Program.Actions[lock.ID].Runtime != "" ||
+			!reflect.DeepEqual(artifact.Job.RequiredCapabilities, []string{"network", "provider-token-read"}) {
+			t.Fatalf("native checkout plan = %#v", artifact.Job)
+		}
+	}
+
+	t.Run("github", func(t *testing.T) {
+		writeAction(t, remote, "", upstreamManifest)
+		native, err := compile(t, actionintegration.CheckoutV7Commit, "", false, "github")
+		if err != nil {
+			t.Fatal(err)
+		}
+		nativeArtifact, nativeLock := onlyLock(t, native)
+		assertNative(t, nativeArtifact, nativeLock)
+
+		// Inputs the native adapter rejects compile because upstream owns them.
+		bundle, err := compile(t, actionintegration.CheckoutV7Commit, "        with:\n          repository: other/repository\n          persist-credentials: true\n", true, "github")
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifact, lock := onlyLock(t, bundle)
+		if !lock.Upstream || lock.ID == nativeLock.ID {
+			t.Fatalf("upstream lock = %#v, native lock ID %q", lock, nativeLock.ID)
+		}
+		if action, ok := artifact.Job.Program.Actions[lock.ID]; !ok || action.Runtime != "node24" || action.Post == "" {
+			t.Fatalf("upstream checkout program = %#v", artifact.Job.Program.Actions)
+		}
+		// The token comes from upstream's github.token input default, through
+		// the ordinary action authority path; no checkout capability remains.
+		if artifact.Job.GitHubToken == nil || !artifact.Job.HasCapability("provider-token-write") || artifact.Job.HasCapability("provider-token-read") ||
+			len(artifact.Authorization.ProviderTokenReadCapabilitySources) != 0 ||
+			!reflect.DeepEqual(artifact.Authorization.GitHubTokenActions, []string{"actions/checkout@" + actionintegration.CheckoutV7Commit}) {
+			t.Fatalf("upstream checkout authority = %#v, authorization = %#v", artifact.Job, artifact.Authorization)
+		}
+		if len(bundle.IR.Warnings) != 0 {
+			t.Fatalf("upstream checkout warnings = %#v", bundle.IR.Warnings)
+		}
+
+		// Plan validation binds the decision to a GitHub event and a program.
+		if err := artifact.Job.Validate(); err != nil {
+			t.Fatalf("upstream plan validation: %v", err)
+		}
+		validateCompiledPlansAgainstSchema(t, []plan.Job{artifact.Job})
+		origin := artifact.Job
+		origin.Event.Provider = "cursor-origin"
+		origin.GitHubToken, origin.RequiredCapabilities = nil, []string{"network"}
+		if err := origin.Validate(); err == nil || !strings.Contains(err.Error(), "requires a GitHub event") {
+			t.Fatalf("Origin upstream plan validation error = %v", err)
+		}
+		withoutProgram := artifact.Job
+		programCopy := *artifact.Job.Program
+		programCopy.Actions = nil
+		withoutProgram.Program = &programCopy
+		if err := withoutProgram.Validate(); err == nil || !strings.Contains(err.Error(), "no normalized execution program") {
+			t.Fatalf("upstream plan without program validation error = %v", err)
+		}
+
+		// A workflow that grants no token permissions cannot run upstream checkout.
+		header = "on: push\npermissions: {}\n"
+		defer func() { header = "on: push\n" }()
+		if _, err := compile(t, actionintegration.CheckoutV7Commit, "", true, "github"); err == nil || !strings.Contains(err.Error(), "has no effective permissions") {
+			t.Fatalf("empty permissions upstream checkout error = %v", err)
+		}
+	})
+
+	t.Run("origin", func(t *testing.T) {
+		writeAction(t, remote, "", upstreamManifest)
+		bundle, err := compile(t, actionintegration.CheckoutV7Commit, "", true, "cursor-origin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifact, lock := onlyLock(t, bundle)
+		assertNative(t, artifact, lock)
+	})
+
+	t.Run("node12 release", func(t *testing.T) {
+		writeAction(t, remote, "", checkoutTestManifest(actionintegration.CheckoutV2Commit))
+		bundle, err := compile(t, actionintegration.CheckoutV2Commit, "", true, "github")
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifact, lock := onlyLock(t, bundle)
+		assertNative(t, artifact, lock)
+		if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_CHECKOUT_LEGACY_RELEASE" {
+			t.Fatalf("legacy checkout warnings = %#v", bundle.IR.Warnings)
+		}
+	})
 }
 
 func TestNonGitHubActionSkipsGitHubOnlyConditionalTokenDefault(t *testing.T) {

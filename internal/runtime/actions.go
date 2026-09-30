@@ -141,8 +141,8 @@ func newActionLockResolver(job plan.Job, workspace string, materializer ActionMa
 }
 
 func usesCheckoutAdapter(lock plan.ActionLock) bool {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-	return descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA
+	adapter, _, _ := lock.NativeAdapter()
+	return adapter == actionintegration.AdapterCheckoutExactEventSHA
 }
 
 func validateJobCheckoutAdapters(job plan.Job) (bool, error) {
@@ -168,17 +168,17 @@ func validateJobCheckoutAdapters(job plan.Job) (bool, error) {
 }
 
 func usesUploadArtifactAdapter(lock plan.ActionLock) bool {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-	return descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite
+	adapter, _, _ := lock.NativeAdapter()
+	return adapter == actionintegration.AdapterUploadArtifactBuildkite
 }
 
 func usesDownloadArtifactAdapter(lock plan.ActionLock) bool {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-	return descriptor.Adapter == actionintegration.AdapterDownloadArtifactBuildkite
+	adapter, _, _ := lock.NativeAdapter()
+	return adapter == actionintegration.AdapterDownloadArtifactBuildkite
 }
 
 func usesNativeAdapter(lock plan.ActionLock) bool {
-	_, admitted, err := actionintegration.AdmitNativeAdapter(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
+	_, admitted, err := lock.NativeAdapter()
 	return err == nil && admitted
 }
 
@@ -234,6 +234,8 @@ func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSe
 	if err != nil {
 		return resolvedAction{}, err
 	}
+	// An upstream lock runs its own verified lifecycle, not the catalog adapter.
+	descriptor.Adapter, _, _ = entry.lock.NativeAdapter()
 
 	var m metadata.Metadata
 	switch entry.lock.Source {

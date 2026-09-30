@@ -76,6 +76,9 @@ type stageRecord struct {
 	// importer read remote reusable workflows through the agent's Git
 	// credentials. Every stage reads them the same way.
 	PrivateReusableWorkflows bool `json:"private_reusable_workflows,omitempty"`
+	// UpstreamCheckout records the importer's upstream-checkout setting, so
+	// every stage selects the same actions/checkout execution.
+	UpstreamCheckout bool `json:"upstream_checkout,omitempty"`
 	// Continuation is the deferred remainder this stage expands: its roots,
 	// their dependents, and the step that performs the upload. Its action
 	// locks are the component's from the importer's compilation, so every
@@ -258,6 +261,7 @@ func importerStage(request hostedCompileRequest, importer, buildCommit string, i
 		OIDC:                     request.OIDC,
 		RunnerUser:               runnerUser,
 		PrivateReusableWorkflows: privateReusable,
+		UpstreamCheckout:         request.UpstreamCheckout,
 	}
 	return record, transport.Artifact{Path: eventPath, Digest: eventDigest, Contents: event.Source}, nil
 }
@@ -859,6 +863,7 @@ func (s stageRecord) compileRequest(workflowPath string, workflowSource, eventSo
 		RuntimeDistributions:     runtimes,
 		OIDC:                     s.OIDC,
 		Vars:                     compiler.VariableSources{Organization: s.Vars.Organization, Repository: s.Vars.Repository, Resolved: s.Vars.Resolved},
+		UpstreamCheckout:         s.UpstreamCheckout,
 		RepositorySource:         repositorySource,
 		RuntimeMatrixRows:        allRows,
 		RuntimeMatrixSkipped:     allSkipped,
