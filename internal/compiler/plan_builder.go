@@ -549,7 +549,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 		if !ok {
 			return built, fmt.Errorf("build plan for job %q: action lock %q is missing", instance.LogicalJobID, selector.Lock)
 		}
-		if err := b.validateActionAdapter(instance, stepIndex, lock, reachability.Steps[stepIndex], &built); err != nil {
+		if err := b.validateActionAdapter(instance, stepIndex, lock, reachability.Job, reachability.Steps[stepIndex], &built); err != nil {
 			return built, err
 		}
 	}
@@ -582,10 +582,13 @@ func (b planBuilder) authorityReferences(instance JobInstance) map[string]any {
 	}
 }
 
-func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, reachable bool, built *builtPlanActions) error {
+func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, jobReachable, stepReachable bool, built *builtPlanActions) error {
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
 	switch descriptor.Adapter {
 	case actionintegration.AdapterCheckoutExactEventSHA:
+		if !jobReachable {
+			return nil
+		}
 		checkoutInputs := cloneMap(instance.Steps[stepIndex].With)
 		for name, value := range checkoutInputs {
 			if !strings.EqualFold(name, "ref") {
@@ -601,7 +604,7 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 			span := instance.Steps[stepIndex].Span.Start
 			return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 		}
-		if reachable {
+		if stepReachable {
 			built.capabilities = append(built.capabilities, "provider-token-read")
 			built.authorization.ProviderTokenReadCapabilitySources = append(built.authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
 		}

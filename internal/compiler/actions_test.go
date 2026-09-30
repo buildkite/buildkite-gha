@@ -1434,6 +1434,48 @@ func TestCheckoutAuthorityFollowsRootReachability(t *testing.T) {
 	}
 }
 
+func TestStaticallySkippedReusableJobDoesNotValidateCheckoutAdapterInputs(t *testing.T) {
+	repository, remote := t.TempDir(), t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", "")
+	writeAction(t, remote, "", checkoutTestManifest(actionintegration.CheckoutV7Commit))
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      enabled: {type: boolean, required: true}
+jobs:
+  update:
+    if: inputs.enabled
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@`+actionintegration.CheckoutV7Commit+`
+        with:
+          persist-credentials: true
+`)
+	compile := func(enabled bool) (Bundle, error) {
+		t.Helper()
+		source := []byte(fmt.Sprintf("on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    with:\n      enabled: %t\n", enabled))
+		if err := os.WriteFile(caller, source, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return CompileBundleWithOptions(caller, source, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust:     EventUntrusted,
+			Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+			ResolveActions: true,
+			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+		})
+	}
+	bundle, err := compile(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Condition != "false" || len(bundle.Plans[0].Job.Actions) == 0 || bundle.Plans[0].Job.HasCapability("provider-token-read") {
+		t.Fatalf("statically skipped checkout plan = %#v", bundle.Plans)
+	}
+	if _, err := compile(true); err == nil || !strings.Contains(err.Error(), `explicit input "persist-credentials" value is unsupported`) {
+		t.Fatalf("reachable checkout adapter error = %v", err)
+	}
+}
+
 func TestCompileActionLocksRemoteCompositeUsesWorkspaceRoot(t *testing.T) {
 	w, remote := t.TempDir(), t.TempDir()
 	writeAction(t, w, "child", "name: child\nruns:\n  using: docker\n  image: Dockerfile\n")

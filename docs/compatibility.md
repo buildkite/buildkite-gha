@@ -2263,6 +2263,8 @@ Buildkite runs v1.2.0 like v1 and v2.8.0 like v2, and warns about their differen
 
 The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean nested directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to the Git commands that fetch repository, LFS, or submodule data and are never persisted.
 
+Checkout input restrictions do not block a whole job whose `if` condition is statically false after reusable inputs and matrix values resolve. The skipped job and locked action remain in the plan so it can publish a `skipped` result. Step-level and runtime-dependent conditions remain conservative and validate the adapter inputs.
+
 An explicit input is accepted only when the exact snapshotted contract declares it, or when the v7.0.1 fallback contract declares it for an unknown commit. The following value restrictions then apply:
 
 | Input | Supported values |
