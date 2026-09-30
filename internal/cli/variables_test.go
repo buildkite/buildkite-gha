@@ -13,7 +13,9 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 // Distinctive repository and organization variable values prove where they
@@ -387,6 +389,82 @@ func TestRunUploadTreatsAbsentVariableScopesAsEmpty(t *testing.T) {
 			pipeline := string(runner.commands[len(runner.commands)-1].stdin)
 			if !strings.Contains(pipeline, defaultNobleRunnerImage) {
 				t.Fatalf("pipeline did not select the literal fallback runner ubuntu-latest:\n%s", pipeline)
+			}
+		})
+	}
+}
+
+func TestRunUploadServiceEnvironmentVariables(t *testing.T) {
+	requireImporterHost(t)
+	for _, test := range []struct {
+		name              string
+		variableStatus    int
+		environmentStatus int
+		wantError         string
+	}{
+		{"all scopes", http.StatusOK, http.StatusOK, ""},
+		{"absent repository scopes", http.StatusNotFound, http.StatusOK, ""},
+		{"unavailable variables", http.StatusServiceUnavailable, http.StatusOK, "variable resolution service is temporarily unavailable"},
+		{"unavailable environments", http.StatusOK, http.StatusNotFound, "does not offer GitHub environment resolution"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			variables, requests := agentVariablesHandler(t, test.variableStatus, "")
+			agent, _ := agentStub(t, "job-secret", test.environmentStatus, variables)
+			setAgentResolutionEnvironment(t, agent.URL)
+			t.Setenv("BUILDKITE", "true")
+			t.Setenv("BUILDKITE_STEP_KEY", "service-vars-importer")
+			eventPath := pushEventPath(t)
+			workflow := "on: push\njobs:\n"
+			for _, name := range []string{"production", "staging", "plain"} {
+				workflow += "  " + name + ":\n    runs-on: ubuntu-latest\n"
+				if name != "plain" {
+					workflow += "    environment: " + name + "\n"
+				}
+				workflow += `    services:
+      db:
+        image: postgres:16
+        env:
+          REGION: ${{ vars.AWS_REGION }}
+          REGISTRY: ${{ vars.REGISTRY }}
+          MISSING: ${{ vars.MISSING }}
+    steps: [{run: true}]
+`
+			}
+			workflows := writeUploadWorkflows(t, map[string]string{"deploy.yml": workflow})
+			runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+			var stdout, stderr bytes.Buffer
+			code := run(append([]string{"upload", "--event-path", eventPath}, workflows...), &stdout, &stderr, "dev", runner)
+			if code != 0 || *requests != 1 {
+				t.Fatalf("code=%d variable requests=%d stderr=%q", code, *requests, stderr.String())
+			}
+			plans := uploadedPlans(t, runner)
+			if test.wantError != "" {
+				found := false
+				for path, data := range runner.uploaded {
+					found = found || strings.HasPrefix(path, ".buildkite-gha/failures/messages/") && strings.Contains(string(data), test.wantError)
+				}
+				if !found || len(plans["production"]) != 0 || len(plans["staging"]) != 0 {
+					t.Fatalf("plans=%v failure artifact containing %q=%t", plans, test.wantError, found)
+				}
+				return
+			}
+			assertNoVariableValueLeak(t, runner, stdout.String(), stderr.String())
+			for _, name := range []string{"production", "staging", "plain"} {
+				if len(plans[name]) != 1 {
+					t.Fatalf("plans for %s = %v", name, plans[name])
+				}
+				job := plans[name][0]
+				want := map[string]string{"REGION": "", "REGISTRY": "", "MISSING": ""}
+				if test.variableStatus == http.StatusOK {
+					want["REGION"], want["REGISTRY"] = stubRepositoryRegion, stubOrganizationRegistry
+				}
+				if name == "production" {
+					want["REGION"] = stubEnvironmentRegion
+				}
+				got, err := program.EvaluateBindings(job.ExecutionJob().Services.Static[0].Container.Env, program.EvaluationContext{Expression: expression.Context{Vars: job.Vars()}})
+				if err != nil || !maps.Equal(got, want) {
+					t.Fatalf("%s service env = %v, %v; want %v", name, got, err, want)
+				}
 			}
 		})
 	}

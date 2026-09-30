@@ -174,12 +174,13 @@ func TestProgramWireDerivesSiteSemanticsFromPosition(t *testing.T) {
 	}
 }
 
-func TestServiceEnvironmentRejectsResidualVarsAfterDecode(t *testing.T) {
+func TestServiceEnvironmentRejectsForbiddenContextsAfterDecode(t *testing.T) {
 	for _, source := range []string{
-		"${{ vars.VALUE }}",
-		"${{ format('{0}-{1}', env.NAME, vars.VALUE) }}",
-		"${{ format('{0}-{1}', needs.build.outputs.name, vars.VALUE) }}",
-		"${{ 'safe' || vars.VALUE }}",
+		"${{ vars.VALUE || github.token }}",
+		"${{ vars.VALUE || toJSON(github) }}",
+		"${{ vars.VALUE || runner.os }}",
+		"${{ vars.VALUE || job.services.db.id }}",
+		"${{ vars.VALUE || secrets[env.KEY] }}",
 	} {
 		t.Run(source, func(t *testing.T) {
 			program := Program{Version: Version, Job: Job{
@@ -197,8 +198,8 @@ func TestServiceEnvironmentRejectsResidualVarsAfterDecode(t *testing.T) {
 			if err := json.Unmarshal(encoded, &decoded); err != nil {
 				t.Fatal(err)
 			}
-			if err := decoded.Validate(); err == nil || !strings.Contains(err.Error(), `runtime context "vars" is unavailable`) {
-				t.Fatalf("decoded service env admitted residual vars: %v", err)
+			if err := decoded.Validate(); err == nil {
+				t.Fatal("decoded service env admitted forbidden context")
 			}
 		})
 	}
