@@ -13,13 +13,17 @@ expected="$(printf '%s\n' \
   buildkite-gha_Linux_x86_64.tar.gz \
   buildkite-gha_Windows_x86_64.tar.gz \
   checksums.txt | sort)"
-actual="$(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name checksums.txt \) -printf '%f\n' | sort)"
+actual="$(for asset in dist/*.tar.gz dist/checksums.txt; do [[ ! -f "$asset" ]] || basename "$asset"; done | sort)"
 [[ "$actual" == "$expected" ]] || {
   printf 'unexpected release assets:\n%s\n' "$actual" >&2
   exit 1
 }
 
-(cd dist && sha256sum --check checksums.txt)
+if command -v sha256sum >/dev/null; then
+  (cd dist && sha256sum --check checksums.txt)
+else
+  (cd dist && shasum -a 256 --check checksums.txt)
+fi
 for archive in dist/*.tar.gz; do
   members="$(tar -tzf "$archive" | sort)"
   binary=buildkite-gha
