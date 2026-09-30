@@ -7,11 +7,12 @@ and the Buildkite plugin. If a feature is not listed, treat it as unsupported.
 
 buildkite-gha requires Buildkite agent v3.129 or newer.
 
-The plugin supports Linux x86-64 and native macOS arm64 importers and
-jobs, with [experimental Windows jobs](#experimental-windows-jobs) available by
-explicit opt-in. It sets the matching `runner.os` and `runner.arch` values. Runner labels
-select a platform; they do not promise GitHub image, toolchain, or Xcode parity.
-It sets `runner.environment` to `self-hosted` on every platform.
+The plugin supports Linux x86-64, Linux arm64, and native macOS arm64 importers
+and jobs, with [experimental Windows jobs](#experimental-windows-jobs) available
+by explicit opt-in. Linux arm64 jobs require an explicit queue. It sets the
+matching `runner.os` and `runner.arch` values. Runner labels select a platform;
+they do not promise GitHub image, toolchain, or Xcode parity. It sets
+`runner.environment` to `self-hosted` on every platform.
 
 Generated Linux jobs use a dedicated `runner` user and need `buildkite-gha`
 v0.13.7 or newer. Use `experimental-runner-user: false` temporarily if an image
@@ -65,7 +66,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | --- | --- | --- |
 | [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name`, explicit `run-name`, and job names are retained. `run-name` supports expressions over `github`, `inputs`, and `vars`. |
 | [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. `workflow_call` is supported for composition. |
-| [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64. The Agent API can map compatible selectors to hosted Linux, native macOS arm64, or explicitly enabled experimental Windows x86-64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
+| [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64. Explicit mappings can select a user-provided Linux arm64 queue. The Agent API can map compatible selectors to Linux, native macOS arm64, or explicitly enabled experimental Windows x86-64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Needs-derived matrices can also read their producer's parallel limit. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `pwsh`, `powershell`, `python`, and custom shell templates; PowerShell and MSYS2 on experimental Windows jobs. |
@@ -80,13 +81,14 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Variables](#repository-and-organization-variables) | 🟡 Supported subset | Repository, organization, and environment `vars` resolve inside a Buildkite job with GitHub's per-position scoping. |
 | [OIDC](#other-secrets-and-oidc) | 🟡 Supported subset | Host JavaScript and composite actions can request Buildkite OIDC tokens in jobs with `id-token: write`. |
 | [Windows jobs](#experimental-windows-jobs) | 🟡 Experimental subset | Windows Server 2022 x86-64 requires explicit opt-in and a compatible Windows queue. No default Windows mapping. |
-| [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows arm64, Windows Server 2025, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers. |
+| [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows arm64, Windows Server 2025, macOS x86-64, GitHub Enterprise Server, and unlisted providers. |
 | [Other GitHub services](#github-services) | ❌ Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
 
 ## Experimental Windows jobs
 
 Windows support is in development, not generally available. Import workflows
-from Linux x86-64 or macOS arm64; Windows agents run generated jobs only.
+from Linux x86-64, Linux arm64, or macOS arm64; Windows agents run generated
+jobs only.
 `windows-latest` and `windows-2022` select Windows x86-64 when explicitly mapped
 to a queue or enabled through Agent API resolution. They have no local preset
 and are otherwise rejected, never silently redirected to Linux.
@@ -1134,9 +1136,11 @@ Noble or Jammy hosted-toolchains image with default Buildkite agent targeting.
 An explicit immutable image overrides the preset for a configured profile.
 
 An explicit mapping is authoritative and bypasses Agent API resolution. It
-declares that the selector runs on Linux x86-64, except for the known macOS
-labels, which select Darwin arm64, and the experimental Windows labels, which
-select Windows x86-64. Both reject images. For every other selector,
+declares that the selector runs on Linux x86-64, except for known Linux arm64
+labels (`ubuntu-24.04-arm`, `ubuntu-22.04-arm`, and labels ending in `-arm64`
+or `-aarch64`), known macOS labels, and experimental Windows labels. Linux arm64 requires an
+explicit queue and rejects images; this does not provision or enable a
+Buildkite Hosted ARM queue. macOS and Windows also reject images. For every other selector,
 the job-scoped Agent API owns compatibility and returns the complete queue,
 platform, and host environment. The importer applies that target verbatim
 and publishes returned fallback warnings as annotations.

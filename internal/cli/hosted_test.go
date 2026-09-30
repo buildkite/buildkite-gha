@@ -86,6 +86,14 @@ func TestHostedRunnerTargetsContainOnlyHostedGuarantees(t *testing.T) {
 	if err != nil || canonical != "macos-15" || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "organization-macos", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("organization macOS target = %q, %#v, %v", canonical, target, err)
 	}
+	canonical, target, err = configuredRunnerTarget("ubuntu-24.04-arm", "organization-arm", "")
+	if err != nil || canonical != "ubuntu-24.04-arm" || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "organization-arm", Platform: compiler.PlatformLinuxARM64}) {
+		t.Fatalf("organization Linux ARM64 target = %q, %#v, %v", canonical, target, err)
+	}
+	canonical, target, err = configuredRunnerTarget("benchmark-aarch64", "benchmark-arm", "")
+	if err != nil || canonical != "benchmark-aarch64" || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "benchmark-arm", Platform: compiler.PlatformLinuxARM64}) {
+		t.Fatalf("custom Linux ARM64 target = %q, %#v, %v", canonical, target, err)
+	}
 }
 
 func TestHostedPreflightCompilesPublicReusableWorkflowWithSharedSource(t *testing.T) {

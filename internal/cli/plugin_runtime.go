@@ -22,11 +22,12 @@ import (
 )
 
 const (
-	pluginDevDarwinRuntimeEnvironment  = "BUILDKITE_GHA_PLUGIN_DEV_DARWIN_RUNTIME"
-	pluginDevLinuxRuntimeEnvironment   = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_RUNTIME"
-	pluginDevWindowsRuntimeEnvironment = "BUILDKITE_GHA_PLUGIN_DEV_WINDOWS_RUNTIME"
-	pluginChecksumLimit                = 4 << 20
-	pluginArchiveLimit                 = 256 << 20
+	pluginDevDarwinRuntimeEnvironment     = "BUILDKITE_GHA_PLUGIN_DEV_DARWIN_RUNTIME"
+	pluginDevLinuxRuntimeEnvironment      = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_RUNTIME"
+	pluginDevLinuxARM64RuntimeEnvironment = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_ARM64_RUNTIME"
+	pluginDevWindowsRuntimeEnvironment    = "BUILDKITE_GHA_PLUGIN_DEV_WINDOWS_RUNTIME"
+	pluginChecksumLimit                   = 4 << 20
+	pluginArchiveLimit                    = 256 << 20
 )
 
 var stableVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
@@ -40,9 +41,10 @@ type pluginRuntimeAcquisition struct {
 }
 
 const (
-	pluginLinuxAsset   = "buildkite-gha_Linux_x86_64.tar.gz"
-	pluginDarwinAsset  = "buildkite-gha_Darwin_arm64.tar.gz"
-	pluginWindowsAsset = "buildkite-gha_Windows_x86_64.tar.gz"
+	pluginLinuxAsset      = "buildkite-gha_Linux_x86_64.tar.gz"
+	pluginLinuxARM64Asset = "buildkite-gha_Linux_arm64.tar.gz"
+	pluginDarwinAsset     = "buildkite-gha_Darwin_arm64.tar.gz"
+	pluginWindowsAsset    = "buildkite-gha_Windows_x86_64.tar.gz"
 )
 
 func securePluginHTTPClient() *http.Client {
@@ -64,6 +66,7 @@ func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[com
 	distributions := make(map[compiler.Platform]runtimeDistribution, len(required))
 	devPaths := map[compiler.Platform]string{
 		compiler.PlatformLinuxAMD64:   os.Getenv(pluginDevLinuxRuntimeEnvironment),
+		compiler.PlatformLinuxARM64:   os.Getenv(pluginDevLinuxARM64RuntimeEnvironment),
 		compiler.PlatformDarwinARM64:  os.Getenv(pluginDevDarwinRuntimeEnvironment),
 		compiler.PlatformWindowsAMD64: os.Getenv(pluginDevWindowsRuntimeEnvironment),
 	}
@@ -74,7 +77,7 @@ func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[com
 			}
 		}
 	}
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformLinuxARM64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		if !required[platform] {
 			continue
 		}
@@ -113,6 +116,9 @@ func pluginDevRuntimeEnvironment(platform compiler.Platform) string {
 	if platform == compiler.PlatformDarwinARM64 {
 		return pluginDevDarwinRuntimeEnvironment
 	}
+	if platform == compiler.PlatformLinuxARM64 {
+		return pluginDevLinuxARM64RuntimeEnvironment
+	}
 	return pluginDevLinuxRuntimeEnvironment
 }
 
@@ -122,6 +128,9 @@ func pluginRuntimeAsset(platform compiler.Platform) string {
 	}
 	if platform == compiler.PlatformDarwinARM64 {
 		return pluginDarwinAsset
+	}
+	if platform == compiler.PlatformLinuxARM64 {
+		return pluginLinuxARM64Asset
 	}
 	return pluginLinuxAsset
 }

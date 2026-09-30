@@ -1517,6 +1517,8 @@ func canonicalRunnerContext(goos, goarch string) (map[string]string, error) {
 	switch {
 	case goos == "linux" && goarch == "amd64":
 		return map[string]string{"os": "Linux", "arch": "X64", "environment": expression.RunnerEnvironment}, nil
+	case goos == "linux" && goarch == "arm64":
+		return map[string]string{"os": "Linux", "arch": "ARM64", "environment": expression.RunnerEnvironment}, nil
 	case goos == "darwin" && goarch == "arm64":
 		return map[string]string{"os": "macOS", "arch": "ARM64", "environment": expression.RunnerEnvironment}, nil
 	case goos == "windows" && goarch == "amd64":

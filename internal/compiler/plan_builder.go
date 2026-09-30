@@ -180,7 +180,7 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	}
 	sort.Strings(actions.capabilities)
 	actions.capabilities = slices.Compact(actions.capabilities)
-	if instance.Platform != PlatformLinuxAMD64 && slices.Contains(actions.capabilities, "docker") {
+	if instance.Platform.OS != OperatingSystemLinux && slices.Contains(actions.capabilities, "docker") {
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on %s", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, instance.Platform)
 	}
 	// Runtime discovery omits failed jobs. Preserve their compatibility error

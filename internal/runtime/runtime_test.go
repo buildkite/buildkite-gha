@@ -1595,6 +1595,7 @@ func TestCanonicalRunnerContext(t *testing.T) {
 		goos, goarch, os, arch string
 	}{
 		{goos: "linux", goarch: "amd64", os: "Linux", arch: "X64"},
+		{goos: "linux", goarch: "arm64", os: "Linux", arch: "ARM64"},
 		{goos: "darwin", goarch: "arm64", os: "macOS", arch: "ARM64"},
 	} {
 		got, err := canonicalRunnerContext(test.goos, test.goarch)
@@ -1602,7 +1603,7 @@ func TestCanonicalRunnerContext(t *testing.T) {
 			t.Errorf("canonicalRunnerContext(%s, %s) = %#v, %v", test.goos, test.goarch, got, err)
 		}
 	}
-	if _, err := canonicalRunnerContext("linux", "arm64"); err == nil {
+	if _, err := canonicalRunnerContext("linux", "386"); err == nil {
 		t.Fatal("canonicalRunnerContext() accepted unsupported pair")
 	}
 }
@@ -1614,6 +1615,9 @@ func TestValidateHostRejectsDockerOnDarwin(t *testing.T) {
 	}
 	if err := ValidateHost(job, "linux", "amd64"); err != nil {
 		t.Fatalf("ValidateHost() Linux Docker error = %v", err)
+	}
+	if err := ValidateHost(job, "linux", "arm64"); err != nil {
+		t.Fatalf("ValidateHost() Linux ARM64 Docker error = %v", err)
 	}
 	if err := ValidateHost(job, "darwin", "amd64"); err == nil || !strings.Contains(err.Error(), "unsupported runner platform") {
 		t.Fatalf("ValidateHost() unsupported platform error = %v", err)
