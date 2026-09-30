@@ -583,12 +583,12 @@ func (b planBuilder) authorityReferences(instance JobInstance) map[string]any {
 }
 
 func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, jobReachable, stepReachable bool, built *builtPlanActions) error {
+	if !jobReachable {
+		return nil
+	}
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
 	switch descriptor.Adapter {
 	case actionintegration.AdapterCheckoutExactEventSHA:
-		if !jobReachable {
-			return nil
-		}
 		checkoutInputs := cloneMap(instance.Steps[stepIndex].With)
 		for name, value := range checkoutInputs {
 			if !strings.EqualFold(name, "ref") {

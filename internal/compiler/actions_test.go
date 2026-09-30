@@ -1476,6 +1476,85 @@ jobs:
 	}
 }
 
+func TestStaticallySkippedReusableJobDoesNotValidateDownloadArtifactAdapterInputs(t *testing.T) {
+	repository, remote := t.TempDir(), t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", "")
+	writeAction(t, remote, "", "name: artifact action\nruns:\n  using: node24\n  main: index.js\n")
+	options := Options{
+		EventTrust:     EventUntrusted,
+		Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	}
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      enabled: {type: boolean, required: true}
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@`+actionintegration.UploadArtifactCommit+`
+        with:
+          path: payload
+  merge:
+    needs: producer
+    if: inputs.enabled
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@`+actionintegration.DownloadArtifactV7Commit+`
+        with:
+          name: payload
+          path: ${{ runner.temp }}/digests
+`)
+	compile := func(enabled string) (Bundle, error) {
+		t.Helper()
+		source := []byte("on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    with:\n      enabled: " + enabled + "\n")
+		if err := os.WriteFile(caller, source, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return CompileBundleWithOptions(caller, source, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", options)
+	}
+	bundle, err := compile("false")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 || bundle.Plans[1].Job.Condition != "false" || len(bundle.Plans[1].Job.Actions) == 0 {
+		t.Fatalf("statically skipped download-artifact plan = %#v", bundle.Plans)
+	}
+	if _, err := compile("true"); err == nil || !strings.Contains(err.Error(), "bounded download-artifact adapter") {
+		t.Fatalf("reachable download-artifact adapter error = %v", err)
+	}
+	runtimeSource := []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@` + actionintegration.UploadArtifactCommit + `
+        with:
+          path: payload
+  merge:
+    needs: producer
+    if: vars.RUNTIME_FLAG == 'yes'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@` + actionintegration.DownloadArtifactV7Commit + `
+        with:
+          name: payload
+          path: ${{ runner.temp }}/digests
+`)
+	if _, err := CompileBundleWithOptions(caller, runtimeSource, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", options); err == nil || !strings.Contains(err.Error(), "bounded download-artifact adapter") {
+		t.Fatalf("runtime-dependent download-artifact adapter error = %v", err)
+	}
+	stepSource := bytes.Replace(runtimeSource, []byte("    if: vars.RUNTIME_FLAG == 'yes'\n"), nil, 1)
+	stepSource = bytes.Replace(stepSource,
+		[]byte("      - uses: actions/download-artifact@"+actionintegration.DownloadArtifactV7Commit+"\n"),
+		[]byte("      - uses: actions/download-artifact@"+actionintegration.DownloadArtifactV7Commit+"\n        if: false\n"), 1)
+	if _, err := CompileBundleWithOptions(caller, stepSource, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", options); err == nil || !strings.Contains(err.Error(), "bounded download-artifact adapter") {
+		t.Fatalf("statically skipped step download-artifact adapter error = %v", err)
+	}
+}
+
 func TestCompileActionLocksRemoteCompositeUsesWorkspaceRoot(t *testing.T) {
 	w, remote := t.TempDir(), t.TempDir()
 	writeAction(t, w, "child", "name: child\nruns:\n  using: docker\n  image: Dockerfile\n")
