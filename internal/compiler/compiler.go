@@ -722,10 +722,7 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 			credentials := *container.Credentials
 			container.Credentials = &credentials
 			for _, field := range []*string{&container.Credentials.Username, &container.Credentials.Password} {
-				if err := validateCompileSite(*field, expression.ProfileServiceCredential, expression.ResultString); err != nil {
-					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
-				}
-				value, err := reducePartialTemplateString(*field, expression.ProfileServiceCredential, runtimeContext)
+				value, err := reduceTemplateString(*field, expression.ProfileCompileServiceCredential, runtimeContext)
 				if err != nil {
 					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
 				}

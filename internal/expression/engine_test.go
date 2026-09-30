@@ -166,41 +166,42 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		want   any
 	}
 	examples := map[ProfileID]example{
-		ProfileCompile:               {"${{ case(true, contains('abc', 'b'), false) }}", ResultBoolean, true},
-		ProfileRunsOn:                {"${{ inputs.name }}", ResultString, "value"},
-		ProfileRunsOnTemplate:        {"linux-${{ inputs.name }}", ResultString, "linux-value"},
-		ProfileCompileTemplate:       {"${{ case(true, true, false) }}", ResultString, "true"},
-		ProfileCompileContainerImage: {"node:${{ case(true, 24, 25) }}", ResultString, "node:24"},
-		ProfilePartialTemplate:       {"value-${{ inputs.name }}", ResultString, "value-value"},
-		ProfileCompileJobCondition:   {"github.event_name == 'push'", ResultBoolean, true},
-		ProfileCompileStepCondition:  {"inputs.enabled", ResultBoolean, true},
-		ProfileCompileCallCondition:  {"inputs.enabled", ResultBoolean, true},
-		ProfileReusableStepControl:   {"${{ true }}", ResultBoolean, true},
-		ProfileReusableInput:         {"${{ 'value' }}", ResultString, "value"},
-		ProfileRunName:               {"run-${{ github.event_name }}", ResultString, "run-push"},
-		ProfileJobCondition:          {"always() && inputs.enabled", ResultBoolean, true},
-		ProfileJobControl:            {"${{ matrix.enabled }}", ResultBoolean, true},
-		ProfileStepCondition:         {"always() && inputs.enabled", ResultBoolean, true},
-		ProfileActionStepCondition:   {"always() && inputs.enabled", ResultBoolean, true},
-		ProfileActionStepTemplate:    {"${{ inputs.name }}", ResultString, "value"},
-		ProfileWorkflowEnvironment:   {"${{ inputs.name }}", ResultString, "value"},
-		ProfileCallCondition:         {"always() && inputs.enabled", ResultBoolean, true},
-		ProfileActionLifecycle:       {"${{ always() && inputs.enabled }}", ResultBoolean, true},
-		ProfileJobEnvironment:        {"${{ inputs.name }}", ResultString, "value"},
-		ProfileJobDefault:            {"${{ inputs.name }}", ResultString, "value"},
-		ProfileJobOutput:             {"${{ inputs.name }}", ResultString, "value"},
-		ProfileStepTemplate:          {"${{ case(true, format('{0}', inputs.name), 'unused') }}", ResultString, "value"},
-		ProfileStepControl:           {"${{ true }}", ResultBoolean, true},
-		ProfileRuntimeTemplate:       {"${{ env.NAME }}", ResultString, "value"},
-		ProfileServiceTemplate:       {"${{ needs.build.outputs.value || 'fallback' }}", ResultString, `{"name":"value"}`},
-		ProfileServiceEnvironment:    {"${{ format('{0}-{1}-{2}', env.NAME, needs.build.outputs.value, vars.NAME) }}", ResultString, `value-{"name":"value"}-value`},
-		ProfileDeferredInput:         {"type=raw,value=${{ needs.build.outputs.value }}", ResultString, `type=raw,value={"name":"value"}`},
-		ProfileSchedulingGroup:       {"group-${{ needs.build.outputs.value }}", ResultString, `group-{"name":"value"}`},
-		ProfileSchedulingParallel:    {"${{ fromJSON('2') }}", ResultNumber, float64(2)},
-		ProfileServiceCredential:     {"${{ env.NAME || 'fallback' }}", ResultString, "value"},
-		ProfileServiceMap:            {"${{ fromJSON(needs.build.outputs.value || '{}') }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
-		ProfileActionInputDefault:    {"${{ case(true, inputs.name, 'unused') }}", ResultString, "value"},
-		ProfileDockerActionArg:       {"${{ format('{0}', inputs.name || 'fallback') }}", ResultString, "value"},
+		ProfileCompile:                  {"${{ case(true, contains('abc', 'b'), false) }}", ResultBoolean, true},
+		ProfileRunsOn:                   {"${{ inputs.name }}", ResultString, "value"},
+		ProfileRunsOnTemplate:           {"linux-${{ inputs.name }}", ResultString, "linux-value"},
+		ProfileCompileTemplate:          {"${{ case(true, true, false) }}", ResultString, "true"},
+		ProfileCompileContainerImage:    {"node:${{ case(true, 24, 25) }}", ResultString, "node:24"},
+		ProfilePartialTemplate:          {"value-${{ inputs.name }}", ResultString, "value-value"},
+		ProfileCompileJobCondition:      {"github.event_name == 'push'", ResultBoolean, true},
+		ProfileCompileStepCondition:     {"inputs.enabled", ResultBoolean, true},
+		ProfileCompileCallCondition:     {"inputs.enabled", ResultBoolean, true},
+		ProfileReusableStepControl:      {"${{ true }}", ResultBoolean, true},
+		ProfileReusableInput:            {"${{ 'value' }}", ResultString, "value"},
+		ProfileRunName:                  {"run-${{ github.event_name }}", ResultString, "run-push"},
+		ProfileJobCondition:             {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileJobControl:               {"${{ matrix.enabled }}", ResultBoolean, true},
+		ProfileStepCondition:            {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileActionStepCondition:      {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileActionStepTemplate:       {"${{ inputs.name }}", ResultString, "value"},
+		ProfileWorkflowEnvironment:      {"${{ inputs.name }}", ResultString, "value"},
+		ProfileCallCondition:            {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileActionLifecycle:          {"${{ always() && inputs.enabled }}", ResultBoolean, true},
+		ProfileJobEnvironment:           {"${{ inputs.name }}", ResultString, "value"},
+		ProfileJobDefault:               {"${{ inputs.name }}", ResultString, "value"},
+		ProfileJobOutput:                {"${{ inputs.name }}", ResultString, "value"},
+		ProfileStepTemplate:             {"${{ case(true, format('{0}', inputs.name), 'unused') }}", ResultString, "value"},
+		ProfileStepControl:              {"${{ true }}", ResultBoolean, true},
+		ProfileRuntimeTemplate:          {"${{ env.NAME }}", ResultString, "value"},
+		ProfileServiceTemplate:          {"${{ needs.build.outputs.value || 'fallback' }}", ResultString, `{"name":"value"}`},
+		ProfileServiceEnvironment:       {"${{ format('{0}-{1}-{2}', env.NAME, needs.build.outputs.value, vars.NAME) }}", ResultString, `value-{"name":"value"}-value`},
+		ProfileDeferredInput:            {"type=raw,value=${{ needs.build.outputs.value }}", ResultString, `type=raw,value={"name":"value"}`},
+		ProfileSchedulingGroup:          {"group-${{ needs.build.outputs.value }}", ResultString, `group-{"name":"value"}`},
+		ProfileSchedulingParallel:       {"${{ fromJSON('2') }}", ResultNumber, float64(2)},
+		ProfileCompileServiceCredential: {"${{ env.NAME || 'fallback' }}", ResultString, "value"},
+		ProfileServiceCredential:        {"${{ env.NAME || 'fallback' }}", ResultString, "value"},
+		ProfileServiceMap:               {"${{ fromJSON(needs.build.outputs.value || '{}') }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
+		ProfileActionInputDefault:       {"${{ case(true, inputs.name, 'unused') }}", ResultString, "value"},
+		ProfileDockerActionArg:          {"${{ format('{0}', inputs.name || 'fallback') }}", ResultString, "value"},
 	}
 	for _, id := range profileIDs() {
 		t.Run(string(id), func(t *testing.T) {
@@ -894,7 +895,7 @@ func TestEngineCaseFunctionPolicyIsClosedByProfile(t *testing.T) {
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileStepCondition,
 		ProfileCallCondition, ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault,
 		ProfileJobOutput, ProfileStepTemplate, ProfileStepControl, ProfileReusableStepControl, ProfileDeferredInput, ProfileActionInputDefault, ProfileDockerActionArg,
-		ProfileServiceTemplate, ProfileServiceMap, ProfileServiceCredential, ProfileServiceEnvironment,
+		ProfileServiceTemplate, ProfileServiceMap, ProfileCompileServiceCredential, ProfileServiceCredential, ProfileServiceEnvironment,
 	} {
 		if !containsFold(profiles[id].Functions, "case") {
 			t.Errorf("profile %q does not admit case", id)
@@ -904,6 +905,69 @@ func TestEngineCaseFunctionPolicyIsClosedByProfile(t *testing.T) {
 		if containsFold(profiles[id].Functions, "case") {
 			t.Errorf("profile %q unexpectedly admits case", id)
 		}
+	}
+}
+
+func TestEngineServiceCredentialReductionBoundaries(t *testing.T) {
+	engine := NewEngine()
+	for _, test := range []struct {
+		source, user, want, wantError string
+	}{
+		{source: "${{ matrix.user }}", user: "${{ secrets.ADMIN }}", wantError: "contains expression syntax"},
+		{source: "${{ matrix.user }}{{ secrets.ADMIN }}", user: "$", wantError: "contains expression syntax"},
+		{source: "${{ format('{0}:{1}', matrix.user, secrets.PASSWORD) }}", user: "${{ secrets.ADMIN }}", want: "${{ secrets.ADMIN }}:private"},
+		{source: "${{ format('{0}:{1}', matrix.user, secrets.PASSWORD) }}", user: "it's ${{ github.token }}", want: "it's ${{ github.token }}:private"},
+	} {
+		t.Run(test.source+test.user, func(t *testing.T) {
+			site := Site{Source: test.source, Profile: ProfileCompileServiceCredential, Result: ResultString}
+			reduced, err := engine.Reduce(site, Values{Compile: CompileContext{Matrix: map[string]any{"user": test.user}}})
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("Reduce() = %#v, %v; want %s", reduced, err, test.wantError)
+				}
+				return
+			}
+			if err != nil || reduced.Known {
+				t.Fatalf("Reduce() = %#v, %v; want residual", reduced, err)
+			}
+			site.Profile, site.Source = ProfileServiceCredential, reduced.Source
+			validation, err := engine.Validate(site)
+			if err != nil || !reflect.DeepEqual(validation.Secrets, []string{"PASSWORD"}) {
+				t.Fatalf("substituted data changed secret inventory: %#v, %v", validation, err)
+			}
+			analysis, err := engine.Analyze(site, AbstractValues{})
+			if err != nil || analysis.Effects.GitHubToken != 0 {
+				t.Fatalf("substituted data introduced token authority: %#v, %v", analysis, err)
+			}
+			got, err := engine.Evaluate(site, Values{Runtime: Context{Secrets: map[string]string{"PASSWORD": "private"}}})
+			if err != nil || got != test.want {
+				t.Fatalf("Evaluate() = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+	// Unknown matrices cannot escape to the unchanged runtime profile.
+	site := Site{Source: "${{ matrix.user || secrets.PASSWORD }}", Profile: ProfileCompileServiceCredential, Result: ResultString}
+	if _, err := engine.Reduce(site, Values{}); err == nil || !strings.Contains(err.Error(), `context "matrix" is unavailable`) {
+		t.Fatalf("unknown matrix Reduce() error = %v", err)
+	}
+	site.Profile = ProfileServiceCredential
+	if _, err := engine.Validate(site); err == nil {
+		t.Fatal("runtime credential profile admitted matrix")
+	}
+}
+
+func TestEngineServiceCredentialUnknownStrategy(t *testing.T) {
+	engine := NewEngine()
+	// Strategy already has runtime support and remains valid when unknown.
+	site := Site{Source: "${{ format('{0}:{1}', matrix.user, strategy.job-index) }}", Profile: ProfileCompileServiceCredential, Result: ResultString}
+	reduced, err := engine.Reduce(site, Values{Compile: CompileContext{Matrix: map[string]any{"user": "known"}}})
+	if err != nil || reduced.Known {
+		t.Fatalf("Reduce() = %#v, %v; want runtime strategy", reduced, err)
+	}
+	site.Profile, site.Source = ProfileServiceCredential, reduced.Source
+	got, err := engine.Evaluate(site, Values{Runtime: Context{Strategy: map[string]any{"job-index": 3}}})
+	if err != nil || got != "known:3" {
+		t.Fatalf("Evaluate() = %q, %v; want known:3", got, err)
 	}
 }
 
@@ -935,7 +999,7 @@ func profileIDs() []ProfileID {
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileJobControl, ProfileStepCondition, ProfileCallCondition,
 		ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput, ProfileStepTemplate,
 		ProfileStepControl, ProfileReusableStepControl, ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileDeferredInput, ProfileServiceCredential, ProfileServiceMap,
-		ProfileServiceEnvironment,
+		ProfileServiceEnvironment, ProfileCompileServiceCredential,
 		ProfileSchedulingGroup, ProfileSchedulingParallel,
 		ProfileActionInputDefault, ProfileDockerActionArg,
 		ProfileActionStepCondition, ProfileActionStepTemplate, ProfileWorkflowEnvironment,
