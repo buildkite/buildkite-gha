@@ -145,7 +145,7 @@ func reduceAvailableCompileTemplate(template string, context CompileContext, red
 		if err != nil {
 			return "", err
 		}
-		if !nodeReferencesGitHubEventPayload(node) && !nodeReferencesContext(node, "event") && !(reduceMatrix && nodeReferencesContext(node, "matrix")) {
+		if !nodeReferencesGitHubEventPayload(node) && !nodeReferencesContext(node, "event") && (!reduceMatrix || !nodeReferencesContext(node, "matrix")) {
 			reduced.WriteString(complete)
 			remaining = source[consumed:]
 			continue
