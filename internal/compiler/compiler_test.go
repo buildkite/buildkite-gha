@@ -1485,6 +1485,40 @@ jobs:
 	}
 }
 
+func TestCompileDefersRunnerDebugInWorkflowActionInput(t *testing.T) {
+	repository := t.TempDir()
+	writeAction(t, repository, ".github/actions/run-gradle", `name: Run Gradle
+inputs:
+  test-verbose:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	path := writeWorkflow(t, repository, "build.yml", `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: JUnit Tests
+        uses: ./.github/actions/run-gradle
+        with:
+          test-verbose: ${{ runner.debug == '1' }}
+`)
+
+	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("plans = %#v", plans)
+	}
+	with := testBindingSources(plans[0].Program.Job.Steps[0].Invocation.With)
+	if got := with["test-verbose"]; got != "${{ runner.debug == '1' }}" {
+		t.Fatalf("test-verbose = %q, want runtime expression preserved", got)
+	}
+}
+
 func TestCompileRejectsUnavailableReusableCallConditionContexts(t *testing.T) {
 	for _, contextName := range []string{"matrix.target", "strategy.job-index", "secrets.TOKEN", "env.FLAG", "runner.os", "steps.build.outcome"} {
 		t.Run(contextName, func(t *testing.T) {

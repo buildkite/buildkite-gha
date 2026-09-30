@@ -282,7 +282,7 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ github.event[secrets.FIELD] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job[env.NAME] }}", "${{ job.check_run_id.extra }}", "${{ job.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ github.event[secrets.FIELD] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job[env.NAME] }}", "${{ job.check_run_id.extra }}", "${{ job.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
@@ -303,12 +303,13 @@ func TestEvaluateActionInputDefaultSupportsDynamicEventAccess(t *testing.T) {
 	}
 }
 
-func TestEvaluateActionInputDefaultTreatsRunnerDebugAsFalse(t *testing.T) {
+func TestEvaluateActionInputDefaultTreatsRunnerDebugAsDisabled(t *testing.T) {
 	for _, test := range []struct {
 		template string
 		want     string
 	}{
-		{template: "${{ runner.debug }}", want: "false"},
+		{template: "${{ runner.debug }}"},
+		{template: "${{ runner['debug'] }}"},
 		{template: "${{ runner.debug == '1' }}", want: "false"},
 	} {
 		got, err := EvaluateActionInputDefault(test.template, Context{})
@@ -318,22 +319,37 @@ func TestEvaluateActionInputDefaultTreatsRunnerDebugAsFalse(t *testing.T) {
 	}
 }
 
-func TestRunnerDebugRemainsUnavailableOutsideActionInputDefaults(t *testing.T) {
-	template := "${{ runner.debug }}"
-	if err := ValidateRuntimeTemplate(template); err == nil {
-		t.Fatal("ValidateRuntimeTemplate() accepted runner.debug")
+func TestRunnerDebugIsAvailableOnlyInRunnerBackedRuntimeProfiles(t *testing.T) {
+	if got, err := EvaluateStep("${{ runner.debug }}", Context{}); err != nil || got != "" {
+		t.Fatalf("EvaluateStep() = %q, %v; want empty disabled value", got, err)
 	}
-	if _, err := Evaluate(template, Context{}); err == nil {
-		t.Fatal("Evaluate() accepted runner.debug")
+	if got, err := EvaluateStep("${{ runner.debug == '1' }}", Context{}); err != nil || got != "false" {
+		t.Fatalf("EvaluateStep() comparison = %q, %v; want false", got, err)
 	}
-	if _, err := EvaluateStep(template, Context{}); err == nil {
-		t.Fatal("EvaluateStep() accepted runner.debug")
+	if got, err := EvaluateStepControl("${{ runner.debug == '1' }}", Context{}); err != nil || got != false {
+		t.Fatalf("EvaluateStepControl() = %#v, %v; want false", got, err)
 	}
-	if _, err := EvaluateCondition("runner.debug", ConditionContext{}); err == nil {
-		t.Fatal("EvaluateCondition() accepted runner.debug")
+	if got, err := EvaluateJobOutput("${{ runner['debug'] || 'disabled' }}", Context{}); err != nil || got != "disabled" {
+		t.Fatalf("EvaluateJobOutput() = %q, %v; want disabled", got, err)
 	}
-	if _, err := EvaluateActionLifecycleCondition("runner.debug", ConditionContext{}); err == nil {
-		t.Fatal("EvaluateActionLifecycleCondition() accepted runner.debug")
+	for _, source := range []string{"runner.debug == '1'", "runner['debug'] == '1'"} {
+		if got, err := EvaluateCondition(source, ConditionContext{}); err != nil || got {
+			t.Errorf("EvaluateCondition(%q) = %v, %v; want false", source, got, err)
+		}
+		if got, err := EvaluateActionLifecycleCondition(source, ConditionContext{}); err != nil || got {
+			t.Errorf("EvaluateActionLifecycleCondition(%q) = %v, %v; want false", source, got, err)
+		}
+	}
+	for _, source := range []string{"${{ runner.debug }}", "${{ runner['debug'] }}"} {
+		if err := ValidateRuntimeTemplate(source); err == nil {
+			t.Errorf("ValidateRuntimeTemplate(%q) accepted runner.debug in a generic runtime field", source)
+		}
+		if _, err := NewEngine().Evaluate(Site{Source: source, Profile: ProfileRuntimeTemplate, Result: ResultString}, Values{}); err == nil {
+			t.Errorf("Engine.Evaluate(%q) accepted runner.debug in a generic runtime field", source)
+		}
+	}
+	if err := ValidateCondition("runner.debug == '1'", JobCondition); err == nil {
+		t.Fatal("ValidateCondition() accepted runner.debug in a job condition")
 	}
 }
 

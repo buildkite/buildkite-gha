@@ -88,6 +88,18 @@ func TestInventoryActionAuthorityHonorsLazyCaseDefault(t *testing.T) {
 	}
 }
 
+func TestInventoryActionAuthorityTreatsRunnerDebugAsDisabled(t *testing.T) {
+	defaultValue := Site{Source: "${{ runner.debug == '1' && github.token || '' }}", Surface: SurfaceActionInputDefault, Result: ResultString, Provenance: ProvenanceAction, Purpose: PurposeExpression}
+	action := Action{Runtime: "node24", Inputs: []ActionInput{{Name: "token", Default: &defaultValue}}}
+	authority, err := InventoryActionAuthority(map[string]Action{"root": action}, "root", nil, ActionAuthorityOptions{ServerURL: "https://github.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("disabled runner debug guard retained action github.token authority")
+	}
+}
+
 func TestActionMetadataRoundTripPreservesDockerEntrypoints(t *testing.T) {
 	source := metadata.Metadata{Name: "docker", Runs: metadata.Runs{
 		Using: "docker", Image: "Dockerfile", Entrypoint: "main.sh",

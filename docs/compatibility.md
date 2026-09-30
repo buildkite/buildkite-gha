@@ -1899,6 +1899,7 @@ Conditions support computed object indexes, numeric array indexes, whole
 | `github.actor`, `github.base_ref`, `github.event_name`, `github.head_ref`, `github.ref`, `github.ref_name`, `github.ref_type`, `github.repository`, `github.repository_owner`, `github.sha`, `github.workflow_ref`, `github.workflow_sha` | ✅ Yes | ✅ Yes |
 | `runner.os`, `runner.arch`, `runner.environment` | ✅ Yes | ✅ Yes |
 | `runner.temp` | ❌ No | ✅ Yes |
+| `runner.debug` | ❌ No | ✅ Yes, always absent |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
 | `matrix.<name>` | ✅ Yes | ✅ Yes |
 | [Scalar `strategy` properties](#matrix-strategies) | ❌ No | ✅ Workflow steps only |
@@ -2016,12 +2017,14 @@ agents are in the same class whether they use hosted agents or your own
 infrastructure.
 After runner setup, step runtime fields and job outputs can also use
 `runner.temp`, which resolves to the canonical temporary directory exposed as
-`RUNNER_TEMP`. Other runner fields and compile-time positions that require
-runner identity are unsupported. Action metadata input defaults may also use
-direct `runner.debug`, which resolves to the string `false` because Buildkite
-has no equivalent step-debug mode. `job.check_run_id` defaults, including the
-static indexed spelling, resolve to an empty string because Buildkite does not
-create a GitHub check run. Other `job` identity fields remain unsupported.
+`RUNNER_TEMP`. Those fields, action lifecycle conditions, and action metadata
+input defaults can use `runner.debug`. Buildkite has no equivalent step-debug
+mode, so the property is absent: direct interpolation is empty and comparison
+with GitHub's enabled value `1` is false. Other runner fields and compile-time
+positions that require runner identity are unsupported. `job.check_run_id`
+defaults, including the static indexed spelling, resolve to an empty string
+because Buildkite does not create a GitHub check run. Other `job` identity
+fields remain unsupported.
 
 A runtime interpolation can read a verified upstream output directly:
 

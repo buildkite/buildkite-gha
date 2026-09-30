@@ -1020,7 +1020,7 @@ func TestResolveActionInputsUsesContextDefaultsUnlessExplicitlySupplied(t *testi
 	for _, test := range []struct {
 		name, input, expression, supplied, defaultValue string
 	}{
-		{name: "runner debug", input: "debug", expression: "${{ runner.debug }}", supplied: "true", defaultValue: "false"},
+		{name: "runner debug", input: "debug", expression: "${{ runner.debug }}", supplied: "true"},
 		{name: "empty check run ID", input: "check-run-id", expression: "${{ job.check_run_id }}", supplied: "1234"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1035,6 +1035,27 @@ func TestResolveActionInputsUsesContextDefaultsUnlessExplicitlySupplied(t *testi
 				t.Fatalf("explicit input = %#v, %v; want %q", inputs, err, test.supplied)
 			}
 		})
+	}
+}
+
+func TestWorkflowActionInputTreatsRunnerDebugAsDisabled(t *testing.T) {
+	step := normalizeRuntimeTestStep(runtimeTestStep{
+		ID: "junit-test", Kind: "uses", Uses: "./.github/actions/run-gradle",
+		With: map[string]string{
+			"test-verbose": "${{ runner.debug == '1' }}",
+			"debug-value":  "${{ runner['debug'] }}",
+		},
+	})
+
+	inputs, err := evaluatePlanStepWith(step, expression.Context{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputs["test-verbose"] != "false" || inputs["debug-value"] != "" {
+		t.Fatalf("workflow action inputs = %#v, want disabled runner debug values", inputs)
+	}
+	if _, ok := standardEnvironment(plan.Job{}, "/workspace", "/tmp", "/tool-cache", RunIdentity{})["RUNNER_DEBUG"]; ok {
+		t.Fatal("standard environment exported RUNNER_DEBUG while step debugging is disabled")
 	}
 }
 
