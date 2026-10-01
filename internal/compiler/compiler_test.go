@@ -1012,8 +1012,8 @@ jobs:
 	if !errors.As(err, &finding) {
 		t.Fatalf("compileUntrustedPlans() error = %T %v, want ProcessingFinding", err, err)
 	}
-	if finding.Blocker != "runner_label" || finding.BlockerDetail != "" {
-		t.Fatalf("finding blocker = %q / %q, want runner_label with no detail: %v", finding.Blocker, finding.BlockerDetail, err)
+	if finding.Blocker != "runner_policy" || finding.BlockerDetail != "unsupported_os" {
+		t.Fatalf("finding blocker = %q / %q, want runner_policy/unsupported_os without the event-derived label: %v", finding.Blocker, finding.BlockerDetail, err)
 	}
 }
 

@@ -313,6 +313,57 @@ func TestProcessingReportAggregatesIdenticalMatrixDiagnostics(t *testing.T) {
 	}
 }
 
+func TestProcessingReportRunnerPolicyCompactionPreservesVisibleGrouping(t *testing.T) {
+	for _, test := range []struct {
+		name, firstReason, secondReason, firstLabel, secondLabel string
+		wantRows                                                 int
+	}{
+		{"different reasons formerly unlabelled", "conflicting_queues", "conflicting_targets", "", "", 1},
+		{"same reason formerly distinct labels", "untrusted_default", "untrusted_default", "ubuntu-latest", "macos-latest", 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			report := NewProcessingReport("ci.yml", "hosted")
+			for i, item := range []struct{ reason, label string }{{test.firstReason, test.firstLabel}, {test.secondReason, test.secondLabel}} {
+				for instance := range 2 {
+					report.Diagnostics = append(report.Diagnostics, Diagnostic{
+						Level: "error", Code: "E_EXPRESSION_INVALID", Stage: "expression-validation",
+						Blocker: "runner_policy", BlockerDetail: item.reason, reportRunnerLabelDetail: item.label,
+						Message: "same actionable reason", Job: "test", Instance: fmt.Sprintf("gha-test-%d-%d", i, instance),
+						Location: &SourceLocation{Path: "ci.yml", Line: 4, Column: 3},
+					})
+				}
+			}
+			report.Finalize()
+			var encoded bytes.Buffer
+			if err := WriteProcessing(&encoded, "json", report); err != nil {
+				t.Fatal(err)
+			}
+			var decoded ProcessingReport
+			if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if len(decoded.Diagnostics) != test.wantRows || strings.Contains(encoded.String(), "runner_policy") || strings.Contains(encoded.String(), "blocker_detail") {
+				t.Fatalf("report JSON changed grouping or exposed attribution: %s", encoded.String())
+			}
+			for _, diagnostic := range decoded.Diagnostics {
+				if diagnostic.Instance != "" {
+					t.Fatalf("aggregated diagnostic retained instance: %#v", decoded.Diagnostics)
+				}
+			}
+		})
+	}
+}
+
+func TestRunnerPolicyCompactionKeySurvivesFindingConversion(t *testing.T) {
+	diagnostic := diagnosticFromError("ci.yml", workflowprocessing.StageExpressions, compiler.CodeExpressionInvalid, "compatibility", &compiler.ProcessingFinding{
+		Blocker: "runner_policy", BlockerDetail: "untrusted_default", ReportRunnerLabelDetail: "ubuntu-latest",
+		Message: "This untrusted event cannot use the default runner.", Err: fmt.Errorf("rejected"),
+	})
+	if diagnostic.Blocker != "runner_policy" || diagnostic.BlockerDetail != "untrusted_default" || diagnostic.reportRunnerLabelDetail != "ubuntu-latest" {
+		t.Fatalf("runner policy finding lost telemetry or report compaction identity: %#v", diagnostic)
+	}
+}
+
 func TestApplyWarningsPreservesCompilerAttribution(t *testing.T) {
 	report := NewProcessingReport(".github/workflows/caller.yml", "hosted")
 	report.ApplyWarnings(report.Workflow, []compiler.Warning{{

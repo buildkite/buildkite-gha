@@ -46,13 +46,16 @@ type ProcessingFinding struct {
 	// BlockerDetail is opt-in telemetry attribution. Set it only from original
 	// workflow syntax or values proven to depend solely on workflow literals.
 	BlockerDetail string
-	Path          string
-	Line          int
-	Column        int
-	Job           string
-	Instance      string
-	Action        string
-	Step          int
+	// ReportRunnerLabelDetail preserves matrix diagnostic grouping from before
+	// unlabelled runner-policy rejections received their own telemetry attribution.
+	ReportRunnerLabelDetail string
+	Path                    string
+	Line                    int
+	Column                  int
+	Job                     string
+	Instance                string
+	Action                  string
+	Step                    int
 	// Message replaces Err's text in the rendered report. Set it whenever Err
 	// can quote event-derived data, so that data cannot reach the report.
 	Message string

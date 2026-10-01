@@ -886,6 +886,11 @@ outcome, client version, duration, and bounded diagnostics. Diagnostics can
 identify a rejected feature with a `blocker` slug and bounded `blocker_detail`,
 such as `runner_label` and `windows-latest`. Distinct rejected values remain
 separate diagnostics even when they share a diagnostic code.
+Unsupported events use `trigger` and the event name; path-filter evaluation
+failures use `path_filter` and the event name. Runner rejections name a label
+only when that label caused the rejection. Trust, conflicting-target, and Agent
+API rejections use `runner_policy` with a stable reason code instead. These
+fields are telemetry attribution, not fields in processing-report JSON.
 
 Workflow diagnostics include their message and detail in `message`, even when
 the importer exits zero after uploading failing steps for rejected workflows.

@@ -338,7 +338,7 @@ func boundedBlocker(blocker, detail string) (string, string, error) {
 			return "", "", fmt.Errorf("telemetry blocker detail requires a blocker")
 		}
 		return "", "", nil
-	case "runner_label", "environment", "shell", "action_ref", "expression", "trigger":
+	case "runner_label", "runner_policy", "environment", "shell", "action_ref", "expression", "trigger", "path_filter":
 	default:
 		return "", "", fmt.Errorf("invalid telemetry blocker")
 	}

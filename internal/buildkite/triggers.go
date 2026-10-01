@@ -213,7 +213,7 @@ func (e *UnsupportedPathFiltersError) Error() string {
 }
 
 func (e *UnsupportedPathFiltersError) CompatibilityBlocker() (string, string) {
-	return "trigger", e.Event
+	return "path_filter", e.Event
 }
 
 // LiveTriggerConditionExpressions uses fields from the Buildkite build that
