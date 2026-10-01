@@ -1590,6 +1590,29 @@ func TestContainerContract(t *testing.T) {
 	}
 }
 
+func TestContainerPlanAcceptsDottedEnvironmentKeys(t *testing.T) {
+	job := validJob()
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &Container{Image: "alpine:3.20", Env: map[string]string{"app.mode": "production"}}
+	job.Services = map[string]ServiceContainer{"elasticsearch": {
+		Image: "elasticsearch:8", Env: map[string]string{"discovery.type": "single-node", "xpack.security.enabled": "false"},
+	}}
+	job.ServiceOrder = []string{"elasticsearch"}
+	synchronizeExecutionProgram(&job)
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Container.Env["app.mode"] != "production" || decoded.Services["elasticsearch"].Env["discovery.type"] != "single-node" || decoded.Services["elasticsearch"].Env["xpack.security.enabled"] != "false" {
+		t.Fatalf("decoded container env = %#v, service env = %#v", decoded.Container.Env, decoded.Services["elasticsearch"].Env)
+	}
+	validateJobPlanSchema(t, encoded)
+}
+
 func TestContainerModelFields(t *testing.T) {
 	tests := []struct {
 		name   string
