@@ -1305,6 +1305,10 @@ restricted to the pipeline's configured repository, and bounds the response
 combined). Its rejection, rate limit (10 requests per job per hour), or
 GitHub outage fails the compile of every workflow that references `vars` with
 the backend's error and any `Retry-After` delay; other workflows still upload.
+If the backend returns only `GitHub variables could not be resolved`, the CLI
+cannot identify the cause. Contact Buildkite support with the build URL so
+they can investigate the server-side failure. When the backend provides a
+specific policy, permission, or installation error, the CLI preserves it.
 A backend without the endpoint, or an organization that has opted out,
 returns 404, which resolves both scopes as empty rather than failing the
 compile. A repository and organization that define no variables resolve the

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -628,14 +629,17 @@ func TestRunCompileResolvesVariablesThroughAgent(t *testing.T) {
 	}
 
 	rejecting, _ := agentVariablesHandler(t, http.StatusBadRequest, "")
-	agent, _ = agentStub(t, "job-secret", http.StatusOK, rejecting)
+	agent, _ = agentStub(t, "job-secret", http.StatusOK, func(w http.ResponseWriter, r *http.Request) {
+		rejecting(w, r)
+		_, _ = io.WriteString(w, `{"message":"GitHub variables could not be resolved"}`)
+	})
 	setAgentResolutionEnvironment(t, agent.URL)
 	stdout.Reset()
 	stderr.Reset()
 	if code := Run([]string{"compile", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code == 0 {
 		t.Fatalf("Run() with rejected resolution succeeded:\n%s", stdout.String())
-	} else if !strings.Contains(stderr.String(), "[E_ENVIRONMENT] variables: the variable resolution request was rejected") {
-		t.Fatalf("stderr = %q, want actionable backend rejection", stderr.String())
+	} else if !strings.Contains(stderr.String(), "[E_ENVIRONMENT] variables: the variable resolution request was rejected: GitHub variables could not be resolved; contact Buildkite support with the build URL to investigate the server-side cause") {
+		t.Fatalf("stderr = %q, want actionable generic backend rejection", stderr.String())
 	}
 
 	for _, name := range []string{"BUILDKITE_AGENT_ENDPOINT", "BUILDKITE_JOB_ID", "BUILDKITE_AGENT_ACCESS_TOKEN"} {

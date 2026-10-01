@@ -124,11 +124,16 @@ func TestAgentVariableResolverStatusErrors(t *testing.T) {
 		body       string
 		want       string
 	}{
-		{"rejected", http.StatusBadRequest, "", "", "the variable resolution request was rejected; confirm that Buildkite's GitHub App can read the repository's variables"},
-		{"rejected with backend policy message", http.StatusBadRequest, "", `{"message":"GitHub repository and organization variables exceed 262144 bytes; remove or shrink repository or organization variables"}`, "rejected: GitHub repository and organization variables exceed 262144 bytes"},
-		{"rejected with permission message", http.StatusBadRequest, "", `{"message":"GitHub App cannot read repository variables; ensure Variables: read is approved"}`, "rejected: GitHub App cannot read repository variables; ensure Variables: read is approved"},
-		{"rejected with malformed body", http.StatusBadRequest, "", `not json`, "rejected; confirm"},
-		{"rejected with unsafe message", http.StatusBadRequest, "", "{\"message\":\"bad\\nrequest\"}", "rejected: bad request"},
+		{"rejected", http.StatusBadRequest, "", "", "the variable resolution request was rejected without a reason; contact Buildkite support with the build URL to investigate the server-side cause"},
+		{"generic backend rejection", http.StatusBadRequest, "", `{"message":"GitHub variables could not be resolved"}`, "the variable resolution request was rejected: GitHub variables could not be resolved; contact Buildkite support with the build URL to investigate the server-side cause"},
+		{"rejected with backend policy message", http.StatusBadRequest, "", `{"message":"GitHub repository and organization variables exceed 262144 bytes; remove or shrink repository or organization variables"}`, "the variable resolution request was rejected: GitHub repository and organization variables exceed 262144 bytes; remove or shrink repository or organization variables"},
+		{"rejected with permission message", http.StatusBadRequest, "", `{"message":"GitHub App cannot read repository variables; ensure Variables: read is approved"}`, "the variable resolution request was rejected: GitHub App cannot read repository variables; ensure Variables: read is approved"},
+		{"rejected without installation", http.StatusBadRequest, "", `{"message":"Can't resolve GitHub variables: No GitHub Code Access App installation is available"}`, "the variable resolution request was rejected: Can't resolve GitHub variables: No GitHub Code Access App installation is available"},
+		{"rejected with missing message", http.StatusBadRequest, "", `{}`, "the variable resolution request was rejected without a reason; contact Buildkite support with the build URL to investigate the server-side cause"},
+		{"rejected with null message", http.StatusBadRequest, "", `{"message":null}`, "the variable resolution request was rejected without a reason; contact Buildkite support with the build URL to investigate the server-side cause"},
+		{"rejected with malformed body", http.StatusBadRequest, "", `not json`, "the variable resolution request was rejected without a reason; contact Buildkite support with the build URL to investigate the server-side cause"},
+		{"rejected with unsafe message", http.StatusBadRequest, "", "{\"message\":\"bad\\nrequest\"}", "the variable resolution request was rejected: bad request"},
+		{"unauthorized", http.StatusUnauthorized, "", "", "denied"},
 		{"denied", http.StatusForbidden, "", "", "denied"},
 		{"unavailable endpoint", http.StatusNotFound, "", "", "the Agent API does not offer GitHub variable resolution"},
 		{"rate limited with delay", http.StatusTooManyRequests, "3600", "", "variable resolution requests are rate limited; retry after 3600 seconds"},
@@ -151,7 +156,7 @@ func TestAgentVariableResolverStatusErrors(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err = resolver.ResolveVariables(t.Context(), "buildkite/buildkite-gha")
-			if err == nil || !strings.Contains(err.Error(), test.want) {
+			if err == nil || (test.status == http.StatusBadRequest && err.Error() != test.want) || (test.status != http.StatusBadRequest && !strings.Contains(err.Error(), test.want)) {
 				t.Fatalf("ResolveVariables() error = %v, want %q", err, test.want)
 			}
 			if test.status == http.StatusTooManyRequests && strings.Contains(test.want, "retry after") && !strings.Contains(err.Error(), test.retryAfter) {
