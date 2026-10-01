@@ -557,8 +557,8 @@ jobs:
 				t.Fatal("CompileWithOptions() error = nil, want runner policy rejection")
 			}
 			var finding *ProcessingFinding
-			if !errors.As(err, &finding) || finding.Blocker != "runner_label" || finding.BlockerDetail != "" {
-				t.Fatalf("processing blocker = %#v, want runner_label with no detail", finding)
+			if !errors.As(err, &finding) || finding.Blocker != "runner_policy" || finding.BlockerDetail != "unsupported_os" {
+				t.Fatalf("processing blocker = %#v, want runner_policy/unsupported_os without the event-derived label", finding)
 			}
 		})
 	}
@@ -785,11 +785,40 @@ func TestCompileReportsServerRejectionAtRunsOn(t *testing.T) {
 	}
 	_, err := CompileWithOptions("policy.yml", workflow, pushEvent(t), options)
 	var finding *ProcessingFinding
-	if !errors.As(err, &finding) || finding.Blocker != "runner_label" || finding.BlockerDetail != "macos-latest" || finding.Job != "test" || finding.Line != 3 {
-		t.Fatalf("CompileWithOptions() error = %v, finding = %+v, want runs-on finding for macos-latest", err, finding)
+	if !errors.As(err, &finding) || finding.Blocker != "runner_policy" || finding.BlockerDetail != "server_missing_queue" || finding.Job != "test" || finding.Line != 3 {
+		t.Fatalf("CompileWithOptions() error = %v, finding = %+v, want server_missing_queue", err, finding)
 	}
 	if !strings.Contains(finding.Message, "Cluster 'Default' has no hosted macOS queue") || strings.Contains(finding.Message, "has no runner-target mapping") || finding.Detail != "" {
 		t.Fatalf("finding message/detail = %q / %q", finding.Message, finding.Detail)
+	}
+}
+
+func TestRunnerRejectionBlockerAttribution(t *testing.T) {
+	for _, test := range []struct {
+		name, runsOn, blocker, detail string
+		policy                        RunnerPolicy
+		trust                         EventTrust
+	}{
+		{"untrusted default", "ubuntu-latest", "runner_policy", "untrusted_default", RunnerPolicy{Targets: map[string]RunnerTarget{"ubuntu-latest": {Platform: PlatformLinuxAMD64}}}, EventUntrusted},
+		{"untrusted queue", "ubuntu-latest", "runner_policy", "untrusted_queue", RunnerPolicy{Targets: map[string]RunnerTarget{"ubuntu-latest": {Queue: "private", Platform: PlatformLinuxAMD64}}}, EventUntrusted},
+		{"conflicting queues", "[ubuntu-latest, self-hosted]", "runner_policy", "conflicting_queues", RunnerPolicy{Targets: map[string]RunnerTarget{"ubuntu-latest": {Queue: "one", Platform: PlatformLinuxAMD64}, "self-hosted": {Queue: "two", Platform: PlatformLinuxAMD64}}}, EventTrusted},
+		{"conflicting targets", "[ubuntu-latest, self-hosted]", "runner_policy", "conflicting_targets", RunnerPolicy{Targets: map[string]RunnerTarget{"ubuntu-latest": {Platform: PlatformLinuxAMD64}, "self-hosted": {Queue: "macos", Platform: PlatformDarwinARM64}}}, EventTrusted},
+		{"server incompatible", "ubuntu-latest", "runner_policy", "server_incompatible_labels", RunnerPolicy{Targets: map[string]RunnerTarget{"ubuntu-latest": {Platform: PlatformLinuxAMD64}}, Rejections: []RunnerRejection{{Labels: []string{"ubuntu-latest"}, Code: RunnerRejectionIncompatibleLabels, Message: "No compatible runner is configured."}}}, EventTrusted},
+		{"server unknown code", "ubuntu-latest", "runner_policy", "server_rejected", RunnerPolicy{Targets: map[string]RunnerTarget{"ubuntu-latest": {Platform: PlatformLinuxAMD64}}, Rejections: []RunnerRejection{{Labels: []string{"ubuntu-latest"}, Code: "future_code", Message: "No compatible runner is configured."}}}, EventTrusted},
+		{"named unsupported label", "windows-latest", "runner_label", "windows-latest", RunnerPolicy{Targets: map[string]RunnerTarget{"ubuntu-latest": {Platform: PlatformLinuxAMD64}}}, EventTrusted},
+		{"named unmapped label", "custom-runner", "runner_label", "custom-runner", RunnerPolicy{Targets: map[string]RunnerTarget{"ubuntu-latest": {Platform: PlatformLinuxAMD64}}}, EventTrusted},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflow := []byte("on: push\njobs:\n  test:\n    runs-on: " + test.runsOn + "\n    steps: [{run: true}]\n")
+			_, err := CompileWithOptions("policy.yml", workflow, pushEvent(t), Options{EventTrust: test.trust, Runners: test.policy})
+			var finding *ProcessingFinding
+			if !errors.As(err, &finding) || finding.Blocker != test.blocker || finding.BlockerDetail != test.detail {
+				t.Fatalf("finding = %#v, want %s/%s (error: %v)", finding, test.blocker, test.detail, err)
+			}
+			if test.runsOn == "ubuntu-latest" && finding.ReportRunnerLabelDetail != "ubuntu-latest" {
+				t.Fatalf("report compaction label = %q, want old single-label identity", finding.ReportRunnerLabelDetail)
+			}
+		})
 	}
 }
 

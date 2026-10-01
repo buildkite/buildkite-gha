@@ -310,6 +310,14 @@ func TestBlockerDetailsAreNormalizedAndBounded(t *testing.T) {
 	if err != nil || blocker != "shell" || len(detail) > maxBlockerDetailBytes || !utf8.ValidString(detail) || !strings.HasPrefix(detail, "pwsh ") {
 		t.Fatalf("boundedBlocker() = %q, %q, %v", blocker, detail, err)
 	}
+	for _, test := range []struct{ blocker, detail string }{
+		{"path_filter", "push"},
+		{"runner_policy", "untrusted_default"},
+	} {
+		if gotBlocker, gotDetail, err := boundedBlocker(test.blocker, test.detail); err != nil || gotBlocker != test.blocker || gotDetail != test.detail {
+			t.Fatalf("boundedBlocker(%q, %q) = %q, %q, %v", test.blocker, test.detail, gotBlocker, gotDetail, err)
+		}
+	}
 	if _, _, err := boundedBlocker("customer-value", "detail"); err == nil {
 		t.Fatal("boundedBlocker() accepted an unknown blocker")
 	}

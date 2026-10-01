@@ -242,16 +242,46 @@ func TestCommandTelemetryDiagnosticLimitUsesWireIdentity(t *testing.T) {
 }
 
 func TestTriggerFailureTelemetryIncludesTrigger(t *testing.T) {
-	for _, triggerErr := range []error{
-		&buildkitepipeline.UnsupportedTriggerEventError{Event: "workflow_run"},
-		&buildkitepipeline.UnsupportedPathFiltersError{Event: "push", Reason: "history unavailable"},
+	for _, test := range []struct {
+		err             error
+		blocker, detail string
+	}{
+		{&buildkitepipeline.UnsupportedTriggerEventError{Event: "workflow_run"}, "trigger", "workflow_run"},
+		{&buildkitepipeline.UnsupportedPathFiltersError{Event: "push", Reason: "history unavailable"}, "path_filter", "push"},
+		{&buildkitepipeline.UnsupportedPathFiltersError{Event: "pull_request", Reason: "history unavailable"}, "path_filter", "pull_request"},
 	} {
 		details := &commandTelemetryDetails{}
-		details.observe(triggerFailureProcessingReport(workflowInput{Path: "workflow.yml", Source: []byte("on: push\n")}, triggerErr))
+		details.observe(triggerFailureProcessingReport(workflowInput{Path: "workflow.yml", Source: []byte("on: push\n")}, test.err))
 		got := details.telemetryDetails()
-		if got.Blocker != "trigger" || got.BlockerDetail == "" || len(got.Diagnostics) != 1 || got.Diagnostics[0].Blocker != "trigger" || got.Diagnostics[0].BlockerDetail != got.BlockerDetail {
+		if got.Blocker != test.blocker || got.BlockerDetail != test.detail || len(got.Diagnostics) != 1 || got.Diagnostics[0].Blocker != test.blocker || got.Diagnostics[0].BlockerDetail != test.detail {
 			t.Fatalf("trigger telemetry = %#v", got)
 		}
+	}
+}
+
+func TestGeneratedFailureAnnotationsDoNotDiscardRunnerTelemetry(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci.yml", "hosted")
+	for _, test := range []struct {
+		line                           int
+		job, instance, blocker, detail string
+	}{
+		{10, "test", "a", "runner_policy", "conflicting_queues"},
+		{10, "test", "b", "runner_policy", "conflicting_targets"},
+		{20, "later", "c", "runner_label", "windows-latest"},
+	} {
+		report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+			Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions,
+			Blocker: test.blocker, BlockerDetail: test.detail, Message: "runner target rejected",
+			Job: test.job, Instance: test.instance,
+			Location: &compatibility.SourceLocation{Path: "ci.yml", Line: test.line, Column: 5},
+		})
+	}
+	_, _ = generatedFailure(t.Context(), report, sourceLinkContext{})
+	details := &commandTelemetryDetails{}
+	details.addReportDiagnostics(report)
+	got := details.telemetryDetails().Diagnostics
+	if len(got) != 3 || got[0].BlockerDetail != "conflicting_queues" || got[1].BlockerDetail != "conflicting_targets" || got[2].BlockerDetail != "windows-latest" {
+		t.Fatalf("telemetry lost a runner rejection after annotation: %#v", got)
 	}
 }
 

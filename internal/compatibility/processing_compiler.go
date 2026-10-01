@@ -318,6 +318,7 @@ func diagnosticFromError(defaultPath string, stage workflowprocessing.Stage, cod
 	if finding != nil {
 		diagnostic.Blocker = finding.Blocker
 		diagnostic.BlockerDetail = finding.BlockerDetail
+		diagnostic.reportRunnerLabelDetail = finding.ReportRunnerLabelDetail
 		diagnostic.Job = finding.Job
 		diagnostic.Instance = finding.Instance
 		diagnostic.Action = finding.Action

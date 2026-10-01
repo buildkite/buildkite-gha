@@ -645,15 +645,42 @@ func sentence(text string) string {
 	return text + "."
 }
 
-func runnerRejectionBlockerDetail(err error, reportableLabels []string) string {
+func runnerRejectionBlocker(err error, reportableLabels []string) (string, string) {
 	var rejection *runnerPolicyRejection
-	if errors.As(err, &rejection) && rejection.label != "" && slices.Contains(reportableLabels, rejection.label) {
-		return rejection.label
+	if !errors.As(err, &rejection) {
+		return "runner_policy", "rejected"
 	}
-	if len(reportableLabels) == 1 {
-		return reportableLabels[0]
+	if rejection.label != "" && slices.Contains(reportableLabels, rejection.label) {
+		return "runner_label", rejection.label
 	}
-	return ""
+	switch rejection.reason {
+	case reasonNoLabels:
+		return "runner_policy", "no_labels"
+	case reasonDuplicateLabel:
+		return "runner_policy", "duplicate_label"
+	case reasonUnsupportedOS:
+		return "runner_policy", "unsupported_os"
+	case reasonUnmappedLabel:
+		return "runner_policy", "unmapped_label"
+	case reasonConflictingQueues:
+		return "runner_policy", "conflicting_queues"
+	case reasonConflictingTarget:
+		return "runner_policy", "conflicting_targets"
+	case reasonUntrustedDefault:
+		return "runner_policy", "untrusted_default"
+	case reasonUntrustedQueue:
+		return "runner_policy", "untrusted_queue"
+	case reasonServerRejected:
+		if rejection.server != nil {
+			switch rejection.server.Code {
+			case RunnerRejectionMissingQueue, RunnerRejectionNoCluster, RunnerRejectionIncompatibleLabels, RunnerRejectionUnmappedLabels:
+				return "runner_policy", "server_" + rejection.server.Code
+			}
+		}
+		return "runner_policy", "server_rejected"
+	default:
+		return "runner_policy", "rejected"
+	}
 }
 
 func (policy RunnerPolicy) supportedLabels() []string {

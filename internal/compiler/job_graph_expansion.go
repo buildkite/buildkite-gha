@@ -835,10 +835,16 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 					reportableLabels = nil
 				}
 				message, detail := runnerRejectionDiagnostic(err, reportableLabels, e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
+				blocker, blockerDetail := runnerRejectionBlocker(err, reportableLabels)
+				reportRunnerLabelDetail := ""
+				if len(reportableLabels) == 1 {
+					reportRunnerLabelDetail = reportableLabels[0]
+				}
 				e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 					Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
-					Blocker: "runner_label", BlockerDetail: runnerRejectionBlockerDetail(err, reportableLabels),
-					Path: jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
+					Blocker: blocker, BlockerDetail: blockerDetail,
+					ReportRunnerLabelDetail: reportRunnerLabelDetail,
+					Path:                    jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
 					Job: job.ID, Instance: key, Message: message, Detail: detail,
 					Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
 				})
