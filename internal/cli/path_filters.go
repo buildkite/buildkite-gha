@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	maxLocallyEvaluatedPathFilterFiles = 300
+	maxLocallyEvaluatedPathFilterFiles = 3000
 	maxGitChangedPathBytes             = 2 << 20
 	maxGitHubPushCommits               = 1000
 	zeroGitCommit                      = "0000000000000000000000000000000000000000"
@@ -124,11 +124,9 @@ func pushChangedPaths(event compiler.Event, workflows []workflowInput, checkoutP
 	if err := gitCommand(root, "check-ref-format", "refs/heads/"+branch).Run(); err != nil {
 		return nil, nil, fmt.Errorf("webhook push branch is invalid")
 	}
-	for label, revision := range map[string]string{"checkout": "HEAD", "origin branch": "refs/remotes/origin/" + branch} {
-		value, err := gitCommand(root, "rev-parse", "--verify", revision+"^{commit}").Output()
-		if err != nil || strings.TrimSpace(string(value)) != after {
-			return nil, nil, fmt.Errorf("push after commit does not match the local %s", label)
-		}
+	checkoutSHA, err := gitCommand(root, "rev-parse", "--verify", "HEAD^{commit}").Output()
+	if err != nil || strings.TrimSpace(string(checkoutSHA)) != after {
+		return nil, nil, fmt.Errorf("push after commit does not match the local checkout")
 	}
 	if err := gitCommand(root, "cat-file", "-e", after+"^{commit}").Run(); err != nil {
 		return nil, nil, fmt.Errorf("push after commit is unavailable in the local checkout")

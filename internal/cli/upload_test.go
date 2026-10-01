@@ -2314,9 +2314,9 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 			failure := pipeline.Steps[0]
 			message := failureLogText(failureArtifactForStep(failure.Plugins, runner.uploaded, "messages"))
 			annotation := failureArtifactForStep(failure.Plugins, runner.uploaded, "annotations")
-			primary := "Push trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching push history, or remove the path filters."
-			detail := "push path filters are unsupported: push path filters require linked Buildkite webhook data"
-			if failure.Group != "" || failure.Label != test.wantLabel || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(message, primary) || !strings.Contains(message, "detail: "+detail) || !strings.Contains(string(annotation), "<strong>Push trigger path filters could not be evaluated safely.</strong>") || !strings.Contains(string(annotation), "matching push history") || !strings.Contains(string(annotation), detail) || strings.Contains(message, "translate workflow triggers") || !strings.Contains(message, ".github/workflows/crowdin-upload.yml") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
+			primary := "Push trigger path filters could not be evaluated safely. Check the detail for unavailable or mismatched evidence; correct the evidence or remove the path filters."
+			detail := "push path filters could not be evaluated: push path filters require linked Buildkite webhook data"
+			if failure.Group != "" || failure.Label != test.wantLabel || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(message, primary) || !strings.Contains(message, "detail: "+detail) || !strings.Contains(string(annotation), "<strong>Push trigger path filters could not be evaluated safely.</strong>") || !strings.Contains(string(annotation), "mismatched evidence") || !strings.Contains(string(annotation), detail) || strings.Contains(message, "translate workflow triggers") || !strings.Contains(message, ".github/workflows/crowdin-upload.yml") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
 				t.Fatalf("trigger failure step = %#v, message = %q, annotation = %q", failure, message, annotation)
 			}
 			diagnostics := message + string(annotation) + stdout.String()

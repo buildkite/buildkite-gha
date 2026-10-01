@@ -756,8 +756,9 @@ remain errors regardless of those exclusions.
 
 For a linked GitHub branch push, the importer binds the webhook repository,
 ref, commit range, force state, and complete pushed-commit list to the Buildkite
-build and local checkout. `HEAD`, the `origin` repository and branch, and the
-workflow file must match the pushed commit.
+build and local checkout. `HEAD` and the workflow file must match the pushed
+commit; the `origin` repository must match, but its branch tip may have advanced
+since the webhook arrived.
 
 Normal and force pushes use GitHub's two-dot `before..after` comparison. For a
 new branch, the importer uses the parent of the oldest pushed commit only when
@@ -770,10 +771,10 @@ Admission fails when the evidence is unsafe or incomplete, including:
 
 - a deleted ref or non-GitHub repository
 - missing or shallow history
-- stale or mismatched repository, ref, checkout, branch, workflow, commit set,
+- stale or mismatched repository, ref, checkout, workflow, commit set,
   or force state
 - ambiguous new-branch history
-- more than 1,000 pushed commits or 300 changed files
+- more than 1,000 pushed commits or 3,000 changed files
 - renames, combined additions and deletions, malformed Git output, or invalid
   patterns
 
@@ -813,7 +814,7 @@ pull requests. It does not call GitHub or use Buildkite `if_changed`.
 | --- | --- |
 | A matching added, modified, deleted, or type-changed path | Unavailable changed-path evidence |
 | A copied destination that matches | A rename, or a diff containing both additions and deletions |
-| At most 300 changed files from complete local history | Missing or shallow history, multiple merge bases, or more than 300 files |
+| At most 3,000 changed files from complete local history | Missing or shallow history, multiple merge bases, or more than 3,000 files |
 | Matching webhook, PR head checkout, and workflow data | Unrelated history, mismatched identity or workflow, path or pattern containing a backslash, invalid pattern, or malformed Git output |
 
 A verified local nonmatch, including an empty diff or changes all excluded by
@@ -822,6 +823,11 @@ workflow jobs. GitHub's unobservable diff-timeout fallback is not reproduced.
 
 An unsupported or inexact filter replaces only the affected workflow with a
 failing step. It never broadens when the workflow runs.
+The failure identifies unavailable or mismatched evidence, or the local
+3,000-file limit. Fetch complete checkout history when commits are missing;
+reduce the diff or remove the filter when the file limit is exceeded. The
+3,000-file bound follows GitHub's documented evaluation window, not a claim
+that GitHub's file ordering or diff-timeout fallback is reproduced.
 
 A top-level workflow that does not declare the effective event is excluded before event-dependent validation or compilation and represented by one top-level skipped command step. A workflow that declares that event remains represented by a group even when a same-event branch, tag, base-branch, or action condition evaluates false in Buildkite. If no directly runnable workflow declares the event, upload succeeds with a skipped-only pipeline.
 
