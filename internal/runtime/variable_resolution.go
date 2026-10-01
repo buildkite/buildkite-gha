@@ -192,9 +192,12 @@ func variableResolutionStatusError(status int, retryAfter string, body []byte) e
 	switch status {
 	case http.StatusBadRequest:
 		if message := errorBodyMessage(body); message != "" {
+			if message == "GitHub variables could not be resolved" {
+				return fmt.Errorf("the variable resolution request was rejected: %s; contact Buildkite support with the build URL to investigate the server-side cause", message)
+			}
 			return fmt.Errorf("the variable resolution request was rejected: %s", message)
 		}
-		return fmt.Errorf("the variable resolution request was rejected; confirm that Buildkite's GitHub App can read the repository's variables")
+		return fmt.Errorf("the variable resolution request was rejected without a reason; contact Buildkite support with the build URL to investigate the server-side cause")
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return fmt.Errorf("the variable resolution request was denied")
 	case http.StatusNotFound:
