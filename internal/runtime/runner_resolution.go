@@ -20,8 +20,14 @@ const runnerResolutionResponseLimit = 1 << 20
 const runnerResolutionBatchLimit = 100
 
 type RunnerRequirement struct {
-	ID     string
-	Labels []string
+	ID               string
+	Labels           []string
+	ConfiguredTarget *ConfiguredRunnerTarget
+}
+
+type ConfiguredRunnerTarget struct {
+	Queue    string `json:"queue"`
+	Platform string `json:"platform"`
 }
 
 type RunnerSuggestion struct {
@@ -31,6 +37,7 @@ type RunnerSuggestion struct {
 	Image     string
 	Agents    map[string]string
 	ToolCache *bool
+	Validated bool
 	Warnings  []RunnerWarning
 }
 
@@ -100,8 +107,9 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 		Labels []string `json:"labels"`
 	}
 	type requirement struct {
-		ID       string   `json:"id"`
-		Selector selector `json:"selector"`
+		ID               string                  `json:"id"`
+		Selector         selector                `json:"selector"`
+		ConfiguredTarget *ConfiguredRunnerTarget `json:"configured_target,omitempty"`
 	}
 	body := struct {
 		Requirements      []requirement `json:"requirements"`
@@ -113,7 +121,7 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 			return nil, nil, fmt.Errorf("runner requirements require unique non-empty IDs")
 		}
 		expected[input.ID] = true
-		body.Requirements[i] = requirement{ID: input.ID, Selector: selector{Labels: input.Labels}}
+		body.Requirements[i] = requirement{ID: input.ID, Selector: selector{Labels: input.Labels}, ConfiguredTarget: input.ConfiguredTarget}
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -142,8 +150,9 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 	}
 	var decoded struct {
 		Resolutions []struct {
-			ID     string `json:"id"`
-			Target *struct {
+			ID        string `json:"id"`
+			Validated bool   `json:"validated"`
+			Target    *struct {
 				Queue     string            `json:"queue"`
 				Platform  string            `json:"platform"`
 				Image     string            `json:"image"`
@@ -181,7 +190,7 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 		}
 		seen[resolution.ID] = true
 		if resolution.Target != nil {
-			suggestion := RunnerSuggestion{ID: resolution.ID, Queue: resolution.Target.Queue, Platform: resolution.Target.Platform, Image: resolution.Target.Image, Agents: resolution.Target.Agents, ToolCache: resolution.Target.ToolCache}
+			suggestion := RunnerSuggestion{ID: resolution.ID, Queue: resolution.Target.Queue, Platform: resolution.Target.Platform, Image: resolution.Target.Image, Agents: resolution.Target.Agents, ToolCache: resolution.Target.ToolCache, Validated: resolution.Validated}
 			for _, warning := range resolution.Warnings {
 				if strings.TrimSpace(warning.Code) == "" || strings.TrimSpace(warning.Message) == "" {
 					return nil, nil, fmt.Errorf("runner resolution response contains an invalid warning")

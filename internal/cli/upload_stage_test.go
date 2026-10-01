@@ -294,6 +294,9 @@ func pipelineUploads(runner *cliCaptureRunner) int {
 // depends on every instance, and nothing the initial upload created is
 // uploaded again.
 func TestContinueExpandsNeedsDerivedMatrix(t *testing.T) {
+	setRunnerResolutionVerdicts(t, map[string]map[string]any{
+		"ubuntu-latest": {"validated": true, "target": map[string]string{"queue": "custom-linux", "platform": "linux/amd64"}},
+	})
 	initial := runContinueInitialUpload(t, "--runner-queue", "ubuntu-latest=custom-linux")
 	prefix := strings.TrimSuffix(initial.artifact.rootProducer().Key, "plan")
 	if initial.artifact.rootProducer().Key != prefix+"plan" || !slices.Equal(initial.artifact.Continuation.Jobs, []string{"build", "publish"}) || initial.artifact.Continuation.StepKey != prefix+"build-matrix" {
@@ -393,6 +396,10 @@ func TestContinueExpandsNeedsDerivedMatrix(t *testing.T) {
 // not map or to platforms it has no runtime for, cannot smuggle settings
 // through unused keys, and cannot bypass the static matrix validation.
 func TestContinueRejectsRowsThatEscapeThePolicy(t *testing.T) {
+	setRunnerResolutionVerdicts(t, map[string]map[string]any{
+		"ubuntu-latest": {"validated": true, "target": map[string]string{"queue": "custom-linux", "platform": "linux/amd64"}},
+		"macos-latest":  {"target": map[string]string{"queue": "macos-medium", "platform": "darwin/arm64"}},
+	})
 	initial := runContinueInitialUpload(t, "--runner-queue", "ubuntu-latest=custom-linux")
 	for _, test := range []struct {
 		name, matrix, want string
@@ -2215,6 +2222,9 @@ func mustJSON(t *testing.T, value any) []byte {
 // TestStageRecordRoundTrip proves the artifact decodes strictly and
 // records the values the continuation needs.
 func TestStageRecordRoundTrip(t *testing.T) {
+	setRunnerResolutionVerdicts(t, map[string]map[string]any{
+		"ubuntu-latest": {"validated": true, "target": map[string]string{"queue": "custom-linux", "platform": "linux/amd64"}},
+	})
 	initial := runContinueInitialUpload(t, "--runner-queue", "ubuntu-latest=custom-linux")
 	artifact := initial.artifact
 	if artifact.Schema != stageSchema || artifact.Importer != continueImporterJobID || artifact.Workflow.Path != ".github/workflows/build.yml" {

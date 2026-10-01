@@ -145,7 +145,8 @@ func hostedRepositorySource(ctx context.Context, clientVersion string, eventSour
 // validated again with the verdict attached, so the compile that follows
 // sees the same runner targets. When resolution is unavailable the built-in
 // presets stand in and out records the degradation. The requests share one
-// configured runner mapping. The call fails only when ctx is done.
+// configured runner mapping. Imports with configured mappings fail closed
+// when the Agent API cannot validate them.
 func validateHostedRequests(ctx context.Context, out processingOutput, requests []*hostedCompileRequest, clientVersion string) ([]compiler.Report, []compatibility.ProcessingReport, error) {
 	validations := make([]compiler.Report, len(requests))
 	validationErrs := make([]error, len(requests))
@@ -161,6 +162,9 @@ func validateHostedRequests(ctx context.Context, out processingOutput, requests 
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
+		}
+		if resolution.validationRequired {
+			return nil, nil, fmt.Errorf("cannot validate explicit runner mappings: %w", err)
 		}
 		// The built-in presets keep the upload moving, but they may target a
 		// queue this cluster lacks, so the degradation must be visible.

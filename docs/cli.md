@@ -719,9 +719,11 @@ Local presets use Noble for `ubuntu-latest` and `ubuntu-24.04`, and Jammy for
 `ubuntu-22.04`. Backend resolution can instead select a native Linux environment
 through agent tags. Use `--runner-image` with an immutable digest
 to override the preset for a configured profile; backend tags never replace
-that explicit image. An explicit mapping declares
-that its selector runs on Linux x86-64, except for the known macOS and Windows labels, and
-bypasses Agent API resolution. The Agent API owns compatibility and returns the
+that explicit image. An explicit mapping declares its selector's platform from
+the known Linux, macOS, and Windows labels. The importer validates its queue and
+hosted platform through the job-scoped Agent API before upload, preserving the
+configured image and cache. An import using explicit mappings stops if that
+validation is unavailable. The Agent API owns compatibility and returns the
 complete target for every other selector. The importer publishes returned
 warnings as annotations. See [Compatibility](compatibility.md#job-configuration)
 for runner behavior. Runtime distribution paths must be absolute executables.

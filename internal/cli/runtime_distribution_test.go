@@ -73,6 +73,10 @@ func TestWindowsRuntimeDistributionValidatesPEAndNeedsNoUnixExecuteBit(t *testin
 	}
 	t.Run("mixed upload", func(t *testing.T) {
 		requireImporterHost(t)
+		setRunnerResolutionVerdicts(t, map[string]map[string]any{
+			"ubuntu-latest": {"validated": true, "target": map[string]string{"queue": "linux", "platform": "linux/amd64"}},
+			"windows-2022":  {"validated": true, "target": map[string]string{"queue": "windows", "platform": "windows/amd64"}},
+		})
 		workflow := filepath.Join(t.TempDir(), "mixed.yml")
 		if err := os.WriteFile(workflow, []byte(`on: push
 jobs:
@@ -173,6 +177,10 @@ jobs:
 		{"runs-on", continueRunsOnWorkflow, `["windows-2022"]`},
 	} {
 		t.Run("deferred Windows "+deferred.name, func(t *testing.T) {
+			setRunnerResolutionVerdicts(t, map[string]map[string]any{
+				"ubuntu-latest": {"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}},
+				"windows-2022":  {"validated": true, "target": map[string]string{"queue": "windows", "platform": "windows/amd64"}},
+			})
 			initial := runContinueInitialUploads(t, deferred.workflow, "--runner-queue", "windows-2022=windows", "--runtime-distribution", "windows/amd64="+path)[0]
 			windowsDigest := distributions[compiler.PlatformWindowsAMD64].digest
 			if initial.artifact.Runtimes["windows/amd64"] != windowsDigest {
