@@ -1664,6 +1664,15 @@ func runnerResolutionServer(t *testing.T, status int, verdicts map[string]map[st
 	return server, &requests
 }
 
+func setRunnerResolutionVerdicts(t *testing.T, verdicts map[string]map[string]any) *int {
+	t.Helper()
+	server, requests := runnerResolutionServer(t, http.StatusOK, verdicts)
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	return requests
+}
+
 func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.T) {
 	requireImporterHost(t)
 	const missingQueueMessage = "The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-medium, or map this runner label to an existing queue: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md"

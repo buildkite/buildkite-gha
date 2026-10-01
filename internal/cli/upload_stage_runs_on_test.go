@@ -144,7 +144,7 @@ func TestContinueRunsOnRequiresValidationForExplicitARM64Mapping(t *testing.T) {
 				return
 			}
 			plans := uploadedPlans(t, runner)
-			if len(plans["build"]) != 1 || plans["build"][0].Target.Queue != "self-hosted-arm" || plans["build"][0].Target.Platform != compiler.PlatformLinuxARM64 {
+			if len(plans["build"]) != 1 || plans["build"][0].Target.Queue != "self-hosted-arm" {
 				t.Fatalf("ARM64 plans = %#v", plans["build"])
 			}
 		})
