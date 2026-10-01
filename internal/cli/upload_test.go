@@ -1842,6 +1842,48 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	}
 }
 
+func TestRunUploadScopesInvalidContainerEnvironmentKeyToWorkflow(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"bad.yml":  "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      database:\n        image: postgres:16\n        env: {bad-key: value}\n    steps: [{run: true}]\n",
+		"good.yml": "name: Good\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_KEY", "mixed-parse-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/bad.yml", ".github/workflows/good.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Label   string `yaml:"label"`
+			Group   string `yaml:"group"`
+			Command string `yaml:"command"`
+			Steps   []struct {
+				Key string `yaml:"key"`
+			} `yaml:"steps"`
+			Plugins failureStepPlugins `yaml:"plugins"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 2 || !isGeneratedFailureCommand(pipeline.Steps[0].Command) || pipeline.Steps[1].Group != ":github: workflow · Good" || len(pipeline.Steps[1].Steps) != 1 || pipeline.Steps[1].Steps[0].Key == "" {
+		t.Fatalf("aggregate pipeline = %#v", pipeline.Steps)
+	}
+	message := failureLogText(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
+	if !strings.Contains(message, "invalid container environment key") || !strings.Contains(message, "bad.yml:8:15") {
+		t.Fatalf("invalid workflow message = %q", message)
+	}
+}
+
 func TestRunUploadRepresentsFourExpandedReusableJobsAfterActionResolutionFailure(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{

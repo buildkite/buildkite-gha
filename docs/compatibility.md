@@ -371,8 +371,8 @@ grouping choice.
 Reusable-only `workflow_call` files remain available to local callers but do not
 create groups. Selecting only reusable workflows is an error.
 
-A safe compilation or trigger-translation error replaces only that workflow
-with a failing top-level step. The step:
+A parse, compilation, or trigger-translation error in an aggregate upload
+replaces only that workflow with a failing top-level step. The step:
 
 - is labeled `:github: workflow · <workflow-name-or-path>`, with the resolved
   run title appended when present
@@ -385,9 +385,9 @@ Other workflows continue compiling. An unsupported matrix derived from `needs`
 outputs, including one inside a called reusable workflow, fails only its own
 workflow after the event and repository variables resolve, so it never reports
 `vars` values as unavailable or blocks other workflows. Missing or untracked
-configured paths are omitted before the transaction. Invalid path states,
-parse, event-input, admission, artifact, and upload failures still abort the
-complete transaction.
+configured paths are omitted before the transaction. Single-workflow parse
+errors and invalid path states, event-input, admission, artifact, and upload
+failures still abort the complete transaction.
 Upload never publishes a partial pipeline.
 
 If a workflow has both a compiler error and a skip reason, the compiler error
@@ -1695,6 +1695,7 @@ services:
 ```
 
 Job containers support `image`, `env`, `ports`, `volumes`, and `options`. Services support `image`, `credentials`, `env`, `ports`, `volumes`, `options`, `command`, and `entrypoint`.
+Container `env` keys must start with a letter or underscore and can otherwise contain letters, digits, underscores, or dots. For example, an Elasticsearch service can use `discovery.type: single-node`.
 
 - Job container images can use compile-time `github`, `inputs`, `strategy`, and `matrix` values. A null or exactly empty evaluated image runs the job on the host, including object-form containers, without applying container `env` or `ports`. For example, `container: ${{ matrix.target.container }}` selects host execution when the matrix entry omits `container`. Other results must be strings containing valid image references; whitespace-only results are invalid. Literal images must be non-empty. Secrets, `needs`, step outputs, and whole or dynamic contexts are unsupported.
 - Service fields can use compile-time `github`, `inputs`, `strategy`, and `matrix` values or runtime `needs` outputs, including fallback expressions such as `${{ needs.build.outputs.image || 'redis:7' }}`. An empty evaluated image skips the service.

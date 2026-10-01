@@ -1603,6 +1603,65 @@ func (s serviceEnvironmentSource) ResolveEnvironment(_ context.Context, _, _, na
 	return value, nil
 }
 
+func TestRunCompiledDottedContainerEnvironment(t *testing.T) {
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	const path = ".github/workflows/containers.yml"
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.20
+      env: {app.mode: production}
+    services:
+      elasticsearch:
+        image: elasticsearch:8
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: false
+    steps: [{run: true}]
+`)
+	writeFixtureFile(t, workspace, path, string(source))
+	jobs, err := compilePlansForTest(t.Context(), path, source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
+		EventTrust: compiler.EventUntrusted,
+		Runners: compiler.RunnerPolicy{
+			Labels: map[string]string{"ubuntu-latest": "gha-untrusted"}, UntrustedQueues: []string{"gha-untrusted"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("compiled jobs = %d, want 1", len(jobs))
+	}
+	f := newJobDocker(t, "")
+	if _, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(t.Context(), jobs[0], workspace); err != nil {
+		t.Fatal(err)
+	}
+	var jobEnv, serviceEnv []string
+	for _, call := range f.calls(t) {
+		if len(call.Args) == 0 || call.Args[0] != "create" {
+			continue
+		}
+		env := &jobEnv
+		if slices.Contains(call.Args, "--network-alias") {
+			env = &serviceEnv
+		}
+		for i, arg := range call.Args {
+			if arg == "--env" {
+				*env = append(*env, call.Args[i+1])
+			}
+		}
+	}
+	if !slices.Contains(jobEnv, "app.mode=production") || !slices.Contains(serviceEnv, "discovery.type=single-node") || !slices.Contains(serviceEnv, "xpack.security.enabled=false") {
+		t.Fatalf("docker environment: job=%q service=%q", jobEnv, serviceEnv)
+	}
+}
+
 func TestCompiledServiceCredentialsResolveNeeds(t *testing.T) {
 	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
 	if err != nil {

@@ -154,8 +154,13 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		parsed, parseErr := workflow.Parse(workflows[i].Path, workflows[i].Source)
 		if parseErr != nil {
-			_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false, compiler.DefaultOptions())
-			return 1
+			if len(workflows) == 1 || uploadArguments.serverSelectedWorkflow != nil {
+				_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false, compiler.DefaultOptions())
+				return 1
+			}
+			workflows[i].ParseError = parseErr
+			runnableWorkflowCount++
+			continue
 		}
 		if uploadArguments.serverSelectedWorkflow != nil && uploadArguments.serverSelectedWorkflow.Name != "" {
 			actualName := parsed.Name
@@ -201,7 +206,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	sourceSwitch := &repositorySourceSwitch{source: initialSource}
 	repositorySource := compiler.MemoizeRepositorySource(sourceSwitch)
 	for i, input := range workflows {
-		if input.ReusableOnly {
+		if input.ReusableOnly || input.ParseError != nil {
 			continue
 		}
 		// This event-independent pass only scans the workflow graph, including
@@ -254,6 +259,13 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if workflows[i].ReusableOnly {
 			continue
 		}
+		if workflows[i].ParseError != nil {
+			parsed, err := compiler.ParseWorkflow(workflows[i].Path, workflows[i].Source)
+			processingReports[i] = compatibility.InitialProcessingReport(workflows[i].Path, hostedProfile, false, parsed, err)
+			processingReports[i].Result = "incompatible"
+			workflows[i].Applicable = true
+			continue
+		}
 		workflowEvent := effectiveEvent
 		if workflows[i].PathFiltersError != "" {
 			workflowEvent.TriggerSnapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{UnavailableReason: workflows[i].PathFiltersError}
@@ -283,7 +295,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	}
 	vars := resolveUploadVariables(ctx, uploadArguments.variableSource, workflows, processingReports, effectiveEvent.Event)
 	for i := range workflows {
-		if workflows[i].ReusableOnly {
+		if workflows[i].ReusableOnly || workflows[i].ParseError != nil {
 			continue
 		}
 		runName, runNameErr := compiler.ResolveWorkflowRunName(workflows[i].Path, workflows[i].Parsed, effectiveEvent.Event, vars, workflows[i].Applicable)
@@ -974,6 +986,7 @@ type workflowInput struct {
 	Name, RunName                                   string
 	Source                                          []byte
 	Parsed                                          *workflow.Workflow
+	ParseError                                      error
 	Triggers                                        []workflow.Trigger
 	TriggerCondition, SkipReason, AnnotationReason  string
 	PathFiltersError                                string

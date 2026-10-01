@@ -683,6 +683,32 @@ jobs:
 	}
 }
 
+func TestParseDottedContainerEnvironmentKeys(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.20
+      env: {app.mode: production}
+    services:
+      elasticsearch:
+        image: elasticsearch:8
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: false
+    steps: [{run: true}]
+`)
+	parsed, err := Parse("containers.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := parsed.Jobs[0]
+	if job.Container.Env["app.mode"] != "production" || job.Services[0].Container.Env["discovery.type"] != "single-node" || job.Services[0].Container.Env["xpack.security.enabled"] != "false" {
+		t.Fatalf("container env = %#v, service env = %#v", job.Container.Env, job.Services[0].Container.Env)
+	}
+}
+
 func TestParsePreservesPartialServiceContainerCredentials(t *testing.T) {
 	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      database:\n        image: postgres:16\n        credentials:\n          username: registry-user\n    steps: [{run: true}]\n")
 	parsed, err := Parse("containers.yml", source)

@@ -628,10 +628,11 @@ Private reusable workflows are off by default. Set the plugin's
 boundary and [Security](security.md#repository-data-does-not-grant-authority)
 for the credential boundary.
 
-A safe compilation or trigger-translation error replaces only that workflow
-with a failing top-level step. Compilation continues for later workflows.
-Parse, event-input, admission, artifact, and upload failures abort the complete
-transaction; no partial pipeline is uploaded.
+A parse, compilation, or trigger-translation error in an aggregate upload
+replaces only that workflow with a failing top-level step. Compilation continues
+for later workflows. Single-workflow parse errors and event-input, admission,
+artifact, and upload failures abort the complete transaction; no partial
+pipeline is uploaded.
 
 ### Select the effective event
 
