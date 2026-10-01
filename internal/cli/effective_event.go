@@ -195,8 +195,10 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 	if errors.As(err, &pathFilters) {
 		message := fmt.Sprintf("%s trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step.", upperFirst(pathFilters.Event))
 		if pathFilters.Reason != "" {
-			history := strings.ReplaceAll(pathFilters.Event, "_", "-")
-			message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching %s history, or remove the path filters.", upperFirst(pathFilters.Event), history)
+			message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. Check the detail for unavailable or mismatched evidence; correct the evidence or remove the path filters.", upperFirst(pathFilters.Event))
+			if strings.Contains(pathFilters.Reason, "file local evaluation bound") {
+				message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. The local changed-file limit was exceeded; reduce the diff or remove the path filters.", upperFirst(pathFilters.Event))
+			}
 		}
 		err = &compiler.ProcessingFinding{
 			Stage: workflowprocessing.StagePipeline, Code: workflowprocessing.CodePipelineGeneration, Category: "compatibility",

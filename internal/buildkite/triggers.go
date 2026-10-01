@@ -207,7 +207,7 @@ type UnsupportedPathFiltersError struct {
 
 func (e *UnsupportedPathFiltersError) Error() string {
 	if e.Reason != "" {
-		return fmt.Sprintf("%s path filters are unsupported: %s", e.Event, e.Reason)
+		return fmt.Sprintf("%s path filters could not be evaluated: %s", e.Event, e.Reason)
 	}
 	return fmt.Sprintf("%s path filters are unsupported: Buildkite if_changed is not equivalent", e.Event)
 }
