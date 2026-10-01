@@ -2263,6 +2263,8 @@ JavaScript action `pre-if` and `post-if` metadata uses the condition operators, 
 
 Pre conditions use the status and action-scoped environment available when preparation reaches the action. Post conditions run during job teardown and use the final job status and environment, including `GITHUB_ENV` changes from main. Root action posts also see final workflow step state. Nested composite actions retain their isolated step context. Cancellation remains distinct from failure, and posts keep LIFO order.
 
+Native adapter input restrictions do not block a whole job whose `if` condition is statically false after reusable inputs and matrix values resolve. The skipped job and locked actions remain in the plan so it can publish a `skipped` result. Step-level and runtime-dependent conditions remain conservative and validate adapter inputs.
+
 ### Checkout action
 
 **🟡 Supported subset.** Immutable commits captured from frozen upstream tags, `main`, `master`, and `releases/v1` through `releases/v6` snapshots are admitted. The snapshot includes historical development and release commits across v1 through v7. These known releases identify the principal contracts:
@@ -2287,8 +2289,6 @@ Maintainers can refresh the frozen refs and per-commit profiles with `go generat
 Buildkite runs v1.2.0 like v1 and v2.8.0 like v2, and warns about their differences from v4 and later. Neither release sets the `ref` or `commit` outputs added in v4.2.0. v1.2.0 also fetches full history by default when `fetch-depth` is omitted. Upgrade only if your workflow needs those outputs or different v1 history behavior. Otherwise, keep the current version.
 
 The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean nested directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to the Git commands that fetch repository, LFS, or submodule data and are never persisted.
-
-Checkout input restrictions do not block a whole job whose `if` condition is statically false after reusable inputs and matrix values resolve. The skipped job and locked action remain in the plan so it can publish a `skipped` result. Step-level and runtime-dependent conditions remain conservative and validate the adapter inputs.
 
 An explicit input is accepted only when the exact snapshotted contract declares it, or when the v7.0.1 fallback contract declares it for an unknown commit. The following value restrictions then apply:
 
