@@ -83,6 +83,7 @@ const (
 	FailureCodePlanConstruction   FailureCode = "E_PLAN_CONSTRUCTION"
 	FailureCodePipelineGeneration FailureCode = "E_PIPELINE_GENERATION"
 	FailureCodeEnvironment        FailureCode = "E_ENVIRONMENT"
+	FailureCodeVariableResolution FailureCode = "E_VARIABLE_RESOLUTION"
 	FailureCodeProfile            FailureCode = "E_PROFILE"
 	FailureCodeStepProcessExit    FailureCode = "E_STEP_PROCESS_EXIT"
 	FailureCodeUnsupportedFeature FailureCode = "E_UNSUPPORTED_FEATURE"
@@ -277,7 +278,7 @@ func validFailureCode(code FailureCode) bool {
 	case FailureCodeUnknown, FailureCodeWorkflowSyntax, FailureCodeEventInvalid, FailureCodeGraphInvalid,
 		FailureCodeMatrixInvalid, FailureCodeExpressionInvalid, FailureCodeActionDiscovery,
 		FailureCodeActionResolution, FailureCodePlanConstruction, FailureCodePipelineGeneration,
-		FailureCodeEnvironment, FailureCodeProfile, FailureCodeStepProcessExit,
+		FailureCodeEnvironment, FailureCodeVariableResolution, FailureCodeProfile, FailureCodeStepProcessExit,
 		FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable:
 		return true
 	default:
@@ -360,7 +361,7 @@ func diagnosticSeverity(code string) (Severity, bool) {
 	case string(FailureCodeWorkflowSyntax), string(FailureCodeEventInvalid), string(FailureCodeGraphInvalid),
 		string(FailureCodeMatrixInvalid), string(FailureCodeExpressionInvalid), string(FailureCodeActionDiscovery),
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
-		string(FailureCodeEnvironment), string(FailureCodeProfile):
+		string(FailureCodeEnvironment), string(FailureCodeVariableResolution), string(FailureCodeProfile):
 		return SeverityError, true
 	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED", "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED":
 		return SeverityWarning, true

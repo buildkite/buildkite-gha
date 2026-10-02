@@ -12,4 +12,5 @@ const (
 	CodePipelineGeneration = "E_PIPELINE_GENERATION"
 	CodeContextRequired    = "E_CONTEXT_REQUIRED"
 	CodeEnvironment        = "E_ENVIRONMENT"
+	CodeVariableResolution = "E_VARIABLE_RESOLUTION"
 )

@@ -451,6 +451,28 @@ func TestObservedFailureMessageIncludesDetail(t *testing.T) {
 	}
 }
 
+func TestVariableResolutionTelemetryStaysDistinctFromEnvironmentFailures(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		add  func(*compatibility.ProcessingReport)
+		code telemetry.FailureCode
+	}{
+		{"variables", func(r *compatibility.ProcessingReport) { r.AddVariableResolutionFailure("variable lookup failed") }, telemetry.FailureCodeVariableResolution},
+		{"environment", func(r *compatibility.ProcessingReport) { r.AddEnvironmentFailure("repository source failed") }, telemetry.FailureCodeEnvironment},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			report := compatibility.NewProcessingReport("workflow.yml", "")
+			test.add(&report)
+			details := &commandTelemetryDetails{}
+			details.observe(report)
+			got := details.forOutcome(telemetry.OutcomeFailure)
+			if got.FailureCode != test.code || len(got.Diagnostics) != 1 || got.Diagnostics[0].Code != string(test.code) {
+				t.Fatalf("failure code/diagnostics = %q/%#v; want %q", got.FailureCode, got.Diagnostics, test.code)
+			}
+		})
+	}
+}
+
 func TestObservedFailureMessageKeepsItsHeadWithinTheTelemetryBound(t *testing.T) {
 	details := &commandTelemetryDetails{}
 	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{

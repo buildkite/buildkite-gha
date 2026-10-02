@@ -217,7 +217,7 @@ func allowlistedTelemetryDiagnosticCode(code string) bool {
 	case workflowprocessing.CodeWorkflowSyntax, workflowprocessing.CodeEventInvalid, workflowprocessing.CodeGraphInvalid,
 		workflowprocessing.CodeMatrixInvalid, workflowprocessing.CodeExpressionInvalid, workflowprocessing.CodeActionDiscovery,
 		workflowprocessing.CodeActionResolution, workflowprocessing.CodePlanConstruction, workflowprocessing.CodePipelineGeneration,
-		workflowprocessing.CodeEnvironment, "E_PROFILE", "W_ACTION_RUNTIME_UNKNOWN",
+		workflowprocessing.CodeEnvironment, workflowprocessing.CodeVariableResolution, "E_PROFILE", "W_ACTION_RUNTIME_UNKNOWN",
 		"W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED", "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED":
 		return true
 	default:
