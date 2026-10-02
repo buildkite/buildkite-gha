@@ -21,7 +21,10 @@ type resultRunner struct {
 func (r *resultRunner) Run(_ context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
 	r.commands = append(r.commands, capturedCommand{dir: dir, name: name, args: append([]string(nil), args...), stdin: string(stdin)})
 	if len(args) >= 2 && args[0] == "artifact" && args[1] == "search" {
-		return []byte(r.jobByStep[args[4]] + "\n"), nil
+		if job := r.jobByStep[args[4]]; job != "" {
+			return []byte(job + "\n"), nil
+		}
+		return nil, nil
 	}
 	if len(args) >= 2 && args[0] == "artifact" && args[1] == "download" {
 		contents, ok := r.dataByPath[args[2]]
@@ -95,7 +98,7 @@ func TestDownloadResultSelectsExactStepThenExactProducerJob(t *testing.T) {
 	if manifest.Outputs[0].Value != "ok" || len(runner.commands) != 2 {
 		t.Fatalf("manifest/commands = %#v / %#v", manifest, runner.commands)
 	}
-	wantSearch := []string{"artifact", "search", path, "--step", "gha-producer", "--format", "%j"}
+	wantSearch := []string{"artifact", "search", path, "--step", "gha-producer", "--format", "%j\\n", "--allow-empty-results", "--include-retried-jobs=false"}
 	if !reflect.DeepEqual(runner.commands[0].args, wantSearch) {
 		t.Fatalf("search = %#v, want %#v", runner.commands[0].args, wantSearch)
 	}

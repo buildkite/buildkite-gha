@@ -10,6 +10,10 @@ import (
 	"strings"
 )
 
+// ErrResultNotFound means a successful artifact search returned no results.
+// Authentication, transport, and malformed-response failures never return it.
+var ErrResultNotFound = errors.New("result artifact not found")
+
 // ResultSource is the immutable compiler-owned identity of one generated
 // producer belonging to a logical GHA need.
 type ResultSource struct {
@@ -26,7 +30,8 @@ type OutputProjection struct {
 	Output  string
 }
 
-// NeedResult is the verified runtime projection exposed to needs contexts.
+// NeedResult is the runtime projection exposed to needs contexts. Outputs,
+// producers, and artifacts always come from verified result manifests.
 type NeedResult struct {
 	Result    string
 	Outputs   map[string]string
@@ -53,17 +58,26 @@ type Publication struct {
 
 // SearchArtifactProducer resolves exactly one artifact owner under the
 // compiler-selected step key. The returned job UUID is then used for download.
+// Only a successful search with no artifacts returns ErrResultNotFound.
 func (a Agent) SearchArtifactProducer(ctx context.Context, path, producerStep string) (string, error) {
 	if !keyPattern.MatchString(producerStep) {
 		return "", fmt.Errorf("invalid producer step key %q", producerStep)
 	}
-	output, err := a.run(ctx, []string{"artifact", "search", path, "--step", producerStep, "--format", "%j"}, nil)
+	// The minimum supported agent (v3.129.0) distinguishes an empty search
+	// from query failures with --allow-empty-results. Explicit retry scoping
+	// prevents agent environment settings from selecting obsolete attempts.
+	output, err := a.run(ctx, []string{"artifact", "search", path, "--step", producerStep, "--format", "%j\\n", "--allow-empty-results", "--include-retried-jobs=false"}, nil)
 	if err != nil {
 		return "", err
 	}
-	lines := strings.Fields(string(output))
+	if len(output) == 0 {
+		return "", ErrResultNotFound
+	}
+	// Preserve empty records: an artifact with a missing job ID is a malformed
+	// response, including when another artifact has a valid producer.
+	lines := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
 	if len(lines) != 1 || !uuidPattern.MatchString(lines[0]) {
-		return "", fmt.Errorf("artifact %q under step %q has %d valid producer jobs, want exactly one", path, producerStep, len(lines))
+		return "", fmt.Errorf("artifact %q under step %q returned %d producer records, want exactly one valid job UUID", path, producerStep, len(lines))
 	}
 	return lines[0], nil
 }
@@ -176,6 +190,46 @@ func DownloadResult(ctx context.Context, agent Agent, root, buildID string, sour
 // returns only verified results and outputs. Conflicting matrix outputs fail
 // closed because Buildkite artifacts do not expose a trusted completion order.
 func LoadNeeds(ctx context.Context, agent Agent, root, buildID string, sources map[string][]ResultSource, projections map[string][]OutputProjection) (map[string]NeedResult, error) {
+	return loadNeeds(sources, projections, func(source ResultSource) (resolvedNeedProducer, error) {
+		manifest, err := DownloadResult(ctx, agent, root, buildID, source)
+		if err != nil {
+			return resolvedNeedProducer{}, err
+		}
+		return resolvedNeedProducer{result: manifest.Result, manifest: &manifest}, nil
+	})
+}
+
+// LoadRuntimeNeeds can also resolve a finished Buildkite step's failure when
+// no attempt has the expected result artifact.
+// It returns that evidence separately from verified producers, outputs, and
+// artifacts. Graph expansion and other consumers of exact receipts must
+// continue to use LoadNeeds or DownloadResult.
+func LoadRuntimeNeeds(ctx context.Context, agent Agent, root, buildID string, sources map[string][]ResultSource, projections map[string][]OutputProjection) (map[string]NeedResult, []TerminalNeedResult, error) {
+	var terminal []TerminalNeedResult
+	needs, err := loadNeeds(sources, projections, func(source ResultSource) (resolvedNeedProducer, error) {
+		manifest, err := DownloadResult(ctx, agent, root, buildID, source)
+		if err == nil {
+			return resolvedNeedProducer{result: manifest.Result, manifest: &manifest}, nil
+		}
+		if !errors.Is(err, ErrResultNotFound) {
+			return resolvedNeedProducer{}, err
+		}
+		status, err := resolveTerminalNeedResult(ctx, agent, buildID, source)
+		if err != nil {
+			return resolvedNeedProducer{}, err
+		}
+		terminal = append(terminal, status)
+		return resolvedNeedProducer{result: status.Result}, nil
+	})
+	return needs, terminal, err
+}
+
+type resolvedNeedProducer struct {
+	result   string
+	manifest *ResultManifest
+}
+
+func loadNeeds(sources map[string][]ResultSource, projections map[string][]OutputProjection, resolve func(ResultSource) (resolvedNeedProducer, error)) (map[string]NeedResult, error) {
 	if len(sources) > MaxResultProducers {
 		return nil, fmt.Errorf("result transport has %d logical needs, maximum is %d", len(sources), MaxResultProducers)
 	}
@@ -213,21 +267,25 @@ func LoadNeeds(ctx context.Context, agent Agent, root, buildID string, sources m
 		sort.Slice(producers, func(i, j int) bool { return producers[i].StepKey < producers[j].StepKey })
 		need := NeedResult{Result: "skipped", Outputs: map[string]string{}}
 		outputNames := make(map[string]string)
-		manifests := make(map[string]ResultManifest, len(producers))
+		resolved := make(map[string]resolvedNeedProducer, len(producers))
 		for i, producer := range producers {
 			if i > 0 && producers[i-1].StepKey == producer.StepKey {
 				return nil, fmt.Errorf("logical need %q repeats producer %q", name, producer.StepKey)
 			}
-			manifest, err := DownloadResult(ctx, agent, root, buildID, producer)
+			result, err := resolve(producer)
 			if err != nil {
 				return nil, fmt.Errorf("load logical need %q: %w", name, err)
 			}
-			manifests[strings.ToLower(producer.StepKey)] = manifest
+			resolved[strings.ToLower(producer.StepKey)] = result
+			need.Result = aggregateResult(need.Result, result.result)
+			if result.manifest == nil {
+				continue
+			}
+			manifest := result.manifest
 			need.Producers = append(need.Producers, manifest.Producer)
 			for _, artifact := range manifest.Artifacts {
 				need.Artifacts = append(need.Artifacts, NeedArtifact{Artifact: artifact, Producer: manifest.Producer})
 			}
-			need.Result = aggregateResult(need.Result, manifest.Result)
 			if _, isProjected := projected[strings.ToLower(name)]; isProjected {
 				continue
 			}
@@ -247,7 +305,7 @@ func LoadNeeds(ctx context.Context, agent Agent, root, buildID string, sources m
 			}
 		}
 		if outputs, isProjected := projected[strings.ToLower(name)]; isProjected {
-			if err := projectNeedOutputs(name, outputs, manifests, need.Outputs); err != nil {
+			if err := projectNeedOutputs(name, outputs, resolved, need.Outputs); err != nil {
 				return nil, err
 			}
 		}
@@ -256,7 +314,7 @@ func LoadNeeds(ctx context.Context, agent Agent, root, buildID string, sources m
 	return needs, nil
 }
 
-func projectNeedOutputs(name string, projections []OutputProjection, manifests map[string]ResultManifest, outputs map[string]string) error {
+func projectNeedOutputs(name string, projections []OutputProjection, producers map[string]resolvedNeedProducer, outputs map[string]string) error {
 	projections = append([]OutputProjection(nil), projections...)
 	sort.Slice(projections, func(i, j int) bool {
 		if projections[i].Name != projections[j].Name {
@@ -272,12 +330,17 @@ func projectNeedOutputs(name string, projections []OutputProjection, manifests m
 		if !keyPattern.MatchString(projection.Name) || !keyPattern.MatchString(projection.StepKey) || !keyPattern.MatchString(projection.Output) {
 			return fmt.Errorf("logical need %q has invalid output projection", name)
 		}
-		manifest, exists := manifests[strings.ToLower(projection.StepKey)]
+		producer, exists := producers[strings.ToLower(projection.StepKey)]
 		if !exists {
 			return fmt.Errorf("logical need %q output %q selects unknown producer %q", name, projection.Name, projection.StepKey)
 		}
+		if producer.manifest == nil {
+			// A recovered status contributes no output value. Treating it as an
+			// empty published output would conflict with a verified matrix leg.
+			continue
+		}
 		value := ""
-		for _, output := range manifest.Outputs {
+		for _, output := range producer.manifest.Outputs {
 			if strings.EqualFold(output.Name, projection.Output) {
 				value = output.Value
 				break
