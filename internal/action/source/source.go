@@ -1647,8 +1647,8 @@ func extractTar(r io.Reader, dst string, c config) error {
 			return fmt.Errorf("omitted symlink path was materialized")
 		}
 		target, err := os.Lstat(filepath.Join(dst, filepath.FromSlash(link.target)))
-		if err != nil || !target.Mode().IsRegular() {
-			return fmt.Errorf("omitted symlink target is not an extracted regular file")
+		if err != nil || (!target.Mode().IsRegular() && !target.IsDir()) {
+			return fmt.Errorf("omitted symlink target is not an extracted regular file or directory")
 		}
 	}
 	return nil

@@ -2263,6 +2263,40 @@ JavaScript action `pre-if` and `post-if` metadata uses the condition operators, 
 
 Pre conditions use the status and action-scoped environment available when preparation reaches the action. Post conditions run during job teardown and use the final job status and environment, including `GITHUB_ENV` changes from main. Root action posts also see final workflow step state. Nested composite actions retain their isolated step context. Cancellation remains distinct from failure, and posts keep LIFO order.
 
+### Repository archive symlinks
+
+Repository archive extraction omits relative symlinks whose targets are extracted
+regular files or directories inside the repository. It never creates or follows
+the aliases. Actions that need those alias paths remain unsupported; this allows
+unused repository fixtures and tooling aliases, not general symlink compatibility.
+Source digests describe the extracted tree without aliases.
+
+Dangling links, link chains, absolute or escaping targets, hardlinks, special
+files, and duplicate or case-colliding paths remain rejected. An alias cannot be
+an ancestor of another archive entry, in either archive order. Archive size,
+entry-count, and path limits apply even when aliases are omitted.
+
+Evidence collected on October 1, 2026:
+
+- The [TruffleHog archive at `e283608`](https://codeload.github.com/trufflesecurity/trufflehog/tar.gz/e28360875917c9c730f9c64aae29fb93aa6c359e)
+  contains `.claude/skills/dep-updates` and `.codex/skills/dep-updates`, both
+  pointing to `../../.cursor/skills/dep-updates`. That directory and its
+  `SKILL.md` are present. The [action](https://github.com/trufflesecurity/trufflehog/blob/e28360875917c9c730f9c64aae29fb93aa6c359e/action.yml)
+  uses neither alias. Archive SHA-256:
+  `0577d4cd5975cb97d68543f372a89585fa46319ca2790a9753f449b37b3cb716`.
+- [GitHub Runner 2.337.0 extracts remote actions with `tar -xzf`](https://github.com/actions/runner/blob/397b032cbf865e9c3ddfab89d533ec19325e1273/src/Runner.Worker/ActionManager.cs#L1330-L1375)
+  on Linux, then [recursively copies directories](https://github.com/actions/runner/blob/397b032cbf865e9c3ddfab89d533ec19325e1273/src/Runner.Sdk/Util/IOUtil.cs#L394-L429),
+  following directory aliases into real copied directories. The tar command
+  accepted this pinned archive locally. Buildkite deliberately omits the alias
+  paths instead: this preserves the files this action reads, not the runner's
+  full tree semantics. Windows uses ZIP extraction; this evidence concerns Linux.
+- An [existing GitHub run](https://github.com/trufflesecurity/trufflehog/actions/runs/36923757087/job/110575881331)
+  successfully executed this commit on Ubuntu using checkout followed by
+  `uses: ./`. This is local-action execution evidence, not a direct remote
+  `uses: trufflesecurity/trufflehog@...` proof. The production report named
+  mutable `@main`; its exact resolved commit was not recovered. The pinned
+  reproduction does not establish that production used this same archive.
+
 ### Checkout action
 
 **🟡 Supported subset.** Immutable commits captured from frozen upstream tags, `main`, `master`, and `releases/v1` through `releases/v6` snapshots are admitted. The snapshot includes historical development and release commits across v1 through v7. These known releases identify the principal contracts:
