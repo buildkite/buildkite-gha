@@ -8,7 +8,7 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#v0.9.3:
+      - github-actions#v0.13.0:
           workflow: .github/workflows/experimental-runner-user.yml
           source-ref: 65209ba627e45a9c0ad124c6ca0334e4ba9e24f5
           experimental-runner-user: true
