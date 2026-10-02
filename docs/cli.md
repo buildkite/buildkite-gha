@@ -340,6 +340,8 @@ buildkite-gha migrate-secrets run \
 
 `run` verifies that the local file matches the workflow at a resolved
 default-branch commit, allowing Git's CRLF checkout conversion on Windows.
+It also requires the exact workflow that the installed `buildkite-gha`
+generates; after upgrading, regenerate and merge any workflow that has not run.
 It creates a short-lived, one-use Buildkite migration
 grant bound to that commit, then dispatches the default branch through `gh`.
 The workflow obtains a GitHub-signed OIDC identity and sends all selected

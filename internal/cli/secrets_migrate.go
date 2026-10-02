@@ -596,11 +596,25 @@ jobs:
           for key, variable in secrets:
               value = os.environ.get(variable, "")
               size = len(value.encode("utf-8"))
-              if not value.strip():
+              if not value:
                   sys.exit(f"GitHub secret {key} is missing or empty; no Buildkite secrets were created")
+              if not value.strip():
+                  sys.exit(f"GitHub secret {key} contains only whitespace; no Buildkite secrets were created")
               if size >= 32 * 1024:
-                  sys.exit(f"GitHub secret {key} is too large for the Buildkite API; no Buildkite secrets were created")
+                  sys.exit(f"GitHub secret {key} is {size} bytes; Buildkite secrets must be smaller than 32768 bytes; no Buildkite secrets were created")
               values[key] = value
+
+          def buildkite_error_detail(error):
+              try:
+                  message = json.loads(error.read(4096)).get("message", "")
+              except Exception:
+                  return ""
+              if not isinstance(message, str):
+                  return ""
+              message = re.sub(r"[^\x20-\x7e]", " ", message)[:300].strip()
+              if not message or any(value in message or value.strip() in message for value in values.values()):
+                  return ""
+              return ": " + message
 
           migration_url = migration_url_prefix + grant_id + "/secrets"
           audience = migration_url
@@ -638,7 +652,8 @@ jobs:
                   if response.status != 201:
                       raise RuntimeError("unexpected response")
           except urllib.error.HTTPError as error:
-              sys.exit(f"Buildkite rejected the migration with HTTP {error.code}; no existing value was overwritten")
+              outcome = "no existing value was overwritten" if error.code >= 500 else "no Buildkite secrets were created"
+              sys.exit(f"Buildkite rejected the migration with HTTP {error.code}{buildkite_error_detail(error)}; {outcome}")
           except Exception:
               sys.exit("The Buildkite migration request failed")
 
