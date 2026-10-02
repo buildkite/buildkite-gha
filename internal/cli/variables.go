@@ -130,7 +130,7 @@ func resolveUploadVariables(ctx context.Context, source variableSource, workflow
 			continue
 		}
 		processingReports[i] = triggerProcessingReport(input.Path, input.Source)
-		processingReports[i].AddEnvironmentFailure(err.Error())
+		processingReports[i].AddVariableResolutionFailure(err.Error())
 		processingReports[i].Result = "indeterminate"
 	}
 	return compiler.VariableSources{}

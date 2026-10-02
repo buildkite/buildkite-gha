@@ -638,7 +638,7 @@ func TestRunCompileResolvesVariablesThroughAgent(t *testing.T) {
 	stderr.Reset()
 	if code := Run([]string{"compile", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code == 0 {
 		t.Fatalf("Run() with rejected resolution succeeded:\n%s", stdout.String())
-	} else if !strings.Contains(stderr.String(), "[E_ENVIRONMENT] variables: the variable resolution request was rejected: GitHub variables could not be resolved; contact Buildkite support with the build URL to investigate the server-side cause") {
+	} else if !strings.Contains(stderr.String(), "[E_VARIABLE_RESOLUTION] variables: the variable resolution request was rejected: GitHub variables could not be resolved; contact Buildkite support with the build URL to investigate the server-side cause") {
 		t.Fatalf("stderr = %q, want actionable generic backend rejection", stderr.String())
 	}
 

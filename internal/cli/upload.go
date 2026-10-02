@@ -491,7 +491,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		if err == nil || len(preflight.Bundle.Plans) != 0 {
 			actionVars, again, varsErr := resolveActionVariables(ctx, uploadArguments.variableSource, effectiveEvent.Event, input.ReferencesVars, preflight.Bundle)
 			if varsErr != nil {
-				processingReports[i].AddEnvironmentFailure(varsErr.Error())
+				processingReports[i].AddVariableResolutionFailure(varsErr.Error())
 				processingReports[i].Result = "indeterminate"
 				preflight.Bundle = failedPartialBundle(preflight.Bundle)
 				if !partialUploadPreservesGraph(preflight.Bundle) {

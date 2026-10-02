@@ -150,6 +150,14 @@ func (r *ProcessingReport) AddEnvironmentFailure(message string) {
 	})
 }
 
+// AddVariableResolutionFailure distinguishes GitHub variable lookup failures
+// from other processing-environment failures.
+func (r *ProcessingReport) AddVariableResolutionFailure(message string) {
+	r.Diagnostics = append(r.Diagnostics, Diagnostic{
+		Level: "error", Code: workflowprocessing.CodeVariableResolution, Category: "environment", Message: message,
+	})
+}
+
 // EnvironmentProcessingReport reports that processing could not start because
 // the environment failed before the workflow was read.
 func EnvironmentProcessingReport(path, profile, message string) ProcessingReport {

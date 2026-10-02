@@ -262,7 +262,7 @@ func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 		string(FailureCodeWorkflowSyntax), string(FailureCodeEventInvalid), string(FailureCodeGraphInvalid),
 		string(FailureCodeMatrixInvalid), string(FailureCodeExpressionInvalid), string(FailureCodeActionDiscovery),
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
-		string(FailureCodeEnvironment), string(FailureCodeProfile),
+		string(FailureCodeEnvironment), string(FailureCodeVariableResolution), string(FailureCodeProfile),
 	}
 	warningCodes := []string{"W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED"}
 	input := make([]Diagnostic, 0, len(errorCodes)+len(warningCodes)+2)
