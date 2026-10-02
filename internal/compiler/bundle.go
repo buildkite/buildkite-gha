@@ -84,6 +84,7 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 // stops before pipeline generation so callers can apply admission policy.
 func CompileBundlePlansContext(ctx context.Context, path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest string, options Options) (Bundle, error) {
 	ctx = actionsource.WithPublicRepositoryChecks(ctx)
+	ctx = actionsource.WithMissingRefResolutions(ctx)
 	if compilerVersion == "" {
 		return Bundle{}, fmt.Errorf("compiler version is required")
 	}

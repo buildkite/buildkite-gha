@@ -164,7 +164,7 @@ func (e *RateLimitError) Error() string {
 }
 
 // NotPublicError deliberately does not distinguish missing and private repositories.
-type NotPublicError struct{}
+type NotPublicError struct{ statusCode int }
 
 func (*NotPublicError) Error() string { return "GitHub action was not found or is not public" }
 
@@ -401,14 +401,14 @@ func (r *Resolver) ResolutionSnapshotID() string {
 	return r.cfg.resolutionSnapshot.generation
 }
 
-func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved, error) {
+func (r *Resolver) resolveMutableUncached(ctx context.Context, ref Reference) (Resolved, error) {
 	if err := r.cfg.credential.provision(ctx); err != nil {
 		return Resolved{}, err
 	}
 	if r.cfg.credential != nil && r.cfg.credential.token != "" {
 		if err := r.ensurePublic(ctx, ref); err != nil {
 			if !gitFallbackError(err) || !r.gitRepositorySource(ref) {
-				return Resolved{}, err
+				return Resolved{}, markMissingRef(err)
 			}
 			return resolveWithGit(ctx, r.cfg, ref)
 		}
@@ -423,6 +423,7 @@ func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved,
 // resolveMutableViaAPI resolves a tag, branch, or commit-ish through the
 // GitHub API, trying tag and branch refs before the commits endpoint.
 func (r *Resolver) resolveMutableViaAPI(ctx context.Context, ref Reference) (Resolved, error) {
+	allNotFound := true
 	for _, kind := range []string{"tags", "heads"} {
 		var v struct {
 			Object struct {
@@ -442,8 +443,13 @@ func (r *Resolver) resolveMutableViaAPI(ctx context.Context, ref Reference) (Res
 		if !errors.As(err, &nf) {
 			return Resolved{}, err
 		}
+		allNotFound = allNotFound && isGitHubNotFound(err)
 	}
-	return r.resolveCommit(ctx, ref)
+	resolved, err := r.resolveCommit(ctx, ref)
+	if allNotFound {
+		err = markMissingRef(err)
+	}
+	return resolved, err
 }
 func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, error) {
 	var v struct {
@@ -532,13 +538,13 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 		return fmt.Errorf("GitHub API response too large")
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		return &NotPublicError{}
+		return &NotPublicError{statusCode: resp.StatusCode}
 	}
 	if rate := rateLimitError(resp, body, cfg.now()); rate != nil {
 		return rate
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return &NotPublicError{}
+		return &NotPublicError{statusCode: resp.StatusCode}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
