@@ -159,7 +159,7 @@ var profiles = map[ProfileID]Profile{
 	ProfileDeferredInput:            {Form: FormTemplate, Scope: ScopeCall, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDeferredInput},
 	ProfileSchedulingGroup:          {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsDeferredInput},
 	ProfileSchedulingParallel:       {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: FunctionSet{"fromJSON"}, Missing: MissingError, Token: TokenDenied, semantics: semanticsJobControl},
-	ProfileCompileServiceCredential: {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"env", "github", "matrix", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsServiceCredential},
+	ProfileCompileServiceCredential: {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsServiceCredential},
 	ProfileServiceCredential:        {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsServiceCredential},
 	ProfileServiceMap:               {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsServiceMap},
 	ProfileActionInputDefault:       {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsActionInputDefault},
@@ -747,7 +747,26 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 		if _, err := engine.Validate(site); err != nil {
 			return Reduced{}, err
 		}
-		reduced, err := reduceAvailableCompileTemplate(site.Source, values.Compile, site.Profile == ProfileCompileServiceCredential)
+		source := site.Source
+		if site.Profile == ProfileCompileServiceCredential {
+			// Validate authored secret names before substitution. Substitute once
+			// so computed input indexes cannot become admitted named references.
+			var err error
+			source, err = substituteCompileInputsOnce(source, values.Compile.Inputs)
+			if err != nil {
+				return Reduced{}, siteError(site, err)
+			}
+			residual := site
+			residual.Source = source
+			referencesInputs, err := engine.ReferencesContext(residual, "inputs", false)
+			if err != nil {
+				return Reduced{}, err
+			}
+			if referencesInputs {
+				return Reduced{}, siteError(site, fmt.Errorf("runtime context %q is unavailable in this field: service credentials require compile-known named inputs", "inputs"))
+			}
+		}
+		reduced, err := reduceAvailableCompileTemplate(source, values.Compile, site.Profile == ProfileCompileServiceCredential)
 		if err != nil {
 			return Reduced{}, siteError(site, err)
 		}
