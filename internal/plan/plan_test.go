@@ -1613,6 +1613,36 @@ func TestContainerPlanAcceptsDottedEnvironmentKeys(t *testing.T) {
 	validateJobPlanSchema(t, encoded)
 }
 
+func TestServiceIDPlanBoundary(t *testing.T) {
+	schema := compileJobPlanSchema(t)
+	for _, name := range []string{"s3.docker.test", "s3-docker-test", "_cache_2", strings.Repeat("a", 255), "", "UPPER", "s3/docker.test", "s3\ndocker.test", ".docker", strings.Repeat("a", 256)} {
+		t.Run(name, func(t *testing.T) {
+			job := validJob()
+			job.RequiredCapabilities = []string{"docker", "network"}
+			job.Services = map[string]ServiceContainer{name: {Image: "redis:7"}}
+			job.ServiceOrder = []string{name}
+			synchronizeExecutionProgram(&job)
+			// Marshal directly to exercise admission of an untrusted wire plan.
+			encoded, err := json.Marshal(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document any
+			if err := json.Unmarshal(encoded, &document); err != nil {
+				t.Fatal(err)
+			}
+			wantValid := name == "s3.docker.test" || name == "s3-docker-test" || name == "_cache_2" || name == strings.Repeat("a", 255)
+			decoded, decodeErr := Decode(encoded)
+			if (decodeErr == nil) != wantValid || (schema.Validate(document) == nil) != wantValid {
+				t.Fatalf("service %q: Decode error = %v, schema error = %v, want valid = %v", name, decodeErr, schema.Validate(document), wantValid)
+			}
+			if wantValid && (decoded.Services[name].Image != "redis:7" || !slices.Equal(decoded.ServiceOrder, []string{name})) {
+				t.Fatalf("decoded services = %#v, order = %#v", decoded.Services, decoded.ServiceOrder)
+			}
+		})
+	}
+}
+
 func TestContainerModelFields(t *testing.T) {
 	tests := []struct {
 		name   string

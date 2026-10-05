@@ -454,8 +454,8 @@ func validateRawContainers(path string, document *yaml.Node) (map[string]rawServ
 		}
 		for j := 0; j+1 < len(services.Content); j += 2 {
 			name, container := services.Content[j], services.Content[j+1]
-			if name.Value != strings.ToLower(name.Value) || !serviceIDPattern.MatchString(name.Value) {
-				return nil, nil, rawError(path, name, fmt.Sprintf("invalid service ID %q; service IDs must be lowercase", name.Value))
+			if err := plan.ValidateServiceName(name.Value); err != nil {
+				return nil, nil, rawError(path, name, err.Error())
 			}
 			extra, expected, err := validateRawContainer(path, container, true)
 			if err != nil {
@@ -708,8 +708,11 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			})
 			for _, name := range names {
 				service := in.Services.Value[name]
-				if service == nil || service.Name == nil || service.Container == nil || !serviceIDPattern.MatchString(service.Name.Value) {
+				if service == nil || service.Name == nil || service.Container == nil {
 					return Job{}, locatedError(path, in.Services.Pos, in.ID.Value, fmt.Sprintf("invalid service ID %q", name))
+				}
+				if err := plan.ValidateServiceName(service.Name.Value); err != nil {
+					return Job{}, locatedError(path, in.Services.Pos, in.ID.Value, err.Error())
 				}
 				container, err := adaptServiceContainer(path, in.ID.Value, service.Container, rawContainers[strings.ToLower(in.ID.Value)+"\x00"+service.Name.Value])
 				if err != nil {
@@ -1032,8 +1035,6 @@ func adaptEnv(in *actionlint.Env) map[string]string {
 	}
 	return out
 }
-
-var serviceIDPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
 
 func adaptContainer(path, jobID string, in *actionlint.Container, raw rawServiceContainer) (Container, error) {
 	if in.Image == nil || strings.TrimSpace(in.Image.Value) == "" {

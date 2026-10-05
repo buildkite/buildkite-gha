@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -706,6 +707,44 @@ jobs:
 	job := parsed.Jobs[0]
 	if job.Container.Env["app.mode"] != "production" || job.Services[0].Container.Env["discovery.type"] != "single-node" || job.Services[0].Container.Env["xpack.security.enabled"] != "false" {
 		t.Fatalf("container env = %#v, service env = %#v", job.Container.Env, job.Services[0].Container.Env)
+	}
+}
+
+func TestParseServiceIDs(t *testing.T) {
+	for _, test := range []struct {
+		name, want string
+	}{
+		{name: "s3.docker.test"},
+		{name: "s3-docker-test"},
+		{name: "_cache_2"},
+		{name: strings.Repeat("a", 255)},
+		{name: "S3.docker.test", want: "character 'S' is uppercase"},
+		{name: "s3/docker.test", want: "invalid character '/'"},
+		{name: "s3 docker.test", want: "invalid character ' '"},
+		{name: "s3\ndocker.test", want: `invalid character '\n'`},
+		{name: "s3\x00docker.test", want: `invalid character '\x00'`},
+		{name: "s3.döcker.test", want: "invalid character 'ö'"},
+		{name: "3docker", want: "must start with a lowercase letter or underscore; found '3'"},
+		{name: ".docker", want: "must start with a lowercase letter or underscore; found '.'"},
+		{name: "", want: "must not be empty"},
+		{name: strings.Repeat("a", 256), want: "exceeds 255 bytes"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte(fmt.Sprintf("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      %q: {image: redis:7}\n    steps: [{run: true}]\n", test.name))
+			parsed, err := Parse("services.yml", source)
+			if test.want != "" {
+				if err == nil || !strings.Contains(err.Error(), "services.yml:6:7: invalid service ID") || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("Parse() error = %v, want located diagnostic containing %q", err, test.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := parsed.Jobs[0].Services[0].Name; got != test.name {
+				t.Fatalf("service ID = %q, want %q", got, test.name)
+			}
+		})
 	}
 }
 

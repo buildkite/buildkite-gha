@@ -565,7 +565,11 @@ func TestEvaluateSupportsStaticIndexReferences(t *testing.T) {
 }
 
 func TestServiceRuntimeContext(t *testing.T) {
-	services := map[string]ServiceContext{"redis": {ID: "container-id", Network: "job-network", Ports: map[string]string{"6379": "49152"}}}
+	services := map[string]ServiceContext{
+		"redis":          {ID: "container-id", Network: "job-network", Ports: map[string]string{"6379": "49152"}},
+		"s3.docker.test": {ID: "dotted-id", Network: "job-network", Ports: map[string]string{"6379": "49153"}},
+		"s3-docker-test": {ID: "hyphenated-id", Network: "job-network", Ports: map[string]string{"6379": "49154"}},
+	}
 	context := Context{Services: services, Env: map[string]string{"PORT": "6379"}}
 	for _, reference := range []string{"job.services.redis.ports[6379]", "JOB.Services.REDIS.Ports[6379]", "job.services.REDIS.ports['6379']"} {
 		got, err := Evaluate("${{ "+reference+" }}", context)
@@ -582,6 +586,11 @@ func TestServiceRuntimeContext(t *testing.T) {
 	for template, want := range map[string]string{
 		"${{ job.services['redis'].id }}":                      "container-id",
 		"${{ format('{0}', job.services.redis.ports[6379]) }}": "49152",
+		"${{ job.services['s3.docker.test'].id }}":             "dotted-id",
+		"${{ job.services['s3-docker-test'].id }}":             "hyphenated-id",
+		"${{ job.services['s3.docker.test'].network }}":        "job-network",
+		"${{ job.services['s3.docker.test'].ports[6379] }}":    "49153",
+		"${{ job.services['s3-docker-test'].ports[6379] }}":    "49154",
 	} {
 		if got, err := EvaluateStep(template, context); err != nil || got != want {
 			t.Fatalf("EvaluateStep(%q) = %q, %v; want %q", template, got, err, want)
@@ -596,7 +605,33 @@ func TestServiceRuntimeContext(t *testing.T) {
 	if got, err := EvaluateCondition("job.services.redis.id == 'container-id' && job.services.redis.network == 'job-network'", ConditionContext{Services: services}); err != nil || !got {
 		t.Fatalf("service identity condition = %v, %v", got, err)
 	}
-	for _, reference := range []string{"job.services.missing.ports[6379]", "job.services.redis.ports[1234]", "job.services.redis.ports[env.PORT]", "job.status"} {
+	engine := NewEngine()
+	known := AbstractValues{References: map[string]any{
+		"job.services.s3.docker.test.id": "dotted-id", "job.services.s3-docker-test.id": "hyphenated-id",
+		"job.services.s3.docker.test.network": "job-network", "job.services.s3-docker-test.network": "job-network",
+	}}
+	for source, want := range map[string]bool{
+		"job.services['s3.docker.test'].id != job.services['s3-docker-test']['id']":           true,
+		"job.services['s3.docker.test'].id == job.services['s3-docker-test']['id']":           false,
+		"job.services['s3.docker.test']['network'] == job.services['s3-docker-test'].network": true,
+	} {
+		site := Site{Source: source, Profile: ProfileStepCondition, Result: ResultBoolean}
+		if got, err := engine.Evaluate(site, Values{Condition: ConditionContext{Services: services}}); err != nil || got != want {
+			t.Fatalf("Evaluate(%q) = %v, %v; want %v", source, got, err, want)
+		}
+		if got, err := engine.Analyze(site, known); err != nil || !got.Value.Known || got.Value.Value != want || got.Effects != (Effects{}) {
+			t.Fatalf("Analyze(%q) = %#v, %v; want known %v without effects", source, got, err, want)
+		}
+		if got, err := engine.Analyze(site, AbstractValues{}); err != nil || got.Value.Known || got.Effects != (Effects{}) {
+			t.Fatalf("unknown Analyze(%q) = %#v, %v", source, got, err)
+		}
+	}
+	for _, source := range []string{"job", "job['services']", "job.services[env.NAME].id", "job.services.s3.docker.test.id", "true || job['status']"} {
+		if _, err := engine.Validate(Site{Source: source, Profile: ProfileStepCondition, Result: ResultBoolean}); err == nil {
+			t.Errorf("Validate(%q) unexpectedly succeeded", source)
+		}
+	}
+	for _, reference := range []string{"job.services.s3.docker.test.id", "job.services.missing.ports[6379]", "job.services.redis.ports[1234]", "job.services.redis.ports[env.PORT]", "job.status"} {
 		if _, err := Evaluate("${{ "+reference+" }}", context); err == nil {
 			t.Errorf("Evaluate(%q) unexpectedly succeeded", reference)
 		}

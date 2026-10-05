@@ -8,6 +8,11 @@ on:
         type: boolean
         default: false
   workflow_call:
+    inputs:
+      dotted-only:
+        description: Run only the dotted service ID probe
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -119,6 +124,8 @@ jobs:
         options: --health-cmd "redis-cli ping" --health-interval 1s --health-timeout 2s --health-retries 10
     steps:
       - name: Verify distinct service context entries
+        id: context
+        if: job.services['s3.docker.test'].id != job.services['s3-docker-test']['id'] && job.services['s3.docker.test']['network'] == job.services['s3-docker-test'].network
         shell: sh
         env:
           SERVICES_JSON: ${{ toJSON(job.services) }}
@@ -171,3 +178,9 @@ jobs:
           test "$(redis-cli -h s3.docker.test GET marker)" = dotted
           test "$(redis-cli -h s3-docker-test GET marker)" = hyphenated
           printf '%s\n' 'DOTTED_SERVICE_CONTAINER=distinct-dns-aliases,roundtrip'
+      - name: Verify service condition ran the context checks
+        if: ${{ !cancelled() }}
+        shell: sh
+        env:
+          CONTEXT_OUTCOME: ${{ steps.context.outcome }}
+        run: test "$CONTEXT_OUTCOME" = success
