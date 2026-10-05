@@ -2132,6 +2132,21 @@ func TestProcessingAnnotationLinksPullRequestTargetGuidance(t *testing.T) {
 	}
 }
 
+func TestProcessingAnnotationLinksDeferredMatrixGuidance(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "ci.yml")
+	source := []byte("on: push\njobs:\n  plan:\n    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.plan.outputs.matrix }}\n    steps:\n      - id: plan\n        run: echo 'matrix=[]' >> \"$GITHUB_OUTPUT\"\n  build:\n    needs: plan\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include: ${{ fromJSON(needs.plan.outputs.matrix) }}\n    steps:\n      - run: true\n")
+	compiled, err := compiler.Validate(workflowPath, source)
+	if err == nil {
+		t.Fatal("Validate() succeeded, want deferred-matrix finding")
+	}
+	report := compatibility.InitialProcessingReport(workflowPath, "hosted", false, compiled, err)
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
+	want := `<a href="https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#matrices-from-job-outputs" target="_blank">docs/compatibility.md</a>)</strong>`
+	if !strings.Contains(body, want) {
+		t.Fatalf("annotation = %q, want it to contain %q", body, want)
+	}
+}
+
 func TestAnnotationCodeEscapesHTML(t *testing.T) {
 	if got, want := annotationCode("action` **not bold** & <tag> ``tail"), "<code>action` **not bold** &amp; &lt;tag&gt; ``tail</code>"; got != want {
 		t.Fatalf("annotationCode() = %q, want %q", got, want)

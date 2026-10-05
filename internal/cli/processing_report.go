@@ -579,7 +579,7 @@ func renderProcessingDiagnostic(ctx context.Context, diagnostic compatibility.Di
 	heading, details := annotationDiagnosticPresentation(diagnostic)
 	var out strings.Builder
 	out.WriteString("<p><strong>")
-	out.WriteString(annotationHTML(heading))
+	out.WriteString(annotationDocsLinks(annotationHTML(heading)))
 	out.WriteString("</strong></p>\n")
 	context := make([]string, 0, 4)
 	if diagnostic.Action != "" {
@@ -611,7 +611,7 @@ func renderProcessingDiagnostic(ctx context.Context, diagnostic compatibility.Di
 			detail = strings.ReplaceAll(detail, "&#34;ubuntu-latest&#34;", annotationCode("ubuntu-latest"))
 			const issueURL = "https://github.com/buildkite/buildkite-gha"
 			detail = strings.ReplaceAll(detail, issueURL+" ", `<a href="`+issueURL+`" target="_blank">buildkite/buildkite-gha</a> `)
-			detail = docsURLPattern.ReplaceAllString(detail, `<a href="$0" target="_blank">$1</a>`)
+			detail = annotationDocsLinks(detail)
 			out.WriteString(detail)
 			out.WriteString("</p>\n")
 		}
@@ -690,6 +690,11 @@ func upperFirst(value string) string {
 
 func annotationCode(value string) string {
 	return "<code>" + annotationHTML(value) + "</code>"
+}
+
+// annotationDocsLinks links repository documentation URLs in escaped HTML.
+func annotationDocsLinks(escaped string) string {
+	return docsURLPattern.ReplaceAllString(escaped, `<a href="$0" target="_blank">$1</a>`)
 }
 
 func annotationHTML(value string) string {
