@@ -2,6 +2,11 @@ name: Service container differential oracle
 
 on:
   workflow_dispatch:
+    inputs:
+      dotted-only:
+        description: Run only the dotted service ID probe
+        type: boolean
+        default: false
   workflow_call:
 
 permissions:
@@ -9,6 +14,7 @@ permissions:
 
 jobs:
   service-parity:
+    if: ${{ !inputs.dotted-only }}
     runs-on: ubuntu-latest
     services:
       z-writer:
@@ -86,3 +92,82 @@ jobs:
           exec 4<&- 4>&-
           printf '%s\n' 'observation=selection,context,ports,command-entrypoint,health,volume,postgres,redis' >> "$GITHUB_OUTPUT"
           printf '%s\n' 'SERVICE_CONTAINER_OBSERVATION={"selection":"static","context":"id-network-ports","command_entrypoint":"verified","health":"gated","volume":"named","databases":"postgres-redis"}'
+
+  dotted-service-ids:
+    if: ${{ inputs.dotted-only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: host
+            container: ''
+          - target: container
+            container: redis@sha256:c9d92d840fd011c908f040592857c724ae6d877f2aba5c40ad963276507386b2
+    container: ${{ matrix.container }}
+    services:
+      s3.docker.test:
+        image: redis@sha256:c9d92d840fd011c908f040592857c724ae6d877f2aba5c40ad963276507386b2
+        ports:
+          - 6379
+        options: --health-cmd "redis-cli ping" --health-interval 1s --health-timeout 2s --health-retries 10
+      s3-docker-test:
+        image: redis@sha256:c9d92d840fd011c908f040592857c724ae6d877f2aba5c40ad963276507386b2
+        ports:
+          - 6379
+        options: --health-cmd "redis-cli ping" --health-interval 1s --health-timeout 2s --health-retries 10
+    steps:
+      - name: Verify distinct service context entries
+        shell: sh
+        env:
+          SERVICES_JSON: ${{ toJSON(job.services) }}
+          DOTTED_ID: ${{ job.services['s3.docker.test'].id }}
+          HYPHENATED_ID: ${{ job.services['s3-docker-test'].id }}
+          DOTTED_NETWORK: ${{ job.services['s3.docker.test'].network }}
+          HYPHENATED_NETWORK: ${{ job.services['s3-docker-test'].network }}
+          DOTTED_PORT: ${{ job.services['s3.docker.test'].ports[6379] }}
+          HYPHENATED_PORT: ${{ job.services['s3-docker-test'].ports[6379] }}
+        run: |
+          set -x
+          printf '%s\n' "$SERVICES_JSON"
+          test -n "$DOTTED_ID"
+          test -n "$HYPHENATED_ID"
+          test "$DOTTED_ID" != "$HYPHENATED_ID"
+          test -n "$DOTTED_NETWORK"
+          test "$DOTTED_NETWORK" = "$HYPHENATED_NETWORK"
+          test -n "$DOTTED_PORT"
+          test -n "$HYPHENATED_PORT"
+          printf '%s\n' 'DOTTED_SERVICE_CONTEXT=id,network,ports,distinct-keys'
+      - name: Verify host published ports
+        if: ${{ !cancelled() && matrix.target == 'host' }}
+        shell: bash
+        env:
+          DOTTED_ID: ${{ job.services['s3.docker.test'].id }}
+          HYPHENATED_ID: ${{ job.services['s3-docker-test'].id }}
+          DOTTED_PORT: ${{ job.services['s3.docker.test'].ports[6379] }}
+          HYPHENATED_PORT: ${{ job.services['s3-docker-test'].ports[6379] }}
+        run: |
+          set -x
+          docker inspect "$DOTTED_ID" "$HYPHENATED_ID" --format '{{.Name}} {{json .NetworkSettings.Networks}}'
+          docker port "$DOTTED_ID"
+          docker port "$HYPHENATED_ID"
+          test "$DOTTED_PORT" != "$HYPHENATED_PORT"
+          for port in "$DOTTED_PORT" "$HYPHENATED_PORT"; do
+            exec 3<>"/dev/tcp/127.0.0.1/$port"
+            printf 'PING\r\n' >&3
+            IFS= read -r -t 2 reply <&3
+            test "$reply" = $'+PONG\r'
+            exec 3<&- 3>&-
+          done
+          printf '%s\n' 'DOTTED_SERVICE_HOST=distinct-published-ports,pong'
+      - name: Verify container DNS aliases
+        if: ${{ !cancelled() && matrix.target == 'container' }}
+        shell: sh
+        run: |
+          set -x
+          test "$(redis-cli -h s3.docker.test SET marker dotted)" = OK
+          test "$(redis-cli -h s3-docker-test SET marker hyphenated)" = OK
+          test "$(redis-cli -h s3.docker.test GET marker)" = dotted
+          test "$(redis-cli -h s3-docker-test GET marker)" = hyphenated
+          printf '%s\n' 'DOTTED_SERVICE_CONTAINER=distinct-dns-aliases,roundtrip'

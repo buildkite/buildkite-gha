@@ -3616,7 +3616,8 @@ func TestLiveManifestContainerFixtures(t *testing.T) {
 
 func TestLiveServiceDifferentialFixture(t *testing.T) {
 	docker := requireDocker(t)
-	sourcePath := fixturePath(t, "..", ".github", "workflows", "service-container-oracle.yml")
+	// Keep the runtime fixture independent of native-only GitHub probes.
+	sourcePath := fixturePath(t, "service-container-oracle.yml")
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
 		t.Fatal(err)
