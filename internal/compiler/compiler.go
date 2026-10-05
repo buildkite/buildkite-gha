@@ -520,7 +520,11 @@ func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warnin
 			message += " The supported triggers declared in this workflow still run: " + strings.Join(supportedNames, ", ") + "."
 			message += " Move the jobs this trigger guards to one of those triggers if you need them."
 		}
-		message += fmt.Sprintf(" If you need %s, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.", trigger.Event)
+		if trigger.Event == "pull_request_target" {
+			message += " pull_request_target is intentionally unsupported for security reasons. Use pull_request with careful checkout and ref handling instead; changing the event alone does not make untrusted code safe. See https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#names-and-triggers for details."
+		} else {
+			message += fmt.Sprintf(" If you need %s, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.", trigger.Event)
+		}
 		warnings = append(warnings, Warning{
 			Code:          "W_TRIGGER_EVENT_UNSUPPORTED",
 			Blocker:       "trigger",

@@ -548,8 +548,11 @@ func TestRunValidateAndCompile(t *testing.T) {
 				messages[event] = message
 			}
 		}
-		for _, event := range []string{"repository_dispatch", "pull_request_target"} {
-			want := "on." + event + " is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: push. Move the jobs this trigger guards to one of those triggers if you need them. If you need " + event + ", log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it."
+		for event, guidance := range map[string]string{
+			"repository_dispatch": "If you need repository_dispatch, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
+			"pull_request_target": "pull_request_target is intentionally unsupported for security reasons. Use pull_request with careful checkout and ref handling instead; changing the event alone does not make untrusted code safe. See https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#names-and-triggers for details.",
+		} {
+			want := "on." + event + " is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: push. Move the jobs this trigger guards to one of those triggers if you need them. " + guidance
 			if messages[event] != want {
 				t.Fatalf("unsupported-trigger message for %s = %q, want %q; report = %#v", event, messages[event], want, report)
 			}
@@ -2111,6 +2114,36 @@ func TestProcessingAnnotationRendersJobPermissionWarningGuidance(t *testing.T) {
 `
 	if body != want {
 		t.Fatalf("annotation = %q, want %q", body, want)
+	}
+}
+
+func TestProcessingAnnotationLinksPullRequestTargetGuidance(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "ci.yml")
+	report := compatibility.NewProcessingReport(workflowPath, "hosted")
+	parsed, err := compiler.ParseWorkflow(workflowPath, []byte("on: [push, pull_request_target]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.ApplyWarnings(report.Workflow, parsed.Warnings)
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
+	want := `<p>See <a href="https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#names-and-triggers" target="_blank">docs/compatibility.md</a> for details.</p>`
+	if !strings.Contains(body, want) {
+		t.Fatalf("annotation = %q, want it to contain %q", body, want)
+	}
+}
+
+func TestProcessingAnnotationLinksDeferredMatrixGuidance(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "ci.yml")
+	source := []byte("on: push\njobs:\n  plan:\n    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.plan.outputs.matrix }}\n    steps:\n      - id: plan\n        run: echo 'matrix=[]' >> \"$GITHUB_OUTPUT\"\n  build:\n    needs: plan\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include: ${{ fromJSON(needs.plan.outputs.matrix) }}\n    steps:\n      - run: true\n")
+	compiled, err := compiler.Validate(workflowPath, source)
+	if err == nil {
+		t.Fatal("Validate() succeeded, want deferred-matrix finding")
+	}
+	report := compatibility.InitialProcessingReport(workflowPath, "hosted", false, compiled, err)
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
+	want := `<a href="https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#matrices-from-job-outputs" target="_blank">docs/compatibility.md</a>)</strong>`
+	if !strings.Contains(body, want) {
+		t.Fatalf("annotation = %q, want it to contain %q", body, want)
 	}
 }
 
