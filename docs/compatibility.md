@@ -1749,11 +1749,14 @@ with a lowercase letter or underscore, followed by lowercase letters, digits,
 underscores, hyphens, or dots. These are Buildkite's supported limits, not a
 claim that GitHub rejects every other spelling.
 
-On 2026-10-05, [GitHub run 37287017319](https://github.com/buildkite/buildkite-gha/actions/runs/37287017319)
-passed the `service-container-oracle.yml` workflow with `dotted-only=true` on
+On 2026-10-05, [GitHub run 37290763650](https://github.com/buildkite/buildkite-gha/actions/runs/37290763650)
+passed the [pinned service-container oracle](https://github.com/buildkite/buildkite-gha/blob/b13ba1d89ed06ec809b0aae25428e4e7bbe5e2ed/.github/workflows/service-container-oracle.yml)
+with `dotted-only=true` on
 `ubuntu-latest`, both on the host and in a digest-pinned Redis job container.
 Two services named `s3.docker.test` and `s3-docker-test` retained distinct IDs,
 bracket-indexed `id`, `network`, and `ports`, and separate published ports.
+The bracket-indexed `id`/`network` step condition evaluated true; an outcome
+assertion confirmed the context checks ran rather than being skipped.
 Asymmetric Redis SET/GET checks inside the job container verified that the DNS
 aliases reached different services. This observation covers dotted service
 IDs, not uppercase IDs, other punctuation, or maximum-length DNS names.
