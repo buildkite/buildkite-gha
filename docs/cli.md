@@ -10,6 +10,7 @@ to validate a workflow, inspect generated output, or build a custom importer.
 | `validate-batch` | Check a large workflow corpus. |
 | `compile` | Render pipeline YAML or compiler IR without uploading it. |
 | `upload` | Upload workflows from a custom importer. |
+| `migrate-secrets` | Copy GitHub Actions repository secrets into Buildkite secrets. |
 
 `run-job` and the `upload --stage-digest` form are internal commands that
 generated steps run. Do not invoke them directly.
@@ -443,6 +444,7 @@ buildkite-gha upload .github/workflows/ci.yml
 
 The importer must run on Linux/amd64, Linux/arm64, or Darwin/arm64 with
 Buildkite agent v3.129 or newer, `BUILDKITE=true`, and `BUILDKITE_STEP_KEY`.
+The plugin wrapper starts the importer only on Linux/amd64 or Darwin/arm64.
 
 The hidden, zero-argument `buildkite-gha plugin` entry point reads plugin
 configuration from `BUILDKITE_PLUGIN_CONFIGURATION`. It accepts:
@@ -860,7 +862,7 @@ executable and compiled plan remain root-owned and read-only to `runner`.
 Generated jobs skip the Buildkite checkout. When a workflow uses
 `actions/checkout`, the native adapter clones as `runner`, so the runtime does
 not recursively change workspace ownership. This behavior does not depend on a
-queue name and does not affect macOS jobs.
+queue name and does not affect macOS or Windows jobs.
 
 During the transition, set the plugin field to `false` to run as the agent's
 original user without this bootstrap:

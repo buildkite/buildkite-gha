@@ -138,9 +138,9 @@ The compiler and plan validator limit the sum of executable path lengths to
 one lock does not consume the budget again.
 
 Linux and macOS verification always reads executable bits from the filesystem,
-so declared paths cannot hide mode changes. The source verifier can use recorded
-paths on Windows, where Unix modes are not preserved; this does not admit
-Windows jobs. Content, additions, removals, and special files remain checked.
+so declared paths cannot hide mode changes. On [experimental Windows
+jobs](compatibility.md#experimental-windows-jobs), where Unix modes are not
+preserved, the source verifier uses the recorded paths instead. Content, additions, removals, and special files remain checked.
 Cache manifests keep their existing format and must match the verified tree;
 stale or mismatched manifests fail rather than being rewritten from provenance.
 
@@ -384,7 +384,7 @@ boundary.
 ## Operator checklist
 
 1. Leave the plugin `version` unset for the latest stable release, or pin an
-   exact stable release from `0.8.0` onward for a controlled rollout.
+   exact stable release from `0.9.0` onward for a controlled rollout.
 1. Run imported jobs on an isolated queue with no ambient credentials.
 1. Treat public actions as third-party code and prefer immutable commit pins.
 1. Restrict managed repository access, secrets, and write tokens with Buildkite

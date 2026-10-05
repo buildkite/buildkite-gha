@@ -7,12 +7,14 @@ and the Buildkite plugin. If a feature is not listed, treat it as unsupported.
 
 buildkite-gha requires Buildkite agent v3.129 or newer.
 
-The plugin supports Linux x86-64, Linux arm64, and native macOS arm64 importers
-and jobs, with [experimental Windows jobs](#experimental-windows-jobs) available
-by explicit opt-in. Linux arm64 jobs require an explicit queue. It sets the
-matching `runner.os` and `runner.arch` values. Runner labels select a platform;
-they do not promise GitHub image, toolchain, or Xcode parity. It sets
-`runner.environment` to `self-hosted` on every platform.
+Generated jobs run on Linux x86-64, Linux arm64, and native macOS arm64, with
+[experimental Windows jobs](#experimental-windows-jobs) available by explicit
+opt-in. Linux arm64 jobs require an explicit queue. The plugin's importer runs
+on Linux x86-64 or macOS arm64; a [custom importer](cli.md#upload-from-a-custom-importer)
+can also run on Linux arm64. Runner labels select a platform; they do not
+promise GitHub image, toolchain, or Xcode parity. The runtime sets the matching
+`runner.os` and `runner.arch` values, and sets `runner.environment` to
+`self-hosted` on every platform.
 
 Generated Linux jobs use a dedicated `runner` user and need `buildkite-gha`
 v0.13.7 or newer. Use `experimental-runner-user: false` temporarily if an image
@@ -66,7 +68,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | --- | --- | --- |
 | [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name`, explicit `run-name`, and job names are retained. `run-name` supports expressions over `github`, `inputs`, and `vars`. |
 | [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. `workflow_call` is supported for composition. |
-| [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64. Explicit mappings can select a user-provided Linux arm64 queue. The Agent API can map compatible selectors to Linux, native macOS arm64, or explicitly enabled experimental Windows x86-64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
+| [Platforms](#job-configuration) | 🟡 Supported subset | Linux x86-64 labels have local presets. Explicit mappings can select a user-provided Linux arm64 queue. The Agent API can map compatible selectors to Linux, native macOS arm64, or explicitly enabled experimental Windows x86-64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Needs-derived matrices can also read their producer's parallel limit. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `pwsh`, `powershell`, `python`, and custom shell templates; PowerShell and MSYS2 on experimental Windows jobs. |
@@ -87,8 +89,8 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 ## Experimental Windows jobs
 
 Windows support is in development, not generally available. Import workflows
-from Linux x86-64, Linux arm64, or macOS arm64; Windows agents run generated
-jobs only.
+from a supported Linux or macOS importer; Windows agents run generated jobs
+only.
 `windows-latest` and `windows-2022` select Windows x86-64 when explicitly mapped
 to a queue or enabled through Agent API resolution. They have no local preset
 and are otherwise rejected, never silently redirected to Linux.
@@ -138,177 +140,6 @@ GitHub Actions combines run creation and workload definition in one file. Buildk
 No shadow GitHub Actions run is created. Buildkite owns scheduling, logs, retries, cancellation, and status.
 
 Steps remain inside one job because they share a workspace, environment files, action state, and post-action cleanup.
-
-### Repository fork events
-
-`fork` runs when someone forks the source repository. Scalar, array, null, and
-empty-map declarations and null/empty `types` are supported. Branch, tag, and path filters are ignored;
-nonempty activity types and other filters are rejected.
-It does not enable pull requests from forks or `pull_request_target`.
-
-Pipeline Triggers require a compatible backend, pinned workflow path/ref/SHA,
-and the original linked payload. Discovery and checkout use the source
-repository's server-resolved default-branch commit, never the forkee's branch or
-commit or stale pipeline/webhook metadata. The complete payload, including
-`github.event.forkee`, survives into `GITHUB_EVENT_PATH`. Missing, malformed,
-foreign-repository, or contradictory provenance fails closed, including rebuilds
-without the original payload. Explicit snapshots must supply a full SHA and
-the resolved source `repository.default_branch`; the runtime does not resolve it.
-
-This adds no token authority or native GitHub Actions run. Release and select the
-fork-capable runtime before deploying backend subscription defaults. Existing
-dedicated hooks require a separately approved additive `fork` subscription;
-deployment does not backfill them.
-
-### Repository visibility events
-
-`public` runs when a private repository becomes public. Scalar, array, null, and
-empty-map declarations and null/empty `types` are supported. Branch, tag, and path filters are ignored;
-nonempty activity types and other filters are rejected.
-Pipeline Triggers require pinned workflow path/ref/SHA and the original payload,
-which must identify the source repository, mark it public, and omit `action`.
-Discovery and checkout use the server-resolved default branch and immutable SHA,
-not stale webhook or pipeline metadata. Explicit snapshots must provide that
-resolved default branch. Missing or contradictory provenance fails closed,
-including rebuilds without the original payload. No token authority is added.
-
-Release and select the public-capable runtime before deploying backend
-subscription defaults. Existing hooks need a separately approved additive update;
-deployment does not backfill them.
-
-### Wiki page events
-
-`gollum` runs when wiki pages are created or edited. Scalar, array, null, and
-empty-map declarations and null/empty `types` are supported. Branch, tag, and path filters are ignored;
-nonempty activity types and other filters are rejected.
-Pipeline Triggers require pinned workflow path/ref/SHA and the original payload,
-including a nonempty `pages` array with valid names, actions, and wiki commit SHAs.
-Workflows and checkout use the source repository's server-resolved default branch
-and pinned SHA, never a wiki commit. Explicit snapshots must supply the resolved
-default branch. Page data remains in `github.event.pages` and `GITHUB_EVENT_PATH`.
-Missing, malformed, or contradictory provenance fails closed, including rebuilds
-without the original payload. No wiki checkout or token authority is added.
-
-Release and select the gollum-capable runtime before deploying backend subscription
-defaults. Existing hooks require a separately approved additive update; deployment
-does not backfill them.
-
-### GitHub Pages build events
-
-`page_build` accepts scalar, array, null, empty-map, and null/empty `types`
-declarations. Branch, tag, and path filters are ignored; nonempty activity types and other filters
-are rejected. Pipeline Triggers require pinned workflow path/ref/SHA
-and the original repository and Pages build payload, including build id, commit,
-and status. Failed builds can trigger workflows. Execution uses the server-resolved
-source default branch and pinned SHA, not the Pages build commit. Status and error
-data remains in `github.event.build` and `GITHUB_EVENT_PATH`. Missing or conflicting
-provenance fails closed, including rebuilds without the original payload. Explicit
-snapshots must supply the resolved default branch. This does not deploy Pages or
-add token authority. Release and select the compatible runtime before backend
-subscription defaults; existing hooks need a separately approved additive update.
-
-### Repository star events
-
-`watch` runs when someone stars the repository (`started`), not when they subscribe
-to notifications or remove a star. Scalar, array, null, empty-map, null/empty `types`,
-and `types: [started]` declarations are supported. Branch, tag, and path filters are ignored; other
-types and filters are rejected.
-Pipeline Triggers require the original payload and pinned workflow path/ref/SHA.
-Workflows and checkout use the source repository's server-resolved default branch,
-not stale webhook branch metadata. The original payload remains in `github.event`
-and `GITHUB_EVENT_PATH`. Missing or conflicting provenance fails closed, including
-rebuilds without the original payload. No token authority is added. Release and
-select the compatible runtime before backend subscription defaults; existing hooks
-need a separately approved additive update.
-
-### Milestone lifecycle events
-
-`milestone` supports `created`, `closed`, `opened`, `edited`, and `deleted`, all by
-default. Scalar, array, null, empty-map, and null/empty `types` declarations select all
-five; explicit `types` selects a subset. Branch, tag, and path filters are ignored.
-Issue/PR `milestoned` activities and other filters are rejected. Pipeline Triggers require pinned workflow
-path/ref/SHA and the original payload, including milestone id, number, and title.
-Workflows and checkout use the source repository's server-resolved default branch.
-`github.event.milestone` and `GITHUB_EVENT_PATH` retain the original data. Missing
-or conflicting provenance fails closed, including rebuilds without the original
-payload. No token authority is added. Release and select a compatible runtime
-before backend subscription defaults; existing hooks need a separately approved
-additive update.
-
-### Branch protection rule events
-
-`branch_protection_rule` supports `created`, `edited`, and `deleted`, all by
-default. Scalar, array, null, empty-map, and null/empty `types` select all three; explicit
-`types` selects a subset. Branch, tag, and path filters are ignored; other filters are rejected. Pipeline Triggers require
-pinned workflow path/ref/SHA and the original rule id, name, and repository id
-matching the source repository. Workflows and checkout use the server-resolved
-default branch, not the rule's branch pattern. `github.event.rule` and
-`GITHUB_EVENT_PATH` retain the original data. Missing or conflicting provenance
-fails closed, including rebuilds without the original payload. No token authority
-is added. Release and select a compatible runtime before backend subscription
-defaults; existing hooks need a separately approved additive update.
-
-### Discussion events
-
-`discussion` supports `created`, `edited`, `deleted`, `transferred`, `pinned`,
-`unpinned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `category_changed`,
-`answered`, `unanswered`, `closed`, and `reopened`, all by default. Scalar, array,
-null, empty-map, and null/empty `types` select all; explicit `types` selects a
-subset. `discussion_comment` supports `created`, `edited`, and `deleted` with
-the same declaration forms.
-Comments require a positive id and a `discussion_id` matching the discussion;
-there is no command-word or trusted-commenter gating. Both events ignore
-`branches`, `branches-ignore`, `tags`,
-`tags-ignore`, `paths`, and `paths-ignore`; explicit `types` still selects the
-activity. Other filters and unknown activities are rejected. Pipeline Triggers require
-pinned workflow path/ref/SHA and the original payload, including discussion id,
-number, and title. Each event uses its repository's server-resolved default
-branch. A transfer emits `transferred` in the source repository and a separate
-`created` event in the destination; each runs that repository's workflows.
-`github.event.discussion`, `github.event.comment`, and `GITHUB_EVENT_PATH` retain the original data. Missing
-or conflicting provenance fails closed, including rebuilds without the original
-payload. No token authority or native Actions run is added. Release and select a
-compatible runtime before backend subscription defaults; existing hooks need a
-separately approved additive update. GitHub lists discussion webhooks as public
-preview.
-
-### Repository label lifecycle events
-
-`label` supports `created`, `edited`, and `deleted` activities, all by default.
-Scalar, array, null, empty-map, `types: null`, and `types: []` declarations select
-all three; explicit `types` selects a subset. Branch, tag, and path filters are
-ignored. Issue/PR `labeled` actions and other filters are rejected.
-
-Pipeline Triggers require a compatible backend and the original linked payload.
-Workflow discovery and checkout use the server-resolved default-branch commit,
-not stale pipeline or webhook branch metadata. `github.event.label` and the
-original event file retain the label data. Missing/malformed/foreign payloads
-fail closed. Existing immutable workflow token policy and pipeline/repository/PR
-restrictions remain unchanged. Release and select this runtime before deploying
-the backend's label subscription defaults.
-
-### Branch and tag lifecycle events
-
-`create` and `delete` support scalar, array, null, and empty-map declarations.
-Branch, tag, and path filters are ignored; activity types and other filters are rejected. These events refer to
-Git refs, not repository creation/deletion. GitHub does not deliver them when
-more than three tags are created/deleted at once.
-
-Pipeline Triggers require a compatible backend and the original linked webhook.
-`create` uses the server-resolved created branch/tag commit (peeled for annotated
-tags). `delete` uses the server-resolved default-branch commit, never the deleted
-ref. Workflow selection and checkout share that immutable SHA. The deleted ref
-remains available in `github.event.ref`; `github.ref` names the default branch.
-Explicit snapshots must supply a full SHA, matching repository identity and,
-for deletion, the resolved `repository.default_branch`. The runtime does not
-resolve mutable refs or attest event-time SHAs from these SHA-less webhooks.
-
-The original payload is digest-bound and hydrated into `GITHUB_EVENT_PATH`.
-Missing payloads fail rather than synthesizing provenance. Neither event adds
-token authority: existing immutable workflow policy, pipeline opt-in, repository,
-PR and merge-queue restrictions remain. Release and select this runtime before
-deploying backend subscription defaults; this change performs no release,
-deployment, or existing-hook migration.
 
 ### Aggregate workflow upload
 
@@ -549,16 +380,141 @@ ref remains `refs/pull/<number>/merge`. There is no default-branch-only workflow
 requirement. Use `github.event.pull_request.head.ref` and `.base.ref` for branch
 conditions. CI-skip commit directives do not suppress these events.
 
-Review support requires the companion Buildkite backend and a runtime newer than
-v0.59.0 containing this implementation. Existing dedicated repository hooks must
-subscribe to both review events; deploying the backend does not backfill hooks.
-Fork PRs are unsupported. Same-repository review builds retain the PR
-`contents:read` token ceiling even for approving reviews; Buildkite secret and
-queue policies still apply. The original linked webhook is required, so rebuilds
-without retained payloads fail explicitly. See the
+Review events require `buildkite-gha` v0.64.0 or later. Fork PRs are
+unsupported. Same-repository review builds retain the PR `contents: read` token
+ceiling even for approving reviews; Buildkite secret and queue policies still
+apply. The original linked webhook is required, so rebuilds without retained
+payloads fail explicitly. See the
 [server-selected event contract](cli.md#private-preview-pipeline-trigger-selection).
 
 GitHub defines seven release activities: `published`, `unpublished`, `created`, `edited`, `deleted`, `prereleased`, and `released`. A bare `on: release` selects all seven. Pipeline Triggers accept all seven and apply GitHub's draft-release suppression before starting workflows. Native release builds deliver three and emit `W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED` when a workflow also selects `unpublished`, `edited`, `deleted`, or `prereleased`.
+
+The following sections describe repository events that only Pipeline Triggers
+deliver. Each requires the original linked payload and pinned workflow path,
+ref, and SHA. Unless noted, workflow selection and checkout use the source
+repository's server-resolved default-branch commit, not stale pipeline or
+webhook branch metadata. Explicit event snapshots must supply that resolved
+`repository.default_branch`; the runtime does not resolve it. The original
+payload remains available through `github.event` and
+[`GITHUB_EVENT_PATH`](#event-file).
+
+Missing, malformed, foreign-repository, or contradictory provenance fails
+closed, including rebuilds without the original payload. None of these events
+adds token authority or creates a native GitHub Actions run. Existing
+repository webhooks may need an additional event subscription; enabling
+backend support does not update existing hooks.
+
+#### Repository fork events
+
+`fork` runs when someone forks the source repository. Scalar, array, null, and
+empty-map declarations and null or empty `types` are supported. Branch, tag,
+and path filters are ignored; nonempty activity types and other filters are
+rejected. It does not enable pull requests from forks or `pull_request_target`.
+
+Workflows and checkout never use the forkee's branch or commit. The complete
+payload, including `github.event.forkee`, is retained. Explicit snapshots must
+also supply a full SHA.
+
+#### Repository visibility events
+
+`public` runs when a private repository becomes public. Scalar, array, null,
+and empty-map declarations and null or empty `types` are supported. Branch,
+tag, and path filters are ignored; nonempty activity types and other filters
+are rejected. The payload must identify the source repository, mark it public,
+and omit `action`.
+
+#### Wiki page events
+
+`gollum` runs when wiki pages are created or edited. Scalar, array, null, and
+empty-map declarations and null or empty `types` are supported. Branch, tag,
+and path filters are ignored; nonempty activity types and other filters are
+rejected.
+
+The payload must include a nonempty `pages` array with valid names, actions,
+and wiki commit SHAs. Workflows and checkout never use a wiki commit, and no
+wiki checkout is added. Page data remains in `github.event.pages`.
+
+#### GitHub Pages build events
+
+`page_build` accepts scalar, array, null, empty-map, and null or empty `types`
+declarations. Branch, tag, and path filters are ignored; nonempty activity
+types and other filters are rejected.
+
+The payload must include the Pages build ID, commit, and status. Failed builds
+can trigger workflows. Execution never uses the Pages build commit. Status and
+error data remain in `github.event.build`. This does not deploy Pages.
+
+#### Repository star events
+
+`watch` runs when someone stars the repository (`started`), not when they
+subscribe to notifications or remove a star. Scalar, array, null, empty-map,
+null or empty `types`, and `types: [started]` declarations are supported.
+Branch, tag, and path filters are ignored; other types and filters are
+rejected.
+
+#### Milestone lifecycle events
+
+`milestone` supports `created`, `closed`, `opened`, `edited`, and `deleted`,
+all by default. Scalar, array, null, empty-map, and null or empty `types`
+declarations select all five; explicit `types` selects a subset. Branch, tag,
+and path filters are ignored. Issue and PR `milestoned` activities and other
+filters are rejected.
+
+The payload must include the milestone ID, number, and title, which remain in
+`github.event.milestone`.
+
+#### Branch protection rule events
+
+`branch_protection_rule` supports `created`, `edited`, and `deleted`, all by
+default. Scalar, array, null, empty-map, and null or empty `types` select all
+three; explicit `types` selects a subset. Branch, tag, and path filters are
+ignored; other filters are rejected.
+
+The payload's rule ID, name, and repository ID must match the source
+repository. Workflows and checkout never use the rule's branch pattern. The
+rule remains in `github.event.rule`.
+
+#### Discussion events
+
+`discussion` supports `created`, `edited`, `deleted`, `transferred`, `pinned`,
+`unpinned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `category_changed`,
+`answered`, `unanswered`, `closed`, and `reopened`, all by default.
+`discussion_comment` supports `created`, `edited`, and `deleted`. For both
+events, scalar, array, null, empty-map, and null or empty `types` select all
+activities; explicit `types` selects a subset. Both events ignore branch, tag,
+and path filters. Other filters and unknown activities are rejected.
+
+The payload must include the discussion ID, number, and title. Comments require
+a positive ID and a `discussion_id` matching the discussion; there is no
+command-word or trusted-commenter gating. A transfer emits `transferred` in the
+source repository and a separate `created` event in the destination; each runs
+that repository's workflows on its own default branch.
+`github.event.discussion` and `github.event.comment` retain the original data.
+GitHub lists discussion webhooks as public preview.
+
+#### Repository label lifecycle events
+
+`label` supports `created`, `edited`, and `deleted` activities, all by default.
+Scalar, array, null, empty-map, `types: null`, and `types: []` declarations
+select all three; explicit `types` selects a subset. Branch, tag, and path
+filters are ignored. Issue and PR `labeled` actions and other filters are
+rejected. `github.event.label` retains the label data.
+
+#### Branch and tag lifecycle events
+
+`create` and `delete` support scalar, array, null, and empty-map declarations.
+Branch, tag, and path filters are ignored; activity types and other filters are
+rejected. These events refer to Git refs, not repository creation or deletion.
+GitHub does not deliver them when more than three tags are created or deleted
+at once.
+
+`create` uses the server-resolved commit of the created branch or tag, peeled
+for annotated tags. `delete` uses the default-branch commit, never the deleted
+ref. The deleted ref remains available in `github.event.ref`; `github.ref`
+names the default branch. Explicit snapshots must supply a full SHA, matching
+repository identity, and, for deletion, the resolved
+`repository.default_branch`. The runtime does not resolve mutable refs or
+attest event-time SHAs from these SHA-less webhooks.
 
 #### Ignored event filters and native evidence
 
@@ -2071,8 +2027,8 @@ projected, or dynamically indexed `github`, and passing the whole context to
 another function, remain unsupported. These limits do not apply to access
 rooted at `github.event`.
 
-`runner.os` and `runner.arch` resolve to `Linux`/`X64`, `macOS`/`ARM64`, or
-`Windows`/`X64`.
+`runner.os` and `runner.arch` resolve to `Linux`/`X64`, `Linux`/`ARM64`,
+`macOS`/`ARM64`, or `Windows`/`X64`.
 `runner.environment` resolves to `self-hosted`. GitHub assigns this value to
 runners registered outside GitHub, including managed providers. Buildkite
 agents are in the same class whether they use hosted agents or your own
@@ -2729,7 +2685,7 @@ The runtime sets `GITHUB_WORKFLOW` to the workflow's top-level `name`. If the wo
 Linux tools come from the [selected host environment](#job-configuration).
 macOS and Windows agents must provide tools used by shell steps. Runner labels
 do not guarantee GitHub image parity. The runtime
-sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64`, `macOS`/`ARM64`, or `Windows`/`X64`, and
+sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64`, `Linux`/`ARM64`, `macOS`/`ARM64`, or `Windows`/`X64`, and
 `RUNNER_ENVIRONMENT` to `self-hosted`. Workflow and step environment entries
 cannot override these values.
 
