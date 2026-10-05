@@ -785,6 +785,23 @@ without matching changed paths.
 
 Tag pushes do not evaluate path filters, matching GitHub. Explicit and generated event snapshots, and Buildkite environment fallbacks, cannot admit push path filters because they are not linked webhook evidence.
 
+When evaluation fails, the diagnostic distinguishes missing evidence from a
+Buildkite compatibility limit:
+
+| Diagnostic detail | Next step |
+| --- | --- |
+| `push path filters require linked Buildkite webhook data` | Use a build triggered by a GitHub push with its original webhook payload. Manual builds and explicit event snapshots cannot supply linked evidence. |
+| `new-branch push requires complete pushed commit evidence` or `webhook push requires its commits array` | Contact Buildkite support with the build URL and diagnostic detail to investigate the original GitHub webhook and retained evidence. Workflow checkout settings cannot supply this evidence. |
+| `push before commit is unavailable in the local checkout` | Contact Buildkite support with the build URL and diagnostic detail. The importer has already verified that its checkout is non-shallow; fetching more branch history is not a proven fix. |
+| `combined added and deleted files require provider rename conformance data` or `renamed and copied files require provider conformance data` | Contact Buildkite support with the build URL and diagnostic detail. This is a Buildkite compatibility limit pending GitHub rename-conformance evidence, not an invalid workflow. |
+| `push path filters require a complete non-shallow checkout` | If `git rev-parse --is-shallow-repository` returns `true` in the importer checkout, ask the agent administrator to fetch full history before import. Workflow `actions/checkout` runs after filtering and cannot fix the importer checkout. If the checkout is not shallow or the check fails, contact Buildkite support with the build URL and diagnostic detail. |
+| `push exceeds GitHub's 1000-commit path-filter diff bound` | Push in batches of at most 1,000 commits. Buildkite does not reproduce GitHub's run-anyway fallback above this limit. |
+| `changed paths exceed the importer's 3000-file local evaluation bound` | Split the push into smaller diffs to stay within the limit. |
+
+Removing `paths` or `paths-ignore` is a workaround that changes which workflows
+run, not a fix for missing evidence or compatibility limits. Unresolved path
+filters remain errors; Buildkite does not guess whether a workflow should run.
+
 #### Pull request path filters
 
 `paths` and `paths-ignore` support ordered GitHub patterns. For example, this runs for changes under `src`, except generated files:

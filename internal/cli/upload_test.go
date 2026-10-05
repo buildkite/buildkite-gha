@@ -2330,9 +2330,9 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 			failure := pipeline.Steps[0]
 			message := failureLogText(failureArtifactForStep(failure.Plugins, runner.uploaded, "messages"))
 			annotation := failureArtifactForStep(failure.Plugins, runner.uploaded, "annotations")
-			primary := "Push trigger path filters could not be evaluated safely. Check the detail for unavailable or mismatched evidence; correct the evidence or remove the path filters."
+			primary := "Push trigger path filters could not be evaluated safely. This import has no linked GitHub push webhook."
 			detail := "push path filters could not be evaluated: push path filters require linked Buildkite webhook data"
-			if failure.Group != "" || failure.Label != test.wantLabel || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(message, primary) || !strings.Contains(message, "detail: "+detail) || !strings.Contains(string(annotation), "<strong>Push trigger path filters could not be evaluated safely.</strong>") || !strings.Contains(string(annotation), "mismatched evidence") || !strings.Contains(string(annotation), detail) || strings.Contains(message, "translate workflow triggers") || !strings.Contains(message, ".github/workflows/crowdin-upload.yml") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
+			if failure.Group != "" || failure.Label != test.wantLabel || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(message, primary) || !strings.Contains(message, "detail: "+detail) || !strings.Contains(string(annotation), "<strong>Push trigger path filters could not be evaluated safely.</strong>") || !strings.Contains(string(annotation), "Use a build triggered by a GitHub push") || strings.Contains(string(annotation), "Contact Buildkite support") || !strings.Contains(string(annotation), detail) || strings.Contains(message, "translate workflow triggers") || !strings.Contains(message, ".github/workflows/crowdin-upload.yml") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
 				t.Fatalf("trigger failure step = %#v, message = %q, annotation = %q", failure, message, annotation)
 			}
 			diagnostics := message + string(annotation) + stdout.String()
@@ -2528,7 +2528,7 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	}
 }
 
-func TestRunUploadPreservesVerifiedPushExclusionsWithUnavailableHistory(t *testing.T) {
+func TestRunUploadPreservesVerifiedPushExclusionsWithUnavailablePaths(t *testing.T) {
 	requireImporterHost(t)
 	jobs := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	filtered := "on:\n  push:\n    paths: ['src/**']\n"
@@ -2549,9 +2549,18 @@ func TestRunUploadPreservesVerifiedPushExclusionsWithUnavailableHistory(t *testi
 	}
 	runGit("config", "user.email", "test@example.com")
 	runGit("config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(repository, "old.txt"), []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "old.txt")
 	runGit("commit", "-qm", "base")
 	base := runGit("rev-parse", "HEAD")
-	runGit("commit", "--allow-empty", "-qm", "head")
+	runGit("rm", "old.txt")
+	if err := os.WriteFile(filepath.Join(repository, "new.txt"), []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "new.txt")
+	runGit("commit", "-qm", "head")
 	head := runGit("rev-parse", "HEAD")
 	runGit("remote", "add", "origin", "https://github.com/buildkite/buildkite-gha.git")
 	runGit("update-ref", "refs/remotes/origin/main", head)
@@ -2569,24 +2578,44 @@ func TestRunUploadPreservesVerifiedPushExclusionsWithUnavailableHistory(t *testi
 	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
 	t.Setenv("BUILDKITE_SOURCE", "webhook")
 	t.Setenv("BUILDKITE_GITHUB_EVENT", "push")
-	for _, history := range []string{"shallow", "missing before"} {
-		t.Run(history, func(t *testing.T) {
+	for _, test := range []struct {
+		name, reason, guidance string
+	}{
+		{"shallow", "push path filters require a complete non-shallow checkout", "fetch full history before import"},
+		{"missing before", "push before commit is unavailable in the local checkout", "already non-shallow checkout"},
+		{"empty new branch commits", "new-branch push requires complete pushed commit evidence", "commit list is empty or does not include"},
+		{"missing new branch after", "new-branch push requires complete pushed commit evidence", "commit list is empty or does not include"},
+		{"missing commits array", "webhook push requires its commits array", "original GitHub push commit list"},
+		{"mixed additions and deletions", "combined added and deleted files require provider rename conformance data", "Buildkite compatibility limit, not an invalid workflow"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			before := base
-			if history == "shallow" {
+			created := false
+			commits := []any{map[string]any{"id": head}}
+			switch test.name {
+			case "shallow":
 				shallowPath := filepath.Join(repository, ".git/shallow")
 				if err := os.WriteFile(shallowPath, []byte(base+"\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { _ = os.Remove(shallowPath) })
-			} else {
+			case "missing before":
 				before = strings.Repeat("f", 40)
+			case "empty new branch commits":
+				before, created, commits = zeroGitCommit, true, []any{}
+			case "missing new branch after":
+				before, created, commits = zeroGitCommit, true, []any{map[string]any{"id": base}}
 			}
-			webhook, err := json.Marshal(map[string]any{
+			payload := map[string]any{
 				"ref": "refs/heads/main", "before": before, "after": head,
-				"created": false, "deleted": false, "forced": false,
-				"commits":    []any{map[string]any{"id": head}},
+				"created": created, "deleted": false, "forced": false,
+				"commits":    commits,
 				"repository": map[string]any{"full_name": "buildkite/buildkite-gha"},
-			})
+			}
+			if test.name == "missing commits array" {
+				delete(payload, "commits")
+			}
+			webhook, err := json.Marshal(payload)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2597,11 +2626,12 @@ func TestRunUploadPreservesVerifiedPushExclusionsWithUnavailableHistory(t *testi
 			}
 			var pipeline struct {
 				Steps []struct {
-					Group     string `yaml:"group"`
-					Condition string `yaml:"if"`
-					Command   string `yaml:"command"`
-					Skip      string `yaml:"skip"`
-					Steps     []any  `yaml:"steps"`
+					Group     string             `yaml:"group"`
+					Condition string             `yaml:"if"`
+					Command   string             `yaml:"command"`
+					Skip      string             `yaml:"skip"`
+					Steps     []any              `yaml:"steps"`
+					Plugins   failureStepPlugins `yaml:"plugins"`
 				} `yaml:"steps"`
 			}
 			for _, command := range runner.commands {
@@ -2627,6 +2657,16 @@ func TestRunUploadPreservesVerifiedPushExclusionsWithUnavailableHistory(t *testi
 			}
 			if !strings.Contains(stdout.String(), "does not match the pushed commit") {
 				t.Fatalf("history failure must not overwrite workflow identity failure: %s", stdout.String())
+			}
+			failure := pipeline.Steps[0]
+			message := failureLogText(failureArtifactForStep(failure.Plugins, runner.uploaded, "messages"))
+			annotation := html.UnescapeString(string(failureArtifactForStep(failure.Plugins, runner.uploaded, "annotations")))
+			for _, output := range []string{stdout.String(), message, annotation} {
+				for _, want := range []string{test.reason, test.guidance, "Buildkite support with this build's URL", "workaround that changes which workflows run, not a fix"} {
+					if !strings.Contains(output, want) {
+						t.Fatalf("missing %q from customer diagnostic: %s", want, output)
+					}
+				}
 			}
 		})
 	}
