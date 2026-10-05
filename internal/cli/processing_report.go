@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -24,6 +25,8 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
+
+var docsURLPattern = regexp.MustCompile(`https://github\.com/buildkite/buildkite-gha/blob/main/(docs/[a-z0-9_-]+\.md)#[a-z0-9-]+`)
 
 const (
 	processingAnnotationContext   = "buildkite-gha-processing"
@@ -608,6 +611,7 @@ func renderProcessingDiagnostic(ctx context.Context, diagnostic compatibility.Di
 			detail = strings.ReplaceAll(detail, "&#34;ubuntu-latest&#34;", annotationCode("ubuntu-latest"))
 			const issueURL = "https://github.com/buildkite/buildkite-gha"
 			detail = strings.ReplaceAll(detail, issueURL+" ", `<a href="`+issueURL+`" target="_blank">buildkite/buildkite-gha</a> `)
+			detail = docsURLPattern.ReplaceAllString(detail, `<a href="$0" target="_blank">$1</a>`)
 			out.WriteString(detail)
 			out.WriteString("</p>\n")
 		}
