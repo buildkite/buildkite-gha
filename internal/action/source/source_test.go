@@ -30,15 +30,29 @@ import (
 const testSHA = "0123456789abcdef0123456789abcdef01234567"
 
 func TestParse(t *testing.T) {
-	for _, good := range []string{"owner/repo@v1", "owner/repo/sub/action@feature/slash", "o/r@deadbeef"} {
+	for _, good := range []string{"owner/repo@v1", "owner/repo/sub/action@feature/slash", "o/r@deadbeef", "owner/mon-projet-complet-sant-@v1", "owner/-repo@v1", "owner/_repo_@v1", "owner/repo.@v1"} {
 		r, err := Parse(good)
 		if err != nil || r.Raw != good {
 			t.Errorf("Parse(%q) = %#v, %v", good, r, err)
 		}
 	}
-	for _, bad := range []string{"", "./local@v1", "owner@v1", "owner/repo", "owner/repo@", "owner//repo@v1", "owner/./x@v1", "owner/../x@v1", "owner/..github/x@v1", "owner/.github/../x@v1", `owner/repo\x@v1`, "owner/repo@a?b", "owner/repo@${{ x }}", "-owner/repo@v1", "owner/repo.git@v1", "owner/repo@a//b"} {
+	for _, bad := range []string{"", "./local@v1", "owner@v1", "owner/repo", "owner/repo@", "owner//repo@v1", "owner/./x@v1", "owner/../x@v1", "owner/..github/x@v1", "owner/.github/../x@v1", `owner/repo\x@v1`, "owner/repo@a?b", "owner/repo@${{ x }}", "-owner/repo@v1", "owner/repo.git@v1", "owner/repo@a//b", "owner/" + strings.Repeat("r", 101) + "@v1"} {
 		if _, err := Parse(bad); err == nil {
 			t.Errorf("Parse(%q) succeeded", bad)
+		}
+	}
+}
+
+func TestGitHubActionSourceTokenProviderAcceptsGitHubRepositoryNames(t *testing.T) {
+	provider := func(context.Context) (string, error) { return "", nil }
+	for _, repository := range []string{"owner/mon-projet-complet-sant-", "owner/-repo", "owner/_repo_"} {
+		if _, err := makeConfig([]Option{WithGitHubActionSourceTokenProvider(repository, provider)}); err != nil {
+			t.Errorf("token provider for %q: %v", repository, err)
+		}
+	}
+	for _, repository := range []string{"owner/.", "owner/..", "owner/repo.git", "owner/repo/extra"} {
+		if _, err := makeConfig([]Option{WithGitHubActionSourceTokenProvider(repository, provider)}); err == nil {
+			t.Errorf("token provider for %q succeeded", repository)
 		}
 	}
 }

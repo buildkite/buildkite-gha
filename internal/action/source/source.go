@@ -44,7 +44,9 @@ const (
 
 var (
 	ownerRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`)
-	repoRE  = regexp.MustCompile(`^(?:[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?|\.[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,97}[A-Za-z0-9])?)$`)
+	// GitHub repository names may start or end with any allowed character,
+	// so GitHub creates "santé" as "sant-".
+	repoRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
 )
 
 // Reference is a parsed remote repository reference. RepositoryRoot asks a
@@ -111,7 +113,7 @@ func Parse(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("invalid action reference")
 	}
 	parts := strings.Split(left, "/")
-	if len(parts) < 2 || len(parts[0])+1+len(parts[1]) > 140 || !ownerRE.MatchString(parts[0]) || !repoRE.MatchString(parts[1]) || strings.HasSuffix(parts[1], ".git") {
+	if len(parts) < 2 || !validOwnerRepository(parts[0], parts[1]) {
 		return Reference{}, fmt.Errorf("invalid GitHub owner/repository")
 	}
 	for _, s := range append(parts[2:], strings.Split(ref, "/")...) {
@@ -210,8 +212,11 @@ func WithUserAgentVersion(version string) Option {
 // never invoke the provider.
 func WithGitHubActionSourceTokenProvider(repository string, provider func(context.Context) (string, error)) Option {
 	return func(c *config) error {
-		if provider == nil || !validRepository(repository) {
+		if provider == nil {
 			return fmt.Errorf("invalid GitHub action source credential provider")
+		}
+		if !validRepository(repository) {
+			return fmt.Errorf("invalid GitHub repository %q for action source credential", repository)
 		}
 		c.credential = &actionSourceCredential{repository: strings.ToLower(repository), provider: provider}
 		return nil
@@ -250,7 +255,17 @@ func WithGitRepositorySource(executable string) Option {
 
 func validRepository(repository string) bool {
 	parts := strings.Split(repository, "/")
-	return len(parts) == 2 && ownerRE.MatchString(parts[0]) && repoRE.MatchString(parts[1]) && !strings.HasSuffix(parts[1], ".git")
+	return len(parts) == 2 && validOwnerRepository(parts[0], parts[1])
+}
+
+// validOwnerRepository accepts GitHub owner and repository names. The name
+// patterns bound their lengths, so the pair fits GitHub's 140-byte limit.
+func validOwnerRepository(owner, name string) bool {
+	return ownerRE.MatchString(owner) &&
+		repoRE.MatchString(name) &&
+		name != "." &&
+		!strings.HasPrefix(name, "..") &&
+		!strings.HasSuffix(name, ".git")
 }
 
 type actionSourceCredential struct {
