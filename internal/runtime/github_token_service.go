@@ -77,7 +77,7 @@ func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, er
 }
 
 func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository, workflow string, permissions map[string]string) (token string, err error) {
-	defer func() { err = markJobSetupFailure(FailureClassWorkflowToken, err) }()
+	defer func() { err = markJobSetupFailure(ctx, FailureClassWorkflowToken, err) }()
 	if c == nil {
 		return "", fmt.Errorf("GitHub workflow token provider is not configured")
 	}

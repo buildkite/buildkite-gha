@@ -1313,7 +1313,7 @@ func (r Runner) resolveWorkflowToken(ctx context.Context, processor *commandOutp
 	}
 	token, err := r.WorkflowToken.WorkflowToken(ctx, repository, workflow, permissions)
 	if err != nil {
-		return "", markJobSetupFailure(FailureClassWorkflowToken, err)
+		return "", markJobSetupFailure(ctx, FailureClassWorkflowToken, err)
 	}
 	if len(token) > 16<<10 || !githubInstallationTokenPattern.MatchString(token) {
 		return "", fmt.Errorf("GitHub workflow token provider returned an invalid token")

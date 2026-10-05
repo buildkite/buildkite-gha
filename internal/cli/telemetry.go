@@ -93,7 +93,12 @@ func (d *commandTelemetryDetails) setFailureCode(code telemetry.FailureCode) {
 }
 
 func (d *commandTelemetryDetails) setAgentAPIHTTPStatus(status int) {
-	if d.agentAPIStatus == 0 {
+	switch d.failureCode {
+	case telemetry.FailureCodeWorkflowToken, telemetry.FailureCodeOIDCToken, telemetry.FailureCodeCacheCredential:
+	default:
+		return
+	}
+	if d.agentAPIStatus == 0 && status >= 100 && status <= 599 {
 		d.agentAPIStatus = status
 	}
 }

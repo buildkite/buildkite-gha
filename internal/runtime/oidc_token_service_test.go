@@ -256,6 +256,60 @@ func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 	}
 }
 
+func TestIDTokenServiceRetainsOnlyUnrecoveredFailures(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		recoverAudience string
+		cancel          bool
+		want            FailureClass
+	}{
+		{name: "successful retry", recoverAudience: "first", want: FailureClassUnknown},
+		{name: "different audience", recoverAudience: "second", want: FailureClassOIDCToken},
+		{name: "cancelled request", cancel: true, want: FailureClassUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &testOIDCTokenProvider{token: "header.payload.signature", err: oidcTokenStatusError(http.StatusServiceUnavailable), requireLiveContext: true}
+			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, newCommandOutputProcessor(io.Discard, io.Discard))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = service.Close(t.Context()) }()
+			env, finish, err := service.actionEnvironment(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodGet, env["ACTIONS_ID_TOKEN_REQUEST_URL"]+"&audience=first", nil)
+			request.Header.Set("Authorization", "Bearer "+env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
+			if test.cancel {
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				request = request.WithContext(ctx)
+			}
+			response := httptest.NewRecorder()
+			service.ServeHTTP(response, request)
+			if response.Code != http.StatusBadGateway {
+				t.Fatalf("failed mint status = %d", response.Code)
+			}
+			if test.recoverAudience != "" {
+				provider.err = nil
+				request.URL.RawQuery = "audience=" + test.recoverAudience
+				response = httptest.NewRecorder()
+				service.ServeHTTP(response, request)
+				if response.Code != http.StatusOK {
+					t.Fatalf("successful mint status = %d", response.Code)
+				}
+			}
+			failure := finish()
+			if got := ClassifyFailure(failure); got != test.want {
+				t.Fatalf("ClassifyFailure() = %q, want %q", got, test.want)
+			}
+			if test.want == FailureClassUnknown && failure != nil {
+				t.Fatalf("unexpected invocation failure: %v", failure)
+			}
+		})
+	}
+}
+
 func writeOIDCUtilsContractShim(t *testing.T, workspace, actionPath string) {
 	t.Helper()
 	writeFixtureFile(t, workspace, actionPath+"/node_modules/@actions/core/index.js", `

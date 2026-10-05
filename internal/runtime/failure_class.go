@@ -36,9 +36,8 @@ const (
 )
 
 // ClassifyFailure reports the most specific class found in a RunJob error
-// chain. Unsupported features and setup failures outrank integrity failures
-// and step process exits, so a specific runtime signal is never hidden by an
-// ordinary workflow failure joined into the same error.
+// chain. Unsupported features and integrity failures outrank setup failures,
+// which in turn outrank ordinary step process exits.
 func ClassifyFailure(err error) FailureClass {
 	var unsupported *unsupportedFeatureError
 	if errors.As(err, &unsupported) {
@@ -51,12 +50,12 @@ func ClassifyFailure(err error) FailureClass {
 	if errors.As(err, &unsupportedRuntime) {
 		return FailureClassUnsupportedFeature
 	}
+	if isHardJobFailure(err) {
+		return FailureClassIntegrity
+	}
 	var setup *jobSetupFailure
 	if errors.As(err, &setup) {
 		return setup.class
-	}
-	if isHardJobFailure(err) {
-		return FailureClassIntegrity
 	}
 	var exit *stepProcessExitError
 	if errors.As(err, &exit) {
@@ -74,8 +73,10 @@ type jobSetupFailure struct {
 func (e *jobSetupFailure) Error() string { return e.err.Error() }
 func (e *jobSetupFailure) Unwrap() error { return e.err }
 
-func markJobSetupFailure(class FailureClass, err error) error {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+func markJobSetupFailure(ctx context.Context, class FailureClass, err error) error {
+	// HTTP client timeouts also match DeadlineExceeded, but are acquisition
+	// failures unless the caller's context has expired.
+	if err == nil || errors.Is(err, context.Canceled) || (ctx.Err() != nil && errors.Is(err, ctx.Err())) {
 		return err
 	}
 	var marked *jobSetupFailure

@@ -70,7 +70,7 @@ func NewAgentOIDCTokens(config AgentOIDCTokenConfig) (*AgentOIDCTokens, error) {
 }
 
 func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (token string, err error) {
-	defer func() { err = markJobSetupFailure(FailureClassOIDCToken, err) }()
+	defer func() { err = markJobSetupFailure(ctx, FailureClassOIDCToken, err) }()
 	if c == nil {
 		return "", fmt.Errorf("OIDC token provider is not configured")
 	}
@@ -163,22 +163,34 @@ type idTokenService struct {
 }
 
 type idTokenInvocation struct {
-	mu      sync.Mutex
-	failure error
+	mu       sync.Mutex
+	failures map[string]error
 }
 
-func (i *idTokenInvocation) recordFailure(err error) {
+func (i *idTokenInvocation) recordResult(audience string, err error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.failure == nil {
-		i.failure = err
+	if err == nil {
+		delete(i.failures, audience)
+		return
+	}
+	var setup *jobSetupFailure
+	if errors.As(err, &setup) {
+		if i.failures == nil {
+			i.failures = make(map[string]error)
+		}
+		i.failures[audience] = err
 	}
 }
 
 func (i *idTokenInvocation) failureError() error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	return i.failure
+	failures := make([]error, 0, len(i.failures))
+	for _, err := range i.failures {
+		failures = append(failures, err)
+	}
+	return errors.Join(failures...)
 }
 
 func startIDTokenService(ctx context.Context, provider OIDCTokenProvider, redactor Redactor, processor *commandOutputProcessor) (*idTokenService, error) {
@@ -263,9 +275,10 @@ func (s *idTokenService) ServeHTTP(w http.ResponseWriter, request *http.Request)
 		http.Error(w, "actions ID-token request is unauthorized", http.StatusUnauthorized)
 		return
 	}
-	token, err := s.provider.OIDCToken(request.Context(), request.URL.Query().Get("audience"))
+	audience := request.URL.Query().Get("audience")
+	token, err := s.provider.OIDCToken(request.Context(), audience)
 	if err != nil {
-		err = markJobSetupFailure(FailureClassOIDCToken, err)
+		err = markJobSetupFailure(request.Context(), FailureClassOIDCToken, err)
 		status := http.StatusBadGateway
 		if upstreamStatus, ok := AgentAPIHTTPStatus(err); ok {
 			switch upstreamStatus {
@@ -273,7 +286,7 @@ func (s *idTokenService) ServeHTTP(w http.ResponseWriter, request *http.Request)
 				status = upstreamStatus
 			}
 		}
-		invocation.recordFailure(err)
+		invocation.recordResult(audience, err)
 		http.Error(w, "could not mint actions ID token", status)
 		return
 	}
@@ -282,6 +295,7 @@ func (s *idTokenService) ServeHTTP(w http.ResponseWriter, request *http.Request)
 		http.Error(w, "could not protect actions ID token", http.StatusInternalServerError)
 		return
 	}
+	invocation.recordResult(audience, nil)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		Value string `json:"value"`

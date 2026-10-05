@@ -703,7 +703,7 @@ func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandOutpu
 		}
 		defer func() {
 			failure := finish()
-			if runErr != nil {
+			if runErr != nil && failure != nil {
 				runErr = errors.Join(runErr, failure)
 			}
 		}()

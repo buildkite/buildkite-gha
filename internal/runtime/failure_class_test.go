@@ -5,8 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 )
@@ -37,6 +41,7 @@ func TestClassifyFailurePrecedence(t *testing.T) {
 		{"setup failure outranks step exit", errors.Join(stepExit, oidcToken), FailureClassOIDCToken},
 		{"integrity", hard, FailureClassIntegrity},
 		{"integrity outranks step exit", errors.Join(stepExit, hard), FailureClassIntegrity},
+		{"integrity outranks setup failure", errors.Join(oidcToken, hard), FailureClassIntegrity},
 		{"unsupported outranks integrity", errors.Join(hard, unsupported), FailureClassUnsupportedFeature},
 		{"unsupported outranks step exit", errors.Join(stepExit, unsupported), FailureClassUnsupportedFeature},
 	}
@@ -55,14 +60,60 @@ func TestJobSetupFailurePreservesStatusAndCancellation(t *testing.T) {
 	if status, ok := AgentAPIHTTPStatus(errors.New("unrelated")); ok || status != 0 {
 		t.Fatalf("unrelated AgentAPIHTTPStatus() = %d, %t, want 0, false", status, ok)
 	}
-	for _, cancellation := range []error{context.Canceled, context.DeadlineExceeded} {
-		marked := markJobSetupFailure(FailureClassWorkflowToken, fmt.Errorf("request token: %w", cancellation))
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	expired, cancelDeadline := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancelDeadline()
+	for _, ctx := range []context.Context{cancelled, expired} {
+		marked := markJobSetupFailure(ctx, FailureClassWorkflowToken, fmt.Errorf("request token: %w", ctx.Err()))
 		if ClassifyFailure(marked) != FailureClassUnknown {
 			t.Errorf("cancellation classified as %q", ClassifyFailure(marked))
 		}
 		if status, ok := AgentAPIHTTPStatus(marked); ok || status != 0 {
 			t.Errorf("cancellation AgentAPIHTTPStatus() = %d, %t", status, ok)
 		}
+	}
+}
+
+func TestAgentTokenClientTimeoutsRemainSetupFailures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client := &http.Client{Timeout: 50 * time.Millisecond}
+	workflow, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "token", Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oidc, err := NewAgentOIDCTokens(AgentOIDCTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "token", Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := NewAgentCacheCredentials(AgentCacheConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "token", Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		class   FailureClass
+		request func() error
+	}{
+		{FailureClassWorkflowToken, func() error {
+			_, err := workflow.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
+			return err
+		}},
+		{FailureClassOIDCToken, func() error { _, err := oidc.OIDCToken(t.Context(), "audience"); return err }},
+		{FailureClassCacheCredential, func() error { _, err := cache.Credentials(t.Context()); return err }},
+	} {
+		t.Run(string(test.class), func(t *testing.T) {
+			err := test.request()
+			if !errors.Is(err, context.DeadlineExceeded) || t.Context().Err() != nil {
+				t.Fatalf("request = %v, context = %v, want client timeout with live context", err, t.Context().Err())
+			}
+			if got := ClassifyFailure(err); got != test.class {
+				t.Fatalf("ClassifyFailure() = %q, want %q", got, test.class)
+			}
+		})
 	}
 }
 

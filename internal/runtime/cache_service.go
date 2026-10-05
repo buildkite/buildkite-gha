@@ -83,7 +83,7 @@ func NewAgentCacheCredentials(config AgentCacheConfig) (*AgentCacheCredentials, 
 }
 
 func (c *AgentCacheCredentials) Credentials(ctx context.Context) (credentials CacheCredentials, err error) {
-	defer func() { err = markJobSetupFailure(FailureClassCacheCredential, err) }()
+	defer func() { err = markJobSetupFailure(ctx, FailureClassCacheCredential, err) }()
 	if c == nil {
 		return CacheCredentials{}, fmt.Errorf("cache credentials are not configured")
 	}
@@ -233,7 +233,7 @@ func (r Runner) cacheActionEnvironment(ctx context.Context, processor *commandOu
 	}
 	credentials, err := r.Cache.Credentials(ctx)
 	if err != nil {
-		return nil, markJobSetupFailure(FailureClassCacheCredential, err)
+		return nil, markJobSetupFailure(ctx, FailureClassCacheCredential, err)
 	}
 	resultsURL, err := normalizeCacheResultsURL(credentials.ResultsURL)
 	if err != nil {
