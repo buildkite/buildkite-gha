@@ -1740,6 +1740,27 @@ Implicit GHCR authentication is unsupported; provide explicit credentials. Mutab
 
 Each job uses a private Docker bridge network. Container jobs reach services by service name. Host jobs use declared published ports; omitted host ports are assigned dynamically. The `job.services.<service>` context exposes `id`, `network`, and `ports`.
 
+Service IDs can contain dots, for example `s3.docker.test`. Use bracket indexing
+for these keys: `${{ job.services['s3.docker.test'].ports[6379] }}`. IDs pass
+unchanged to network aliases and context keys; `s3.docker.test` and
+`s3-docker-test` remain distinct. Static declarations and expression-generated
+service maps use the same validation: at most 255 ASCII characters, starting
+with a lowercase letter or underscore, followed by lowercase letters, digits,
+underscores, hyphens, or dots. These are Buildkite's supported limits, not a
+claim that GitHub rejects every other spelling.
+
+On 2026-10-05, [GitHub run 37290763650](https://github.com/buildkite/buildkite-gha/actions/runs/37290763650)
+passed the [pinned service-container oracle](https://github.com/buildkite/buildkite-gha/blob/b13ba1d89ed06ec809b0aae25428e4e7bbe5e2ed/.github/workflows/service-container-oracle.yml)
+with `dotted-only=true` on
+`ubuntu-latest`, both on the host and in a digest-pinned Redis job container.
+Two services named `s3.docker.test` and `s3-docker-test` retained distinct IDs,
+bracket-indexed `id`, `network`, and `ports`, and separate published ports.
+The bracket-indexed `id`/`network` step condition evaluated true; an outcome
+assertion confirmed the context checks ran rather than being skipped.
+Asymmetric Redis SET/GET checks inside the job container verified that the DNS
+aliases reached different services. This observation covers dotted service
+IDs, not uppercase IDs, other punctuation, or maximum-length DNS names.
+
 A service with a Docker health check must become healthy before steps run. A service without one is ready after it starts. Failures include bounded status, health, port, and log diagnostics.
 
 Cleanup removes the job container, emits masked and bounded service logs, then removes services in declaration order, the network, owned volumes, and private Docker configuration. Unless `options` specifies `--volume-driver`, volumes newly created for job `container.volumes` receive a unique ownership label before container creation, so cleanup can recover them after failed or cancelled creation. Pre-existing named volumes retain their labels and are not removed. Docker removes anonymous volumes attached through job `options`, a custom driver, or the image when removing the container. Named volumes supplied only through `options` or created by a custom driver remain because their ownership is ambiguous. Service volumes retain mount-based tracking. Cleanup does not delete unrelated volumes to recover unattributable resources. Remaining owned resources fail the job. Docker resources are not a security or resource-isolation boundary: the hosted queue must isolate the whole job and enforce host CPU, memory, disk, and network limits. See the [security model](security.md#isolate-the-whole-job).
@@ -1948,7 +1969,7 @@ Conditions support computed object indexes, numeric array indexes, whole
 | `inputs.<name>` and computed input indexes | ✅ Yes | ✅ Yes |
 | `steps.<id>.outcome`, `steps.<id>.conclusion`, `steps.<id>.outputs.<name>` | ❌ No | ✅ Yes |
 | `env.<name>` | ❌ No | ✅ Yes |
-| `job.services.<service>.ports[<port>]` | ❌ No | ✅ Yes |
+| [`job.services` IDs, networks, and ports](#containers-and-services), including bracket-indexed service IDs | ❌ No | ✅ Yes |
 | `github.event`, including direct, projected, and dynamically indexed properties | ✅ Yes | ✅ Yes |
 | `secrets` and other contexts | ❌ No | ❌ No |
 

@@ -1435,7 +1435,10 @@ func TestEvaluateServiceMapExpressionRejectsUnsafeShapes(t *testing.T) {
 		{name: "null environment", value: `{"db":{"image":"postgres:16","env":null}}`, want: "want an object"},
 		{name: "null ports", value: `{"db":{"image":"postgres:16","ports":null}}`, want: "want an array"},
 		{name: "null volumes", value: `{"db":{"image":"postgres:16","volumes":null}}`, want: "want an array"},
-		{name: "invalid service name", value: `{"UPPER":"postgres:16"}`, want: "service name"},
+		{name: "uppercase service ID", value: `{"UPPER":"postgres:16"}`, want: "character 'U' is uppercase"},
+		{name: "invalid service ID character", value: `{"s3/docker.test":"redis:7"}`, want: "invalid character '/'"},
+		{name: "invalid skipped service ID", value: `{"s3 docker.test":""}`, want: "invalid character ' '"},
+		{name: "overlong service ID", value: `{"` + strings.Repeat("a", 256) + `":"redis:7"}`, want: "exceeds 255 bytes"},
 		{name: "invalid image", value: `{"db":"BAD IMAGE"}`, want: "invalid image"},
 		{name: "credentials", value: `{"db":{"image":"postgres:16","credentials":{"username":"user","password":"secret"}}}`, want: "cannot introduce registry credentials"},
 		{name: "null credentials", value: `{"db":{"image":"postgres:16","credentials":null}}`, want: "cannot introduce registry credentials"},
@@ -3616,7 +3619,8 @@ func TestLiveManifestContainerFixtures(t *testing.T) {
 
 func TestLiveServiceDifferentialFixture(t *testing.T) {
 	docker := requireDocker(t)
-	sourcePath := fixturePath(t, "..", ".github", "workflows", "service-container-oracle.yml")
+	// Keep the runtime fixture independent of native-only GitHub probes.
+	sourcePath := fixturePath(t, "service-container-oracle.yml")
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
 		t.Fatal(err)
@@ -3644,6 +3648,116 @@ func TestLiveServiceDifferentialFixture(t *testing.T) {
 	}
 	if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
 		t.Fatalf("differential service fixture leaked owned Docker resources: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestLiveCompiledDottedServiceIDs(t *testing.T) {
+	docker := requireDocker(t)
+	runtimeExecutable := buildLiveContainerRuntime(t)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const image = "redis@sha256:c9d92d840fd011c908f040592857c724ae6d877f2aba5c40ad963276507386b2"
+	for _, containerized := range []bool{false, true} {
+		for _, dynamic := range []bool{false, true} {
+			t.Run(fmt.Sprintf("container=%t/dynamic=%t", containerized, dynamic), func(t *testing.T) {
+				services := `
+      s3.docker.test:
+        image: ` + image + `
+        ports: [6379]
+        options: --health-cmd "redis-cli ping" --health-interval 1s --health-timeout 2s --health-retries 10
+      s3-docker-test:
+        image: ` + image + `
+        ports: [6379]
+        options: --health-cmd "redis-cli ping" --health-interval 1s --health-timeout 2s --health-retries 10
+`
+				if dynamic {
+					service := `{"image":"` + image + `","ports":[6379],"options":"--health-cmd \"redis-cli ping\" --health-interval 1s --health-timeout 2s --health-retries 10"}`
+					services = ` ${{ fromJSON('{"s3.docker.test":` + service + `,"s3-docker-test":` + service + `}') }}` + "\n"
+				}
+				container := ""
+				shell := "bash"
+				command := `for port in "$DOTTED_PORT" "$HYPHENATED_PORT"; do
+            exec 3<>"/dev/tcp/127.0.0.1/$port"
+            printf 'PING\r\n' >&3
+            IFS= read -r -t 2 reply <&3
+            test "$reply" = $'+PONG\r'
+            exec 3<&- 3>&-
+          done`
+				if containerized {
+					container = "    container: " + image + "\n"
+					shell = "sh"
+					command = `test "$(redis-cli -h s3.docker.test SET marker dotted)" = OK
+          test "$(redis-cli -h s3-docker-test SET marker hyphenated)" = OK
+          test "$(redis-cli -h s3.docker.test GET marker)" = dotted
+          test "$(redis-cli -h s3-docker-test GET marker)" = hyphenated`
+				}
+				source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+` + container + `    services:` + services + `    outputs:
+      verified: ${{ steps.verify.outputs.verified }}
+    steps:
+      - id: verify
+        if: job.services['s3.docker.test'].id != job.services['s3-docker-test'].id
+        shell: ` + shell + `
+        env:
+          DOTTED_ID: ${{ job.services['s3.docker.test'].id }}
+          HYPHENATED_ID: ${{ job.services['s3-docker-test'].id }}
+          DOTTED_NETWORK: ${{ job.services['s3.docker.test'].network }}
+          HYPHENATED_NETWORK: ${{ job.services['s3-docker-test'].network }}
+          DOTTED_PORT: ${{ job.services['s3.docker.test'].ports[6379] }}
+          HYPHENATED_PORT: ${{ job.services['s3-docker-test'].ports[6379] }}
+        run: |
+          set -x
+          test -n "$DOTTED_ID"
+          test -n "$HYPHENATED_ID"
+          test "$DOTTED_ID" != "$HYPHENATED_ID"
+          test -n "$DOTTED_NETWORK"
+          test "$DOTTED_NETWORK" = "$HYPHENATED_NETWORK"
+          test -n "$DOTTED_PORT"
+          test -n "$HYPHENATED_PORT"
+          test "$DOTTED_PORT" != "$HYPHENATED_PORT"
+          ` + command + `
+          echo verified=yes >> "$GITHUB_OUTPUT"
+`)
+				workspace := t.TempDir()
+				const path = ".github/workflows/dotted.yml"
+				writeFixtureFile(t, workspace, path, string(source))
+				bundle, err := compiler.CompileBundle(path, source, event, "dotted-live", "sha256:"+strings.Repeat("3", 64), "dotted-importer")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(bundle.Plans) != 1 {
+					t.Fatalf("compiled plans = %d, want 1", len(bundle.Plans))
+				}
+				job := bundle.Plans[0].Job
+				if (job.Program.Job.Services.Dynamic != nil) != dynamic || !dynamic && !slices.Equal(job.ServiceOrder, []string{"s3.docker.test", "s3-docker-test"}) {
+					t.Fatalf("compiled services = %#v, order = %#v", job.Program.Job.Services, job.ServiceOrder)
+				}
+				encoded, err := plan.Encode(job)
+				if err != nil {
+					t.Fatal(err)
+				}
+				job, err = plan.Decode(encoded)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before := liveDockerOwnedResources(t, docker)
+				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+				defer cancel()
+				var logs bytes.Buffer
+				result, err := (Runner{Docker: docker, RuntimeExecutable: runtimeExecutable, Stdout: &logs, Stderr: &logs}).RunJob(ctx, job, workspace)
+				if err != nil || result.Conclusion != "success" || result.Outputs["verified"] != "yes" {
+					t.Fatalf("dotted service result = %#v, error = %v\n%s", result, err, logs.String())
+				}
+				if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
+					t.Fatalf("dotted services leaked Docker resources: before=%#v after=%#v", before, after)
+				}
+			})
+		}
 	}
 }
 

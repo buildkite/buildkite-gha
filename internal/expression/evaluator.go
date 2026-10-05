@@ -135,8 +135,8 @@ func (v *semanticValidator) validate(node actionlint.ExprNode) error {
 		return v.referenceError(err)
 	case *actionlint.IndexAccessNode:
 		root, path, err := referencePath(node)
-		staticReference := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets") || strings.EqualFold(root, "runner")
-		if err == nil && (v.validateAccess == nil || staticReference || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
+		staticReference := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets") || strings.EqualFold(root, "runner") || strings.EqualFold(root, "job")
+		if err == nil && (v.validateAccess == nil || staticReference) {
 			return v.validateReference(node, root, path)
 		}
 		if v.validateAccess != nil {
@@ -206,7 +206,8 @@ func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
 	case *actionlint.VariableNode, *actionlint.ObjectDerefNode:
 		root, path, err := referencePath(node)
 		if err == nil {
-			if _, object := node.(*actionlint.ObjectDerefNode); object && e.resolveRoot != nil && expressionReferenceUsesIndex(node) && !e.policy.resolveStaticIndexedReference {
+			// Conditions expose service fields, not a resolvable whole job root.
+			if _, object := node.(*actionlint.ObjectDerefNode); object && e.resolveRoot != nil && expressionReferenceUsesIndex(node) && !e.policy.resolveStaticIndexedReference && !strings.EqualFold(root, "job") {
 				return e.evaluateAccess(node)
 			}
 			if _, whole := node.(*actionlint.VariableNode); whole && e.resolveRoot != nil {
@@ -223,8 +224,8 @@ func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
 		// Mirror the validator: static bracket references to restricted
 		// contexts resolve as ordinary references so evaluation never
 		// requires access to the whole context root.
-		staticReference := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets") || strings.EqualFold(root, "runner")
-		if err == nil && (staticReference || e.policy.resolveStaticIndexedReference || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
+		staticReference := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets") || strings.EqualFold(root, "runner") || strings.EqualFold(root, "job")
+		if err == nil && (staticReference || e.policy.resolveStaticIndexedReference) {
 			return e.resolve(root, path)
 		}
 		if e.resolveRoot != nil {

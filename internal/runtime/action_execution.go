@@ -1065,8 +1065,8 @@ func evaluateServiceEntries(entries []expression.ObjectEntry) (map[string]plan.S
 	order := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		name, raw := entry.Name, entry.Value
-		if !plan.ValidateServiceName(name) {
-			return nil, nil, fmt.Errorf("service name %q must be lowercase and valid", name)
+		if err := plan.ValidateServiceName(name); err != nil {
+			return nil, nil, err
 		}
 		var service plan.ServiceContainer
 		if image, ok := raw.(string); ok {

@@ -42,7 +42,6 @@ var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var actionLockIDPattern = regexp.MustCompile(`^a-[0-9a-f]{16}$`)
 var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
-var serviceNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,254}$`)
 var githubRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var githubWorkflowFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$`)
 
@@ -730,8 +729,8 @@ func (job Job) Validate() error {
 			seen[name] = true
 		}
 		for name, service := range job.Services {
-			if !serviceNamePattern.MatchString(name) {
-				return fmt.Errorf("service name %q must be lowercase and valid", name)
+			if err := ValidateServiceName(name); err != nil {
+				return err
 			}
 			if err := validateServiceContainer(service, true); err != nil {
 				return fmt.Errorf("service %q: %w", name, err)
@@ -1280,8 +1279,29 @@ func ValidateEvaluatedServiceContainer(service ServiceContainer) error {
 	return validateServiceContainer(service, false)
 }
 
-func ValidateServiceName(name string) bool {
-	return serviceNamePattern.MatchString(name)
+// ValidateServiceName applies the same service ID contract to source workflows,
+// serialized plans, and runtime-generated service maps. Keep the wire schema's
+// programServices.name pattern in sync.
+func ValidateServiceName(name string) error {
+	if name == "" {
+		return fmt.Errorf("invalid service ID %q: must not be empty", name)
+	}
+	if len(name) > 255 {
+		return fmt.Errorf("invalid service ID %q: exceeds 255 bytes", name)
+	}
+	for i, char := range name {
+		if char >= 'A' && char <= 'Z' {
+			return fmt.Errorf("invalid service ID %q: character %q is uppercase; use lowercase letters", name, char)
+		}
+		if i == 0 {
+			if char != '_' && (char < 'a' || char > 'z') {
+				return fmt.Errorf("invalid service ID %q: must start with a lowercase letter or underscore; found %q", name, char)
+			}
+		} else if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '_' && char != '-' && char != '.' {
+			return fmt.Errorf("invalid service ID %q: invalid character %q; use lowercase letters, digits, underscores, hyphens, or dots", name, char)
+		}
+	}
+	return nil
 }
 
 func mapStringValues(values map[string]string) []string {
