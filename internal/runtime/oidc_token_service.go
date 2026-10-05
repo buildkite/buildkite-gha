@@ -113,7 +113,7 @@ func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (token
 		Token string `json:"token"`
 	}
 	if err := decoder.Decode(&decoded); err != nil {
-		return "", fmt.Errorf("decode OIDC token response: %w", err)
+		return "", fmt.Errorf("decode OIDC token response")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return "", fmt.Errorf("OIDC token response has trailing data")
