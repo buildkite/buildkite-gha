@@ -2415,6 +2415,15 @@ func TestContinueReadsPrivateReusableWorkflowsLikeTheImporter(t *testing.T) {
 		if pipelineUploads(runner) != 0 {
 			t.Fatalf("continue uploaded a pipeline without its repository source: %#v", runner.commands)
 		}
+		var annotation string
+		for _, command := range runner.commands {
+			if len(command.args) > 0 && command.args[0] == "annotate" {
+				annotation += string(command.stdin)
+			}
+		}
+		if !strings.Contains(annotation, "Git was not found on PATH") || !strings.Contains(annotation, "install Git") || !strings.Contains(annotation, "On Buildkite-hosted agents") {
+			t.Fatalf("continue lost safe cause and next action: %q", annotation)
+		}
 		// The importer without the setting does not need Git at all.
 		runner = withoutSetting.continueRunner(withoutSetting.producerManifest(t, "success", matrix))
 		if code, stdout, stderr := runContinue(t, runner, withoutSetting.digest); code != 0 {

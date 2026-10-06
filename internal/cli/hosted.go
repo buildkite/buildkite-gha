@@ -7,15 +7,18 @@ import (
 	"io"
 	"maps"
 	"os"
+	"os/exec"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
+	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
@@ -228,6 +231,53 @@ func newHostedActionSource(ctx context.Context, actionCacheDir, clientVersion st
 	return actionSource, cleanup, err
 }
 
+// repositorySourceSetupError retains the original error for local logs and
+// typed cause checks. Only the fixed operation and recognized causes enter
+// reports: arbitrary error text can contain paths, credentials or backend data.
+type repositorySourceSetupError struct {
+	operation string
+	err       error
+}
+
+func (e *repositorySourceSetupError) Error() string { return e.operation + ": " + e.err.Error() }
+func (e *repositorySourceSetupError) Unwrap() error { return e.err }
+
+func repositorySourceSetupReport(path, message string, err error) compatibility.ProcessingReport {
+	report := compatibility.EnvironmentProcessingReport(path, hostedProfile, message)
+	detail := "Repository source setup failed; the cause is unrecognized."
+	advice := "Contact Buildkite support with the build/job URL; for local validation, include the command and a sanitized error log."
+	var setupErr *repositorySourceSetupError
+	if errors.As(err, &setupErr) {
+		detail = setupErr.operation + " failed; the cause is unrecognized."
+		fix := ""
+		switch {
+		case setupErr.operation == "resolve Git executable" && errors.Is(err, exec.ErrNotFound):
+			detail = "Resolve Git executable failed: Git was not found on PATH. Private reusable workflows require Git."
+			fix = "install Git and make it available on PATH to the agent running the importer"
+		case setupErr.operation == "create action source store":
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				detail = "Create action source store failed: the temporary directory does not exist."
+				fix = "check the temporary-directory setting (such as TMPDIR) and create the directory or select an existing one"
+			case errors.Is(err, syscall.ENOTDIR):
+				detail = "Create action source store failed: the temporary-directory path is not a directory."
+				fix = "set the temporary-directory setting (such as TMPDIR) to a directory"
+			case errors.Is(err, os.ErrPermission):
+				detail = "Create action source store failed: access to temporary storage was denied."
+				fix = "check the temporary-directory setting (such as TMPDIR) and grant the importer user access to create directories there"
+			case errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EDQUOT):
+				detail = "Create action source store failed: temporary storage is full or its quota is exhausted."
+				fix = "free temporary-storage capacity or select a temporary directory with available capacity"
+			}
+		}
+		if fix != "" {
+			advice = "If you manage the environment running this command, " + fix + ". On Buildkite-hosted agents, contact Buildkite support with the build/job URL."
+		}
+	}
+	report.Diagnostics[0].Detail = detail + " " + advice
+	return report
+}
+
 func newHostedActionSourceWithSnapshot(ctx context.Context, actionCacheDir, clientVersion string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), string, error) {
 	resolverOptions = append(resolverOptions, actionsource.WithUserAgentVersion(clientVersion))
 	storeOptions = append(storeOptions, actionsource.WithUserAgentVersion(clientVersion))
@@ -237,19 +287,19 @@ func newHostedActionSourceWithSnapshot(ctx context.Context, actionCacheDir, clie
 		var err error
 		actionRoot, err = os.MkdirTemp("", "buildkite-gha-action-source-")
 		if err != nil {
-			return nil, cleanup, "", fmt.Errorf("create action source store: %w", err)
+			return nil, cleanup, "", &repositorySourceSetupError{operation: "create action source store", err: err}
 		}
 		cleanup = func() { _ = os.RemoveAll(actionRoot) }
 	}
 	resolver, err := actionsource.NewResolver(nil, resolverOptions...)
 	if err != nil {
 		cleanup()
-		return nil, func() {}, "", fmt.Errorf("configure public action resolver: %w", err)
+		return nil, func() {}, "", &repositorySourceSetupError{operation: "configure public action resolver", err: err}
 	}
 	store, err := actionsource.NewStoreContext(ctx, actionRoot, nil, storeOptions...)
 	if err != nil {
 		cleanup()
-		return nil, func() {}, "", fmt.Errorf("configure public action source store: %w", err)
+		return nil, func() {}, "", &repositorySourceSetupError{operation: "configure public action source store", err: err}
 	}
 	return compiler.MemoizeActionSource(compiler.PublicActionSource{Resolver: resolver, Store: store}), cleanup, resolver.ResolutionSnapshotID(), nil
 }

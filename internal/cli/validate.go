@@ -230,7 +230,7 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 		actionSource, sourceCleanup, sourceErr := newHostedActionSource(ctx, actionCacheDir, clientVersion, nil, nil)
 		cleanup = sourceCleanup
 		if sourceErr != nil {
-			validationReport := compatibility.EnvironmentProcessingReport(workflowPath, hostedProfile, "public repository source could not be configured")
+			validationReport := repositorySourceSetupReport(workflowPath, "public repository source could not be configured", sourceErr)
 			report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
 			_ = out.writeV3(ctx, report)
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", sourceErr)

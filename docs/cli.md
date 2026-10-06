@@ -249,6 +249,14 @@ control characters are removed without changing the underlying report data.
 If the CLI cannot publish an annotation, it warns without changing the command
 result.
 
+Repository source setup failures in uploads and all-events validation use
+`E_ENVIRONMENT`. Their diagnostic detail names the failed local operation and
+recognized causes, such as missing Git or unavailable temporary storage, without
+copying paths or arbitrary error text. Remediation applies if you manage the
+environment running the command; Buildkite-hosted guidance directs you to support.
+Unrecognized causes identify the operation and direct you to support rather than
+guessing a network or credential problem.
+
 For fetched public and private reusable workflows, source locations in
 annotations link to the resolved commit and line in the source repository,
 including nested local calls inside that repository. The link opens only for
