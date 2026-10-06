@@ -608,11 +608,13 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 	originEventSource = bytes.Replace(originEventSource, []byte(`"owner": "buildkite"`), []byte(`"owner": "acme_team"`), 1)
 	originEventSource = bytes.Replace(originEventSource, []byte(`"name": "buildkite-gha"`), []byte(`"name": "widgets"`), 1)
 	originEventSource = bytes.Replace(originEventSource, []byte(`"clone_url": "https://github.com/buildkite/buildkite-gha.git"`), []byte(`"clone_url": "https://origin.cursor.com/git/acme_team/widgets.git"`), 1)
+	trailingHyphenEventSource := bytes.Replace(eventSource, []byte(`"name": "buildkite-gha"`), []byte(`"name": "mon-projet-complet-sant-"`), 1)
 	for _, test := range []struct {
 		name  string
 		event []byte
 	}{
 		{name: "GitHub", event: eventSource},
+		{name: "GitHub repository name ending in a hyphen", event: trailingHyphenEventSource},
 		{name: "Origin repository with GitHub-incompatible namespace", event: originEventSource},
 	} {
 		t.Run(test.name, func(t *testing.T) {

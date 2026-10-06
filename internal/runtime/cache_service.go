@@ -82,7 +82,7 @@ func NewAgentCacheCredentials(config AgentCacheConfig) (*AgentCacheCredentials, 
 	}, nil
 }
 
-func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentials, error) {
+func (c *AgentCacheCredentials) Credentials(ctx context.Context) (credentials CacheCredentials, err error) {
 	if c == nil {
 		return CacheCredentials{}, fmt.Errorf("cache credentials are not configured")
 	}
@@ -90,6 +90,7 @@ func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentia
 	if err != nil {
 		return CacheCredentials{}, fmt.Errorf("create cache credential request: %w", err)
 	}
+	defer func() { err = markJobSetupFailure(FailureClassCacheCredential, credentialRequestFailure(ctx, err)) }()
 	response, err := c.agent.Do(request)
 	if err != nil {
 		return CacheCredentials{}, fmt.Errorf("request cache credential: %w", err)
@@ -112,7 +113,7 @@ func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentia
 		Token string `json:"token"`
 	}
 	if err := decoder.Decode(&body); err != nil {
-		return CacheCredentials{}, fmt.Errorf("decode cache credential response: %w", err)
+		return CacheCredentials{}, fmt.Errorf("decode cache credential response")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return CacheCredentials{}, fmt.Errorf("cache credential response has trailing data")
@@ -150,15 +151,15 @@ func validCredentialServiceURL(u *url.URL) bool {
 func cacheCredentialStatusError(status int) error {
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("cache credential request was denied")
+		return credentialStatusError(status, "cache credential request was denied")
 	case http.StatusNotFound:
-		return fmt.Errorf("cache credential service is not enabled for this organization")
+		return credentialStatusError(status, "cache credential service is not enabled for this organization")
 	case http.StatusUnprocessableEntity:
-		return fmt.Errorf("cache credential request rejected the current build provenance")
+		return credentialStatusError(status, "cache credential request rejected the current build provenance")
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("cache credential service is rate limited")
+		return credentialStatusError(status, "cache credential service is rate limited")
 	default:
-		return fmt.Errorf("cache credential service returned HTTP %d", status)
+		return credentialStatusError(status, "cache credential service returned HTTP %d", status)
 	}
 }
 

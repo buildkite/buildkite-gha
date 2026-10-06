@@ -89,10 +89,11 @@ func TestAgentOIDCTokensRejectsAuthFailuresAndMalformedResponses(t *testing.T) {
 		body   string
 		want   string
 	}{
+		{"rejected", http.StatusBadRequest, secret, "rejected"},
 		{"unauthorized", http.StatusUnauthorized, secret, "denied"},
 		{"forbidden", http.StatusForbidden, secret, "denied"},
 		{"malformed", http.StatusOK, `{"token":`, "decode"},
-		{"unknown field", http.StatusOK, `{"token":"header.payload.signature","other":true}`, "unknown field"},
+		{"unknown field", http.StatusOK, `{"token":"header.payload.signature","` + secret + `":true}`, "decode OIDC token response"},
 		{"trailing data", http.StatusOK, `{"token":"header.payload.signature"}{}`, "trailing data"},
 		{"invalid JWT", http.StatusOK, `{"token":"not-a-jwt"}`, "invalid token"},
 		{"oversized", http.StatusOK, `{"token":"header.payload.signature"}` + strings.Repeat(" ", oidcTokenResponseLimit), "exceeds"},
@@ -111,7 +112,39 @@ func TestAgentOIDCTokensRejectsAuthFailuresAndMalformedResponses(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), secret) {
 				t.Fatalf("OIDCToken() error = %v, want %q without response body", err, test.want)
 			}
+			if ClassifyFailure(err) != FailureClassOIDCToken {
+				t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassOIDCToken)
+			}
+			status, ok := AgentAPIHTTPStatus(err)
+			if test.status >= 200 && test.status < 300 {
+				if ok || status != 0 {
+					t.Fatalf("AgentAPIHTTPStatus() = %d, %t for HTTP %d", status, ok, test.status)
+				}
+			} else if !ok || status != test.status {
+				t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want %d, true", status, ok, test.status)
+			}
 		})
+	}
+}
+
+func TestAgentOIDCTokensHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	provider, err := NewAgentOIDCTokens(AgentOIDCTokenConfig{
+		Endpoint: "https://agent.invalid/v3", JobID: testCacheJobID, JobToken: "job-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.OIDCToken(ctx, "audience")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("OIDCToken() error = %v, want cancellation", err)
+	}
+	if ClassifyFailure(err) != FailureClassUnknown {
+		t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassUnknown)
+	}
+	if status, ok := AgentAPIHTTPStatus(err); ok || status != 0 {
+		t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want 0, false", status, ok)
 	}
 }
 
@@ -146,7 +179,7 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer revoke()
+	defer func() { _ = revoke() }()
 	wantLower := "127.0.0.1"
 	if runtime.GOOS == "windows" {
 		wantLower = "internal.example,127.0.0.1"
@@ -189,7 +222,7 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
-			provider := &testOIDCTokenProvider{err: oidcTokenStatusError(status)}
+			provider := &testOIDCTokenProvider{err: markJobSetupFailure(FailureClassOIDCToken, oidcTokenStatusError(status))}
 			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, newCommandOutputProcessor(&bytes.Buffer{}, &bytes.Buffer{}))
 			if err != nil {
 				t.Fatal(err)
@@ -199,7 +232,6 @@ func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer revoke()
 			request, err := http.NewRequest(http.MethodGet, env["ACTIONS_ID_TOKEN_REQUEST_URL"], nil)
 			if err != nil {
 				t.Fatal(err)
@@ -212,6 +244,67 @@ func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 			_ = response.Body.Close()
 			if response.StatusCode != status || len(provider.audiences) != 1 {
 				t.Fatalf("request = HTTP %d with %d mint calls, want HTTP %d with one call", response.StatusCode, len(provider.audiences), status)
+			}
+			failure := revoke()
+			if ClassifyFailure(failure) != FailureClassOIDCToken {
+				t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(failure), FailureClassOIDCToken)
+			}
+			if upstreamStatus, ok := AgentAPIHTTPStatus(failure); !ok || upstreamStatus != status {
+				t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want %d, true", upstreamStatus, ok, status)
+			}
+		})
+	}
+}
+
+func TestIDTokenServiceRetainsOnlyUnrecoveredFailures(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		recoverAudience string
+		cancel          bool
+		want            FailureClass
+	}{
+		{name: "successful retry", recoverAudience: "first", want: FailureClassUnknown},
+		{name: "different audience", recoverAudience: "second", want: FailureClassOIDCToken},
+		{name: "cancelled request", cancel: true, want: FailureClassUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &testOIDCTokenProvider{token: "header.payload.signature", err: markJobSetupFailure(FailureClassOIDCToken, oidcTokenStatusError(http.StatusServiceUnavailable)), requireLiveContext: true}
+			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, newCommandOutputProcessor(io.Discard, io.Discard))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = service.Close(t.Context()) }()
+			env, finish, err := service.actionEnvironment(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodGet, env["ACTIONS_ID_TOKEN_REQUEST_URL"]+"&audience=first", nil)
+			request.Header.Set("Authorization", "Bearer "+env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
+			if test.cancel {
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				request = request.WithContext(ctx)
+			}
+			response := httptest.NewRecorder()
+			service.ServeHTTP(response, request)
+			if response.Code != http.StatusBadGateway {
+				t.Fatalf("failed mint status = %d", response.Code)
+			}
+			if test.recoverAudience != "" {
+				provider.err = nil
+				request.URL.RawQuery = "audience=" + test.recoverAudience
+				response = httptest.NewRecorder()
+				service.ServeHTTP(response, request)
+				if response.Code != http.StatusOK {
+					t.Fatalf("successful mint status = %d", response.Code)
+				}
+			}
+			failure := finish()
+			if got := ClassifyFailure(failure); got != test.want {
+				t.Fatalf("ClassifyFailure() = %q, want %q", got, test.want)
+			}
+			if test.want == FailureClassUnknown && failure != nil {
+				t.Fatalf("unexpected invocation failure: %v", failure)
 			}
 		})
 	}
@@ -295,6 +388,63 @@ if (process.env.no_proxy !== "lower.example,127.0.0.1") throw new Error("no_prox
 	}
 	if string(contents) != provider.token || len(provider.audiences) != 1 || provider.audiences[0] != "sts.amazonaws.com" {
 		t.Fatalf("token/audiences = %q / %#v", contents, provider.audiences)
+	}
+}
+
+func TestNodeActionPreservesOIDCTokenFailure(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/oidc-failure.yml"
+	actionPath := ".github/actions/oidc-failure"
+	writeFixtureFile(t, workspace, workflowPath, "name: OIDC failure\n")
+	writeFixtureFile(t, workspace, actionPath+"/action.yml", "name: OIDC failure\nruns:\n  using: node24\n  main: main.js\n")
+	writeOIDCUtilsContractShim(t, workspace, actionPath)
+	writeFixtureFile(t, workspace, actionPath+"/main.js", `
+const core = require("@actions/core");
+(async () => await core.getIDToken("sts.amazonaws.com"))().catch(error => { console.error(error); process.exitCode = 1; });
+`)
+	lockID := "a-0123456789abcdef"
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
+		ID: "oidc", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.IDTokenPermission = "write"
+	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
+	const secret = "provider-response-must-not-leak"
+	for _, test := range []struct {
+		name       string
+		status     int
+		body       string
+		wantError  string
+		wantStatus int
+	}{
+		{"denied", http.StatusForbidden, secret, "OIDC token request was denied", http.StatusForbidden},
+		{"unknown field", http.StatusOK, `{"token":"header.payload.signature","` + secret + `":true}`, "decode OIDC token response", 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer server.Close()
+			provider, err := NewAgentOIDCTokens(AgentOIDCTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-token"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: &testRedactor{}, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+			if err == nil || result.Conclusion != "failure" {
+				t.Fatalf("RunJob() = %#v, %v", result, err)
+			}
+			if !strings.Contains(err.Error(), test.wantError) || strings.Contains(err.Error(), secret) || strings.Contains(logs.String(), secret) {
+				t.Fatalf("error = %v, logs = %q; want %q without response data", err, logs.String(), test.wantError)
+			}
+			if ClassifyFailure(err) != FailureClassOIDCToken {
+				t.Fatalf("ClassifyFailure() = %q, want %q for %v", ClassifyFailure(err), FailureClassOIDCToken, err)
+			}
+			if status, ok := AgentAPIHTTPStatus(err); status != test.wantStatus || ok != (test.wantStatus != 0) {
+				t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want %d", status, ok, test.wantStatus)
+			}
+		})
 	}
 }
 

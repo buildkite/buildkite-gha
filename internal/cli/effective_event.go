@@ -193,12 +193,16 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 	report := triggerProcessingReport(input.Path, input.Source)
 	var pathFilters *buildkitepipeline.UnsupportedPathFiltersError
 	if errors.As(err, &pathFilters) {
-		message := fmt.Sprintf("%s trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step.", upperFirst(pathFilters.Event))
-		if pathFilters.Reason != "" {
+		var message string
+		switch {
+		case pathFilters.Event == "push":
+			message = pushPathFilterFailureMessage(pathFilters.Reason)
+		case pathFilters.Reason == "":
+			message = fmt.Sprintf("%s trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step.", upperFirst(pathFilters.Event))
+		case strings.Contains(pathFilters.Reason, "file local evaluation bound"):
+			message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. The local changed-file limit was exceeded; reduce the diff or remove the path filters.", upperFirst(pathFilters.Event))
+		default:
 			message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. Check the detail for unavailable or mismatched evidence; correct the evidence or remove the path filters.", upperFirst(pathFilters.Event))
-			if strings.Contains(pathFilters.Reason, "file local evaluation bound") {
-				message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. The local changed-file limit was exceeded; reduce the diff or remove the path filters.", upperFirst(pathFilters.Event))
-			}
 		}
 		err = &compiler.ProcessingFinding{
 			Stage: workflowprocessing.StagePipeline, Code: workflowprocessing.CodePipelineGeneration, Category: "compatibility",
@@ -210,6 +214,35 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 	report.AddFailure(input.Path, workflowprocessing.StagePipeline, workflowprocessing.CodePipelineGeneration, "compatibility", err)
 	report.Result = "incompatible"
 	return report
+}
+
+func pushPathFilterFailureMessage(reason string) string {
+	detail := "Buildkite could not verify the webhook or checkout evidence needed to select this workflow."
+	nextStep := " Contact Buildkite support with this build's URL and the diagnostic detail to investigate."
+	switch reason {
+	case "push path filters require linked Buildkite webhook data":
+		detail = "This import has no linked GitHub push webhook. Manual builds and explicit event snapshots cannot supply the linked evidence required for push path filters."
+		nextStep = " Use a build triggered by a GitHub push with its original webhook payload."
+	case "new-branch push requires complete pushed commit evidence":
+		detail = "The webhook commit list is empty or does not include the new branch's after commit, so Buildkite cannot determine the changed paths. Changing workflow checkout settings cannot supply this evidence."
+	case "webhook push requires its commits array":
+		detail = "The linked webhook has no usable commits array. Buildkite needs the original GitHub push commit list; changing workflow checkout settings cannot supply it."
+	case "push before commit is unavailable in the local checkout":
+		detail = "The webhook's before commit is missing from the importer's already non-shallow checkout. Buildkite needs that exact commit to compare the push; fetching more branch history is not a proven fix."
+	case "combined added and deleted files require provider rename conformance data", "renamed and copied files require provider conformance data":
+		detail = "Buildkite cannot yet match GitHub's path-filter behavior for possible renames or copies in this diff. This is a Buildkite compatibility limit, not an invalid workflow."
+	case "push path filters require a complete non-shallow checkout":
+		detail = "Buildkite could not confirm a non-shallow importer checkout. If git rev-parse --is-shallow-repository returns true there, ask the agent administrator to fetch full history before import. Workflow actions/checkout runs too late to fix this."
+		nextStep = " If the checkout is not shallow or the check fails, contact Buildkite support with this build's URL and the diagnostic detail."
+	case fmt.Sprintf("push exceeds GitHub's %d-commit path-filter diff bound", maxGitHubPushCommits):
+		detail = fmt.Sprintf("The push exceeds the %d-commit path-filter evaluation limit. Buildkite does not reproduce GitHub's run-anyway fallback above this limit.", maxGitHubPushCommits)
+		nextStep = fmt.Sprintf(" Push in batches of at most %d commits to stay within this limit.", maxGitHubPushCommits)
+	case fmt.Sprintf("changed paths exceed the importer's %d-file local evaluation bound", maxLocallyEvaluatedPathFilterFiles):
+		detail = fmt.Sprintf("The diff exceeds Buildkite's %d-file local evaluation limit.", maxLocallyEvaluatedPathFilterFiles)
+		nextStep = " Split the push into smaller diffs to stay within this limit."
+	}
+	return "Push trigger path filters could not be evaluated safely. " + detail + nextStep +
+		" Removing paths or paths-ignore is a workaround that changes which workflows run, not a fix."
 }
 
 func triggerProcessingReport(path string, source []byte) compatibility.ProcessingReport {

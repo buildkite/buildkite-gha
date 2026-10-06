@@ -109,6 +109,41 @@ Use a Windows Server 2022 queue with Buildkite agent v3.129 or newer, PowerShell
 or its tools. `runner.os` is `Windows` and `runner.arch` is `X64`. See
 [explicit mappings and runtime distributions](cli.md#choose-runners-and-runtimes).
 
+### Configure a Windows runner
+
+Choose one route with your pipeline administrator:
+
+- **Explicit mapping:** map the workflow's `windows-latest` or `windows-2022`
+  label to an existing Windows Server 2022 x86-64 queue in the importing job's
+  cluster. The Agent API must validate that the queue exists and, for a hosted
+  queue, matches `windows/amd64`. See the [plugin and CLI examples](cli.md#choose-runners-and-runtimes).
+- **Automatic routing:** ask Buildkite support to confirm your organization's
+  hosted Windows Medium access and Agent API routing availability. The importing
+  job's cluster needs an active hosted Windows AMD64 **Medium** queue named
+  `windows-medium`. A self-hosted, differently sized, wrong-platform, or
+  other-cluster queue does not qualify, even if its name matches.
+
+Neither route creates queues, grants hosted Windows access, or changes trust
+policy. Keep generated-job queues isolated from protected credentials and
+earlier jobs, including when using a self-hosted queue. An explicit mapping is
+not a way to bypass queue validation. Do not change a Windows-only job to Linux
+to get past runner admission.
+
+| Diagnostic | Action |
+| --- | --- |
+| No Windows runner target is configured | Configure one of the routes above. Offline validation has no Windows preset; this failure alone does not establish runtime incompatibility. |
+| No hosted Windows queue (`missing_queue`) | Ask an administrator to check the importing job's cluster and all automatic-routing queue requirements above, or explicitly map a compatible existing queue. |
+| Job does not belong to a cluster (`no_cluster`) | Ask an administrator to move the pipeline to a cluster containing compatible queues. |
+| Queue not found or platform mismatch | Correct the mapping to an active Windows queue in the importing job's cluster. A Linux queue cannot run the Windows runtime. |
+| Incompatible labels | Check the variant and use a single supported Windows label. For `windows-latest` or `windows-2022`, this can also mean hosted Windows access is unavailable; ask Buildkite support to check eligibility and routing rather than assuming Windows is wholly unsupported. |
+| Windows variant has no local mapping | Use `windows-latest` or `windows-2022` only if the job can run on Server 2022 x86-64. The documented Windows 2025 aliases require Agent API resolution and preserve neither Server 2025 nor provider hardware. Native Windows arm64 remains unsupported. |
+
+For support, include the build/job URL, workflow path, requested `runs-on`,
+importer version, and complete runner diagnostic. A generic rejection does not
+identify a missing entitlement, queue, or mapping by itself.
+
+### Runtime boundaries
+
 The default shell is `pwsh`. Explicit `pwsh` and Windows PowerShell
 (`powershell`) steps, JavaScript actions, and composite actions are supported
 within the same action restrictions documented below. Use UTF-8 for file
@@ -741,6 +776,23 @@ without matching changed paths.
 
 Tag pushes do not evaluate path filters, matching GitHub. Explicit and generated event snapshots, and Buildkite environment fallbacks, cannot admit push path filters because they are not linked webhook evidence.
 
+When evaluation fails, the diagnostic distinguishes missing evidence from a
+Buildkite compatibility limit:
+
+| Diagnostic detail | Next step |
+| --- | --- |
+| `push path filters require linked Buildkite webhook data` | Use a build triggered by a GitHub push with its original webhook payload. Manual builds and explicit event snapshots cannot supply linked evidence. |
+| `new-branch push requires complete pushed commit evidence` or `webhook push requires its commits array` | Contact Buildkite support with the build URL and diagnostic detail to investigate the original GitHub webhook and retained evidence. Workflow checkout settings cannot supply this evidence. |
+| `push before commit is unavailable in the local checkout` | Contact Buildkite support with the build URL and diagnostic detail. The importer has already verified that its checkout is non-shallow; fetching more branch history is not a proven fix. |
+| `combined added and deleted files require provider rename conformance data` or `renamed and copied files require provider conformance data` | Contact Buildkite support with the build URL and diagnostic detail. This is a Buildkite compatibility limit pending GitHub rename-conformance evidence, not an invalid workflow. |
+| `push path filters require a complete non-shallow checkout` | If `git rev-parse --is-shallow-repository` returns `true` in the importer checkout, ask the agent administrator to fetch full history before import. Workflow `actions/checkout` runs after filtering and cannot fix the importer checkout. If the checkout is not shallow or the check fails, contact Buildkite support with the build URL and diagnostic detail. |
+| `push exceeds GitHub's 1000-commit path-filter diff bound` | Push in batches of at most 1,000 commits. Buildkite does not reproduce GitHub's run-anyway fallback above this limit. |
+| `changed paths exceed the importer's 3000-file local evaluation bound` | Split the push into smaller diffs to stay within the limit. |
+
+Removing `paths` or `paths-ignore` is a workaround that changes which workflows
+run, not a fix for missing evidence or compatibility limits. Unresolved path
+filters remain errors; Buildkite does not guess whether a workflow should run.
+
 #### Pull request path filters
 
 `paths` and `paths-ignore` support ordered GitHub patterns. For example, this runs for changes under `src`, except generated files:
@@ -1129,13 +1181,14 @@ queue fails before pipeline upload with the cluster and queue named:
 | Rejection | Meaning |
 | --- | --- |
 | `missing_queue` | The labels are compatible, but the job's cluster has none of the hosted queues they need. Create the named queue or configure an explicit runner mapping. |
-| `incompatible_labels` | The labels require an operating system or architecture hosted agents do not provide. |
+| `incompatible_labels` | The selector is unsupported, or hosted Windows access is unavailable. See [Configure a Windows runner](#configure-a-windows-runner) before changing Windows labels. |
 | `no_cluster` | The job is not in a cluster, so no hosted queue can be selected. |
 | `queue_not_found` | The explicitly configured queue is not active in the job's cluster. Correct the mapping or create the queue. |
 | `queue_platform_mismatch` | The configured hosted queue has a different OS or architecture. Map the label to a compatible queue. |
 
-Windows labels keep the local Windows guidance. Unknown rejection codes render
-the server message with generic mapping guidance.
+Windows rejections preserve the server's reason and add setup or variant
+guidance for incompatible selectors. Unknown rejection codes render the server
+message with generic mapping guidance.
 
 Imports using explicit mappings require job-scoped Agent API credentials and
 a server that acknowledges configured-target validation. If validation is
@@ -2554,6 +2607,11 @@ an Origin repository. Native adapters ignore upstream input defaults, so
 
 The top-level workflow's `permissions` set the scope. Token issuance needs a
 Buildkite organization feature and a pipeline setting; both are off by default.
+If either setting is off, the runtime links to the pipeline repository setting.
+If an enabled request is rejected, the runtime instead asks you to check the
+top-level permissions and the Buildkite GitHub App's access to the event
+repository. If those checks do not find the cause, contact Buildkite support
+and include the build URL shown in the error.
 
 Buildkite reads that policy from the pipeline repository at the immutable build
 commit. The workflow must be a simple `.yml` or `.yaml` file directly under

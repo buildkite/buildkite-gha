@@ -735,8 +735,30 @@ have no direct-upload default.
 supported.
 
 For [experimental Windows jobs](compatibility.md#experimental-windows-jobs),
-explicitly map `windows-latest` or `windows-2022` and supply the matching
-Windows x86-64 runtime from the same release:
+map the workflow's label to an existing compatible Windows queue. For example,
+this plugin configuration imports a workflow using `runs-on: windows-2022`:
+
+```yaml
+steps:
+  - label: Import Windows workflow
+    key: import-windows-workflow
+    agents:
+      queue: my-linux-importer-queue
+    plugins:
+      - github-actions#latest:
+          workflow: .github/workflows/ci.yml
+          runners:
+            - runs-on: windows-2022
+              queue: my-windows-queue
+```
+
+Replace both queue names with queues in your pipeline's cluster. The importer
+runs on Linux or macOS, not Windows. If the workflow uses `windows-latest`, use
+that label in the mapping instead. For automatic routing, omit the Windows
+`runners` entry only after checking the [access and queue requirements](compatibility.md#configure-a-windows-runner).
+
+For direct CLI upload from a Buildkite job, also supply the Windows x86-64
+runtime executable from the same release, at an absolute path on the importer:
 
 ```sh
 buildkite-gha upload \
@@ -747,7 +769,9 @@ buildkite-gha upload \
 ```
 
 The plugin acquires the Windows runtime from the same release only when a
-selected workflow requires it. Development plugin runs use
+selected workflow requires it and verifies the release checksums. Direct CLI
+users must verify the Windows release archive against that release's checksum
+file before extracting `buildkite-gha.exe`. Development plugin runs use
 `BUILDKITE_GHA_PLUGIN_DEV_WINDOWS_RUNTIME` as an absolute path to a locally
 built Windows executable. Windows targets reject `--runner-image` and cache
 volumes. These mappings do not create queues or grant hosted Windows access.
@@ -917,7 +941,16 @@ failures (`E_RUNTIME_INTEGRITY`), so a failing test suite is not counted as a
 compatibility gap. Runtime rejections include the same blocker fields when the
 runtime can identify the rejected shell or action reference.
 Secret resolution failures use `E_SECRET_UNAVAILABLE`, making secret
-availability independently measurable.
+availability independently measurable. Workflow-token, OIDC-token, and cache
+credential acquisition failures use `E_WORKFLOW_TOKEN_UNAVAILABLE`,
+`E_OIDC_TOKEN_UNAVAILABLE`, and `E_CACHE_CREDENTIAL_UNAVAILABLE`, including
+Agent API client timeouts but not caller cancellation. A successful OIDC retry
+clears the recorded failure for that audience. Unsupported-feature and runtime
+integrity failures take precedence over token acquisition failures.
+When the failure code identifies a token or cache credential failure,
+`agent_api_http_status` contains the Agent API response status, if it is
+between 100 and 599. Invalid statuses are omitted without dropping the event.
+Other unclassified failures keep the `unknown` code and omit the status.
 
 Buildkite adds organization, pipeline, build, and job identifiers on the
 server. The client does not send workflow or event content, environment
