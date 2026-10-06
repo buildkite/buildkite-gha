@@ -51,7 +51,7 @@ Common plugin options:
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `version` | `latest` | Exact stable CLI release, from `0.9.0` onward. |
-| `source-ref` | — | `buildkite-gha` commit, branch, or tag to build for development testing. Mutually exclusive with `version`. |
+| `source-ref` | — | Full lowercase 40-character `buildkite-gha` commit SHA to build for development testing. Mutually exclusive with `version`. |
 | `runners` | — | Map `runs-on` labels to queues, images, and cache volumes. |
 | `experimental-runner-user` | `true` | Run generated Linux jobs as a dedicated `runner` user. See [non-root jobs](docs/cli.md#run-linux-jobs-as-a-non-root-user). |
 | `private-reusable-workflows` | `false` | Allow reusable workflows from private repositories the importer can read. See [Reusable workflows](docs/compatibility.md#reusable-workflows). |
