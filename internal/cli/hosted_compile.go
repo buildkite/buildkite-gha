@@ -329,7 +329,7 @@ func privateRepositorySourceOptions(privateReusableWorkflows bool) ([]actionsour
 		git, err = filepath.Abs(git)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("resolve Git executable: %w", err)
+		return nil, &repositorySourceSetupError{operation: "resolve Git executable", err: err}
 	}
 	return []actionsource.Option{actionsource.WithGitRepositorySource(git)}, nil
 }

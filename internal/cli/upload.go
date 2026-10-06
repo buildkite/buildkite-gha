@@ -188,7 +188,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	if privateSourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "private repository source could not be configured"), privateSourceErr)
+				return out.fail(ctx, repositorySourceSetupReport(input.Path, "private repository source could not be configured", privateSourceErr), privateSourceErr)
 			}
 		}
 		return 1
@@ -197,7 +197,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	if sourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "repository source could not be configured"), sourceErr)
+				return out.fail(ctx, repositorySourceSetupReport(input.Path, "repository source could not be configured", sourceErr), sourceErr)
 			}
 		}
 		return 1
@@ -246,7 +246,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	if sourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "repository source could not be configured"), sourceErr)
+				return out.fail(ctx, repositorySourceSetupReport(input.Path, "repository source could not be configured", sourceErr), sourceErr)
 			}
 		}
 		return 1

@@ -367,7 +367,7 @@ func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]b
 	record := r.record
 	repositorySource, cleanupSource, err := hostedRepositorySource(r.ctx, r.clientVersion, r.eventSource, importerJobActionSourceAuthentication(r.stderr, r.clientVersion), record.PrivateReusableWorkflows)
 	if err != nil {
-		return hostedCompilation{}, compatibility.EnvironmentProcessingReport(record.Workflow.Path, hostedProfile, "repository source could not be configured"), err
+		return hostedCompilation{}, repositorySourceSetupReport(record.Workflow.Path, "repository source could not be configured", err), err
 	}
 	defer cleanupSource()
 	request := record.compileRequest(r.workflowPath, r.workflowSource, r.eventSource, rows, skipped, runnerOutputs, repositorySource)
