@@ -739,6 +739,7 @@ this plugin configuration imports a workflow using `runs-on: windows-2022`:
 ```yaml
 steps:
   - label: Import Windows workflow
+    key: import-windows-workflow
     agents:
       queue: my-linux-importer-queue
     plugins:
