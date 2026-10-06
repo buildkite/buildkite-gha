@@ -70,7 +70,6 @@ func NewAgentOIDCTokens(config AgentOIDCTokenConfig) (*AgentOIDCTokens, error) {
 }
 
 func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (token string, err error) {
-	defer func() { err = markJobSetupFailure(ctx, FailureClassOIDCToken, err) }()
 	if c == nil {
 		return "", fmt.Errorf("OIDC token provider is not configured")
 	}
@@ -90,6 +89,7 @@ func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (token
 	if err != nil {
 		return "", fmt.Errorf("create OIDC token request: %w", err)
 	}
+	defer func() { err = markJobSetupFailure(FailureClassOIDCToken, credentialRequestFailure(ctx, err)) }()
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.agent.Do(request)
 	if err != nil {
@@ -125,20 +125,18 @@ func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (token
 }
 
 func oidcTokenStatusError(status int) error {
-	message := ""
 	switch status {
 	case http.StatusBadRequest, http.StatusUnprocessableEntity:
-		message = "OIDC token request was rejected"
+		return credentialStatusError(status, "OIDC token request was rejected")
 	case http.StatusUnauthorized, http.StatusForbidden:
-		message = "OIDC token request was denied"
+		return credentialStatusError(status, "OIDC token request was denied")
 	case http.StatusNotFound:
-		message = "OIDC token service is not enabled for this organization"
+		return credentialStatusError(status, "OIDC token service is not enabled for this organization")
 	case http.StatusTooManyRequests:
-		message = "OIDC token service is rate limited"
+		return credentialStatusError(status, "OIDC token service is rate limited")
 	default:
-		message = fmt.Sprintf("OIDC token service returned HTTP %d", status)
+		return credentialStatusError(status, "OIDC token service returned HTTP %d", status)
 	}
-	return newJobSetupHTTPFailure(FailureClassOIDCToken, status, message)
 }
 
 func isIDTokenEnvironment(name string) bool {
@@ -278,7 +276,6 @@ func (s *idTokenService) ServeHTTP(w http.ResponseWriter, request *http.Request)
 	audience := request.URL.Query().Get("audience")
 	token, err := s.provider.OIDCToken(request.Context(), audience)
 	if err != nil {
-		err = markJobSetupFailure(request.Context(), FailureClassOIDCToken, err)
 		status := http.StatusBadGateway
 		if upstreamStatus, ok := AgentAPIHTTPStatus(err); ok {
 			switch upstreamStatus {

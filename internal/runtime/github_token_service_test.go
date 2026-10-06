@@ -173,6 +173,8 @@ func TestAgentGitHubTokensRejectsUnsafeConfigurationAndRepository(t *testing.T) 
 	for _, repository := range []string{"", "other", "../other/repo", "owner/..", "owner/repo/extra", "owner/repo?permission=write"} {
 		if _, err := provider.WorkflowToken(t.Context(), repository, "ci.yml", map[string]string{"contents": "read"}); err == nil {
 			t.Fatalf("WorkflowToken(%q) succeeded", repository)
+		} else if ClassifyFailure(err) != FailureClassUnknown {
+			t.Fatalf("WorkflowToken(%q) validation classified as %q", repository, ClassifyFailure(err))
 		}
 		if _, err := provider.ActionSourceToken(t.Context(), repository); err == nil {
 			t.Fatalf("ActionSourceToken(%q) succeeded", repository)
@@ -197,7 +199,7 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 		{"unsafe retry header", http.StatusServiceUnavailable, secret, secret, "temporarily unavailable"},
 		{"unexpected status", http.StatusBadGateway, secret, "", "HTTP 502"},
 		{"malformed JSON", http.StatusOK, `{"token":`, "", "decode"},
-		{"unknown field", http.StatusOK, `{"token":"ghs_valid","other":true}`, "", "unknown field"},
+		{"unknown field", http.StatusOK, `{"token":"ghs_valid","` + secret + `":true}`, "", "decode GitHub workflow token response"},
 		{"trailing JSON", http.StatusOK, `{"token":"ghs_valid"}{}`, "", "trailing data"},
 		{"empty token", http.StatusOK, `{"token":""}`, "", "invalid token"},
 		{"invalid token", http.StatusOK, `{"token":"secret with spaces"}`, "", "invalid token"},
@@ -312,9 +314,6 @@ func TestAgentGitHubTokensKeepsActionSourceFailureUnclassified(t *testing.T) {
 	}
 	if ClassifyFailure(err) != FailureClassUnknown {
 		t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassUnknown)
-	}
-	if status, ok := AgentAPIHTTPStatus(err); ok || status != 0 {
-		t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want 0, false", status, ok)
 	}
 }
 

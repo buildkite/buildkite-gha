@@ -20,9 +20,9 @@ func TestClassifyFailurePrecedence(t *testing.T) {
 	stepExit := markStepProcessExit(fmt.Errorf("step %q: %w", "test", exit))
 	unsupported := errUnsupportedf("shell %q is unsupported in the supported runtime subset", "pwsh")
 	hard := markHardJobFailure(errors.New("owned Docker resources remain after cleanup"))
-	workflowToken := newJobSetupHTTPFailure(FailureClassWorkflowToken, 400, "workflow token rejected")
-	oidcToken := newJobSetupHTTPFailure(FailureClassOIDCToken, 403, "OIDC token denied")
-	cacheCredential := newJobSetupHTTPFailure(FailureClassCacheCredential, 422, "cache credential rejected")
+	workflowToken := markJobSetupFailure(FailureClassWorkflowToken, credentialStatusError(400, "workflow token rejected"))
+	oidcToken := markJobSetupFailure(FailureClassOIDCToken, credentialStatusError(403, "OIDC token denied"))
+	cacheCredential := markJobSetupFailure(FailureClassCacheCredential, credentialStatusError(422, "cache credential rejected"))
 	cases := []struct {
 		name string
 		err  error
@@ -52,10 +52,17 @@ func TestClassifyFailurePrecedence(t *testing.T) {
 	}
 }
 
-func TestJobSetupFailurePreservesStatusAndCancellation(t *testing.T) {
-	err := fmt.Errorf("prepare token: %w", newJobSetupHTTPFailure(FailureClassWorkflowToken, 404, "not enabled"))
+func TestJobSetupFailureClassifiesOnlyCredentialRequestFailures(t *testing.T) {
+	err := fmt.Errorf("prepare token: %w", markJobSetupFailure(FailureClassWorkflowToken, credentialStatusError(404, "not enabled")))
+	if ClassifyFailure(err) != FailureClassWorkflowToken {
+		t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassWorkflowToken)
+	}
 	if status, ok := AgentAPIHTTPStatus(err); !ok || status != 404 {
 		t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want 404, true", status, ok)
+	}
+	validation := markJobSetupFailure(FailureClassWorkflowToken, errors.New("GitHub workflow token requires a valid event repository"))
+	if ClassifyFailure(validation) != FailureClassUnknown {
+		t.Fatalf("validation classified as %q", ClassifyFailure(validation))
 	}
 	if status, ok := AgentAPIHTTPStatus(errors.New("unrelated")); ok || status != 0 {
 		t.Fatalf("unrelated AgentAPIHTTPStatus() = %d, %t, want 0, false", status, ok)
@@ -65,7 +72,8 @@ func TestJobSetupFailurePreservesStatusAndCancellation(t *testing.T) {
 	expired, cancelDeadline := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 	defer cancelDeadline()
 	for _, ctx := range []context.Context{cancelled, expired} {
-		marked := markJobSetupFailure(ctx, FailureClassWorkflowToken, fmt.Errorf("request token: %w", ctx.Err()))
+		failure := credentialRequestFailure(ctx, fmt.Errorf("request token: %w", ctx.Err()))
+		marked := markJobSetupFailure(FailureClassWorkflowToken, failure)
 		if ClassifyFailure(marked) != FailureClassUnknown {
 			t.Errorf("cancellation classified as %q", ClassifyFailure(marked))
 		}

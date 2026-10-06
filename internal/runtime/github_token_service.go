@@ -76,8 +76,7 @@ func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, er
 	}, nil
 }
 
-func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository, workflow string, permissions map[string]string) (token string, err error) {
-	defer func() { err = markJobSetupFailure(ctx, FailureClassWorkflowToken, err) }()
+func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository, workflow string, permissions map[string]string) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("GitHub workflow token provider is not configured")
 	}
@@ -87,7 +86,8 @@ func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository, workf
 	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(permissions); err != nil {
 		return "", err
 	}
-	return c.mint(ctx, c.workflowURL, repository, workflow, permissions, "workflow")
+	token, err := c.mint(ctx, c.workflowURL, repository, workflow, permissions, "workflow")
+	return token, markJobSetupFailure(FailureClassWorkflowToken, err)
 }
 
 func (c *AgentGitHubTokens) ActionSourceToken(ctx context.Context, repository string) (string, error) {
@@ -97,7 +97,7 @@ func (c *AgentGitHubTokens) ActionSourceToken(ctx context.Context, repository st
 	return c.mint(ctx, c.actionSourceURL, repository, "", nil, "action source")
 }
 
-func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workflow string, permissions map[string]string, purpose string) (string, error) {
+func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workflow string, permissions map[string]string, purpose string) (token string, err error) {
 	if c == nil {
 		return "", fmt.Errorf("GitHub %s token provider is not configured", purpose)
 	}
@@ -120,6 +120,7 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 	if err != nil {
 		return "", fmt.Errorf("create GitHub %s token request: %w", purpose, err)
 	}
+	defer func() { err = credentialRequestFailure(ctx, err) }()
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.agent.Do(request)
 	if err != nil {
@@ -143,7 +144,7 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 		Token string `json:"token"`
 	}
 	if err := decoder.Decode(&decoded); err != nil {
-		return "", fmt.Errorf("decode GitHub %s token response: %w", purpose, err)
+		return "", fmt.Errorf("decode GitHub %s token response", purpose)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return "", fmt.Errorf("GitHub %s token response has trailing data", purpose)
@@ -178,42 +179,27 @@ func githubTokenStatusError(status int, retryAfter, purpose, repositorySettings,
 			if buildURL != "" {
 				message += ": " + buildURL
 			}
-			return newJobSetupHTTPFailure(FailureClassWorkflowToken, status, message)
+			return credentialStatusError(status, "%s", message)
 		}
-		return fmt.Errorf("%s request was rejected", credential)
+		return credentialStatusError(status, "%s request was rejected", credential)
 	case http.StatusUnauthorized, http.StatusForbidden:
-		if purpose == "workflow" {
-			return newJobSetupHTTPFailure(FailureClassWorkflowToken, status, credential+" request was denied")
-		}
-		return fmt.Errorf("%s request was denied", credential)
+		return credentialStatusError(status, "%s request was denied", credential)
 	case http.StatusNotFound:
 		if purpose == "workflow" {
 			message := `GitHub workflow access tokens are not enabled for this organization or pipeline; enable "Allow workflow-authorized GitHub access tokens" in the pipeline's repository settings`
 			if repositorySettings != "" {
 				message += ": " + repositorySettings
 			}
-			return newJobSetupHTTPFailure(FailureClassWorkflowToken, status, message)
+			return credentialStatusError(status, "%s", message)
 		}
-		return fmt.Errorf("GitHub action source access tokens are not enabled for this organization")
+		return credentialStatusError(status, "GitHub action source access tokens are not enabled for this organization")
 	case http.StatusServiceUnavailable:
 		retryAfter = strings.TrimSpace(retryAfter)
 		if retryAfterSecondsPattern.MatchString(retryAfter) {
-			message := fmt.Sprintf("%s service is temporarily unavailable; retry after %s seconds", credential, retryAfter)
-			if purpose == "workflow" {
-				return newJobSetupHTTPFailure(FailureClassWorkflowToken, status, message)
-			}
-			return errors.New(message)
+			return credentialStatusError(status, "%s service is temporarily unavailable; retry after %s seconds", credential, retryAfter)
 		}
-		message := credential + " service is temporarily unavailable"
-		if purpose == "workflow" {
-			return newJobSetupHTTPFailure(FailureClassWorkflowToken, status, message)
-		}
-		return errors.New(message)
+		return credentialStatusError(status, "%s service is temporarily unavailable", credential)
 	default:
-		message := fmt.Sprintf("%s service returned HTTP %d", credential, status)
-		if purpose == "workflow" {
-			return newJobSetupHTTPFailure(FailureClassWorkflowToken, status, message)
-		}
-		return errors.New(message)
+		return credentialStatusError(status, "%s service returned HTTP %d", credential, status)
 	}
 }

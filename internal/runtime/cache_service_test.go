@@ -139,7 +139,7 @@ func TestAgentCacheCredentialsRejectsRedirectsAndUntrustedResponses(t *testing.T
 		{"rate limited", http.StatusTooManyRequests, secret, "rate limited"},
 		{"unexpected status", http.StatusBadGateway, secret, "HTTP 502"},
 		{"malformed JSON", http.StatusOK, `{"token":`, "decode"},
-		{"unknown field", http.StatusOK, `{"token":"a.b.c","other":true}`, "unknown field"},
+		{"unknown field", http.StatusOK, `{"token":"a.b.c","` + secret + `":true}`, "decode cache credential response"},
 		{"trailing JSON", http.StatusOK, `{"token":"a.b.c"}{}`, "trailing data"},
 		{"invalid token", http.StatusOK, `{"token":"not-a-jwt"}`, "invalid token"},
 		{"oversized", http.StatusOK, `{"token":"a.b.c"}` + strings.Repeat(" ", cacheCredentialResponseLimit), "exceeds"},
@@ -738,7 +738,7 @@ fs.writeFileSync(process.env.MARKER, "executed");
 
 func TestCacheActionPreservesCredentialFailure(t *testing.T) {
 	provider := cacheCredentialProviderFunc(func(context.Context) (CacheCredentials, error) {
-		return CacheCredentials{}, cacheCredentialStatusError(http.StatusUnprocessableEntity)
+		return CacheCredentials{}, markJobSetupFailure(FailureClassCacheCredential, cacheCredentialStatusError(http.StatusUnprocessableEntity))
 	})
 	result := newResult()
 	err := newJobRun(Runner{Cache: provider, Redactor: &testRedactor{}}).runJavaScriptPhase(

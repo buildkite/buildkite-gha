@@ -64,19 +64,50 @@ func ClassifyFailure(err error) FailureClass {
 	return FailureClassUnknown
 }
 
+// credentialRequestError reports a credential request that the Agent API
+// boundary sent and could not complete. status is the Agent API response
+// status, or zero when the request failed without a non-success response.
+type credentialRequestError struct {
+	status int
+	err    error
+}
+
+func (e *credentialRequestError) Error() string { return e.err.Error() }
+func (e *credentialRequestError) Unwrap() error { return e.err }
+
+func credentialStatusError(status int, format string, args ...any) error {
+	return &credentialRequestError{status: status, err: fmt.Errorf(format, args...)}
+}
+
+// credentialRequestFailure marks err as a failed credential request unless the
+// caller cancelled it. HTTP client timeouts also match DeadlineExceeded, but
+// are request failures unless ctx itself has expired.
+func credentialRequestFailure(ctx context.Context, err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || (ctx.Err() != nil && errors.Is(err, ctx.Err())) {
+		return err
+	}
+	var requestErr *credentialRequestError
+	if errors.As(err, &requestErr) {
+		return err
+	}
+	return &credentialRequestError{err: err}
+}
+
+// jobSetupFailure attributes a failed credential request to the job setup
+// step that needed it.
 type jobSetupFailure struct {
-	class      FailureClass
-	httpStatus int
-	err        error
+	class FailureClass
+	err   error
 }
 
 func (e *jobSetupFailure) Error() string { return e.err.Error() }
 func (e *jobSetupFailure) Unwrap() error { return e.err }
 
-func markJobSetupFailure(ctx context.Context, class FailureClass, err error) error {
-	// HTTP client timeouts also match DeadlineExceeded, but are acquisition
-	// failures unless the caller's context has expired.
-	if err == nil || errors.Is(err, context.Canceled) || (ctx.Err() != nil && errors.Is(err, ctx.Err())) {
+// markJobSetupFailure classifies failed credential requests. Local validation
+// errors and cancellations pass through unclassified.
+func markJobSetupFailure(class FailureClass, err error) error {
+	var requestErr *credentialRequestError
+	if !errors.As(err, &requestErr) {
 		return err
 	}
 	var marked *jobSetupFailure
@@ -86,18 +117,14 @@ func markJobSetupFailure(ctx context.Context, class FailureClass, err error) err
 	return &jobSetupFailure{class: class, err: err}
 }
 
-func newJobSetupHTTPFailure(class FailureClass, status int, message string) error {
-	return &jobSetupFailure{class: class, httpStatus: status, err: errors.New(message)}
-}
-
-// AgentAPIHTTPStatus returns the upstream Agent API status retained by a
-// classified runtime setup failure.
+// AgentAPIHTTPStatus returns the Agent API status of a failed credential
+// request.
 func AgentAPIHTTPStatus(err error) (int, bool) {
-	var setup *jobSetupFailure
-	if !errors.As(err, &setup) || setup.httpStatus == 0 {
+	var requestErr *credentialRequestError
+	if !errors.As(err, &requestErr) || requestErr.status == 0 {
 		return 0, false
 	}
-	return setup.httpStatus, true
+	return requestErr.status, true
 }
 
 type stepProcessExitError struct {

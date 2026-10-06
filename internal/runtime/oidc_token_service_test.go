@@ -222,7 +222,7 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
-			provider := &testOIDCTokenProvider{err: oidcTokenStatusError(status)}
+			provider := &testOIDCTokenProvider{err: markJobSetupFailure(FailureClassOIDCToken, oidcTokenStatusError(status))}
 			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, newCommandOutputProcessor(&bytes.Buffer{}, &bytes.Buffer{}))
 			if err != nil {
 				t.Fatal(err)
@@ -268,7 +268,7 @@ func TestIDTokenServiceRetainsOnlyUnrecoveredFailures(t *testing.T) {
 		{name: "cancelled request", cancel: true, want: FailureClassUnknown},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			provider := &testOIDCTokenProvider{token: "header.payload.signature", err: oidcTokenStatusError(http.StatusServiceUnavailable), requireLiveContext: true}
+			provider := &testOIDCTokenProvider{token: "header.payload.signature", err: markJobSetupFailure(FailureClassOIDCToken, oidcTokenStatusError(http.StatusServiceUnavailable)), requireLiveContext: true}
 			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, newCommandOutputProcessor(io.Discard, io.Discard))
 			if err != nil {
 				t.Fatal(err)
