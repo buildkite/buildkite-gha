@@ -107,6 +107,41 @@ Use a Windows Server 2022 queue with Buildkite agent v3.129 or newer, PowerShell
 or its tools. `runner.os` is `Windows` and `runner.arch` is `X64`. See
 [explicit mappings and runtime distributions](cli.md#choose-runners-and-runtimes).
 
+### Configure a Windows runner
+
+Choose one route with your pipeline administrator:
+
+- **Explicit mapping:** map the workflow's `windows-latest` or `windows-2022`
+  label to an existing Windows Server 2022 x86-64 queue in the importing job's
+  cluster. The Agent API must validate that the queue exists and, for a hosted
+  queue, matches `windows/amd64`. See the [plugin and CLI examples](cli.md#choose-runners-and-runtimes).
+- **Automatic routing:** ask Buildkite support to confirm your organization's
+  hosted Windows Medium access and Agent API routing availability. The importing
+  job's cluster needs an active hosted Windows AMD64 **Medium** queue named
+  `windows-medium`. A self-hosted, differently sized, wrong-platform, or
+  other-cluster queue does not qualify, even if its name matches.
+
+Neither route creates queues, grants hosted Windows access, or changes trust
+policy. Keep generated-job queues isolated from protected credentials and
+earlier jobs, including when using a self-hosted queue. An explicit mapping is
+not a way to bypass queue validation. Do not change a Windows-only job to Linux
+to get past runner admission.
+
+| Diagnostic | Action |
+| --- | --- |
+| No Windows runner target is configured | Configure one of the routes above. Offline validation has no Windows preset; this failure alone does not establish runtime incompatibility. |
+| No hosted Windows queue (`missing_queue`) | Ask an administrator to check the importing job's cluster and all automatic-routing queue requirements above, or explicitly map a compatible existing queue. |
+| Job does not belong to a cluster (`no_cluster`) | Ask an administrator to move the pipeline to a cluster containing compatible queues. |
+| Queue not found or platform mismatch | Correct the mapping to an active Windows queue in the importing job's cluster. A Linux queue cannot run the Windows runtime. |
+| Incompatible labels | Check the variant and use a single supported Windows label. For `windows-latest` or `windows-2022`, this can also mean hosted Windows access is unavailable; ask Buildkite support to check eligibility and routing rather than assuming Windows is wholly unsupported. |
+| Windows variant has no local mapping | Use `windows-latest` or `windows-2022` only if the job can run on Server 2022 x86-64. The documented Windows 2025 aliases require Agent API resolution and preserve neither Server 2025 nor provider hardware. Native Windows arm64 remains unsupported. |
+
+For support, include the build/job URL, workflow path, requested `runs-on`,
+importer version, and complete runner diagnostic. A generic rejection does not
+identify a missing entitlement, queue, or mapping by itself.
+
+### Runtime boundaries
+
 The default shell is `pwsh`. Explicit `pwsh` and Windows PowerShell
 (`powershell`) steps, JavaScript actions, and composite actions are supported
 within the same action restrictions documented below. Use UTF-8 for file
@@ -1190,13 +1225,14 @@ queue fails before pipeline upload with the cluster and queue named:
 | Rejection | Meaning |
 | --- | --- |
 | `missing_queue` | The labels are compatible, but the job's cluster has none of the hosted queues they need. Create the named queue or configure an explicit runner mapping. |
-| `incompatible_labels` | The labels require an operating system or architecture hosted agents do not provide. |
+| `incompatible_labels` | The selector is unsupported, or hosted Windows access is unavailable. See [Configure a Windows runner](#configure-a-windows-runner) before changing Windows labels. |
 | `no_cluster` | The job is not in a cluster, so no hosted queue can be selected. |
 | `queue_not_found` | The explicitly configured queue is not active in the job's cluster. Correct the mapping or create the queue. |
 | `queue_platform_mismatch` | The configured hosted queue has a different OS or architecture. Map the label to a compatible queue. |
 
-Windows labels keep the local Windows guidance. Unknown rejection codes render
-the server message with generic mapping guidance.
+Windows rejections preserve the server's reason and add setup or variant
+guidance for incompatible selectors. Unknown rejection codes render the server
+message with generic mapping guidance.
 
 Imports using explicit mappings require job-scoped Agent API credentials and
 a server that acknowledges configured-target validation. If validation is
