@@ -343,43 +343,43 @@ jobs:
 }
 
 func TestCompilePinsRemoteWorkflowAndActionToOneCommit(t *testing.T) {
-	callerRoot := t.TempDir()
-	callerPath := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: owner/repository/.github/workflows/ci.yml@v1\n")
-	remoteRoot := t.TempDir()
-	writeWorkflow(t, remoteRoot, "ci.yml", `on: workflow_call
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: owner/repository/action@v1
-`)
-	actionRoot := filepath.Join(remoteRoot, "action")
-	if err := os.MkdirAll(actionRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(actionRoot, "action.yml"), []byte("runs:\n  using: node24\n  main: index.js\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(actionRoot, "index.js"), []byte("console.log('ok')\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fake := newFakeReusableRepositorySource(t, map[string]string{"owner/repository": remoteRoot})
-	shared := MemoizeRepositorySource(fake)
-	options := defaultOptions()
-	options.RepositorySource = shared
-	options.ResolveActions = true
-	options.ActionSource = shared
-	plans, err := compilePlansForTest(t.Context(), callerPath, readFile(t, callerPath), pushEvent(t), "0.0.0-test", testDistributionDigest, options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	commit := fake.commits["owner/repository"]
-	if len(plans) != 1 || plans[0].Workflow.Remote == nil || plans[0].Workflow.Remote.Commit != commit || len(plans[0].Actions) != 1 || plans[0].Actions[0].Commit != commit || plans[0].Actions[0].RequestedRef != "v1" {
-		t.Fatalf("workflow/action pins = %#v", plans)
-	}
-	calls := fake.references()
-	if len(calls) != 2 || calls[0].Raw != "owner/repository/.github/workflows/ci.yml@v1" || !calls[0].RepositoryRoot || calls[1].Raw != "owner/repository/action@"+commit || calls[1].RepositoryRoot {
-		t.Fatalf("repository source calls = %#v, want mutable ref once then exact commit", calls)
+	// GitHub allows repository names that end in a hyphen.
+	for _, repository := range []string{"owner/repository", "owner/repo-"} {
+		t.Run(repository, func(t *testing.T) {
+			callerRoot := t.TempDir()
+			callerPath := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: "+repository+"/.github/workflows/ci.yml@v1\n")
+			remoteRoot := t.TempDir()
+			writeWorkflow(t, remoteRoot, "ci.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: "+repository+"/action@v1\n")
+			actionRoot := filepath.Join(remoteRoot, "action")
+			if err := os.MkdirAll(actionRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(actionRoot, "action.yml"), []byte("runs:\n  using: node24\n  main: index.js\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(actionRoot, "index.js"), []byte("console.log('ok')\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fake := newFakeReusableRepositorySource(t, map[string]string{repository: remoteRoot})
+			shared := MemoizeRepositorySource(fake)
+			options := defaultOptions()
+			options.RepositorySource = shared
+			options.ResolveActions = true
+			options.ActionSource = shared
+			plans, err := compilePlansForTest(t.Context(), callerPath, readFile(t, callerPath), pushEvent(t), "0.0.0-test", testDistributionDigest, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			commit := fake.commits[repository]
+			if len(plans) != 1 || plans[0].Workflow.Remote == nil || plans[0].Workflow.Remote.Commit != commit || len(plans[0].Actions) != 1 || plans[0].Actions[0].Commit != commit || plans[0].Actions[0].RequestedRef != "v1" {
+				t.Fatalf("workflow/action pins = %#v", plans)
+			}
+			calls := fake.references()
+			if len(calls) != 2 || calls[0].Raw != repository+"/.github/workflows/ci.yml@v1" || !calls[0].RepositoryRoot || calls[1].Raw != repository+"/action@"+commit || calls[1].RepositoryRoot {
+				t.Fatalf("repository source calls = %#v, want mutable ref once then exact commit", calls)
+			}
+			validateCompiledPlansAgainstSchema(t, plans)
+		})
 	}
 }
 
