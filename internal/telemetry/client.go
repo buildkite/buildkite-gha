@@ -89,6 +89,9 @@ const (
 	FailureCodeUnsupportedFeature FailureCode = "E_UNSUPPORTED_FEATURE"
 	FailureCodeRuntimeIntegrity   FailureCode = "E_RUNTIME_INTEGRITY"
 	FailureCodeSecretUnavailable  FailureCode = "E_SECRET_UNAVAILABLE"
+	FailureCodeWorkflowToken      FailureCode = "E_WORKFLOW_TOKEN_UNAVAILABLE"
+	FailureCodeOIDCToken          FailureCode = "E_OIDC_TOKEN_UNAVAILABLE"
+	FailureCodeCacheCredential    FailureCode = "E_CACHE_CREDENTIAL_UNAVAILABLE"
 )
 
 type Severity string
@@ -116,6 +119,7 @@ type Details struct {
 	Diagnostics           []Diagnostic
 	Blocker               string
 	BlockerDetail         string
+	AgentAPIHTTPStatus    int
 }
 
 type Properties struct {
@@ -130,6 +134,7 @@ type Properties struct {
 	Diagnostics           []Diagnostic `json:"diagnostics,omitempty"`
 	Blocker               string       `json:"blocker,omitempty"`
 	BlockerDetail         string       `json:"blocker_detail,omitempty"`
+	AgentAPIHTTPStatus    int          `json:"agent_api_http_status,omitempty"`
 }
 
 type Config struct {
@@ -210,6 +215,9 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	if details.FailureCode != "" && !validFailureCode(details.FailureCode) {
 		return fmt.Errorf("invalid telemetry failure code")
 	}
+	if details.AgentAPIHTTPStatus != 0 && (details.AgentAPIHTTPStatus < 100 || details.AgentAPIHTTPStatus > 599) {
+		return fmt.Errorf("invalid telemetry Agent API HTTP status")
+	}
 	diagnostics, err := BoundedDiagnostics(details.Diagnostics)
 	if err != nil {
 		return err
@@ -235,7 +243,7 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 			Command: command, Outcome: outcome, ClientVersion: c.clientVersion, DurationMS: durationMS,
 			FailurePhase: details.FailurePhase, FailureCode: details.FailureCode,
 			ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated, Diagnostics: diagnostics,
-			Blocker: blocker, BlockerDetail: blockerDetail,
+			Blocker: blocker, BlockerDetail: blockerDetail, AgentAPIHTTPStatus: details.AgentAPIHTTPStatus,
 		},
 	})
 	if err != nil {
@@ -279,7 +287,8 @@ func validFailureCode(code FailureCode) bool {
 		FailureCodeMatrixInvalid, FailureCodeExpressionInvalid, FailureCodeActionDiscovery,
 		FailureCodeActionResolution, FailureCodePlanConstruction, FailureCodePipelineGeneration,
 		FailureCodeEnvironment, FailureCodeVariableResolution, FailureCodeProfile, FailureCodeStepProcessExit,
-		FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable:
+		FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable,
+		FailureCodeWorkflowToken, FailureCodeOIDCToken, FailureCodeCacheCredential:
 		return true
 	default:
 		return false

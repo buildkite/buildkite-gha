@@ -50,6 +50,7 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 	if err := client.Emit(CommandRunJob, OutcomeFailure, duration, Details{
 		FailurePhase:          FailurePhaseParsing,
 		FailureCode:           FailureCodeWorkflowSyntax,
+		AgentAPIHTTPStatus:    http.StatusUnprocessableEntity,
 		ErrorMessage:          "  buildkite-gha: run-job:\ninvalid workflow\tvalue  ",
 		ErrorMessageTruncated: true,
 		Blocker:               "shell",
@@ -67,7 +68,8 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 	want := Properties{
 		Command: CommandRunJob, Outcome: OutcomeFailure, ClientVersion: "1.2.3", DurationMS: 1234,
 		FailurePhase: FailurePhaseParsing, FailureCode: FailureCodeWorkflowSyntax,
-		ErrorMessage: "buildkite-gha: run-job: invalid workflow value", ErrorMessageTruncated: true,
+		AgentAPIHTTPStatus: http.StatusUnprocessableEntity,
+		ErrorMessage:       "buildkite-gha: run-job: invalid workflow value", ErrorMessageTruncated: true,
 		Blocker: "shell", BlockerDetail: "pwsh",
 		Diagnostics: []Diagnostic{{
 			Code: string(FailureCodeExpressionInvalid), Severity: SeverityError,
@@ -224,6 +226,11 @@ func TestPropertiesAreBounded(t *testing.T) {
 	if err := client.Emit(CommandRunJob, OutcomeFailure, 0, Details{FailurePhase: FailurePhaseUnknown, FailureCode: FailureCode("arbitrary")}); err == nil {
 		t.Fatal("Emit() accepted an unknown failure code")
 	}
+	for _, status := range []int{-1, 99, 600} {
+		if err := client.Emit(CommandRunJob, OutcomeFailure, 0, Details{AgentAPIHTTPStatus: status}); err == nil {
+			t.Errorf("Emit() accepted Agent API HTTP status %d", status)
+		}
+	}
 }
 
 func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
@@ -247,7 +254,10 @@ func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
 }
 
 func TestRuntimeClassificationCodesAreFailureCodesOnly(t *testing.T) {
-	for _, code := range []FailureCode{FailureCodeStepProcessExit, FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable} {
+	for _, code := range []FailureCode{
+		FailureCodeStepProcessExit, FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable,
+		FailureCodeWorkflowToken, FailureCodeOIDCToken, FailureCodeCacheCredential,
+	} {
 		if !validFailureCode(code) {
 			t.Errorf("validFailureCode(%q) = false", code)
 		}

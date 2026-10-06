@@ -939,7 +939,16 @@ failures (`E_RUNTIME_INTEGRITY`), so a failing test suite is not counted as a
 compatibility gap. Runtime rejections include the same blocker fields when the
 runtime can identify the rejected shell or action reference.
 Secret resolution failures use `E_SECRET_UNAVAILABLE`, making secret
-availability independently measurable.
+availability independently measurable. Workflow-token, OIDC-token, and cache
+credential acquisition failures use `E_WORKFLOW_TOKEN_UNAVAILABLE`,
+`E_OIDC_TOKEN_UNAVAILABLE`, and `E_CACHE_CREDENTIAL_UNAVAILABLE`, including
+Agent API client timeouts but not caller cancellation. A successful OIDC retry
+clears the recorded failure for that audience. Unsupported-feature and runtime
+integrity failures take precedence over token acquisition failures.
+When the failure code identifies a token or cache credential failure,
+`agent_api_http_status` contains the Agent API response status, if it is
+between 100 and 599. Invalid statuses are omitted without dropping the event.
+Other unclassified failures keep the `unknown` code and omit the status.
 
 Buildkite adds organization, pipeline, build, and job identifiers on the
 server. The client does not send workflow or event content, environment

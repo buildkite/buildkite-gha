@@ -24,6 +24,51 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
+func TestCommandTelemetryOmitsInvalidOrUnrelatedAgentStatus(t *testing.T) {
+	events := make(chan telemetry.Properties, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var event struct {
+			Properties telemetry.Properties `json:"properties"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			t.Error(err)
+		}
+		events <- event.Properties
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	client, err := telemetry.New(telemetry.Config{Endpoint: server.URL, JobID: cliTestJobID, JobToken: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		code       telemetry.FailureCode
+		status     int
+		wantStatus int
+	}{
+		{telemetry.FailureCodeWorkflowToken, -1, 0},
+		{telemetry.FailureCodeWorkflowToken, 99, 0},
+		{telemetry.FailureCodeWorkflowToken, 100, 100},
+		{telemetry.FailureCodeWorkflowToken, 599, 599},
+		{telemetry.FailureCodeWorkflowToken, 600, 0},
+		{telemetry.FailureCodeOIDCToken, 403, 403},
+		{telemetry.FailureCodeCacheCredential, 422, 422},
+		{telemetry.FailureCodeRuntimeIntegrity, 403, 0},
+		{telemetry.FailureCodeSecretUnavailable, 404, 0},
+	} {
+		details := &commandTelemetryDetails{}
+		details.setFailureCode(test.code)
+		details.setAgentAPIHTTPStatus(test.status)
+		if err := client.Emit(telemetry.CommandRunJob, telemetry.OutcomeFailure, 0, details.forOutcome(telemetry.OutcomeFailure)); err != nil {
+			t.Fatalf("status %d dropped the event: %v", test.status, err)
+		}
+		event := <-events
+		if event.FailureCode != test.code || event.AgentAPIHTTPStatus != test.wantStatus {
+			t.Fatalf("code %s, status %d: event = %#v", test.code, test.status, event)
+		}
+	}
+}
+
 func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
 	type event struct {
 		Event      string `json:"event"`
