@@ -592,7 +592,11 @@ func TestRunnerRejectionDiagnosticIsActionableWithoutResolvedLabel(t *testing.T)
 	}{
 		{name: "no labels", trust: EventTrusted, want: "Set runs-on"},
 		{name: "duplicate label", labels: []string{"ubuntu-24.04", "ubuntu-24.04"}, trust: EventTrusted, want: "Remove duplicate labels"},
-		{name: "unsupported operating system", labels: []string{"windows-latest"}, trust: EventTrusted, want: `change runs-on to "ubuntu-latest"`},
+		{name: "unconfigured Windows", labels: []string{"windows-latest"}, trust: EventTrusted, want: "Ask a pipeline administrator to map windows-latest or windows-2022"},
+		{name: "unsupported Windows architecture", labels: []string{"windows-11-arm"}, trust: EventTrusted, want: "native Windows arm64 is unsupported"},
+		{name: "server-only Windows alias", labels: []string{"windows-2025"}, trust: EventTrusted, want: "Windows 2025 aliases require Agent API resolution"},
+		{name: "server-only Depot alias", labels: []string{"depot-windows-2025-16"}, trust: EventTrusted, want: "Windows 2025 aliases require Agent API resolution"},
+		{name: "unsupported Windows version", labels: []string{"windows-2019"}, trust: EventTrusted, want: "Explicit Windows mappings support only windows-latest and windows-2022"},
 		{name: "unmapped label", labels: []string{"macos-15"}, trust: EventTrusted, want: "Configure a mapping"},
 		{name: "conflicting queues", labels: []string{"self-hosted", "linux"}, trust: EventTrusted, want: "Use labels that map to one runner target"},
 		{name: "conflicting targets", labels: []string{"ubuntu-24.04", "macos"}, trust: EventTrusted, want: "Use labels that map to one runner target"},
@@ -673,9 +677,9 @@ func TestRunnerPolicyServerRejectionWinsOverLocalPreset(t *testing.T) {
 	if _, err := policy.resolve([]string{"macos-latest", "self-hosted"}, EventTrusted); !errors.As(err, &rejection) || rejection.reason != reasonUnmappedLabel {
 		t.Fatalf("overlapping selector error = %#v, want per-label rejection", err)
 	}
-	// The local Windows guidance is more specific than the server's.
-	if _, err := policy.resolve([]string{"windows-latest"}, EventTrusted); !errors.As(err, &rejection) || rejection.reason != reasonUnsupportedOS {
-		t.Fatalf("windows-latest error = %#v, want local unsupported-OS rejection", err)
+	// Windows must retain the server's cause, just like other platforms.
+	if _, err := policy.resolve([]string{"windows-latest"}, EventTrusted); !errors.As(err, &rejection) || rejection.reason != reasonServerRejected {
+		t.Fatalf("windows-latest error = %#v, want server rejection", err)
 	}
 	if _, err := (RunnerPolicy{Selectors: []RunnerSelector{{Labels: []string{"macos-latest"}, Target: preset}}, Rejections: []RunnerRejection{missingQueue}}).resolve([]string{"macos-latest"}, EventTrusted); err != nil {
 		t.Fatalf("selector should win over rejection: %v", err)
@@ -684,14 +688,74 @@ func TestRunnerPolicyServerRejectionWinsOverLocalPreset(t *testing.T) {
 
 func TestRunnerPolicyExplicitWindowsTarget(t *testing.T) {
 	target := RunnerTarget{Queue: "windows", Platform: PlatformWindowsAMD64}
-	policy := RunnerPolicy{Targets: map[string]RunnerTarget{"windows-latest": target}}
-	if got, err := policy.Resolve([]string{"windows-latest"}, EventTrusted); err != nil || !reflect.DeepEqual(got, target) {
-		t.Fatalf("Resolve() = %#v, %v, want explicit Windows target", got, err)
+	for _, mapped := range []bool{false, true} {
+		policy := RunnerPolicy{Selectors: []RunnerSelector{{Labels: []string{"windows-latest"}, Target: target}}}
+		if mapped {
+			policy = RunnerPolicy{Targets: map[string]RunnerTarget{"windows-latest": target}}
+		}
+		if got, err := policy.Resolve([]string{"windows-latest"}, EventTrusted); err != nil || !reflect.DeepEqual(got, target) {
+			t.Fatalf("Windows target (mapped=%t) = %#v, %v", mapped, got, err)
+		}
+		var rejection *runnerPolicyRejection
+		if _, err := policy.Resolve([]string{"windows-latest"}, EventUntrusted); !errors.As(err, &rejection) || rejection.reason != reasonUntrustedQueue {
+			t.Fatalf("untrusted Windows (mapped=%t) = %v, want queue rejection", mapped, err)
+		}
+		policy.UntrustedQueues = []string{"windows"}
+		if got, err := policy.Resolve([]string{"windows-latest"}, EventUntrusted); err != nil || !reflect.DeepEqual(got, target) {
+			t.Fatalf("allowed Windows (mapped=%t) = %#v, %v", mapped, got, err)
+		}
 	}
 	options := DefaultOptions()
 	options.Runners = RunnerPolicy{Targets: map[string]RunnerTarget{"windows-latest": {Platform: PlatformWindowsAMD64}}}
 	if err := options.validate(); err == nil {
 		t.Fatal("options accepted Windows target without explicit queue")
+	}
+}
+
+func TestWindowsRunnerServerRejectionsPreserveCause(t *testing.T) {
+	for _, test := range []struct {
+		code, message string
+		mapped        bool
+	}{
+		{RunnerRejectionMissingQueue, "The 'Default' cluster has no hosted Windows amd64 queue. Create a hosted Windows amd64 queue named windows-medium: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md", false},
+		{RunnerRejectionNoCluster, "This job does not belong to a cluster. Move the pipeline into a cluster with compatible queues.", false},
+		{RunnerRejectionIncompatibleLabels, "This runner selector requires an operating system or architecture that Buildkite hosted agents do not provide: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md", false},
+		{"queue_not_found", "The 'windows' queue was not found in this job's cluster.", true},
+		{"queue_platform_mismatch", "The 'windows' queue requires platform linux/amd64, not windows/amd64.", true},
+		{"future_rejection", "This queue is not available.", false},
+	} {
+		t.Run(test.code, func(t *testing.T) {
+			policy := RunnerPolicy{Rejections: []RunnerRejection{{Labels: []string{"windows-latest"}, Code: test.code, Message: test.message}}}
+			if test.mapped {
+				policy.Targets = map[string]RunnerTarget{"windows-latest": {Queue: "windows", Platform: PlatformWindowsAMD64}}
+			}
+			_, err := policy.Resolve([]string{"Windows-Latest"}, EventTrusted)
+			var rejection *runnerPolicyRejection
+			if !errors.As(err, &rejection) || rejection.reason != reasonServerRejected {
+				t.Fatalf("Resolve() = %v, want server rejection", err)
+			}
+			message, detail := runnerRejectionDiagnostic(err, nil, []string{"ubuntu-latest"}, nil)
+			if !strings.Contains(message, test.message) || strings.Contains(message, "Windows-Latest") || strings.Contains(message, "aren't currently supported") {
+				t.Fatalf("server cause lost or resolved label leaked: %q", message)
+			}
+			if test.code == RunnerRejectionIncompatibleLabels && (!strings.Contains(message, "/compatibility.md Experimental Windows") || !strings.Contains(message, "contact Buildkite support to check hosted Windows access") || detail != "") {
+				t.Fatalf("missing eligibility guidance or altered server URL: %q / %q", message, detail)
+			}
+		})
+	}
+}
+
+func TestWindowsServerVariantGuidance(t *testing.T) {
+	for _, labels := range [][]string{{"windows-11-arm"}, {"windows-2025"}, {"depot-windows-2025-16"}, {"self-hosted", "windows-2022", "x64"}} {
+		rejection := RunnerRejection{Labels: labels, Code: RunnerRejectionIncompatibleLabels, Message: "No compatible runner is configured."}
+		message, detail := runnerRejectionDiagnostic(rejectRunnerByServer(rejection), nil, nil, nil)
+		if !strings.HasPrefix(message, "Buildkite could not resolve the runs-on labels. No compatible runner is configured.") || detail != "" ||
+			!strings.Contains(message, "Use one only if this job is compatible") ||
+			!strings.Contains(message, "Windows 2025 aliases require Agent API resolution") ||
+			!strings.Contains(message, "native Windows arm64 is unsupported") ||
+			!strings.Contains(message, "If a documented Windows 2025 alias is rejected, contact Buildkite support") {
+			t.Fatalf("variant %v: message = %q, detail = %q", labels, message, detail)
+		}
 	}
 }
 
@@ -740,7 +804,7 @@ func TestRunnerRejectionDiagnosticRendersServerRejections(t *testing.T) {
 			name:        "incompatible labels",
 			rejection:   RunnerRejection{Labels: []string{"self-hosted", "arm64"}, Code: RunnerRejectionIncompatibleLabels, Message: "No compatible runner is configured."},
 			labels:      []string{"self-hosted", "arm64"},
-			wantMessage: "Buildkite could not resolve the runs-on labels. No compatible runner is configured. Change runs-on to a Linux or macOS runner label that Buildkite hosted agents support.",
+			wantMessage: "Buildkite could not resolve the runs-on labels. No compatible runner is configured. Use a runner label compatible with this job and its Buildkite queue.",
 			wantDetail:  "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.",
 		},
 		{
@@ -824,7 +888,7 @@ func TestRunnerRejectionBlockerAttribution(t *testing.T) {
 
 func TestRunnerRejectionDiagnosticFallsBackWhenUnclassified(t *testing.T) {
 	message, detail := runnerRejectionDiagnostic(errors.New("boom"), nil, nil, nil)
-	if message != "Runner target is unsupported. Use a configured Linux or macOS runner target." || detail != "" {
+	if message != "Runner target is unsupported. Use a configured runner target compatible with this job." || detail != "" {
 		t.Fatalf("runnerRejectionDiagnostic() = %q, %q", message, detail)
 	}
 }
@@ -838,7 +902,7 @@ func TestRunnerRejectionDiagnosticSeparatesStaticLabelFromAllowlist(t *testing.T
 	}{
 		{
 			label:       "windows-latest",
-			wantMessage: `Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. If this job can run on Linux, change "windows-latest" to "ubuntu-latest". If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.`,
+			wantMessage: `No Windows runner target is configured. Experimental Windows jobs require a Windows Server 2022 x86-64 queue. Ask a pipeline administrator to map windows-latest or windows-2022 to that queue, or contact Buildkite support to check hosted Windows access and automatic routing. See https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#experimental-windows-jobs`,
 		},
 		{
 			label:       "macos-latest",

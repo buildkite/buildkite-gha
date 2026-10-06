@@ -1721,11 +1721,11 @@ func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.
 	if !strings.Contains(message, `Buildkite could not resolve runner label "macos-latest". `+missingQueueMessage) {
 		t.Fatalf("missing_queue rejection was not rendered: %q", message)
 	}
-	if !strings.Contains(message, `Buildkite could not resolve runner label "ubuntu-24.04-arm". No compatible runner is configured. Change runs-on to a Linux or macOS runner label that Buildkite hosted agents support.`) {
+	if !strings.Contains(message, `Buildkite could not resolve runner label "ubuntu-24.04-arm". No compatible runner is configured. Use a runner label compatible with this job and its Buildkite queue.`) {
 		t.Fatalf("incompatible_labels rejection was not rendered: %q", message)
 	}
-	if !strings.Contains(message, `Windows runners aren't currently supported.`) {
-		t.Fatalf("local Windows guidance was replaced by the server rejection: %q", message)
+	if !strings.Contains(message, `Buildkite could not resolve runner label "windows-latest". No compatible runner is configured.`) || !strings.Contains(message, "contact Buildkite support to check hosted Windows access and automatic routing") {
+		t.Fatalf("Windows server rejection or setup guidance missing: %q", message)
 	}
 	if strings.Contains(message, "has no runner-target mapping") || strings.Contains(message, `job "linux"`) {
 		t.Fatalf("unexpected failure content: %q", message)
@@ -1844,7 +1844,7 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 		t.Fatalf("expanded failed workflow = %#v", missing)
 	}
 	firstFailureMessage := failureLogText(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
-	if !strings.Contains(firstFailureMessage, `Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. If this job can run on Linux, change "windows-latest" to "ubuntu-latest". If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.`) ||
+	if !strings.Contains(firstFailureMessage, `No Windows runner target is configured.`) || !strings.Contains(firstFailureMessage, "Ask a pipeline administrator to map windows-latest or windows-2022 to that queue") ||
 		!strings.Contains(firstFailureMessage, `Runner label "macos-15" has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.`) ||
 		strings.Count(firstFailureMessage, "detail: Supported runner labels: macos-latest, ubuntu-22.04, ubuntu-24.04, ubuntu-latest.") != 1 {
 		t.Fatalf("multi-diagnostic failure message = %q", firstFailureMessage)
