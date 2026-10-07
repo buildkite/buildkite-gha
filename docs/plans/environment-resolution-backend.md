@@ -30,22 +30,21 @@ artifacts) was broader than environment resolution needs. The snapshot
 endpoint keeps the token inside Buildkite and narrows the importer-visible
 output to exactly the fields the compiler consumes.
 
+The backend environments endpoint
+([buildkite/buildkite#33480](https://github.com/buildkite/buildkite/pull/33480)),
+its `include_variables` extension
+([#33692](https://github.com/buildkite/buildkite/pull/33692)), and the separate
+repository and organization variables endpoint,
+`POST /jobs/{job_id}/github-actions/variables`
+([#33752](https://github.com/buildkite/buildkite/pull/33752)), are merged. The
+environments endpoint carries environment-scoped variables only and will not
+grow repository or organization fields.
+
 Remaining before removing this plan:
 
-- Backend endpoint and its `include_variables` extension merged and rolled
-  out, including adding Actions: read and Environments: read to the
-  code-access GitHub App and installation administrator approvals. Environment
-  variable listing is covered by Environments: read. The environments
-  endpoint carries environment-scoped variables only and will not grow
-  repository or organization fields.
-- Repository and organization variables come from a separate job-scoped
-  endpoint, `POST /jobs/{job_id}/github-actions/variables`, which replaced a
-  withdrawn draft that extended the environments response; this client never
-  consumed those draft fields. The client side is done (see below).
-  Remaining: merge and roll out the backend endpoint, including its
-  Variables: read token scope and the 10-requests-per-job-per-hour budget.
-  Until then the endpoint returns 404 and the client leaves both scopes
-  empty, so `vars` names no scope defines keep evaluating as empty strings.
+- Roll out the code-access GitHub App permissions (Actions: read,
+  Environments: read, and Variables: read) and installation administrator
+  approvals. Installations that have not approved keep failing closed.
 - A hosted end-to-end proof of an `upload` resolving an environment and gating
   a deploy job.
 
