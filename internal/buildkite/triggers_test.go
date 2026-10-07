@@ -23,7 +23,7 @@ func TestTriggerFilterErrorLocations(t *testing.T) {
 		{"push", "tags", "['!v1']", "must follow a positive"},
 		{"pull_request", "paths-ignore", "['!src/**']", "cannot be negated"},
 		{"release", "types", "[not-real]", "cannot be mapped exactly"},
-		{"merge_group", "types", "[destroyed]", "checks_requested is the only"},
+		{"merge_group", "types", "[not-real]", "checks_requested and destroyed"},
 	} {
 		t.Run(test.event+"/"+test.filter, func(t *testing.T) {
 			// Quoted, inline declarations still locate the key without exposing values.
@@ -171,7 +171,7 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 		{name: "mixed include ignore", triggers: []workflow.Trigger{{Event: "push", Branches: []string{"main"}, BranchesIgnore: []string{"release"}}}, want: "cannot be combined"},
 		{name: "leading negative", triggers: []workflow.Trigger{{Event: "push", Branches: []string{"!release/**"}}}, want: "must follow a positive"},
 		{name: "unsupported PR type", triggers: []workflow.Trigger{{Event: "pull_request", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
-		{name: "unsupported merge group type", triggers: []workflow.Trigger{{Event: "merge_group", Types: []string{"destroyed"}}}, want: `merge_group type "destroyed" is unsupported`},
+		{name: "unsupported merge group type", triggers: []workflow.Trigger{{Event: "merge_group", Types: []string{"not-real"}}}, want: `merge_group type "not-real" is unsupported`},
 		{name: "merge group tags", triggers: []workflow.Trigger{{Event: "merge_group", Tags: []string{"v*"}}}, want: "does not support the tags filter"},
 		{name: "unknown release type", triggers: []workflow.Trigger{{Event: "release", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
 		{name: "release workflows", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Workflows: []string{"CI"}}}, want: "does not support the workflows filter"},
@@ -204,8 +204,8 @@ func TestTranslateTriggerConditionReportsActionableTriggerErrors(t *testing.T) {
 	}{
 		{
 			name:    "unsupported merge group type",
-			trigger: workflow.Trigger{Event: "merge_group", Types: []string{"destroyed"}},
-			want:    `merge_group type "destroyed" is unsupported. checks_requested is the only merge queue activity currently mapped. Set types: [checks_requested]. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
+			trigger: workflow.Trigger{Event: "merge_group", Types: []string{"not-real"}},
+			want:    `merge_group type "not-real" is unsupported. Supported types are checks_requested and destroyed. Set types to the activities this workflow handles. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
 		},
 	}
 	for _, test := range tests {
@@ -259,6 +259,56 @@ func TestEmptyMergeGroupTypesMatchChecksRequested(t *testing.T) {
 	reason, err := TriggerFilterMismatchReason(triggers, "merge_group", TriggerEventSnapshot{MergeGroupAction: &action})
 	if err != nil || reason != "" {
 		t.Fatalf("mismatch reason = %q, %v", reason, err)
+	}
+}
+
+func TestMergeGroupActivitySelection(t *testing.T) {
+	for _, test := range []struct {
+		declaration, predicate string
+		checks, destroyed      bool
+	}{
+		{"merge_group", `build.source_action == "checks_requested"`, true, false},
+		{"{merge_group: {types: null}}", `build.source_action == "checks_requested"`, true, false},
+		{"{merge_group: {types: []}}", `build.source_action == "checks_requested"`, true, false},
+		{"{merge_group: {types: [checks_requested]}}", `build.source_action == "checks_requested"`, true, false},
+		{"{merge_group: {types: [destroyed]}}", `build.source_action == "destroyed"`, false, true},
+		{"{merge_group: {types: [checks_requested, destroyed]}}", `(build.source_action == "checks_requested" || build.source_action == "destroyed")`, true, true},
+	} {
+		t.Run(test.declaration, func(t *testing.T) {
+			parsed, err := workflow.Parse("queue.yml", []byte("on: "+test.declaration+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			condition, err := TranslateTriggerCondition(parsed.Triggers)
+			want := "(" + LiveEventPredicate("merge_group") + " && " + test.predicate + ")"
+			if err != nil || condition != want {
+				t.Fatalf("condition = %q, %v; want %q", condition, err, want)
+			}
+			for action, matches := range map[string]bool{"checks_requested": test.checks, "destroyed": test.destroyed} {
+				snapshot := TriggerEventSnapshot{MergeGroupAction: &action}
+				condition, applicable, err := TranslateEventTriggerCondition(parsed.Triggers, "merge_group", TriggerConditionExpressions{EventPredicate: "true", MergeGroupAction: yamlScalar(action)}, snapshot)
+				want := "(true && " + strings.ReplaceAll(test.predicate, "build.source_action", yamlScalar(action)) + ")"
+				if err != nil || !applicable || condition != want {
+					t.Fatalf("%s: condition = %q, applicable %t, %v; want %q", action, condition, applicable, err, want)
+				}
+				reason, err := TriggerFilterMismatchReason(parsed.Triggers, "merge_group", snapshot)
+				if err != nil || (reason == "") != matches {
+					t.Errorf("%s: mismatch reason = %q, %v; want match %t", action, reason, err, matches)
+				}
+			}
+		})
+	}
+	base, action := "stable", "destroyed"
+	for _, filters := range []workflow.Trigger{
+		{Branches: []string{"main"}},
+		{Branches: []string{"*", "!stable"}},
+		{BranchesIgnore: []string{"stable"}},
+	} {
+		filters.Event, filters.Types = "merge_group", []string{"destroyed"}
+		reason, err := TriggerFilterMismatchReason([]workflow.Trigger{filters}, "merge_group", TriggerEventSnapshot{MergeGroupBaseBranch: &base, MergeGroupAction: &action})
+		if err != nil || !strings.Contains(reason, `Base branch "stable"`) {
+			t.Fatalf("branch filter %#v: reason = %q, %v", filters, reason, err)
+		}
 	}
 }
 

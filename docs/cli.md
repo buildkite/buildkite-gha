@@ -480,7 +480,7 @@ Actions Pipeline Trigger selection. The server also supplies:
   `<owner>/<repo>/<repository-relative-path>@<event-ref>`
 - `GITHUB_WORKFLOW_SHA`: the full commit used to match the workflow
 - `BUILDKITE_GITHUB_EVENT`: a compatibility duplicate of `GITHUB_EVENT_NAME`
-- `BUILDKITE_GITHUB_ACTION`: the event activity, including `checks_requested` for merge groups; push
+- `BUILDKITE_GITHUB_ACTION`: the event activity; push
   and deployment events, plus `create`, `delete`, `fork`, `public`, `gollum`, and `page_build`, omit it
 
 The `GITHUB_*` values take precedence when present. The plugin derives the
@@ -512,8 +512,10 @@ See [deployment compatibility](compatibility.md#names-and-triggers) for provenan
 checks and inactive-status suppression.
 For `merge_group`, both workflow identity fields and the original linked payload
 are required. The selected ref/SHA identifies the speculative head; the distinct
-base branch/SHA must match Buildkite's merge-queue metadata. Only tokenless
-workflows are supported. See [merge-group compatibility](compatibility.md#names-and-triggers).
+base branch/SHA must match Buildkite's merge-queue metadata. `BUILDKITE_GITHUB_ACTION`
+must match the payload's actual `checks_requested` or `destroyed` action. Only
+tokenless workflows are supported. See [merge-group compatibility](compatibility.md#names-and-triggers)
+and the [destruction rollout boundary](compatibility.md#merge-group-destruction).
 `BUILDKITE_GITHUB_WORKFLOW_PATH` remains the path fallback because GitHub has no
 `GITHUB_WORKFLOW_PATH`. `BUILDKITE_GITHUB_ACTION` remains the action source
 because GitHub's `GITHUB_ACTION` has a different meaning. An explicit

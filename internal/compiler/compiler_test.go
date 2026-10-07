@@ -4774,7 +4774,7 @@ func TestParseEventValidatesMergeGroupIdentity(t *testing.T) {
 	for _, test := range []struct {
 		name, old, replacement, want string
 	}{
-		{name: "activity", old: `"checks_requested"`, replacement: `"destroyed"`, want: "checks_requested"},
+		{name: "activity", old: `"checks_requested"`, replacement: `"not-real"`, want: "checks_requested or destroyed"},
 		{name: "head ref", old: headRef, replacement: "refs/heads/other", want: "must match"},
 		{name: "head sha", old: headSHA, replacement: strings.Repeat("c", 40), want: "must match"},
 		{name: "base ref", old: "refs/heads/main", replacement: "main", want: "base_ref"},

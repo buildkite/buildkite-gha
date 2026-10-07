@@ -455,8 +455,8 @@ func validateDeploymentEvent(provider, event string, repository Repository, ref,
 }
 
 func validateMergeGroupEvent(ref, sha string, payload map[string]any) error {
-	if action, _ := payload["action"].(string); action != "checks_requested" {
-		return fmt.Errorf("merge_group event snapshot requires payload.action to be checks_requested")
+	if action, _ := payload["action"].(string); !buildkitepipeline.SupportedMergeGroupAction(action) {
+		return fmt.Errorf("merge_group event snapshot requires payload.action to be checks_requested or destroyed")
 	}
 	mergeGroup, ok := payload["merge_group"].(map[string]any)
 	if !ok {
