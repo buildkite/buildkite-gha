@@ -87,7 +87,7 @@ func TestAnonymousCheckoutAdapterPopulatesVerifiedWorkspace(t *testing.T) {
 	script := `#!/bin/sh
 set -eu
 test "$GIT_CONFIG_NOSYSTEM" = 1
-test "$GIT_CONFIG_GLOBAL" = ` + shellTestQuote(os.DevNull) + `
+test "$GIT_CONFIG_GLOBAL" = /dev/null
 test "$GIT_TERMINAL_PROMPT" = 0
 test "$GIT_LFS_SKIP_SMUDGE" = 1
 test -z "$GIT_ASKPASS"
@@ -593,7 +593,7 @@ func TestCheckoutSubmodulesUsesNativePorcelain(t *testing.T) {
 			if test.depthOne {
 				depth = "1"
 			}
-			if err := runner.runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), workspace, "git", map[string]string{"HOME": filepath.Join(workspace, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull}, base, depth, test.recursive, false, ""); err != nil {
+			if err := runner.runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), workspace, "git", map[string]string{"HOME": filepath.Join(workspace, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}, base, depth, test.recursive, false, ""); err != nil {
 				t.Fatal(err)
 			}
 			childPath := filepath.Join(workspace, "deps", "child")
@@ -1147,7 +1147,7 @@ printf 'username=token\npassword=%s\n' ` + shellTestQuote(repositoryToken) + `
 	git := filepath.Join(t.TempDir(), "git")
 	script := `#!/bin/sh
 set -eu
-test "$GIT_CONFIG_GLOBAL" = ` + shellTestQuote(os.DevNull) + `
+test "$GIT_CONFIG_GLOBAL" = /dev/null
 test -z "${GIT_LFS_SKIP_SMUDGE+x}"
 assert_no_proxy_environment() {
   test -z "${HTTP_PROXY+x}"

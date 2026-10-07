@@ -110,10 +110,12 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandOutputProcess
 	if lfs && (!filepath.IsAbs(git) || !canonicalGitName) {
 		return result, fmt.Errorf("checkout adapter requires Git LFS to use a canonical Git executable named git")
 	}
+	// Git maps /dev/null to the null device on every platform. Go's os.DevNull
+	// is NUL on Windows, which Git for Windows 2.56.0.windows.1 rejects.
 	env := map[string]string{
 		"HOME":                   filepath.Join(checkoutDirectory, ".no-home"),
 		"GIT_CONFIG_NOSYSTEM":    "1",
-		"GIT_CONFIG_GLOBAL":      os.DevNull,
+		"GIT_CONFIG_GLOBAL":      "/dev/null",
 		"GIT_TERMINAL_PROMPT":    "0",
 		"GIT_ASKPASS":            "",
 		"SSH_ASKPASS":            "",
