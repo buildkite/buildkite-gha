@@ -277,11 +277,12 @@ func validateBuildkiteMergeGroup(snapshot map[string]any, getenv func(string) st
 	if !ok {
 		return fmt.Errorf("merge_group webhook requires payload.merge_group")
 	}
-	if action, _ := payload["action"].(string); action != "checks_requested" {
-		return fmt.Errorf("merge_group webhook action must be checks_requested")
+	action, _ := payload["action"].(string)
+	if !buildkitepipeline.SupportedMergeGroupAction(action) {
+		return fmt.Errorf("merge_group webhook action must be checks_requested or destroyed")
 	}
 	if getenv(pipelineTriggerWorkflowPathEnvironment) != "" {
-		if getenv("BUILDKITE_GITHUB_ACTION") != "checks_requested" || snapshot["ref"] != "refs/heads/"+getenv("BUILDKITE_BRANCH") {
+		if getenv("BUILDKITE_GITHUB_ACTION") != action || snapshot["ref"] != "refs/heads/"+getenv("BUILDKITE_BRANCH") {
 			return fmt.Errorf("merge_group workflow ref or action does not match the Buildkite build")
 		}
 		repository, _ := payload["repository"].(map[string]any)

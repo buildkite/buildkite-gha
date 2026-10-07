@@ -194,13 +194,13 @@ func TestValidatePublishesActionableTriggerDiagnostics(t *testing.T) {
 		{
 			name: "unsupported merge group type",
 			line: 3, column: 5,
-			workflow: "on:\n  merge_group:\n    types: [destroyed]\n" +
+			workflow: "on:\n  merge_group:\n    types: [not-real]\n" +
 				"jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
-			wantMessage: `merge_group type "destroyed" is unsupported. checks_requested is the only merge queue activity currently mapped. Set types: [checks_requested]. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
+			wantMessage: `merge_group type "not-real" is unsupported. Supported types are checks_requested and destroyed. Set types to the activities this workflow handles. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
 			wantAnnotation: []string{
-				`<p><strong>merge_group type &#34;destroyed&#34; is unsupported.</strong></p>`,
-				`checks_requested is the only merge queue activity currently mapped.`,
-				`Set types: [checks_requested].`,
+				`<p><strong>merge_group type &#34;not-real&#34; is unsupported.</strong></p>`,
+				`Supported types are checks_requested and destroyed.`,
+				`Set types to the activities this workflow handles.`,
 			},
 		},
 	}

@@ -781,6 +781,39 @@ func TestCheckoutFetchArgsAgainstRealRepository(t *testing.T) {
 	}
 }
 
+func TestCheckoutFetchesMergeGroupHeadAfterQueueRefRemoval(t *testing.T) {
+	remote := t.TempDir()
+	runTestGit(t, remote, "init", "--initial-branch=main")
+	runTestGit(t, remote, "config", "user.name", "buildkite-gha test")
+	runTestGit(t, remote, "config", "user.email", "test@example.invalid")
+	runTestGit(t, remote, "commit", "--allow-empty", "-m", "Base")
+	baseSHA := strings.TrimSpace(runTestGit(t, remote, "rev-parse", "HEAD"))
+	branch := "gh-readonly-queue/main/pr-42-deadbeef"
+	runTestGit(t, remote, "checkout", "-b", branch)
+	if err := os.WriteFile(filepath.Join(remote, "queue.txt"), []byte("immutable queue head\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, remote, "add", "queue.txt")
+	runTestGit(t, remote, "commit", "-m", "Queue head")
+	headSHA := strings.TrimSpace(runTestGit(t, remote, "rev-parse", "HEAD"))
+	runTestGit(t, remote, "checkout", "main")
+	runTestGit(t, remote, "branch", "-D", branch)
+	if refs := runTestGit(t, remote, "for-each-ref", "--format=%(refname)"); strings.Contains(refs, branch) {
+		t.Fatal("queue ref still exists")
+	}
+	workspace := t.TempDir()
+	runTestGit(t, workspace, "init", "--initial-branch=main")
+	runTestGit(t, workspace, "remote", "add", "origin", remote)
+	runTestGit(t, workspace, checkoutFetchArgs(nil, headSHA)...)
+	runTestGit(t, workspace, "checkout", "--detach", checkoutRevision(nil, headSHA))
+	if got := strings.TrimSpace(runTestGit(t, workspace, "rev-parse", "HEAD")); got != headSHA || got == baseSHA {
+		t.Fatalf("HEAD = %s, want queue head %s, not base %s", got, headSHA, baseSHA)
+	}
+	if contents, err := os.ReadFile(filepath.Join(workspace, "queue.txt")); err != nil || string(contents) != "immutable queue head\n" {
+		t.Fatalf("queue source = %q, %v", contents, err)
+	}
+}
+
 func TestPrepareCheckoutDirectory(t *testing.T) {
 	workspace := t.TempDir()
 	root, err := prepareCheckoutDirectory(workspace, map[string]string{"path": "sources/test-catalog", "clean": "false"})

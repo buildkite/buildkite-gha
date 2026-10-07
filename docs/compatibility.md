@@ -378,7 +378,7 @@ the group condition, and the provider-check suffix.
 | --- | --- |
 | `push` | `branches`, `branches-ignore`, `tags`, and `tags-ignore`, including ordered negative patterns in an include list. Branch and tag filters select their corresponding ref kind. Matching `paths` and `paths-ignore` can be admitted for linked GitHub branch pushes when the bounded local-diff requirements below are met. |
 | `pull_request` | `branches` and `branches-ignore` match the base branch. Omitted `types`, `types: null`, and `types: []` default to `opened`, `synchronize`, and `reopened`, not every activity; explicitly listed activity types must map exactly to a supported Buildkite source action. Matching `paths` and `paths-ignore` can be admitted when the bounded local-diff requirements below are met. |
-| `merge_group` | Pipeline Triggers with a compatible server, and native Buildkite merge queue builds. Native builds require merge queue builds and Merge groups webhook delivery in the pipeline's GitHub settings. `branches` and `branches-ignore` match the base branch. Omitted `types`, `types: null`, or `types: []` selects the only supported activity, `checks_requested`; other types and tag and workflow filters are rejected. One native `destroyed` event with `reason: merged` selected explicit `[destroyed]`, not default forms; Buildkite does not support that activity ([PB-3523](https://linear.app/buildkite/issue/PB-3523)). See the [evidence limits](#activity-defaults-and-native-evidence). `paths` and `paths-ignore` are ignored with a warning, matching GitHub, which does not evaluate path filters for `merge_group` events. The ref and SHA identify the speculative queue head, not the base commit. A push to a queue ref is still a push. |
+| `merge_group` | Pipeline Triggers with a compatible server, and native Buildkite merge queue builds. Native builds require merge queue builds and Merge groups webhook delivery in the pipeline's GitHub settings. `branches` and `branches-ignore` match the base branch. Omitted `types`, `types: null`, or `types: []` selects only `checks_requested`. Explicit `[destroyed]` and `[checks_requested, destroyed]` are supported by the CLI/runtime; hosted execution requires [server activation and compatible runtimes](#merge-group-destruction). Unknown types and tag and workflow filters are rejected. `paths` and `paths-ignore` are ignored with a warning, matching GitHub, which does not evaluate path filters for `merge_group` events. The ref and SHA identify the speculative queue head, not the base commit. A push to a queue ref is still a push. |
 | `release` | Pipeline Triggers accept all seven GitHub release activities. Native Buildkite release builds require **Additional Webhooks** > **Releases** and **Code** trigger mode and deliver only `published`, `created`, and `released`; workflows that select other activities emit `W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED`. Bare declarations, `types: null`, and empty `types` lists select all activities. Other explicit `types` preserve exact selection, including a scalar selecting one activity. Branch, tag, and path filters are ignored; malformed types, unknown activities, and workflow filters are rejected. GitHub does not trigger `created`, `edited`, `deleted`, or `unpublished` for draft releases, and Buildkite rejects those deliveries. Pipeline Triggers require the GitHub Code Access App to select the workflow at the immutable peeled tag commit. The ref is `refs/tags/<tag_name>`. The SHA is the server-resolved peeled commit, or the checked-out commit for the native compatibility fallback. Existing hosted release `GITHUB_TOKEN` policy is unchanged. |
 | `deployment`, `deployment_status` | Pipeline Triggers with a compatible server, or explicit event snapshots. Bare, array, null, and empty-map declarations are supported. Branch, tag, and path filters are ignored; activity types and other event filters are rejected. Workflows and checkout use the deployment commit. The ref identifies its branch or tag and is empty for SHA-only deployments. Status states `error`, `failure`, `in_progress`, `queued`, `pending`, `success`, and `waiting` are supported ([GitHub status enum](https://docs.github.com/en/graphql/reference/enums#deploymentstatusstate)); `inactive` cannot run a workflow. The genuine payload exposes `github.event.deployment` and `github.event.deployment_status`, including environment, state, `environment_url`, `log_url`, and `target_url` when present. Use job/step conditions on these values, not `types` or environment filters. No deployment creation or environment orchestration is added. |
 | `create`, `delete` | [Branch and tag lifecycle](#branch-and-tag-lifecycle-events). Branch, tag, and path filters are ignored; activity types and other filters are rejected. Creation uses the exact ref's resolved commit; deletion uses the default branch. |
@@ -423,6 +423,49 @@ payloads fail explicitly. See the
 [server-selected event contract](cli.md#private-preview-pipeline-trigger-selection).
 
 GitHub defines seven release activities: `published`, `unpublished`, `created`, `edited`, `deleted`, `prereleased`, and `released`. A bare `on: release` selects all seven. Pipeline Triggers accept all seven and apply GitHub's draft-release suppression before starting workflows. Native release builds deliver three and emit `W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED` when a workflow also selects `unpublished`, `edited`, `deleted`, or `prereleased`.
+
+#### Merge-group destruction
+
+On September 24, 2026, a single-PR merge queue experiment observed a successful
+GitHub Actions run for explicit `types: [destroyed]` with `reason: merged`
+([source][merge-destroyed-source], [run][merge-destroyed-run]). The completed
+run's original event, expression values, checkout, and workflow identity agreed
+on the group head SHA. Omitted/null/empty types did not select this event.
+Other destruction reasons and automatic-cancellation semantics were not
+established. The GitHub documentation retained with this evidence listed only
+`checks_requested`; the implementation follows the observed execution rather
+than treating that documentation as proof of rejection.
+
+The CLI/runtime accepts explicitly selected destruction events without a
+`reason` restriction. Mixed declarations select either listed activity:
+
+```yaml
+on:
+  merge_group:
+    types: [checks_requested, destroyed]
+    branches: [stable]
+```
+
+The original payload, group head ref/SHA, and immutable workflow identity remain
+unchanged after queue-ref deletion. The default checkout fetches the recorded
+head SHA; it does not resolve the deleted ref or substitute the base branch.
+Local tests cover selection, provenance rejection, plugin compilation, job
+execution, and fetching a retained Git object after ref removal. They do not
+prove GitHub's object retention or hosted execution.
+
+The [backend support](https://github.com/buildkite/buildkite/pull/35638) merged
+and [reached production](https://github.com/buildkite/buildkite/pull/35638#issuecomment-6030979444)
+before this CLI release. Its off-by-default organization flag gates server
+selection and admission for explicit `destroyed` and mixed declarations. The
+CLI does not check or require that flag. The server's provenance-based
+cancellation guard is independent of the flag and preserves existing
+cancellation settings and defaults.
+
+Deployment does not establish flag activation, old-worker drain, or compatible
+runtime selection. Activation requires compatible applicable importers and job
+runtimes and drained old cancellation workers, followed by tokenless hosted
+proof. That proof remains pending [PB-3523](https://linear.app/buildkite/issue/PB-3523).
+Existing merge-queue token restrictions still apply.
 
 The following sections describe repository events that only Pipeline Triggers
 deliver. Each requires the original linked payload and pinned workflow path,
@@ -653,13 +696,9 @@ declarations, including omitted/null/empty, during the same experiment. This
 does not test an explicit `[closed]` declaration.
 
 Earlier controls also distinguish defaults from all activities: PR `edited`
-ran only with explicit `[opened, edited]`, and
-one merge-group `destroyed` event with `reason: merged` ran only with explicit `[destroyed]`
-([source][merge-destroyed-source], [run][merge-destroyed-run]). Neither selected
-omitted/null/empty declarations. Other destruction reasons were not emitted.
-The GitHub documentation retained with this evidence listed only
-`checks_requested` for `merge_group`; this single `destroyed` observation is
-not a documented support guarantee.
+ran only with explicit `[opened, edited]`, not omitted/null/empty declarations.
+The [merge-group destruction observation](#merge-group-destruction) also excluded
+those default forms.
 
 The September 29 hosted check selected all 12 expected workflows, matching the
 12 successful native runs. Eleven Buildkite first attempts completed payload,

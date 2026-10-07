@@ -402,7 +402,7 @@ func TestBuildkiteWebhookEventSourceBindsMergeGroupIdentity(t *testing.T) {
 	for _, test := range []struct{ name, old, replacement, want string }{
 		{name: "head", old: headSHA, replacement: strings.Repeat("c", 40), want: "head_sha"},
 		{name: "base", old: baseSHA, replacement: strings.Repeat("c", 40), want: "base_sha"},
-		{name: "action", old: "checks_requested", replacement: "destroyed", want: "action"},
+		{name: "action", old: "checks_requested", replacement: "not-real", want: "action"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			changed := strings.Replace(webhook, test.old, test.replacement, 1)

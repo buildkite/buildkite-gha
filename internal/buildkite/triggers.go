@@ -110,6 +110,11 @@ var supportedIssueCommentAction = map[string]bool{
 
 var supportedReleaseActions = []string{"published", "unpublished", "created", "edited", "deleted", "prereleased", "released"}
 
+// SupportedMergeGroupAction reports whether action is a merge queue lifecycle activity.
+func SupportedMergeGroupAction(action string) bool {
+	return action == "checks_requested" || action == "destroyed"
+}
+
 // SupportedMilestoneAction reports whether action is a milestone lifecycle activity.
 func SupportedMilestoneAction(action string) bool {
 	return slices.Contains([]string{"created", "closed", "opened", "edited", "deleted"}, action)
@@ -426,8 +431,14 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 					return fmt.Sprintf("Base branch %q does not match this workflow's merge_group branch filters.", *snapshot.MergeGroupBaseBranch), nil
 				}
 			}
-			if snapshot.MergeGroupAction != nil && *snapshot.MergeGroupAction != "checks_requested" {
-				return fmt.Sprintf("Merge group activity %q does not match this workflow's merge_group activity filters.", *snapshot.MergeGroupAction), nil
+			if snapshot.MergeGroupAction != nil {
+				types := trigger.Types
+				if len(types) == 0 {
+					types = []string{"checks_requested"}
+				}
+				if !slices.Contains(types, *snapshot.MergeGroupAction) {
+					return fmt.Sprintf("Merge group activity %q does not match this workflow's merge_group activity filters.", *snapshot.MergeGroupAction), nil
+				}
 			}
 		case "release":
 			if snapshot.ReleaseAction != nil {
@@ -716,10 +727,24 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		if expressions.MergeGroupAction == "null" {
 			return "", false, fmt.Errorf("merge_group event snapshot requires payload.action")
 		}
-		if snapshot.MergeGroupAction != nil && *snapshot.MergeGroupAction != "checks_requested" {
-			return "", false, fmt.Errorf("merge_group activity must be checks_requested")
+		if snapshot.MergeGroupAction != nil && !SupportedMergeGroupAction(*snapshot.MergeGroupAction) {
+			return "", false, fmt.Errorf("merge_group activity must be checks_requested or destroyed")
 		}
-		parts := []string{expressions.EventPredicate, expressions.MergeGroupAction + ` == "checks_requested"`}
+		if len(t.Types) == 0 {
+			t.Types = []string{"checks_requested"}
+		}
+		actions := make([]string, 0, len(t.Types))
+		for _, activity := range t.Types {
+			if !SupportedMergeGroupAction(activity) {
+				return "", false, triggerFilterError(t, fmt.Errorf("merge_group type %q is unsupported. Supported types are checks_requested and destroyed. Set types to the activities this workflow handles. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it", activity), "types")
+			}
+			actions = append(actions, expressions.MergeGroupAction+` == `+yamlScalar(activity))
+		}
+		actionCondition := strings.Join(actions, " || ")
+		if len(actions) > 1 {
+			actionCondition = "(" + actionCondition + ")"
+		}
+		parts := []string{expressions.EventPredicate, actionCondition}
 		hasBranchFilter := t.Branches != nil || t.BranchesIgnore != nil
 		if hasBranchFilter && (expressions.MergeGroupBaseBranch == "" || expressions.MergeGroupBaseBranch == "null") {
 			return "", false, triggerFilterError(t, fmt.Errorf("merge_group branch filters require payload.merge_group.base_ref"), "branches", "branches-ignore")
@@ -730,13 +755,6 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		if hasBranchFilter {
 			parts = append(parts, branch)
-		}
-		if t.Types != nil {
-			for _, activity := range t.Types {
-				if activity != "checks_requested" {
-					return "", false, triggerFilterError(t, fmt.Errorf("merge_group type %q is unsupported. checks_requested is the only merge queue activity currently mapped. Set types: [checks_requested]. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it", activity), "types")
-				}
-			}
 		}
 		return strings.Join(parts, " && "), true, nil
 	case "release":
