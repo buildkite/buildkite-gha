@@ -33,6 +33,19 @@ jobs:
         run: go test ./internal/action/integration ./internal/runtime -run '^(TestUploadArtifactPathsNormalizesSafeSpellings|TestUploadArtifactAbsolutePathsUseSearchRoot|TestUploadArtifactArchiveRootAtVolumeBoundary)$' -v -count=1
       - name: Exercise checkout Git preflight
         run: go test ./internal/runtime -run '^(TestCheckoutPreflightResolvesHostGit|TestCheckoutLFSInitializesBeforeFetch|TestWindowsExecutablePreflightPinsJunctionTarget)$' -v -count=1
+      # Git for Windows 2.56.0.windows.1 rejects GIT_CONFIG_GLOBAL=NUL, but
+      # runner images update Git independently of this repository.
+      - name: Exercise checkout with Git for Windows 2.56.0.windows.1
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'PortableGit-2.56.0-64-bit.7z.exe'
+          Invoke-WebRequest -Uri 'https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.1/PortableGit-2.56.0-64-bit.7z.exe' -OutFile $installer
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash -ne 'eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1') { throw 'PortableGit checksum mismatch' }
+          $directory = Join-Path $env:RUNNER_TEMP 'git-2.56.0.windows.1'
+          Start-Process -FilePath $installer -ArgumentList '-y', "-o$directory" -Wait
+          $env:PATH = "$directory\ucrt64\bin;$env:PATH"
+          $version = git --version
+          if ($version -ne 'git version 2.56.0.windows.1') { throw "unexpected $version" }
+          go test ./internal/runtime -run '^TestCheckoutLFSInitializesBeforeFetch$' -v -count=1
       - name: Verify action source publication and cleanup
         run: go test ./internal/action/source -run '^(TestStoreExactCommitAtomicHitAndSubpath|TestStoreConcurrentMaterialize|TestStoreMaintenanceUsesLRUAndCleansOnlyUnlockedPartials|TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease)$' -v -count=1
       - name: Exercise PowerShell and process cleanup
