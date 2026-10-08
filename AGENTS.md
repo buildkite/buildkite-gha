@@ -8,7 +8,7 @@ Follow the Buildkite [writing style guide](https://github.com/buildkite/docs/blo
 - Write directly, in active voice, with sentence-case headings.
 - Describe current behavior in product documentation. Durable engineering plans may live in `docs/plans/`; keep task tracking and remaining work in Linear.
 - User documentation lives in the [Buildkite Docs](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows), sourced from `pages/pipelines/migration/run_github_actions_workflows*` in [buildkite/docs](https://github.com/buildkite/docs). Its compatibility reference owns supported behavior; its CLI and security pages own their respective details.
-- This repository keeps contributor documentation only: `README.md` is the overview, and `docs/development.md` and `docs/expression-authority.md` own development and architecture details.
+- This repository keeps contributor documentation only: `README.md` is the overview, and `docs/development.md` and `docs/expression-authority.md` own development and architecture details. `docs/compatibility.md`, `docs/cli.md`, and `docs/security.md` only redirect older links; do not add content to them.
 - State each fact once, then link to its source of truth. Link to Buildkite Docs pages instead of copying their content.
 - Remove repetition, not behavior, boundaries, limits, warnings, or useful examples.
 - Update documentation alongside the behavior it describes; for user-visible changes, open a companion Buildkite Docs pull request. Replace outdated text instead of appending dated notes or corrections.
