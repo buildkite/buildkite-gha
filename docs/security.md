@@ -181,8 +181,13 @@ Reusable-workflow call conditions become immutable plan guards. They run in the
 caller scope before the flattened job requests secrets or tokens, starts OIDC,
 materializes actions, creates containers, or runs steps.
 
-Direct `needs` values come from producer-attributed, digest-bound result
-manifests. A missing or changed manifest stops the job.
+Direct `needs` outputs and artifacts come from producer-attributed,
+digest-bound result manifests. Changed or invalid manifests stop the job.
+[Missing-result handling](compatibility.md#results-retries-and-cancellation)
+can supply only a logical failure, with separate provider
+evidence and a warning. It never supplies a successful result, attributes a
+receipt to another job, or grants access to outputs or artifacts. Needs-derived
+reusable-workflow inputs still require verified manifests.
 
 ### Matrices from job outputs
 
