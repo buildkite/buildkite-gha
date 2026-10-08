@@ -248,7 +248,9 @@ GitHub OIDC authenticates the workflow; it does not choose its Buildkite
 authority. The authenticated Buildkite user fixes that authority when creating
 the grant. The workflow receives no Buildkite API token and cannot change the
 destination, policy, or allowlist. It sends values only in one in-memory HTTPS
-request, and Buildkite errors and audit data must never include them.
+request, and Buildkite errors and audit data must never include them. The
+workflow prints a Buildkite error `message` only as one line of printable
+ASCII that contains no submitted value.
 
 Anyone who can change and run the default-branch workflow can read the selected
 GitHub secrets. Binding the grant to the reviewed commit prevents another
