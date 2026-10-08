@@ -4,7 +4,7 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v7
         with:
           name: compatibility-gap
           path: README.md
