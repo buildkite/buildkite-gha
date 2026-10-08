@@ -14,6 +14,7 @@ Configure the [GitHub Actions Buildkite plugin](https://github.com/buildkite-plu
 ```yaml
 steps:
   - label: ":github: Test"
+    key: "gha-ci"
     plugins:
       - github-actions#latest:
           workflow: .github/workflows/ci.yml
