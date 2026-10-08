@@ -2690,7 +2690,7 @@ JavaScript and Docker actions with compatible bundled cache clients also receive
 
 ### GitHub token
 
-**🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the
+**🟡 Supported subset.** A job requests a short-lived `GITHUB_TOKEN` for the
 event repository when it:
 
 - statically references `secrets.GITHUB_TOKEN` or `github.token`; or
@@ -2708,6 +2708,20 @@ If an enabled request is rejected, the runtime instead asks you to check the
 top-level permissions and the Buildkite GitHub App's access to the event
 repository. If those checks do not find the cause, contact Buildkite support
 and include the build URL shown in the error.
+
+Workflow-token acquisition retries Agent API HTTP 503 responses and HTTP 429
+responses with a valid `Retry-After` header. It makes at most three attempts
+within 45 seconds, bounded by job cancellation and the job deadline. Each
+attempt has a 15-second limit. Retry delays use 1-second and 2-second bases,
+plus random jitter up to the base. A valid `Retry-After` value (seconds or an
+HTTP date) sets the minimum delay before jitter. If the delay would exhaust
+the remaining budget, acquisition fails without waiting.
+
+Other statuses, transport errors, and invalid successful responses are not
+retried. This includes HTTP 400 from servers that do not distinguish transient
+GitHub failures. Action-source token requests and checkout are unchanged.
+Each retry uses the same repository, workflow, and permissions; server-side
+authorization and rate limits still apply to every request.
 
 Buildkite reads that policy from the pipeline repository at the immutable build
 commit. The workflow must be a simple `.yml` or `.yaml` file directly under

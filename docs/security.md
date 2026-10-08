@@ -282,6 +282,11 @@ context includes `token`. Before evaluating an authorized step context, the
 runtime registers the token with both Buildkite Agent redaction and local
 redaction.
 
+[Bounded workflow-token retries](compatibility.md#github-token) preserve the
+requested scope; they do not make issuance idempotent. A failed response may
+leave an additional token valid until expiry. The runtime does not cache tokens
+across jobs or retry ambiguous transport failures.
+
 The serialized context contains only the fields listed in the
 [compatibility reference](compatibility.md#runtime-interpolation). A runtime
 job also loads the verified event artifact when it requires `github.event`.
