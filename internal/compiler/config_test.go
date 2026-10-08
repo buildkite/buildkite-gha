@@ -738,7 +738,7 @@ func TestWindowsRunnerServerRejectionsPreserveCause(t *testing.T) {
 			if !strings.Contains(message, test.message) || strings.Contains(message, "Windows-Latest") || strings.Contains(message, "aren't currently supported") {
 				t.Fatalf("server cause lost or resolved label leaked: %q", message)
 			}
-			if test.code == RunnerRejectionIncompatibleLabels && (!strings.Contains(message, "/compatibility.md Experimental Windows") || !strings.Contains(message, "contact Buildkite support to check hosted Windows access") || detail != "") {
+			if test.code == RunnerRejectionIncompatibleLabels && (!strings.Contains(message, "/compatibility.md Windows jobs require") || !strings.Contains(message, "contact Buildkite support to check hosted Windows access") || detail != "") {
 				t.Fatalf("missing eligibility guidance or altered server URL: %q / %q", message, detail)
 			}
 		})
@@ -902,7 +902,7 @@ func TestRunnerRejectionDiagnosticSeparatesStaticLabelFromAllowlist(t *testing.T
 	}{
 		{
 			label:       "windows-latest",
-			wantMessage: `No Windows runner target is configured. Experimental Windows jobs require a Windows Server 2022 x86-64 queue. Ask a pipeline administrator to map windows-latest or windows-2022 to that queue, or contact Buildkite support to check hosted Windows access and automatic routing. See https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#experimental-windows-jobs`,
+			wantMessage: `No Windows runner target is configured. Windows jobs require a Windows Server 2022 x86-64 queue. Ask a pipeline administrator to map windows-latest or windows-2022 to that queue, or contact Buildkite support to check hosted Windows access and automatic routing. See https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#windows-jobs`,
 		},
 		{
 			label:       "macos-latest",

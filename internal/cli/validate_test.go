@@ -136,10 +136,10 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		for _, want := range []string{
 			`<h2 class="h4 mb2">Workflow could not be run</h2>`,
 			`<p><strong>No Windows runner target is configured.</strong></p>`,
-			`Experimental Windows jobs require a Windows Server 2022 x86-64 queue.`,
+			`Windows jobs require a Windows Server 2022 x86-64 queue.`,
 			`Ask a pipeline administrator to map windows-latest or windows-2022 to that queue`,
 			`contact Buildkite support to check hosted Windows access and automatic routing.`,
-			`href="https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#experimental-windows-jobs"`,
+			`href="https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#windows-jobs"`,
 			"Job <code>test</code>",
 		} {
 			if !strings.Contains(string(annotation.stdin), want) {
