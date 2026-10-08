@@ -52,20 +52,18 @@ mise run release:check
 ## Configure Bugsnag
 
 GoReleaser embeds `BUGSNAG_API_KEY` when it is present in the build environment.
-Leave it unset to build without a key. Retrieve the ingestion key from a
-Buildkite cluster secret in the trusted release job before invoking GoReleaser:
+Leave it unset for local builds without a key. The tagged release job runs
+`scripts/ci-buildkite-release`, which validates the release tag and checked-out
+commit before retrieving the ingestion key from the Buildkite cluster secret
+`GHA_BUGSNAG_API_KEY`. It exports `BUGSNAG_API_KEY` before invoking GoReleaser
+and fails without publishing if secret retrieval fails or the key is empty.
 
-```sh
-set +x
-BUGSNAG_API_KEY="$(buildkite-agent secret get GHA_BUGSNAG_API_KEY)"
-export BUGSNAG_API_KEY
-```
-
-`GHA_BUGSNAG_API_KEY` is the suggested secret name; provisioning it and adding
-the retrieval command to the release job are separate deployment steps. Restrict
-secret access to trusted release builds. Do not fetch it in pull request builds
-or print it in logs. GoReleaser's generated configuration, binaries, and Go build
-metadata can contain the key; do not treat them as secret storage.
+Create the secret in the release agent's cluster and scope its access policy
+to the release pipeline. Tag-only retrieval is a scheduling and script guard,
+not a secret access policy: other jobs admitted by that policy can request it.
+The script disables shell tracing before retrieving credentials. GoReleaser's
+generated configuration, binaries, and Go build metadata can contain the key;
+do not treat them as secret storage.
 
 For a direct Go build, supply the same linker variable:
 
