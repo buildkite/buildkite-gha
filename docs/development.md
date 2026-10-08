@@ -189,7 +189,7 @@ indeterminate repositories separately and excludes them from the compatibility
 percentage. The tally records workflow result counts; each workflow report
 keeps its diagnostics.
 
-Windows jobs require [explicit opt-in](compatibility.md#experimental-windows-jobs).
+Windows jobs require a [configured Windows runner](compatibility.md#configure-a-windows-runner).
 Corpus validation has no Windows preset, so it still rejects unmapped Windows
 labels. Keep those workflows in raw results so the benchmark describes the full
 sample; a rejected mapping is not proof of runtime incompatibility.

@@ -138,8 +138,8 @@ The compiler and plan validator limit the sum of executable path lengths to
 one lock does not consume the budget again.
 
 Linux and macOS verification always reads executable bits from the filesystem,
-so declared paths cannot hide mode changes. On [experimental Windows
-jobs](compatibility.md#experimental-windows-jobs), where Unix modes are not
+so declared paths cannot hide mode changes. On [Windows
+jobs](compatibility.md#windows-jobs), where Unix modes are not
 preserved, the source verifier uses the recorded paths instead. Content, additions, removals, and special files remain checked.
 Cache manifests keep their existing format and must match the verified tree;
 stale or mismatched manifests fail rather than being rewritten from provenance.
