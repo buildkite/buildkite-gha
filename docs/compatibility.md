@@ -1827,6 +1827,12 @@ macOS and Windows jobs reject containers, services, Docker actions, and Docker c
 | `continue-on-error` | ✅ Supported | Accepts literal booleans or expressions that produce a Boolean. A failure records `outcome: failure` and `conclusion: success`, then the job continues. |
 | `timeout-minutes` | 🟡 Supported subset | Accepts literal numbers or expressions that produce a number greater than 0 and at most 360. |
 
+Tolerated step failures, including expression failures before a process starts,
+produce masked warnings in the job log and workflow warning annotation. This
+also applies to composite child steps and JavaScript pre hooks; the warning
+does not change the step's conclusion. If composite main is skipped, its
+tolerated pre-hook warnings appear before result publication.
+
 A step can continue after failure and expose its outcome to a later condition:
 
 ```yaml
@@ -1975,7 +1981,7 @@ Three expression modes intentionally support different syntax.
 | `!`, `&&`, `\|\|`, `==`, `!=`, `<`, `<=`, `>`, `>=` | ✅ Supported | 🟡 Listed workflow fields | 🟡 When the result resolves fully |
 | `always()`, `success()`, `failure()`, `cancelled()` | ✅ Without arguments | ❌ Unsupported | ❌ Unsupported |
 | `startsWith()`, `contains()`, `endsWith()`, `format()`, `join()`, `toJSON()`, `fromJSON()`, `case()` | ✅ Supported | 🟡 Listed workflow fields | 🟡 When the result resolves fully |
-| `hashFiles()` | 🟡 Step `if` and action lifecycle conditions | 🟡 Workflow steps only | ❌ Unsupported |
+| `hashFiles()` | 🟡 Workflow and composite step `if` and JavaScript lifecycle conditions | 🟡 Workflow and composite step fields | ❌ Unsupported |
 
 ### Conditions
 
@@ -2077,9 +2083,11 @@ Workflow-level `env` values use the job `env` expression rules except for
 supported. Workflow-level `defaults.run` remains limited to direct context
 references.
 
-Workflow step fields support `hashFiles()`; composite step and job-level fields
-do not. Composite action `run`, `env`, `with`, and `working-directory` fields do
-support the listed operators and pure functions.
+Workflow step fields and composite step `run`, `env`, `with`, `shell`, and
+`working-directory` support `hashFiles()` and the listed operators and pure
+functions. Job-level fields, action input defaults, and composite output
+metadata cannot call `hashFiles()`. A composite can expose a hash through a
+step output instead.
 
 The listed workflow step fields and job fields accept the four
 [scalar `strategy` properties](#matrix-strategies), including static bracket
@@ -2165,12 +2173,61 @@ This is not the full GitHub context.
 
 `hashFiles()` evaluates when its step field is consumed, so it sees files from
 earlier steps such as checkout. A JavaScript action's `with` and `env` can be
-evaluated for `pre`, then evaluated again for `main`.
+evaluated for `pre`, then evaluated again for `main`, including inside a
+composite. Composite patterns use the job workspace, not the action directory
+or the step's `working-directory`. The same hashing limits and filesystem
+boundaries apply to workflow and composite steps.
+
+Composite compatibility evidence inspected on October 8, 2026:
+
+- Tree-sitter's [successful October 7 GitHub run](https://github.com/tree-sitter/tree-sitter/actions/runs/37661010152/job/112928225032)
+  used Runner 2.337.0 on Ubuntu 24.04. Its
+  [pinned workflow](https://github.com/tree-sitter/tree-sitter/blob/1bf93c4f2fd7e95c61ac449d7482ba4b2336a0e6/.github/workflows/build.yml#L277-L280)
+  called a [local composite](https://github.com/tree-sitter/tree-sitter/blob/1bf93c4f2fd7e95c61ac449d7482ba4b2336a0e6/.github/actions/cache/action.yml)
+  whose nested `actions/cache@v5` input `key` calls `hashFiles()` over repository
+  paths. The logs show a key ending in
+  `9f14bc1a01eba715ce78e61b3251cd999bace65479100056f3bd6678efacee13`
+  and `cache.cache` completing successfully. Recheck with
+  `gh run view 37661010152 --repo tree-sitter/tree-sitter --log`.
+- The [pinned Runner composite handler](https://github.com/actions/runner/blob/ae09a9d7b52be2e5dfe5ee86226a3d03e79c228e/src/Runner.Worker/Handlers/CompositeActionHandler.cs#L235-L244)
+  registers `hashFiles()` for embedded steps. Its
+  [action schema](https://github.com/actions/runner/blob/ae09a9d7b52be2e5dfe5ee86226a3d03e79c228e/src/Runner.Worker/action_yaml.json#L192-L270)
+  admits it in step strings, `env`, `with`, and `if`. These are source checks,
+  not separate hosted proofs of every field. Local regressions cover these
+  fields, nested composites, workspace scope, and JavaScript pre/main
+  reevaluation. No new hosted workflow was dispatched for this investigation.
 
 Patterns apply in order. `!` excludes matches; a later positive pattern can add
 them back. Directory matches include descendants, hidden files match normally,
 and overlapping patterns hash each path once. Matching is case-insensitive only
-on Windows. An empty match returns an empty string.
+on Windows. An empty match returns an empty string, not an error or warning,
+matching GitHub's behavior. A key such as `npm-${{ hashFiles('package-lock.json') }}`
+would become `npm-` if the lockfile is missing. When the file is required, reject
+an empty digest before using the cache:
+
+```yaml
+# Run after checkout. These steps also work inside a composite action.
+- id: lockfile
+  shell: sh
+  env:
+    HASH: ${{ hashFiles('package-lock.json') }}
+  run: |
+    if [ -z "$HASH" ]; then
+      echo "package-lock.json was not found; check checkout order and the hashFiles pattern" >&2
+      exit 1
+    fi
+    printf 'digest=%s\n' "$HASH" >> "$GITHUB_OUTPUT"
+- uses: actions/cache@v5
+  with:
+    path: ~/.npm
+    key: npm-${{ runner.os }}-${{ steps.lockfile.outputs.digest }}
+```
+
+Hashing failures reach the job log with step and field context. Composite
+errors include the child step number; `env` and `with` errors also name the
+binding. Direct calls in composite output metadata explain the restriction
+and suggest exposing a step output. Step or job cancellation/deadline messages
+identify hashing as the interrupted operation.
 
 On Linux, literal paths use direct lookups. macOS and Windows enumerate directory
 names to preserve platform-specific matching. Each positive pattern searches

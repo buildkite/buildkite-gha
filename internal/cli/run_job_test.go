@@ -28,6 +28,47 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
+func TestRunJobLogsHashFilesFailureEvenWhenTolerated(t *testing.T) {
+	for _, tolerate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("continue-on-error=%t", tolerate), func(t *testing.T) {
+			job := cliRunJobPlan()
+			step := &job.Program.Job.Steps[0]
+			step.Env = cliProgramBindings(map[string]string{"CACHE_KEY": "${{ hashFiles('../package-lock.json') }}"})
+			step.ContinueOnError.Literal = tolerate
+			planPath, planDigest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, planDigest)
+			var stdout, stderr bytes.Buffer
+			runner := &cliCaptureRunner{}
+			wantCode, wantResult := 1, "failure"
+			if tolerate {
+				wantCode, wantResult = 0, "success"
+			}
+			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != wantCode {
+				t.Fatalf("exit = %d, want %d; stderr = %s", code, wantCode, stderr.String())
+			}
+			want := `step "step-1": environment: evaluate "CACHE_KEY": hashFiles pattern 1 may not contain ".."`
+			if !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+			}
+			if result := publishedCLIManifest(t, runner, job, planDigest); result.Result != wantResult {
+				t.Fatalf("published result = %q, want %q", result.Result, wantResult)
+			}
+			if tolerate && !strings.Contains(stderr.String(), "continue-on-error") {
+				t.Fatalf("tolerated failure lacks explanation: %s", stderr.String())
+			}
+			warningPublished := false
+			for _, command := range runner.commands {
+				if len(command.args) > 0 && command.args[0] == "annotate" && slices.Contains(command.args, "buildkite-gha-workflow-warnings") && strings.Contains(string(command.stdin), "hashFiles pattern 1") {
+					warningPublished = true
+				}
+			}
+			if warningPublished != tolerate {
+				t.Fatalf("warning annotation published = %t, want %t", warningPublished, tolerate)
+			}
+		})
+	}
+}
+
 func TestRunJobPublishesFailureWhenExplicitRuntimeMiseIsInvalid(t *testing.T) {
 	job := cliRunJobPlan()
 	job.Schema = plan.Schema

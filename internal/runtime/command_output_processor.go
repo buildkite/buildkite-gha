@@ -24,15 +24,16 @@ const (
 // masks logs, interprets GitHub workflow commands parsed in workflow_command.go,
 // and collects bounded Buildkite annotations consistently across streams.
 type commandOutputProcessor struct {
-	mu              sync.Mutex
-	stdout          io.Writer
-	stderr          io.Writer
-	masks           []string
-	trustedWarnings workflowCommandAnnotationBuffer
-	warnings        workflowCommandAnnotationBuffer
-	errors          workflowCommandAnnotationBuffer
-	stopToken       string
-	discard         bool
+	mu                 sync.Mutex
+	stdout             io.Writer
+	stderr             io.Writer
+	masks              []string
+	trustedWarnings    workflowCommandAnnotationBuffer
+	warnings           workflowCommandAnnotationBuffer
+	errors             workflowCommandAnnotationBuffer
+	pendingPreWarnings map[*actionPreFailure]error
+	stopToken          string
+	discard            bool
 }
 
 type workflowCommandAnnotationBuffer struct {
@@ -186,6 +187,73 @@ func (p *commandOutputProcessor) trustedWarning(message string) {
 	defer p.mu.Unlock()
 	p.appendWorkflowCommandLocked(&p.trustedWarnings, workflowWarningAnnotationHeading, parsedWorkflowCommand{message: message})
 	p.writeWorkflowCommandMessageLocked(p.stderr, "warning", message)
+}
+
+func (p *commandOutputProcessor) warnToleratedFailure(execution stepExecution, location string) bool {
+	if execution.outcome == "failure" && execution.conclusion == "success" {
+		p.warnContinuedError(fmt.Errorf("%s: %w", location, execution.err))
+		return true
+	}
+	return false
+}
+
+func (p *commandOutputProcessor) warnContinuedError(err error) {
+	p.trustedWarning(fmt.Sprintf("%s (continued because continue-on-error is enabled)", p.scrubError(err)))
+}
+
+// Preparation runs before main conditions resolve. Keep tolerated pre failures
+// until main reports them, or flush them even if an ancestor's main is skipped.
+func (p *commandOutputProcessor) queuePreWarnings(err error, location string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pendingPreWarnings == nil {
+		p.pendingPreWarnings = make(map[*actionPreFailure]error)
+	}
+	visitPreFailures(err, func(failure *actionPreFailure) {
+		p.pendingPreWarnings[failure] = fmt.Errorf("%s: %w", location, failure)
+	})
+}
+
+func (p *commandOutputProcessor) consumePreWarnings(reported error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	visitPreFailures(reported, func(failure *actionPreFailure) {
+		delete(p.pendingPreWarnings, failure)
+	})
+}
+
+// Stop at occurrence identities, not shared errors below them. Visit each
+// joined failure separately so reporting one does not discard or repeat others.
+func visitPreFailures(err error, visit func(*actionPreFailure)) {
+	if err == nil {
+		return
+	}
+	if failure, ok := err.(*actionPreFailure); ok {
+		visit(failure)
+		return
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			visitPreFailures(child, visit)
+		}
+		return
+	}
+	visitPreFailures(errors.Unwrap(err), visit)
+}
+
+func (p *commandOutputProcessor) flushPreWarnings() {
+	p.mu.Lock()
+	pending := p.pendingPreWarnings
+	p.pendingPreWarnings = nil
+	p.mu.Unlock()
+	warnings := make([]error, 0, len(pending))
+	for _, err := range pending {
+		warnings = append(warnings, err)
+	}
+	sort.Slice(warnings, func(i, j int) bool { return warnings[i].Error() < warnings[j].Error() })
+	for _, err := range warnings {
+		p.warnContinuedError(err)
+	}
 }
 
 func (p *commandOutputProcessor) writeMaskedLineLocked(target io.Writer, line string) {

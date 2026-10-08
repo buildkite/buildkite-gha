@@ -625,7 +625,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 		eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
 		if step.Kind == "cancel" {
 			for _, execution := range supervisor.cancel(step.Targets[0]) {
-				targetErr := commitStepExecution(execution, &jobResult, &eval)
+				targetErr := commitStepExecution(execution, processor, &jobResult, &eval)
 				if execution.conclusion != "cancelled" {
 					runErr = errors.Join(runErr, targetErr)
 				}
@@ -642,7 +642,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			}
 			var barrierErr error
 			for _, execution := range completed {
-				barrierErr = errors.Join(barrierErr, commitStepExecution(execution, &jobResult, &eval))
+				barrierErr = errors.Join(barrierErr, commitStepExecution(execution, processor, &jobResult, &eval))
 			}
 			outcome, conclusion := "success", "success"
 			if barrierErr != nil {
@@ -657,7 +657,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			continue
 		}
 		if execution, ok := preFailures[stepIndex]; ok {
-			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
+			runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
 			continue
 		}
 		if runErr != nil || runCtx.Err() != nil {
@@ -665,7 +665,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			if err != nil {
 				stepEval := stepExpressionContext(eval)
 				execution := classifyStepExecutionWithControls(ctx, runCtx, step, newResult(), fmt.Errorf("condition: %w", err), stepEval)
-				runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
+				runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
 				continue
 			}
 			if !referencesStatus {
@@ -680,7 +680,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("environment: %w", err), stepEval)
 			cancelEvaluation()
-			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
+			runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
 			continue
 		}
 		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
@@ -689,7 +689,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("condition: %w", err), stepEval)
 			cancelEvaluation()
-			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
+			runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
 			continue
 		}
 		if !run {
@@ -701,7 +701,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("controls: %w", err), stepEval)
 			cancelEvaluation()
-			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
+			runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
 			continue
 		}
 		cancelEvaluation()
@@ -711,7 +711,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, stepCtx, step, newResult(), fmt.Errorf("name: %w", err), stepEval)
 			cancelStep()
-			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
+			runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
 			continue
 		}
 
@@ -741,10 +741,10 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			processor.expandCurrentSection()
 			jobResult.failureVisible = true
 		}
-		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
+		runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
 	}
 	for _, execution := range supervisor.waitAll() {
-		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
+		runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
 	}
 	if runCtx.Err() != nil {
 		runErr = errors.Join(runErr, runCtx.Err())
@@ -822,6 +822,7 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 	jobResult := r.result
 	runErr := r.runErr
 	hardFailure := r.hardFailure
+	processor.flushPreWarnings()
 	r.node16Warnings.emit(processor)
 	jobResult.WarningAnnotations, jobResult.warningsTruncated, jobResult.ErrorAnnotations, jobResult.errorsTruncated = processor.workflowCommandAnnotations()
 	sensitiveValues := processor.maskValues()
@@ -1807,8 +1808,15 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutputProcessor, workspace string, step executionprogram.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error, inheritedTimeout *remotePreparationTimeout, inheritedEnvOverlay map[string]string) (Result, error) {
 	result := newResult()
 	eval.JobStatus = jobStatusValue(status.unsuccessful, ctx.Err() != nil)
-	if !workflowStep {
-		eval.HashFiles = nil
+	bindHashFilesContext(ctx, &eval)
+	if inheritedTimeout != nil && inheritedTimeout.bounded != nil {
+		// Later children share the deadline started by an earlier pre hook.
+		// Do not resolve it here: skipped pre hooks must keep timeout lazy.
+		hashCtx, err := inheritedTimeout.context(ctx)
+		if err != nil {
+			return result, err
+		}
+		bindHashFilesContext(hashCtx, &eval)
 	}
 	selector, ok := stepActionSelector(step)
 	if !ok {
@@ -1850,13 +1858,13 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 		jobStatusInputs := actionJobStatusInputs(*actionProgram, bindingSources(step.Invocation.With))
 		javascript := javaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: resolved.integration.Service == actionintegration.ServiceCache, CacheClientCompatibility: resolved.integration.CacheClientCompatibility, nodeMajor: major, reference: stepUses(step), jobStatusInputs: jobStatusInputs}
 		invocationEval := cloneExpressionContext(eval)
-		bindHashFilesContext(ctx, &invocationEval)
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}, eval: invocationEval, isolated: !workflowStep}
 		prepared[invocationID] = invocation
 		if javascript.Pre != "" {
 			failPre := func(err error) (Result, error) {
-				invocation.preFailure = err
-				return result, err
+				failure := &actionPreFailure{err: fmt.Errorf("JavaScript action %q pre: %w", stepUses(step), err)}
+				invocation.preFailure = failure
+				return result, failure
 			}
 			stepEnv := map[string]string{}
 			if inheritedEvalErr == nil {
@@ -1895,6 +1903,7 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 					return failPre(err)
 				}
 			}
+			bindHashFilesContext(phaseCtx, &eval)
 			inputs, err := evaluatePlanStepWith(step, eval)
 			if err != nil {
 				return failPre(err)
@@ -1993,6 +2002,7 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 					err = errors.Join(err, fmt.Errorf("composite action step %d: %w", i+1, childErr))
 				} else {
 					status.unsuccessful = wasUnsuccessful
+					processor.queuePreWarnings(childErr, fmt.Sprintf("composite action %q step %d pre", lock.Path, i+1))
 				}
 			}
 		}
@@ -2194,9 +2204,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProc
 func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, action resolvedAction, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string) (Result, error) {
 	result := newResult()
 	actionPath := action.metadata.Path
-	// Keep hashFiles unavailable to composite step metadata while retaining the
-	// context binder for nested JavaScript lifecycle conditions.
-	eval.HashFiles = nil
+	bindHashFilesContext(ctx, &eval)
 	eval.Inputs = inputs
 	eval.Steps = make(map[string]expression.StepStatus)
 	bindActionReferenceContext(&eval, &action.lock)
@@ -2231,6 +2239,9 @@ func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutpu
 		if invocation := prepared[childInvocationID]; invocation != nil && invocation.preFailure != nil {
 			childErr := invocation.preFailure
 			execution := classifyStepExecution(ctx, ctx, step.ID, step.ContinueOnError, newResult(), childErr)
+			if processor.warnToleratedFailure(execution, fmt.Sprintf("composite action %q step %d pre", action.lock.Path, i+1)) {
+				processor.consumePreWarnings(childErr)
+			}
 			if id != "" {
 				eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: map[string]string{}}
 			}
@@ -2244,11 +2255,12 @@ func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutpu
 		for name, value := range eval.Inputs {
 			inputs[name] = value
 		}
-		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, Steps: eval.Steps, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
+		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, Steps: eval.Steps, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled, HashFiles: eval.HashFiles}
 		run, err := evaluateProgramTyped[bool](step.Condition, executionprogram.EvaluationContext{Expression: eval, Condition: condition})
 		if err != nil {
 			childErr := fmt.Errorf("composite action step %d condition: %w", i+1, err)
 			execution := classifyStepExecution(ctx, ctx, step.ID, step.ContinueOnError, newResult(), childErr)
+			processor.warnToleratedFailure(execution, fmt.Sprintf("composite action %q", action.lock.Path))
 			if id != "" {
 				eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: map[string]string{}}
 			}
@@ -2280,8 +2292,13 @@ func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutpu
 			var childEnv map[string]string
 			childEnv, childErr = executionprogram.EvaluateBindings(step.Env, executionprogram.EvaluationContext{Expression: eval})
 			var childWith map[string]string
-			if childErr == nil {
+			if childErr != nil {
+				childErr = fmt.Errorf("env: %w", childErr)
+			} else {
 				childWith, childErr = executionprogram.EvaluateBindings(step.Invocation.With, executionprogram.EvaluationContext{Expression: eval})
+				if childErr != nil {
+					childErr = fmt.Errorf("with: %w", childErr)
+				}
 			}
 			child := *actionProgramStep(step)
 			selector, ok := action.lock.Children[step.Invocation.Uses.Source]
@@ -2309,12 +2326,19 @@ func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutpu
 		maps.Copy(result.State, stepResult.State)
 		appendJobSummary(&result.Summary, &result.summaryTruncated, stepResult.Summary, stepResult.summaryTruncated)
 		execution := classifyStepExecution(ctx, ctx, step.ID, step.ContinueOnError, stepResult, childErr)
+		if processor.warnToleratedFailure(execution, fmt.Sprintf("composite action %q step %d", action.lock.Path, i+1)) {
+			processor.consumePreWarnings(childErr)
+		}
 		if id != "" {
 			eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: stepResult.Outputs}
 		}
 		if execution.conclusion != "success" {
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d: %w", i+1, childErr))
 		}
+	}
+	// Output metadata is not a step field. Retain its existing hashFiles boundary.
+	eval.HashFiles = func([]string) (string, error) {
+		return "", fmt.Errorf("hashFiles() is not supported in composite output metadata; compute it in a step and expose that step's output")
 	}
 	for _, output := range action.program.Outputs {
 		value, err := evaluateProgramString(output.Value, eval)
@@ -2338,14 +2362,22 @@ func bindActionReferenceContext(eval *expression.Context, lock *plan.ActionLock)
 }
 
 func evaluatePlanStepEnv(step executionprogram.Step, context expression.Context) (map[string]string, error) {
-	return executionprogram.EvaluateBindings(step.Env, executionprogram.EvaluationContext{Expression: context})
+	values, err := executionprogram.EvaluateBindings(step.Env, executionprogram.EvaluationContext{Expression: context})
+	if err != nil {
+		return nil, fmt.Errorf("env: %w", err)
+	}
+	return values, nil
 }
 
 func evaluatePlanStepWith(step executionprogram.Step, context expression.Context) (map[string]string, error) {
 	if step.Invocation == nil {
 		return nil, nil
 	}
-	return executionprogram.EvaluateBindings(step.Invocation.With, executionprogram.EvaluationContext{Expression: context})
+	values, err := executionprogram.EvaluateBindings(step.Invocation.With, executionprogram.EvaluationContext{Expression: context})
+	if err != nil {
+		return nil, fmt.Errorf("with: %w", err)
+	}
+	return values, nil
 }
 
 func stepActionSelector(step executionprogram.Step) (plan.ActionSelector, bool) {

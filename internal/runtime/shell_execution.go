@@ -19,7 +19,7 @@ func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOut
 	result := newResult()
 	script, err := evaluateProgramTyped[string](step.Run.Command, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
-		return result, err
+		return result, fmt.Errorf("run: %w", err)
 	}
 	shellSite := step.Run.Shell
 	if shellSite.Source == "" {
@@ -27,7 +27,7 @@ func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOut
 	}
 	shell, err := evaluateProgramTyped[string](shellSite, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
-		return result, err
+		return result, fmt.Errorf("shell: %w", err)
 	}
 	if shell == "" {
 		switch {
@@ -45,7 +45,7 @@ func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOut
 	}
 	workingDirectory, err := evaluateProgramTyped[string](workingDirectorySite, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
-		return result, err
+		return result, fmt.Errorf("working-directory: %w", err)
 	}
 	dir, err := r.shellWorkingDirectory(workspace, workingDirectory)
 	if err != nil {
@@ -58,15 +58,15 @@ func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOut
 func (r *jobRun) runCompositeShellStep(ctx context.Context, processor *commandOutputProcessor, workspace string, step *executionprogram.ActionStep, jobEnv map[string]string, eval expression.Context, result *Result) error {
 	env, err := executionprogram.EvaluateBindings(step.Env, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
-		return err
+		return fmt.Errorf("env: %w", err)
 	}
 	script, err := evaluateProgramString(step.Run.Command, eval)
 	if err != nil {
-		return err
+		return fmt.Errorf("run: %w", err)
 	}
 	workingDirectory, err := evaluateProgramString(step.WorkingDirectory, eval)
 	if err != nil {
-		return err
+		return fmt.Errorf("working-directory: %w", err)
 	}
 	dir, err := r.shellWorkingDirectory(workspace, workingDirectory)
 	if err != nil {
@@ -74,7 +74,7 @@ func (r *jobRun) runCompositeShellStep(ctx context.Context, processor *commandOu
 	}
 	shell, err := evaluateProgramString(step.Shell, eval)
 	if err != nil {
-		return err
+		return fmt.Errorf("shell: %w", err)
 	}
 	return r.runShellProcess(ctx, processor, dir, mergeStepEnvironment(jobEnv, env), result, shell, script)
 }

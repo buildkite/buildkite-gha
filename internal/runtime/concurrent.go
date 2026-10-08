@@ -231,7 +231,7 @@ func cancelledStepExecution(jobCtx, runCtx context.Context, step executionprogra
 	return classifyStepExecution(jobCtx, runCtx, step.ID, step.ContinueOnError.Literal, newResult(), err)
 }
 
-func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *expression.Context) error {
+func commitStepExecution(execution stepExecution, processor *commandOutputProcessor, jobResult *JobResult, eval *expression.Context) error {
 	id := strings.ToLower(execution.id)
 	eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
 	commitResultEnvironment(jobResult.Env, execution.result)
@@ -239,6 +239,7 @@ func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *ex
 	maps.Copy(jobResult.State, execution.result.State)
 	appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, execution.result.Summary, execution.result.summaryTruncated)
 	jobResult.Artifacts = append(jobResult.Artifacts, execution.result.Artifacts...)
+	processor.warnToleratedFailure(execution, fmt.Sprintf("step %q", execution.id))
 	if execution.conclusion != "success" {
 		return fmt.Errorf("step %q: %w", execution.id, execution.err)
 	}
