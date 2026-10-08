@@ -19,6 +19,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -5034,8 +5035,8 @@ func TestResolveCompileServiceMatrixCredentials(t *testing.T) {
 
 func TestResolveCompileServiceCredentialAuthoredValidation(t *testing.T) {
 	for _, source := range []string{
-		"${{ true || inputs.user }}", "${{ true || runner.os }}",
-		"${{ matrix.user || inputs.user }}", "${{ matrix.user || runner.os }}",
+		"${{ true || inputs.missing }}", "${{ true || runner.os }}",
+		"${{ matrix.user || inputs.missing }}", "${{ matrix.user || runner.os }}",
 		"${{ matrix.user || secrets[matrix.name] }}", "${{ true || secrets[vars.NAME] }}",
 		"${{ matrix.user || toJSON(github) }}", "${{ matrix.user || hashFiles('**') }}",
 		"${{ github.token }}", "${{ true || github.token }}",
@@ -5049,6 +5050,201 @@ func TestResolveCompileServiceCredentialAuthoredValidation(t *testing.T) {
 			})
 			if err == nil {
 				t.Fatal("accepted forbidden authored credential context")
+			}
+		})
+	}
+}
+
+func TestCompilePlansServiceCredentialAuthoredInputs(t *testing.T) {
+	for _, mode := range []string{"dispatch", "caller", "no-known-inputs", "deferred"} {
+		t.Run(mode, func(t *testing.T) {
+			repository := t.TempDir()
+			jobs := `jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      database:
+        image: postgres:16
+        credentials:
+          username: user
+          password: CREDENTIAL
+    steps: [{run: true}]
+`
+			source := "on: push\n" + jobs
+			var event map[string]any
+			if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "dispatch":
+				source = "on:\n  workflow_dispatch:\n    inputs:\n      user: {type: string, default: REGISTRY_PASSWORD}\n      key: {type: string, default: user}\n" + jobs
+				event["event"] = "workflow_dispatch"
+			case "caller", "deferred":
+				source = "on:\n  workflow_call:\n    inputs:\n      user: {type: string, default: REGISTRY_PASSWORD}\n      key: {type: string, default: user}\n      pending: {type: string}\n" + jobs
+			}
+			eventSource, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, credential := range []string{
+				"literal",
+				"${{ inputs.user || inputs.missing }}",
+				"${{ true || inputs.missing }}",
+				"${{ inputs.user || inputs[vars.NAME] }}",
+				"${{ inputs[inputs.key] }}",
+				"${{ true || toJSON(inputs) }}",
+				"${{ true || inputs.pending }}",
+				"${{ inputs.user || inputs.pending }}",
+				"${{ secrets[inputs.user] }}",
+				"${{ true || secrets[inputs.user] }}",
+				"${{ inputs.user || secrets[inputs.user] }}",
+				"${{ true || runner.os }}",
+				"${{ inputs.user || github.token }}",
+				"${{ true || toJSON(github) }}",
+				"${{ true || hashFiles('**') }}",
+			} {
+				// pending has a known empty default in the ordinary caller case.
+				if mode == "caller" && strings.Contains(credential, "inputs.pending") {
+					continue
+				}
+				t.Run(credential, func(t *testing.T) {
+					workflowSource := strings.Replace(source, "CREDENTIAL", credential, 1)
+					if mode == "caller" || mode == "deferred" {
+						writeWorkflow(t, repository, "callee.yml", workflowSource)
+						workflowSource = "on: push\njobs:\n"
+						if mode == "deferred" {
+							workflowSource += "  producer:\n    runs-on: ubuntu-latest\n    outputs: {value: '${{ steps.value.outputs.value }}'}\n    steps: [{id: value, run: true}]\n"
+						}
+						workflowSource += "  call:\n    uses: ./.github/workflows/callee.yml\n    secrets: inherit\n"
+						if mode == "deferred" {
+							workflowSource += "    needs: producer\n    with: {pending: '${{ needs.producer.outputs.value }}'}\n"
+						}
+					}
+					path := writeWorkflow(t, repository, "caller.yml", workflowSource)
+					plans, err := compilePlansForTest(t.Context(), path, []byte(workflowSource), eventSource, "0.0.0-test", testDistributionDigest, defaultOptions())
+					if credential == "literal" {
+						if err != nil || len(plans) == 0 {
+							t.Fatalf("valid fixture: plans=%d, err=%v", len(plans), err)
+						}
+					} else if err == nil {
+						t.Fatalf("accepted prohibited authored credential %q", credential)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCompilePlansServiceCredentialKnownInputs(t *testing.T) {
+	for _, mode := range []string{"dispatch", "caller"} {
+		t.Run(mode, func(t *testing.T) {
+			repository := t.TempDir()
+			declarations := `    inputs:
+      user: {type: string, default: default-user}
+      enabled: {type: boolean, default: false}
+      count: {type: number, default: 7}
+`
+			jobs := `jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: {name: [row]}
+    services:
+      database:
+        image: postgres:16
+        credentials:
+          username: ${{ format('{0}:{1}:{2}:{3}:{4}', inputs['user'], inputs.enabled, inputs.count, matrix.name, vars.USER) }}
+          password: ${{ inputs.enabled && secrets.GITHUB_TOKEN || inputs.user || secrets.REGISTRY_PASSWORD }}
+    steps: [{run: true}]
+`
+			source := "on:\n  workflow_dispatch:\n" + declarations + "permissions: {contents: read}\n" + jobs
+			var event map[string]any
+			if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+				t.Fatal(err)
+			}
+			wantUsername, wantPassword := "default-user:false:9:row:environment", "default-user"
+			if mode == "dispatch" {
+				event["event"] = "workflow_dispatch"
+				event["payload"] = map[string]any{"inputs": map[string]any{"count": "9"}}
+			} else {
+				writeWorkflow(t, repository, "callee.yml", "on:\n  workflow_call:\n"+declarations+jobs)
+				source = "on: push\npermissions: {contents: read}\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets: inherit\n    with: {user: '${{ vars.USER }}'}\n"
+				wantUsername, wantPassword = "repository:false:7:row:environment", "repository"
+			}
+			path := writeWorkflow(t, repository, "caller.yml", source)
+			eventSource, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := defaultOptions()
+			options.Vars.Organization = map[string]string{"USER": "organization"}
+			options.Vars.Repository = map[string]string{"USER": "repository"}
+			plans, err := compilePlansForTest(t.Context(), path, []byte(source), eventSource, "0.0.0-test", testDistributionDigest, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := plan.Encode(plans[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			job, err := plan.Decode(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Even with enabled=false and a nonempty user, both named secret
+			// inventories survive. The decoded positional profile owns evaluation.
+			if !slices.Equal(job.RequiredSecrets, []string{"REGISTRY_PASSWORD"}) || job.GitHubToken == nil || !job.HasCapability("provider-token-write") || job.GitHubToken.Permissions["contents"] != "read" {
+				t.Fatalf("credential authority changed: secrets=%v token=%v capabilities=%v", job.RequiredSecrets, job.GitHubToken, job.RequiredCapabilities)
+			}
+			credentials := job.Program.Job.Services.Static[0].Container.Credentials
+			context := program.EvaluationContext{Expression: expression.Context{
+				Vars: map[string]string{"USER": "environment"}, Secrets: map[string]string{"REGISTRY_PASSWORD": "private", "GITHUB_TOKEN": "token"},
+			}}
+			for _, field := range []struct {
+				site program.Site
+				want string
+			}{{credentials.Username, wantUsername}, {credentials.Password, wantPassword}} {
+				got, err := program.EvaluateSite(field.site, context)
+				if err != nil || got != field.want {
+					t.Fatalf("credential = %q, %v; want %q", got, err, field.want)
+				}
+			}
+		})
+	}
+}
+
+func TestCompilePlansServiceCredentialInputData(t *testing.T) {
+	const input = "it's ${{ github.token }} and ${{ secrets.ADMIN }}"
+	var event map[string]any
+	if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+		t.Fatal(err)
+	}
+	event["event"] = "workflow_dispatch"
+	event["payload"] = map[string]any{"inputs": map[string]any{"user": input}}
+	eventSource, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, credential := range []string{"${{ inputs.user }}", "${{ format('{0}:{1}', inputs.user, secrets.REGISTRY_PASSWORD) }}"} {
+		t.Run(credential, func(t *testing.T) {
+			source := []byte("on:\n  workflow_dispatch:\n    inputs:\n      user: {type: string}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      database:\n        image: postgres:16\n        credentials:\n          username: user\n          password: " + credential + "\n    steps: [{run: true}]\n")
+			plans, err := compilePlansForTest(t.Context(), "credentials.yml", source, eventSource, "0.0.0-test", testDistributionDigest, defaultOptions())
+			if credential == "${{ inputs.user }}" {
+				if err == nil || !strings.Contains(err.Error(), "contains expression syntax") {
+					t.Fatalf("expression-shaped literal error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := plans[0]
+			if !slices.Equal(job.RequiredSecrets, []string{"REGISTRY_PASSWORD"}) || job.GitHubToken != nil {
+				t.Fatalf("input data introduced authority: secrets=%v token=%v", job.RequiredSecrets, job.GitHubToken)
+			}
+			got, err := program.EvaluateSite(job.Program.Job.Services.Static[0].Container.Credentials.Password, program.EvaluationContext{Expression: expression.Context{Secrets: map[string]string{"REGISTRY_PASSWORD": "private"}}})
+			if err != nil || got != input+":private" {
+				t.Fatalf("credential = %q, %v; want literal input plus :private", got, err)
 			}
 		})
 	}

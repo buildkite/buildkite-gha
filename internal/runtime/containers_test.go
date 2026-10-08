@@ -35,6 +35,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 // startJobContainer is a test convenience that starts services in sorted-key
@@ -1731,6 +1732,96 @@ jobs:
 				}
 			}
 		})
+	}
+}
+
+func TestCompiledServiceCredentialDeferredInputEnvironment(t *testing.T) {
+	const (
+		buildID = "11111111-1111-4111-8111-111111111111"
+		jobID   = "22222222-2222-4222-8222-222222222222"
+	)
+	workspace := t.TempDir()
+	caller := `on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs: {password: '${{ steps.auth.outputs.password }}'}
+    steps: [{id: auth, run: true}]
+  call:
+    needs: producer
+    uses: ./.github/workflows/callee.yml
+    secrets: inherit
+    with: {password: '${{ needs.producer.outputs.password }}'}
+`
+	callee := `on:
+  workflow_call:
+    inputs:
+      user: {type: string, default: registry-user}
+      password: {type: string}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env: {PASSWORD: '${{ inputs.password }}'}
+    services:
+      database:
+        image: registry.example.test/team/postgres:16
+        credentials:
+          username: ${{ inputs.user }}
+          password: ${{ env.PASSWORD || secrets.REGISTRY_PASSWORD }}
+    steps: [{run: true}]
+`
+	writeFixtureFile(t, workspace, ".github/workflows/caller.yml", caller)
+	writeFixtureFile(t, workspace, ".github/workflows/callee.yml", callee)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(filepath.Join(workspace, ".github/workflows/caller.yml"), []byte(caller), event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil || len(plans) != 2 {
+		t.Fatalf("compile plans: %d, %v", len(plans), err)
+	}
+	producer, job := plans[0], plans[1]
+	encoded, err := plan.Encode(producer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := transport.Digest(encoded)
+	input := job.DeferredInputs["password"]
+	if got := input.NeedSources["producer"]; len(got) != 1 || got[0].StepKey != producer.Target.StepKey || got[0].PlanDigest != digest {
+		t.Fatalf("deferred input producer binding = %#v", got)
+	}
+	wantOutputs := []plan.NeedOutput{{Name: "password", StepKey: producer.Target.StepKey, Output: "password"}}
+	if !slices.Equal(input.NeedOutputs["producer"], wantOutputs) || len(job.NeedSources) != 0 || !slices.Equal(job.RequiredSecrets, []string{"REGISTRY_PASSWORD"}) || job.GitHubToken != nil {
+		t.Fatalf("deferred input changed scope or authority: input=%#v needs=%v secrets=%v token=%v", input, job.NeedSources, job.RequiredSecrets, job.GitHubToken)
+	}
+	manifest, err := transport.MarshalResultManifest(transport.ResultManifest{
+		PlanDigest: digest, Producer: transport.Producer{BuildID: buildID, JobID: jobID, StepKey: producer.Target.StepKey},
+		Result: "success", Outputs: []transport.Output{{Name: "password", Value: "registry-password"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := transport.Agent{Runner: deferredInputRunner{jobID: jobID, path: transport.ResultPath(producer.Target.StepKey, digest), data: manifest}}
+	job.DeferredInputValues, err = ResolveDeferredInputs(t.Context(), agent, t.TempDir(), buildID, job.DeferredInputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.CallGuards, err = ResolveCallGuards(t.Context(), agent, t.TempDir(), buildID, job.CallGuards)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newJobDocker(t, "")
+	result, err := (Runner{Docker: f.path, Secrets: testSecretResolver{"REGISTRY_PASSWORD": "unused-fallback"}, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("run result=%v, err=%v", result.Conclusion, err)
+	}
+	if jobDockerCallIndex(f.calls(t), "login", "registry.example.test", "--username", "registry-user", "--password-stdin") < 0 {
+		t.Fatalf("missing service login: %#v", f.calls(t))
+	}
+	// The Docker fixture accepts only registry-password on standard input.
+	status, err := os.ReadFile(filepath.Join(f.root, "login-stdin"))
+	if err != nil || string(status) != "ok" {
+		t.Fatalf("deferred password did not reach service startup: %q, %v", status, err)
 	}
 }
 
