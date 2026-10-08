@@ -59,7 +59,7 @@ func newCommandOutputProcessor(stdout, stderr io.Writer) *commandOutputProcessor
 	return &commandOutputProcessor{stdout: stdout, stderr: stderr}
 }
 
-var errInvalidWorkflowCommandStopToken = errors.New("invalid ::stop-commands workflow command")
+var errInvalidWorkflowCommandStopToken = errWorkflowValidationf("invalid ::stop-commands workflow command")
 
 func (p *commandOutputProcessor) process(target io.Writer, line string) error {
 	p.mu.Lock()

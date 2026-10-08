@@ -3,12 +3,16 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -23,6 +27,7 @@ func TestClassifyFailurePrecedence(t *testing.T) {
 	workflowToken := markJobSetupFailure(FailureClassWorkflowToken, credentialStatusError(400, "workflow token rejected"))
 	oidcToken := markJobSetupFailure(FailureClassOIDCToken, credentialStatusError(403, "OIDC token denied"))
 	cacheCredential := markJobSetupFailure(FailureClassCacheCredential, credentialStatusError(422, "cache credential rejected"))
+	validation := errWorkflowValidationf("invalid file command")
 	cases := []struct {
 		name string
 		err  error
@@ -30,6 +35,11 @@ func TestClassifyFailurePrecedence(t *testing.T) {
 	}{
 		{"nil", nil, FailureClassUnknown},
 		{"plain", errors.New("boom"), FailureClassUnknown},
+		{"workflow validation", validation, FailureClassWorkflowValidation},
+		{"wrapped workflow validation", fmt.Errorf("step: %w", validation), FailureClassWorkflowValidation},
+		{"joined workflow validations", errors.Join(validation, errWorkflowValidationf("invalid output")), FailureClassWorkflowValidation},
+		{"validation does not hide unexpected failure", errors.Join(validation, errors.New("read failed")), FailureClassUnknown},
+		{"validation does not hide integrity failure", errors.Join(validation, hard), FailureClassIntegrity},
 		{"step exit", stepExit, FailureClassStepProcessExit},
 		{"wrapped step exit", fmt.Errorf("run-job: %w", stepExit), FailureClassStepProcessExit},
 		{"tolerated step exit", &toleratedJobFailure{err: stepExit}, FailureClassStepProcessExit},
@@ -83,6 +93,117 @@ func TestJobSetupFailureClassifiesOnlyCredentialRequestFailures(t *testing.T) {
 	}
 }
 
+func TestUnexpectedFailureKeepsIndependentDefects(t *testing.T) {
+	unsupported := errUnsupportedf("unsupported shell")
+	validation := errWorkflowValidationf("invalid output")
+	hard := markHardJobFailure(errors.New("cleanup failed"))
+	credential := markJobSetupFailure(FailureClassOIDCToken, credentialStatusError(403, "denied"))
+	internal := errors.New("read failed")
+	deadline, cancel := context.WithTimeoutCause(t.Context(), -time.Second, errWorkflowDeadline)
+	defer cancel()
+	timeout := markWorkflowTimeout(deadline, fmt.Errorf("process: %w", deadline.Err()))
+	cancelled, cancelProcess := context.WithCancel(t.Context())
+	cancelProcess()
+	processCancellation := MarkWorkflowProcessTimeout(cancelled, exitError(t))
+	for _, test := range []struct {
+		name      string
+		err       error
+		want      error
+		wantClass FailureClass
+	}{
+		{"unsupported only", unsupported, nil, FailureClassUnknown},
+		{"workflow deadline only", timeout, nil, FailureClassUnknown},
+		{"workflow deadline cause", markWorkflowTimeout(deadline, context.Cause(deadline)), nil, FailureClassUnknown},
+		{"hard workflow deadline", markHardJobFailure(timeout), nil, FailureClassUnknown},
+		{"hard workflow process deadline", markHardJobFailure(MarkWorkflowProcessTimeout(deadline, exitError(t))), nil, FailureClassUnknown},
+		{"hard workflow deadline then cleanup", errors.Join(markHardJobFailure(timeout), hard), hard, FailureClassIntegrity},
+		{"hard workflow deadline and cleanup deadline", markHardJobFailure(errors.Join(timeout, context.DeadlineExceeded)), context.DeadlineExceeded, FailureClassIntegrity},
+		{"unsupported then cleanup", errors.Join(unsupported, hard), hard, FailureClassIntegrity},
+		{"cleanup then unsupported", errors.Join(hard, unsupported), hard, FailureClassIntegrity},
+		{"unsupported then credential", errors.Join(unsupported, credential), credential, FailureClassOIDCToken},
+		{"validation then internal", errors.Join(validation, internal), internal, FailureClassUnknown},
+		{"deadline then cleanup", errors.Join(timeout, hard), hard, FailureClassIntegrity},
+		{"deadline then credential", errors.Join(timeout, credential), credential, FailureClassOIDCToken},
+		{"joined during deadline", markWorkflowTimeout(deadline, errors.Join(deadline.Err(), hard)), hard, FailureClassIntegrity},
+		{"cancelled then internal", errors.Join(context.Canceled, internal), internal, FailureClassUnknown},
+		{"cancelled process only", processCancellation, nil, FailureClassUnknown},
+		{"cancelled process then cleanup", errors.Join(processCancellation, hard), hard, FailureClassIntegrity},
+		{"hard cancelled process then cleanup", errors.Join(markHardJobFailure(processCancellation), hard), hard, FailureClassIntegrity},
+		{"hard joined cancellation and cleanup", markHardJobFailure(errors.Join(processCancellation, internal)), internal, FailureClassIntegrity},
+		{"cleanup deadline", markHardJobFailure(context.DeadlineExceeded), context.DeadlineExceeded, FailureClassIntegrity},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			selected := UnexpectedFailure(fmt.Errorf("run job: %w", test.err))
+			if test.want == nil {
+				if selected != nil {
+					t.Fatalf("UnexpectedFailure() = %v, want no defect", selected)
+				}
+				return
+			}
+			if !errors.Is(selected, test.want) || ClassifyFailure(selected) != test.wantClass {
+				t.Fatalf("UnexpectedFailure() = %v (%s), want %v (%s)", selected, ClassifyFailure(selected), test.want, test.wantClass)
+			}
+			if errors.Is(selected, unsupported) || errors.Is(selected, validation) || errors.Is(selected, timeout) {
+				t.Fatalf("UnexpectedFailure() retained an excluded sibling: %v", selected)
+			}
+			if errors.Is(selected, context.Canceled) {
+				t.Fatalf("UnexpectedFailure() retained cancellation: %v", selected)
+			}
+		})
+	}
+}
+
+func TestWorkflowSetupProcessTimeoutsAreNotUnexpected(t *testing.T) {
+	for _, operation := range []string{"Agent redaction", "mise lookup", "Node verification"} {
+		for _, deadline := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/deadline=%t", operation, deadline), func(t *testing.T) {
+				root := canonicalTempDir(t)
+				marker := filepath.Join(root, "started")
+				script := fmt.Sprintf("#!/bin/sh\nprintf ready > %q\n", marker)
+				if deadline {
+					script += "exec /bin/sleep 30\n"
+				} else {
+					script += "exit 7\n"
+				}
+				executable := filepath.Join(root, "setup")
+				if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				ctx := t.Context()
+				if deadline {
+					var cancel context.CancelFunc
+					ctx, cancel = stepContext(ctx, 0.003)
+					defer cancel()
+				}
+				var err error
+				switch operation {
+				case "Agent redaction":
+					err = (AgentRedactor{Executable: executable}).AddRedaction(ctx, "private")
+				case "mise lookup":
+					_, _, err = (Runner{}).miseNodeInstallation(ctx, 24, executable)
+				case "Node verification":
+					digest := sha256.Sum256([]byte(script))
+					err = verifyManagedNodeExecutable(ctx, 24, executable, hex.EncodeToString(digest[:]))
+				}
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || ClassifyFailure(err) != FailureClassUnknown {
+					t.Fatalf("subprocess exit/classification was not preserved: %v", err)
+				}
+				if _, err := os.Stat(marker); err != nil {
+					t.Fatalf("subprocess did not start: %v", err)
+				}
+				selected := UnexpectedFailure(err)
+				if deadline && (ctx.Err() != context.DeadlineExceeded || selected != nil) {
+					t.Fatalf("workflow deadline selected as a defect: context=%v selected=%v", ctx.Err(), selected)
+				}
+				if !deadline && (selected == nil || ctx.Err() != nil || exit.ExitCode() != 7) {
+					t.Fatalf("live-context setup failure was suppressed: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestAgentTokenClientTimeoutsRemainSetupFailures(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -120,6 +241,9 @@ func TestAgentTokenClientTimeoutsRemainSetupFailures(t *testing.T) {
 			}
 			if got := ClassifyFailure(err); got != test.class {
 				t.Fatalf("ClassifyFailure() = %q, want %q", got, test.class)
+			}
+			if selected := UnexpectedFailure(err); selected == nil || ClassifyFailure(selected) != test.class {
+				t.Fatalf("client timeout was not selected for error reporting: %v", selected)
 			}
 		})
 	}

@@ -372,6 +372,9 @@ func TestFailureConditionsAndCancellation(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "failure" || time.Since(started) > 3*time.Second {
 		t.Fatalf("timed RunJob() result = %#v, error = %v, elapsed = %s", result, err, time.Since(started))
 	}
+	if selected := UnexpectedFailure(err); selected != nil {
+		t.Fatalf("workflow step timeout selected as a defect: %v", selected)
+	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -1526,6 +1529,9 @@ func TestJobTimeoutDuringSetupIsCancelled(t *testing.T) {
 	result, err := runner.runTestJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if selected := UnexpectedFailure(err); selected != nil {
+		t.Fatalf("workflow job timeout selected as a defect: %v", selected)
 	}
 }
 

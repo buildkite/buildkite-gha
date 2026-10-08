@@ -49,6 +49,37 @@ mise run smoke:local
 mise run release:check
 ```
 
+## Configure Bugsnag
+
+GoReleaser embeds `BUGSNAG_API_KEY` when it is present in the build environment.
+Leave it unset to build without a key. Retrieve the ingestion key from a
+Buildkite cluster secret in the trusted release job before invoking GoReleaser:
+
+```sh
+set +x
+BUGSNAG_API_KEY="$(buildkite-agent secret get GHA_BUGSNAG_API_KEY)"
+export BUGSNAG_API_KEY
+```
+
+`GHA_BUGSNAG_API_KEY` is the suggested secret name; provisioning it and adding
+the retrieval command to the release job are separate deployment steps. Restrict
+secret access to trusted release builds. Do not fetch it in pull request builds
+or print it in logs. GoReleaser's generated configuration, binaries, and Go build
+metadata can contain the key; do not treat them as secret storage.
+
+For a direct Go build, supply the same linker variable:
+
+```sh
+go build -trimpath \
+  -ldflags "-X github.com/buildkite/buildkite-gha/internal/telemetry.BugsnagAPIKey=${BUGSNAG_API_KEY}" \
+  -o buildkite-gha ./cmd/buildkite-gha
+```
+
+An embedded key is extractable by anyone who downloads the client. Use only a
+Bugsnag project ingestion key, never an account-management credential. Runtime
+configuration and report contents are documented in
+[Bugsnag error reports](cli.md#bugsnag-error-reports).
+
 ## Runner-resolution API contract
 
 The CLI posts to `POST /v3/jobs/:job_id/github-actions/runners` with the

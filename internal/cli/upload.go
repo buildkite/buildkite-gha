@@ -699,6 +699,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			if uploadArguments.telemetry != nil {
 				uploadArguments.telemetry.setFailurePhase(telemetry.FailurePhasePipelineUpload)
 			}
+			telemetry.ReportError(ctx, telemetry.CommandPluginImport, uploadArguments.clientVersion, telemetry.Details{FailurePhase: telemetry.FailurePhasePipelineUpload}, err)
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: upload pipeline: %v\n", err)
 			return 1
 		}
@@ -714,13 +715,14 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	defer func() { _ = os.RemoveAll(root) }()
 
 	if err := transport.UploadArtifacts(ctx, agent, root, artifacts, aggregatePipeline); err != nil {
+		phase := telemetry.FailurePhaseArtifactUpload
+		if errors.Is(err, transport.ErrPipelineUpload) {
+			phase = telemetry.FailurePhasePipelineUpload
+		}
 		if uploadArguments.telemetry != nil {
-			phase := telemetry.FailurePhaseArtifactUpload
-			if errors.Is(err, transport.ErrPipelineUpload) {
-				phase = telemetry.FailurePhasePipelineUpload
-			}
 			uploadArguments.telemetry.setFailurePhase(phase)
 		}
+		telemetry.ReportError(ctx, telemetry.CommandPluginImport, uploadArguments.clientVersion, telemetry.Details{FailurePhase: phase}, err)
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}

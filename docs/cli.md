@@ -974,3 +974,42 @@ configuration values. Avoid putting secrets in error messages. Disable
 telemetry when this diagnostic context must stay inside the job.
 
 Set `BUILDKITE_GHA_TELEMETRY_DISABLED=true` to disable telemetry. Missing Agent endpoint, job ID, or job token also disables it. Telemetry failures do not change command results.
+
+### Bugsnag error reports
+
+When a Bugsnag ingestion key is configured, the client sends best-effort error
+reports directly to `https://notify.bugsnag.com`, independently of the Agent API.
+The key can be [embedded at build time](development.md#configure-bugsnag) or
+supplied through `BUGSNAG_API_KEY`, which overrides the embedded key. Without a
+valid key, no reports are sent. `BUILDKITE_GHA_TELEMETRY_DISABLED=true` disables
+both Bugsnag reporting and completion telemetry.
+
+Reports cover unexpected runtime errors, runtime integrity and token-acquisition
+failures, final artifact/pipeline uploads during initial workflow import, and
+authoritative result-publication failures. Deferred-stage and skipped-job
+uploads are not instrumented. Ordinary workflow process exits (including
+tolerated failures), unsupported features, import validation errors, classified
+runtime file-command/output validation errors, secret-availability errors, and
+caller cancellation are excluded, as are workflow-owned job and step timeouts.
+Agent HTTP client timeouts and cleanup deadlines remain reportable. Excluded branches
+of joined errors do not suppress independent unexpected failures. Warnings and
+unhandled panics are not reported.
+
+Container termination failures remain reportable even when the job tolerates
+the step failure. Reporting does not change continue-on-error behavior.
+
+Reports contain the CLI version, error type, stack locations, command, failure
+phase/code, valid Buildkite build/job IDs, and applicable Agent API status.
+Development versions use the `development` release stage; other versions use
+`production`. Standard Go errors have a stack at the reporting boundary, not the
+original failure site. Wrapped and joined errors retain the first captured
+stack in depth-first order when available. Command, phase, and failure code
+participate in the error class so different categories do not share a group
+solely because they reach the same reporting boundary.
+Reports omit raw error messages and causes, job output, diagnostics,
+workflow/event contents, other environment values, and hostname. Detailed error
+text remains in the job log. Automatic session tracking and the SDK's
+process-forking panic handler are not enabled.
+
+Delivery is synchronous, with a 1.5-second network timeout per report, no retries,
+and no redirects. Reporting failures are silent and do not change command results.

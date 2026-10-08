@@ -177,7 +177,7 @@ func (s *backgroundSupervisor) commitCompleted(tasks []*backgroundTask) []stepEx
 
 func stepContext(parent context.Context, timeoutMinutes float64) (context.Context, context.CancelFunc) {
 	if timeoutMinutes > 0 {
-		return context.WithTimeout(parent, durationMinutes(timeoutMinutes))
+		return context.WithTimeoutCause(parent, durationMinutes(timeoutMinutes), errWorkflowDeadline)
 	}
 	return context.WithCancel(parent)
 }
@@ -196,6 +196,7 @@ func (r *jobRun) executePlanStep(jobCtx, runCtx context.Context, processor *comm
 }
 
 func classifyStepExecution(jobCtx, runCtx context.Context, id string, continueOnError bool, result Result, err error) stepExecution {
+	err = markWorkflowTimeout(runCtx, err)
 	execution := stepExecution{id: id, result: result, err: err, outcome: "success", conclusion: "success"}
 	if err == nil {
 		return execution

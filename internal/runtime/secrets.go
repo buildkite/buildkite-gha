@@ -193,7 +193,7 @@ func (r AgentRedactor) AddRedaction(ctx context.Context, value string) error {
 	}
 	command.Stdin = strings.NewReader(value)
 	if output, err := command.CombinedOutput(); err != nil {
-		return fmt.Errorf("register secret with Buildkite Agent redactor: %w: %s", err, output)
+		return fmt.Errorf("register secret with Buildkite Agent redactor: %w: %s", MarkWorkflowProcessTimeout(ctx, err), output)
 	}
 	return nil
 }
