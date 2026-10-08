@@ -335,6 +335,9 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	case "port":
+		if scenario == "block-port" {
+			time.Sleep(30 * time.Second)
+		}
 		if scenario == "malformed-port" {
 			fmt.Print("not Docker port output\n")
 			os.Exit(0)
@@ -2261,29 +2264,36 @@ func TestRunJobHostServicePortProtocolCollisionIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestRunJobContainerNetworkTimeoutIsNotUnexpected(t *testing.T) {
-	f := newJobDocker(t, "block-network-create")
-	w := t.TempDir()
-	j := jobContainerPlan(t, w, nil)
-	j.TimeoutMinutes = 0.02
-	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), j, w)
-	var exit *exec.ExitError
-	if result.Conclusion != "cancelled" || !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &exit) {
-		t.Fatalf("RunJob() result = %#v, error = %v, want killed setup command", result, err)
-	}
-	if selected := UnexpectedFailure(err); selected != nil {
-		t.Fatalf("workflow Docker setup timeout selected as a defect: %v", selected)
-	}
-	created, removed := false, false
-	for _, call := range f.calls(t) {
-		created = created || (len(call.Args) > 1 && call.Args[0] == "network" && call.Args[1] == "create")
-		removed = removed || (len(call.Args) > 1 && call.Args[0] == "network" && call.Args[1] == "rm")
-	}
-	if !created || !removed {
-		t.Fatalf("blocking setup command and detached cleanup were not reached: %#v", f.calls(t))
-	}
-	if _, err := os.Stat(filepath.Join(f.root, "network")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("owned network was not removed: %v", err)
+func TestRunJobContainerSetupTimeoutIsNotUnexpected(t *testing.T) {
+	for _, stage := range []string{"network-create", "port"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newJobDocker(t, "block-"+stage)
+			w := t.TempDir()
+			j := jobContainerPlan(t, w, nil)
+			if stage == "port" {
+				j.Container = nil
+				j.Services = map[string]plan.ServiceContainer{"db": {Image: "postgres", Ports: []string{"6379"}}}
+				j.ServiceOrder = []string{"db"}
+			}
+			j.TimeoutMinutes = 0.02
+			result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), j, w)
+			var exit *exec.ExitError
+			if result.Conclusion != "cancelled" || !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &exit) {
+				t.Fatalf("RunJob() result = %#v, error = %v, want killed setup command", result, err)
+			}
+			if selected := UnexpectedFailure(err); selected != nil {
+				t.Fatalf("workflow Docker setup timeout selected as a defect: %v", selected)
+			}
+			calls := f.calls(t)
+			blocked := jobDockerCallIndex(calls, strings.Split(stage, "-")...) >= 0
+			removed := jobDockerCallIndex(calls, "network", "rm") >= 0
+			if !blocked || !removed {
+				t.Fatalf("blocking setup command and detached cleanup were not reached: %#v", calls)
+			}
+			if _, err := os.Stat(filepath.Join(f.root, "network")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("owned network was not removed: %v", err)
+			}
+		})
 	}
 }
 

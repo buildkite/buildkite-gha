@@ -84,8 +84,9 @@ func unexpectedFailure(err error, workflowTimeout, stepExit bool) error {
 		return nil
 	case *hardJobFailure:
 		// Hard cleanup deadlines and process exits remain defects, but a
-		// cancelled setup process must not hide independent cleanup errors.
-		if !errors.Is(err, context.Canceled) {
+		// cancelled or timed-out setup must not hide independent cleanup errors.
+		var timeout *workflowTimeoutError
+		if !errors.Is(err, context.Canceled) && !errors.As(err, &timeout) {
 			return err
 		}
 		selected := unexpectedFailure(err.err, false, false)
