@@ -1,11 +1,14 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"html"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,6 +18,7 @@ import (
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
@@ -211,7 +215,7 @@ func TestRunJobHashFilesArgumentsUseStepEnvironment(t *testing.T) {
 	}
 }
 
-func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
+func TestHashFilesRuntimeSurfaces(t *testing.T) {
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: hashFiles surfaces\n")
 	writeFixtureFile(t, workspace, "value", "contents")
@@ -236,7 +240,7 @@ func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 		t.Fatalf("step name unexpectedly evaluated hashFiles: %#v, %v", result, err)
 	}
 
-	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "runs:\n  using: composite\n  steps:\n    - shell: sh\n      run: echo \"${{ hashFiles('value') }}\"\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "runs:\n  using: composite\n  steps:\n    - shell: sh\n      run: test \"${{ hashFiles('value') }}\" = "+githubHash("contents")+"\n")
 	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
 	if err := synthesizeTestLocalActionLocks(&job, workspace); err != nil {
 		t.Fatal(err)
@@ -245,9 +249,6 @@ func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 	if err := attachTestActionPrograms(&job, workspace, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := job.Program.Actions[job.Actions[0].ID].Steps[0].Run.Command.Source; got != "echo \"${{ hashFiles('value') }}\"" {
-		t.Fatalf("normalized composite command = %q", got)
-	}
 	action := job.Program.Actions[job.Actions[0].ID]
 	if value, err := executionprogram.EvaluateSite(action.Steps[0].Condition, executionprogram.EvaluationContext{}); err != nil || value != true {
 		t.Fatalf("normalized composite condition = %#v, %v", value, err)
@@ -255,8 +256,14 @@ func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 	if _, err := executionprogram.EvaluateSite(action.Steps[0].Run.Command, executionprogram.EvaluationContext{}); err == nil {
 		t.Fatal("normalized action command admitted unavailable hashFiles")
 	}
-	if result, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `runtime function "hashFiles" is unavailable`) {
+	if result, err := (Runner{}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("composite metadata hashFiles result/error = %#v / %v", result, err)
+	}
+
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "outputs:\n  digest:\n    value: ${{ hashFiles('value') }}\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: true\n")
+	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `composite output "digest": hashFiles() is not supported in composite output metadata; compute it in a step and expose that step's output`) {
+		t.Fatalf("composite output hashFiles error = %v", err)
 	}
 
 	writeFixtureFile(t, workspace, ".github/actions/child/action.yml", "inputs:\n  value:\n    required: false\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: true\n")
@@ -264,6 +271,254 @@ func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
 	if result, err := (Runner{}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("nested composite input was evaluated twice: %#v, %v", result, err)
+	}
+}
+
+func TestCompositeHashFilesDiagnostics(t *testing.T) {
+	for _, test := range []struct {
+		field string
+		step  string
+		want  string
+	}{
+		{field: "env", step: "shell: sh\n      env:\n        KEY: ${{ hashFiles('../outside') }}\n      run: true", want: `env: evaluate "KEY"`},
+		{field: "run", step: "shell: sh\n      run: echo ${{ hashFiles('../outside') }}", want: "run"},
+		{field: "shell", step: "shell: ${{ hashFiles('../outside') }}\n      run: true", want: "shell"},
+		{field: "working-directory", step: "shell: sh\n      working-directory: ${{ hashFiles('../outside') }}\n      run: true", want: "working-directory"},
+		{field: "with", step: "uses: ./.github/actions/child\n      with:\n        key: ${{ hashFiles('../outside') }}", want: `with: evaluate "key"`},
+		{field: "condition", step: "shell: sh\n      if: hashFiles('../outside') != ''\n      run: true", want: "condition"},
+	} {
+		for _, tolerate := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/tolerate=%t", test.field, tolerate), func(t *testing.T) {
+				workspace := t.TempDir()
+				writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: hashing diagnostics\n")
+				writeFixtureFile(t, workspace, ".github/actions/child/action.yml", "inputs:\n  key:\n    required: true\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: true\n")
+				writeFixtureFile(t, workspace, ".github/actions/hash/action.yml", fmt.Sprintf("runs:\n  using: composite\n  steps:\n    - id: invalid\n      continue-on-error: %t\n      %s\n    - shell: sh\n      run: echo continued\n", tolerate, test.step))
+				job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "hash", Kind: "uses", Uses: "./.github/actions/hash"}})
+				var stdout, stderr bytes.Buffer
+				result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).runTestJob(t.Context(), job, workspace)
+				want := test.want + `: hashFiles pattern 1 may not contain ".."`
+				fatalLocation := `step "hash": composite action step 1: `
+				if test.field == "condition" {
+					fatalLocation = `step "hash": composite action step 1 `
+				}
+				if tolerate {
+					if err != nil || result.Conclusion != "success" || !strings.Contains(stdout.String(), "continued") {
+						t.Fatalf("tolerated result = %#v, error = %v, stdout = %q", result, err, stdout.String())
+					}
+					if !strings.Contains(stderr.String(), want) || strings.Count(stderr.String(), "continue-on-error") != 1 || !strings.Contains(result.WarningAnnotations, "hashFiles pattern 1") {
+						t.Fatalf("missing/duplicate diagnostic: stderr = %q, annotations = %q", stderr.String(), result.WarningAnnotations)
+					}
+				} else if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), fatalLocation+want) {
+					t.Fatalf("fatal result = %#v, error = %v, want field diagnostic %q", result, err, want)
+				}
+			})
+		}
+	}
+}
+
+func TestRequiredHashFilesGuard(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lockfile=%t", present), func(t *testing.T) {
+			workspace := t.TempDir()
+			writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: required cache digest\n")
+			if present {
+				writeFixtureFile(t, workspace, "package-lock.json", "lockfile contents")
+			}
+			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{
+				{ID: "lockfile", Kind: "run", Shell: "sh", Env: map[string]string{"HASH": "${{ hashFiles('package-lock.json') }}"}, Command: `if [ -z "$HASH" ]; then
+  echo "package-lock.json was not found; check checkout order and the hashFiles pattern" >&2
+  exit 1
+fi
+printf 'digest=%s\n' "$HASH" >> "$GITHUB_OUTPUT"`},
+				{ID: "cache", Kind: "run", Shell: "sh", Command: `echo "cache-key=npm-${{ steps.lockfile.outputs.digest }}"`},
+			})
+			var stdout, stderr bytes.Buffer
+			result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).runTestJob(t.Context(), job, workspace)
+			if present {
+				if err != nil || result.Conclusion != "success" || !strings.Contains(stdout.String(), "cache-key=npm-"+githubHash("lockfile contents")) {
+					t.Fatalf("present lockfile result = %#v, %v, logs = %s", result, err, stdout.String())
+				}
+			} else if err == nil || result.Conclusion != "failure" || !strings.Contains(stderr.String(), "package-lock.json was not found") || strings.Contains(stdout.String(), "cache-key=") {
+				t.Fatalf("missing lockfile result = %#v, %v, stdout = %s, stderr = %s", result, err, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestCompiledCompositeStepsUseHashFiles(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/hash-files.yml"
+	workflow := `on: push
+jobs:
+  hash:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/hash
+        id: hash
+        env:
+          PATTERN: payload
+      - run: test "${{ steps.hash.outputs.digest }}" = "93f7a1af9e76c89675b5bc8c5f5c6aa62f1c78bc0c95693f0296b25274843527"
+`
+	writeFixtureFile(t, workspace, workflowPath, workflow)
+	writeFixtureFile(t, workspace, ".github/actions/hash/payload", "action directory decoy")
+	writeFixtureFile(t, workspace, ".github/actions/hash/action.yml", `outputs:
+  digest:
+    value: ${{ steps.nested.outputs.digest }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: printf 'runtime contents' > payload
+    - shell: sh
+      if: hashFiles(env.PATTERN) != ''
+      env:
+        DIGEST: ${{ hashFiles(env.PATTERN) }}
+      run: |
+        test "$DIGEST" = "93f7a1af9e76c89675b5bc8c5f5c6aa62f1c78bc0c95693f0296b25274843527"
+        test "${{ hashFiles('payload') }}" = "$DIGEST"
+        mkdir -p "$DIGEST"
+    - id: nested
+      uses: ./.github/actions/child
+      env:
+        DIGEST: ${{ hashFiles('payload') }}
+      with:
+        key: ${{ hashFiles('payload') }}
+    - shell: sh
+      if: hashFiles('missing') != ''
+      run: exit 1
+    - shell: sh
+      if: false
+      env:
+        UNUSED: ${{ hashFiles('../outside') }}
+      run: exit 1
+`)
+	writeFixtureFile(t, workspace, ".github/actions/child/action.yml", `inputs:
+  key:
+    required: true
+outputs:
+  digest:
+    value: ${{ steps.check.outputs.digest }}
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: sh
+      working-directory: ${{ hashFiles('payload') }}
+      run: |
+        test "${{ inputs.key }}" = "$DIGEST"
+        test "${{ hashFiles('payload') }}" = "$DIGEST"
+        test "${{ hashFiles('missing') }}" = ""
+        printf 'digest=%s\n' "$DIGEST" >> "$GITHUB_OUTPUT"
+`)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(workflow), event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "hosted")
+	if err != nil || len(plans) != 1 {
+		t.Fatalf("compile composite hashFiles workflow = %#v, %v", plans, err)
+	}
+	result, err := (Runner{}).RunJob(t.Context(), plans[0], workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() composite hashFiles result = %#v, %v", result, err)
+	}
+}
+
+func TestRemoteCompositeHashFilesForPreAndMain(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: composite hashing lifecycle\n")
+	writeFixtureFile(t, workspace, "payload", "before pre")
+	writeFixtureFile(t, remote, "root/action.yml", `runs:
+  using: composite
+  steps:
+    - uses: owner/repo/child@v1
+      env:
+        DIGEST: ${{ hashFiles('payload') }}
+      with:
+        key: ${{ hashFiles('payload') }}
+`)
+	writeFixtureFile(t, remote, "child/action.yml", "inputs:\n  key:\n    required: true\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n  pre-if: hashFiles('payload') != ''\n  post-if: hashFiles('payload') != ''\n")
+	writeFixtureFile(t, remote, "child/pre.js", `const fs = require('fs');
+if (process.env.INPUT_KEY !== process.env.EXPECTED_PRE || process.env.DIGEST !== process.env.EXPECTED_PRE) throw new Error('pre digest');
+fs.writeFileSync('payload', 'after pre');
+fs.appendFileSync('phases', 'pre\n');
+`)
+	writeFixtureFile(t, remote, "child/main.js", `const fs = require('fs');
+if (process.env.INPUT_KEY !== process.env.EXPECTED_MAIN || process.env.DIGEST !== process.env.EXPECTED_MAIN) throw new Error('main digest');
+fs.appendFileSync('phases', 'main\n');
+`)
+	writeFixtureFile(t, remote, "child/post.js", "require('fs').appendFileSync('phases', 'post\\n');\n")
+	digest := digestTree(t, remote)
+	rootID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}}})
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"EXPECTED_PRE": githubHash("before pre"), "EXPECTED_MAIN": githubHash("after pre")}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: requireNode24(t), Actions: materializer}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() composite lifecycle hashing result = %#v, %v", result, err)
+	}
+	phases, err := os.ReadFile(filepath.Join(workspace, "phases"))
+	if err != nil || string(phases) != "pre\nmain\npost\n" {
+		t.Fatalf("composite lifecycle phases = %q, %v", phases, err)
+	}
+}
+
+func TestCompositePreHashFilesUsesResolvedDeadline(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		resolved bool
+		env      map[string]string
+		with     map[string]string
+		preIf    string
+	}{
+		{name: "first pre input", with: map[string]string{"key": "${{ hashFiles('payload') }}"}},
+		{name: "later pre input", resolved: true, with: map[string]string{"key": "${{ hashFiles('payload') }}"}},
+		{name: "later pre environment", resolved: true, env: map[string]string{"HASH": "${{ hashFiles('payload') }}"}},
+		{name: "later pre condition", resolved: true, preIf: "hashFiles('payload') != ''"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace, remote := t.TempDir(), t.TempDir()
+			writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: composite pre deadline\n")
+			writeFixtureFile(t, remote, "child/action.yml", fmt.Sprintf("inputs:\n  key:\n    required: false\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  pre-if: %q\n", test.preIf))
+			writeFixtureFile(t, remote, "child/pre.js", "")
+			writeFixtureFile(t, remote, "child/main.js", "")
+			lockID := remoteLifecycleLockID(1)
+			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "child", Kind: "uses", Uses: remoteLifecycleUses("child"), Action: &plan.ActionSelector{Lock: lockID}, Env: test.env, With: test.with}})
+			job.RequiredCapabilities = []string{"network"}
+			job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "child", digestTree(t, remote), nil)}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: job.Actions[0].SourceDigest}}
+			if err := attachTestActionPrograms(&job, workspace, materializer); err != nil {
+				t.Fatal(err)
+			}
+			stopHash := errors.New("stop at hash callback")
+			var hashContext context.Context
+			eval := expression.Context{Matrix: map[string]any{"timeout": 1}, HashFilesContext: func(ctx context.Context, _ []string) (string, error) {
+				hashContext = ctx
+				return "", stopHash
+			}}
+			timeout := &remotePreparationTimeout{step: executionprogram.Step{TimeoutMinutes: executionprogram.NumberControl{Expression: &executionprogram.Site{Source: "${{ matrix.timeout }}", Surface: executionprogram.SurfaceStepControl, Result: executionprogram.ResultNumber}}}, eval: eval}
+			defer timeout.close()
+			if test.resolved {
+				if _, err := timeout.context(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			run := newJobRun(Runner{})
+			_, err := run.prepareRemoteAction(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), workspace, job.Program.Job.Steps[0], "0/0", nil, eval, &postRegistry{}, newActionLockResolver(job, workspace, materializer), remotePreparations{}, &remotePreparationStatus{}, false, nil, timeout, nil)
+			if !errors.Is(err, stopHash) || hashContext == nil || timeout.bounded == nil {
+				t.Fatalf("preparation hashing = %v, context = %v, timeout = %v", err, hashContext, timeout.bounded)
+			}
+			want, _ := timeout.bounded.Deadline()
+			if got, ok := hashContext.Deadline(); !ok || !got.Equal(want) {
+				t.Fatalf("hash deadline = %v (%v), want resolved deadline %v", got, ok, want)
+			}
+		})
 	}
 }
 
@@ -413,7 +668,7 @@ func TestHashWorkspaceFilesExecutionBudget(t *testing.T) {
 		}
 		cancel()
 		_, err := hashWorkspaceFiles(ctx, workspace, []string{"missing"})
-		if !errors.Is(err, ctx.Err()) || strings.Contains(err.Error(), "execution limit") {
+		if !errors.Is(err, ctx.Err()) || strings.Contains(err.Error(), "execution limit") || !strings.Contains(err.Error(), "hashFiles interrupted by step or job cancellation/deadline") {
 			t.Fatalf("parent cancellation = %v, want %v", err, ctx.Err())
 		}
 	}
@@ -641,12 +896,96 @@ func TestHashFilesRemotePreFailureUsesStepConclusion(t *testing.T) {
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "action", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace)
+	var stderr bytes.Buffer
+	result, err := (Runner{Actions: materializer, Stderr: &stderr}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
+	if strings.Count(stderr.String(), "continue-on-error") != 1 || !strings.Contains(stderr.String(), `env: evaluate "HASH": hashFiles matched symlink "link"`) {
+		t.Fatalf("tolerated pre failure diagnostic = %q", stderr.String())
+	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("later step did not run: %v", err)
+	}
+}
+
+func TestCompositeHashFilesPreFailureWarning(t *testing.T) {
+	for _, test := range []struct {
+		runMain         bool
+		parentTolerates bool
+		mainFailure     bool
+	}{{true, false, false}, {false, false, false}, {true, true, false}, {false, true, false}, {true, true, true}} {
+		t.Run(fmt.Sprintf("run-main=%t/parent-tolerates=%t/main-failure=%t", test.runMain, test.parentTolerates, test.mainFailure), func(t *testing.T) {
+			workspace, remote := t.TempDir(), t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: composite pre warning\n")
+			writeFixtureFile(t, remote, "root/action.yml", `runs:
+  using: composite
+  steps:
+    - uses: owner/repo/child@v1
+      continue-on-error: true
+      with:
+        key: ${{ hashFiles('../outside') }}
+    - shell: sh
+      run: echo continued
+`)
+			if test.parentTolerates {
+				writeFixtureFile(t, remote, "root/action.yml", "runs:\n  using: composite\n  steps:\n    - uses: owner/repo/middle@v1\n      continue-on-error: true\n    - shell: sh\n      run: echo continued\n")
+				writeFixtureFile(t, remote, "middle/action.yml", "runs:\n  using: composite\n  steps:\n    - uses: owner/repo/child@v1\n      with:\n        key: ${{ hashFiles('../outside') }}\n")
+			}
+			if test.mainFailure {
+				writeFixtureFile(t, remote, "root/action.yml", `runs:
+  using: composite
+  steps:
+    - id: gate
+      shell: sh
+      run: echo 'FAIL_MAIN=true' >> "$GITHUB_ENV"
+    - uses: owner/repo/middle@v1
+      continue-on-error: true
+      env:
+        MAIN: ${{ env.FAIL_MAIN == 'true' && hashFiles('../main') || '' }}
+    - shell: sh
+      run: echo continued
+`)
+			}
+			writeFixtureFile(t, remote, "child/action.yml", "inputs:\n  key:\n    required: true\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+			writeFixtureFile(t, remote, "child/pre.js", "")
+			writeFixtureFile(t, remote, "child/main.js", "")
+			digest := digestTree(t, remote)
+			rootID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+				{ID: "gate", Kind: "run", Shell: "sh", Command: fmt.Sprintf("echo 'run=%t' >> \"$GITHUB_OUTPUT\"", test.runMain)},
+				{ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}, Condition: "steps.gate.outputs.run == 'true'"},
+			})
+			job.RequiredCapabilities = []string{"network"}
+			job.Actions = []plan.ActionLock{
+				remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+				remoteLifecycleLock(childID, "child", digest, nil),
+			}
+			if test.parentTolerates {
+				middleID := remoteLifecycleLockID(3)
+				job.Actions[0] = remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{remoteLifecycleUses("middle"): {Lock: middleID}})
+				job.Actions = append(job.Actions, remoteLifecycleLock(middleID, "middle", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}))
+			}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+			var stdout, stderr bytes.Buffer
+			result, err := (Runner{Actions: materializer, Stdout: &stdout, Stderr: &stderr}).runTestJob(t.Context(), job, workspace)
+			if err != nil || result.Conclusion != "success" || strings.Contains(stdout.String(), "continued") != test.runMain {
+				t.Fatalf("tolerated pre result = %#v, %v, stdout = %s", result, err, stdout.String())
+			}
+			wantCount, wantStep := 1, 1
+			if test.mainFailure {
+				wantCount, wantStep = 2, 2
+				for _, diagnostic := range []string{`env: evaluate "MAIN"`, `with: evaluate "key"`} {
+					if strings.Count(stderr.String(), diagnostic) != 1 || strings.Count(result.WarningAnnotations, html.EscapeString(diagnostic)) != 1 {
+						t.Fatalf("distinct failure %q missing/duplicated: stderr = %q, annotations = %q", diagnostic, stderr.String(), result.WarningAnnotations)
+					}
+				}
+			}
+			if strings.Count(stderr.String(), "continue-on-error") != wantCount || !strings.Contains(stderr.String(), fmt.Sprintf("composite action %q step %d", "root", wantStep)) || !strings.Contains(stderr.String(), `with: evaluate "key": hashFiles pattern 1 may not contain ".."`) || strings.Count(result.WarningAnnotations, "hashFiles pattern 1") != wantCount {
+				t.Fatalf("pre diagnostic = %q, annotations = %q", stderr.String(), result.WarningAnnotations)
+			}
+		})
 	}
 }
 
@@ -655,9 +994,12 @@ func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 		name      string
 		env       map[string]string
 		condition string
+		composite bool
 	}{
 		{name: "environment", env: map[string]string{"HASH": "${{ hashFiles('large') }}"}},
 		{name: "condition", condition: "hashFiles('large') != ''"},
+		{name: "composite environment", env: map[string]string{"HASH": "${{ hashFiles('large') }}"}, composite: true},
+		{name: "composite condition", condition: "hashFiles('large') != ''", composite: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			workspace := t.TempDir()
@@ -683,6 +1025,10 @@ func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 				Condition:      test.condition,
 				Command:        "true",
 			}})
+			if test.composite {
+				writeFixtureFile(t, workspace, ".github/actions/hash/action.yml", fmt.Sprintf("runs:\n  using: composite\n  steps:\n    - shell: sh\n      if: %q\n      env:\n        HASH: %q\n      run: true\n", test.condition, test.env["HASH"]))
+				job = runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "hash", Kind: "uses", Uses: "./.github/actions/hash", TimeoutMinutes: 0.001}})
+			}
 			started := time.Now()
 			_, err = (Runner{}).runTestJob(t.Context(), job, workspace)
 			if !errors.Is(err, context.DeadlineExceeded) {

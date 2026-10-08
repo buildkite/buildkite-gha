@@ -85,7 +85,7 @@ func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, source
 		if err := ctx.Err(); err != nil {
 			digest = ""
 			if parent.Err() != nil {
-				retErr = parent.Err()
+				retErr = fmt.Errorf("hashFiles interrupted by step or job cancellation/deadline: %w", parent.Err())
 			} else {
 				retErr = fmt.Errorf("hashFiles exceeded its %s execution limit (%w) while searching %s", limits.duration, err, hashFilesBudgetHint(patterns))
 			}
