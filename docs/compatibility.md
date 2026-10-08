@@ -7,10 +7,10 @@ and the Buildkite plugin. If a feature is not listed, treat it as unsupported.
 
 buildkite-gha requires Buildkite agent v3.129 or newer.
 
-Generated jobs run on Linux x86-64, Linux arm64, and native macOS arm64, with
-[experimental Windows jobs](#experimental-windows-jobs) available by explicit
-opt-in. Linux arm64 jobs require an explicit queue. The plugin's importer runs
-on Linux x86-64 or macOS arm64; a [custom importer](cli.md#upload-from-a-custom-importer)
+Generated jobs run on Linux x86-64, Linux arm64, native macOS arm64, and
+[Windows Server 2022 x86-64](#windows-jobs). Linux arm64 jobs require an
+explicit queue; Windows jobs require a [compatible Windows queue](#configure-a-windows-runner).
+The plugin's importer runs on Linux x86-64 or macOS arm64; a [custom importer](cli.md#upload-from-a-custom-importer)
 can also run on Linux arm64. Runner labels select a platform; they do not
 promise GitHub image, toolchain, or Xcode parity. The runtime sets the matching
 `runner.os` and `runner.arch` values, and sets `runner.environment` to
@@ -68,13 +68,13 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | --- | --- | --- |
 | [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name`, explicit `run-name`, and job names are retained. `run-name` supports expressions over `github`, `inputs`, and `vars`. |
 | [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. `workflow_call` is supported for composition. |
-| [Platforms](#job-configuration) | 🟡 Supported subset | Linux x86-64 labels have local presets. Explicit mappings can select a user-provided Linux arm64 queue. The Agent API can map compatible selectors to Linux, native macOS arm64, or explicitly enabled experimental Windows x86-64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
+| [Platforms](#job-configuration) | 🟡 Supported subset | Linux x86-64 labels have local presets. Explicit mappings can select a user-provided Linux arm64 or Windows x86-64 queue. The Agent API can map compatible selectors to Linux, native macOS arm64, or, when Windows routing is enabled, Windows x86-64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Needs-derived matrices can also read their producer's parallel limit. Maximum 256 instances per job. `fail-fast` has no effect. |
-| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `pwsh`, `powershell`, `python`, and custom shell templates; PowerShell and MSYS2 on experimental Windows jobs. |
+| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `pwsh`, `powershell`, `python`, and custom shell templates; PowerShell and MSYS2 on Windows jobs. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local, public, and approved private GitHub workflows with static or needs-derived typed inputs and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. Private access requires a separate importer opt-in and existing Git access. |
-| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux, macOS, and experimental Windows jobs; verified Dockerfile and public prebuilt-image actions on Linux only. |
+| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux, macOS, and Windows jobs; verified Dockerfile and public prebuilt-image actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs and locally inherited or explicitly mapped reusable jobs resolve through the destination job's Buildkite secret authority. |
@@ -82,13 +82,19 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Environments and snapshots](#deployment-environments) | 🟡 Supported subset | Literal environments on top-level jobs, with required-reviewer approval gates and environment-scoped secret names. Wait timers, branch policies, and custom rules are rejected. Snapshots are accepted with no effect. |
 | [Variables](#repository-and-organization-variables) | 🟡 Supported subset | Repository, organization, and environment `vars` resolve inside a Buildkite job with GitHub's per-position scoping. |
 | [OIDC](#other-secrets-and-oidc) | 🟡 Supported subset | Host JavaScript and composite actions can request Buildkite OIDC tokens in jobs with `id-token: write`. |
-| [Windows jobs](#experimental-windows-jobs) | 🟡 Experimental subset | Windows Server 2022 x86-64 requires explicit opt-in and a compatible Windows queue. No default Windows mapping. |
+| [Windows jobs](#windows-jobs) | 🟡 Supported subset | Windows Server 2022 x86-64 through an explicit queue mapping or enabled automatic routing. No local Windows preset. |
 | [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows arm64, Windows Server 2025, macOS x86-64, GitHub Enterprise Server, and unlisted providers. |
 | [Other GitHub services](#github-services) | ❌ Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
 
-## Experimental Windows jobs
+<a id="experimental-windows-jobs"></a>
 
-Windows support is in development, not generally available. Import workflows
+## Windows jobs
+
+Windows Server 2022 x86-64 jobs are supported within the limits below. As on
+every platform, compatibility gaps may exist; [browse or report compatibility
+issues](https://github.com/buildkite/buildkite-gha/issues?q=is%3Aissue%20state%3Aopen%20label%3Acompatibility).
+Buildkite hosted Windows queues need separate access; see
+[Configure a Windows runner](#configure-a-windows-runner). Import workflows
 from a supported Linux or macOS importer; Windows agents run generated jobs
 only.
 `windows-latest` and `windows-2022` select Windows x86-64 when explicitly mapped
@@ -1191,7 +1197,7 @@ An explicit immutable image overrides the preset for a configured profile.
 An explicit mapping overrides automatic runner selection. It
 declares that the selector runs on Linux x86-64, except for known Linux arm64
 labels (`ubuntu-24.04-arm`, `ubuntu-22.04-arm`, and labels ending in `-arm64`
-or `-aarch64`), known macOS labels, and experimental Windows labels. Linux arm64
+or `-aarch64`), known macOS labels, and Windows labels. Linux arm64
 requires an explicit queue and rejects images; this does not provision or enable
 a Buildkite Hosted ARM queue. macOS and Windows also reject images. During import,
 the job-scoped Agent API checks that the configured queue exists in the job's
@@ -2645,7 +2651,7 @@ fail the action. Docker actions do not receive the compiled mode.
 
 The v3 releases use managed Node 16 and emit its standard deprecation warning. Node 20 declarations run with managed Node 24. Every admitted bundle selects cache v2 from `ACTIONS_CACHE_SERVICE_V2`, uses `ACTIONS_RESULTS_URL` and a job-scoped runtime token, and preserves the root restore/post-save lifecycle and separate entry points. A non-routable `ACTIONS_CACHE_URL` satisfies the legacy availability gate; cache traffic still uses `ACTIONS_RESULTS_URL`. Their tar with zstd-or-gzip archive versioning is compatible across releases.
 
-On experimental Windows jobs, cache actions use a restricted tool path:
+On Windows jobs, cache actions use a restricted tool path:
 `Git\usr\bin` and `zstd` under the Windows Program Files directory, then
 Windows System32. Install Git for Windows and zstd there for GNU tar with zstd
 compression. Without zstd, the upstream client uses gzip; without Git's tar,

@@ -744,7 +744,7 @@ have no direct-upload default.
 `BUILDKITE_GHA_TARGET_QUEUE` and `BUILDKITE_GHA_RUNTIME_IMAGE` are no longer
 supported.
 
-For [experimental Windows jobs](compatibility.md#experimental-windows-jobs),
+For [Windows jobs](compatibility.md#windows-jobs),
 map the workflow's label to an existing compatible Windows queue. For example,
 this plugin configuration imports a workflow using `runs-on: windows-2022`:
 

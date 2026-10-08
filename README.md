@@ -5,7 +5,7 @@ Run GitHub Actions workflows as native Buildkite jobs without creating a GitHub 
 `buildkite-gha` turns each supported workflow job and matrix entry into a Buildkite job. Steps run in a compatibility runtime inside that job. Buildkite owns scheduling, logs, retries, cancellation, and the build UI.
 
 > [!IMPORTANT]
-> `buildkite-gha` is an experimental pre-1.0 preview. The released plugin runs generated jobs on Linux x86-64, Linux arm64 with an explicit queue, and native macOS arm64. [Windows Server 2022 x86-64 jobs](docs/compatibility.md#experimental-windows-jobs) are experimental and need an explicit opt-in. Private actions and GitHub-issued OIDC claims are unsupported.
+> `buildkite-gha` is an experimental pre-1.0 preview. The released plugin runs generated jobs on Linux x86-64, Linux arm64 with an explicit queue, native macOS arm64, and [Windows Server 2022 x86-64](docs/compatibility.md#windows-jobs) with a compatible Windows queue. Private actions and GitHub-issued OIDC claims are unsupported.
 
 ## How it works
 
@@ -98,7 +98,7 @@ plugins:
 | Linux x86-64 | `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04` | Agent API or local preset | `Linux` / `X64` |
 | Linux arm64 | `ubuntu-24.04-arm`, `ubuntu-22.04-arm`, labels ending in `-arm64` or `-aarch64` | Explicit mapping only | `Linux` / `ARM64` |
 | macOS arm64 | `macos-latest`, `macos-15`, `macos-14` | Agent API, local preset, or explicit mapping | `macOS` / `ARM64` |
-| Windows x86-64 (experimental) | `windows-latest`, `windows-2022` | Explicit mapping or enabled Agent API routing | `Windows` / `X64` |
+| Windows x86-64 | `windows-latest`, `windows-2022` | Explicit mapping or enabled Agent API routing | `Windows` / `X64` |
 
 Runner labels are case-insensitive. An explicit mapping is authoritative; the importer checks its queue through the Agent API before upload. For unmapped labels, the Agent API selects a native Linux host or an immutable image and may return a fallback warning, which the importer annotates. Labels select a platform; they do not provide GitHub's runner image or tools. See [Job configuration](docs/compatibility.md#job-configuration) and [cache volumes](docs/cli.md#configure-generated-job-cache-volumes).
 
@@ -128,7 +128,7 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 
 | Good fit | Not currently supported |
 | --- | --- |
-| Linux x86-64, explicitly queued Linux arm64, and native macOS arm64 jobs; [experimental Windows x86-64 jobs](docs/compatibility.md#experimental-windows-jobs) | Windows arm64, Windows Server 2025, or macOS x86-64 |
+| Linux x86-64, explicitly queued Linux arm64, and native macOS arm64 jobs; [Windows Server 2022 x86-64 jobs](docs/compatibility.md#windows-jobs) | Windows arm64, Windows Server 2025, or macOS x86-64 |
 | Bash, `sh`, PowerShell, Python, and custom shell steps | `cmd` shells |
 | Local, public, and self-repository (`$/`) JavaScript and composite actions; verified Dockerfile and public prebuilt-image actions on Linux | Private actions, private container images, and Docker actions on macOS or Windows |
 | Static matrices, matrices and runner labels from job outputs, `needs`, outputs, and local, public, or opt-in private reusable workflows | Dynamically selected reusable workflows and expressions outside the documented subset |
