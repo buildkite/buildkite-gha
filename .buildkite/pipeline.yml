@@ -138,6 +138,33 @@ steps:
         if: build.env("DEMO_SUITE") != "plugin" && build.env("SMOKE_PROBE") != "hosted" && build.env("COMPATIBILITY_PROOF") == null
         command: "buildkite-agent pipeline upload .buildkite/public-actions-proof.yml"
 
+      - label: ":github: Composite hashFiles runtime smoke"
+        key: "composite-hash-files-importer"
+        if: build.env("DEMO_SUITE") != "plugin"
+        timeout_in_minutes: 20
+        retry:
+          automatic: false
+        plugins:
+          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+              version: "2026.5.12"
+        command: |
+          set -euo pipefail
+          commit="$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}"
+          scripts/verify-source-checkout "$$commit"
+          test -z "$$(git status --porcelain --untracked-files=all)"
+          distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-composite-hash-files.XXXXXXXX")"
+          trap 'rm -rf -- "$$distribution_root"' EXIT
+          CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.revision=$$commit" -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+          # An explicit dispatch snapshot avoids skipping this manual workflow
+          # during push/PR builds and binds checkout to the build's exact SHA.
+          jq --arg sha "$$commit" --arg branch "$$BUILDKITE_BRANCH" --arg tag "$${BUILDKITE_TAG:-}" \
+            '.sha = $$sha | .ref = (if $$tag != "" then "refs/tags/" + $$tag else "refs/heads/" + $$branch end)' \
+            testdata/smoke/events/workflow_dispatch.json > "$$distribution_root/event.json"
+          "$$distribution_root/buildkite-gha" upload \
+            --event-path "$$distribution_root/event.json" \
+            --runner-queue ubuntu-latest=hosted \
+            .github/workflows/composite-hash-files.yml
+
       - label: ":github: Exact-source plugin smoke"
         key: "plugin-source-smoke-importer"
         if: build.env("DEMO_SUITE") != "plugin"

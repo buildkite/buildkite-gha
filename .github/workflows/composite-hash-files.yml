@@ -1,0 +1,44 @@
+name: Composite hashFiles smoke test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  composite-hash-files:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Prepare files and calculate an independent digest
+        id: expected
+        shell: bash
+        run: |
+          mkdir -p .hash-files-proof
+          printf alpha > .hash-files-proof/package-lock.json
+          printf bravo > .hash-files-proof/sibling.txt
+          openssl dgst -sha256 -binary .hash-files-proof/package-lock.json |
+            openssl dgst -sha256 |
+            awk '{ print "digest=" $NF }' >> "$GITHUB_OUTPUT"
+
+      - name: Exercise composite hashFiles fields
+        id: composite
+        uses: ./.github/actions/hash-files
+        with:
+          expected: ${{ steps.expected.outputs.digest }}
+
+      - name: Verify the digest and nested cache-key input
+        shell: bash
+        env:
+          EXPECTED: ${{ steps.expected.outputs.digest }}
+          ACTUAL: ${{ steps.composite.outputs.digest }}
+          CACHE_KEY: ${{ steps.composite.outputs.cache-key }}
+        run: |
+          test -n "$EXPECTED"
+          test "$ACTUAL" = "$EXPECTED"
+          test "$CACHE_KEY" = "npm-$EXPECTED-composite"
+          printf 'COMPOSITE_HASHFILES_OBSERVATION={"digest":"%s","nested_input":"%s","empty_match":true}\n' "$ACTUAL" "$CACHE_KEY"
