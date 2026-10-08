@@ -12,7 +12,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}} -X github.com/buildkite/buildkite-gha/internal/telemetry.BugsnagAPIKey={{ envOrDefault "BUGSNAG_API_KEY" "" }}
   - id: buildkite-gha-linux-arm64
     main: ./cmd/buildkite-gha
     binary: buildkite-gha
@@ -24,7 +24,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}} -X github.com/buildkite/buildkite-gha/internal/telemetry.BugsnagAPIKey={{ envOrDefault "BUGSNAG_API_KEY" "" }}
   - id: buildkite-gha-darwin
     main: ./cmd/buildkite-gha
     binary: buildkite-gha
@@ -36,7 +36,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}} -X github.com/buildkite/buildkite-gha/internal/telemetry.BugsnagAPIKey={{ envOrDefault "BUGSNAG_API_KEY" "" }}
   - id: buildkite-gha-windows
     main: ./cmd/buildkite-gha
     binary: buildkite-gha
@@ -48,7 +48,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}} -X github.com/buildkite/buildkite-gha/internal/telemetry.BugsnagAPIKey={{ envOrDefault "BUGSNAG_API_KEY" "" }}
 
 archives:
   - id: buildkite-gha

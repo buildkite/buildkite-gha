@@ -228,7 +228,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	runCtx := ctx
 	cancelJob := func() {}
 	if job.TimeoutMinutes > 0 {
-		runCtx, cancelJob = context.WithTimeout(ctx, durationMinutes(job.TimeoutMinutes))
+		runCtx, cancelJob = context.WithTimeoutCause(ctx, durationMinutes(job.TimeoutMinutes), errWorkflowDeadline)
 	}
 	defer cancelJob()
 	if oidcTokenRequired {
@@ -564,7 +564,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 				continue
 			}
 			if err := r.verifyRemoteActionTree(runCtx, actions, selector, nil); err != nil {
-				err = fmt.Errorf("prepare action %q: %w", stepUses(step), err)
+				err = fmt.Errorf("prepare action %q: %w", stepUses(step), markWorkflowTimeout(runCtx, err))
 				runErr = errors.Join(runErr, err)
 				hardFailure = true
 				break
@@ -747,7 +747,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 		runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
 	}
 	if runCtx.Err() != nil {
-		runErr = errors.Join(runErr, runCtx.Err())
+		runErr = errors.Join(runErr, markWorkflowTimeout(runCtx, runCtx.Err()))
 	}
 	r.eval = eval
 	r.result = jobResult
@@ -841,14 +841,16 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 		name := output.Name
 		value, err := evaluateProgramTyped[string](output.Value, executionprogram.EvaluationContext{Expression: eval})
 		if err != nil {
-			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("job output %q: %w", name, err))
+			// Job-output expressions admit only pure functions, not hashFiles
+			// or other runtime-backed operations. A rejected value is authored.
+			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, errWorkflowValidationf("job output %q: %w", name, err))
 		}
 		if len(value) > maxJobOutputBytes {
-			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("job output %q exceeds the %d-byte limit", name, maxJobOutputBytes))
+			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, errWorkflowValidationf("job output %q exceeds the %d-byte limit", name, maxJobOutputBytes))
 		}
 		for _, sensitive := range sensitiveValues {
 			if sensitive != "" && strings.Contains(value, sensitive) {
-				return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("job output %q contains a registered secret", name))
+				return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, errWorkflowValidationf("job output %q contains a registered secret", name))
 			}
 		}
 		jobResult.Outputs[name] = value
@@ -1053,7 +1055,7 @@ func evaluateProgramTyped[T any](site executionprogram.Site, context executionpr
 	}
 	typed, ok := value.(T)
 	if !ok {
-		return zero, fmt.Errorf("expression produced %T, want the normalized result type", value)
+		return zero, errWorkflowValidationf("expression produced %T, want the normalized result type", value)
 	}
 	return typed, nil
 }
@@ -1919,13 +1921,13 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 			invocation.envOverlay = mergeStringMaps(inheritedEnvOverlay, stepEnv)
 			node, err := r.discoverNode(phaseCtx, major, explicit)
 			if err != nil {
-				return failPre(err)
+				return failPre(markWorkflowTimeout(phaseCtx, err))
 			}
 			invocation.node = node
 			posts.register(postForInvocation(invocation, &actionProgram.PostIf))
 			invocation.postRegistered = true
 			if err := r.runJavaScriptPhase(phaseCtx, processor, workspace, node, javascript, javascript.Pre, nil, invocation.state, &result); err != nil {
-				return failPre(err)
+				return failPre(markWorkflowTimeout(phaseCtx, err))
 			}
 		}
 		return result, nil

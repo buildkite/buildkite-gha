@@ -381,6 +381,15 @@ process under the same job identity from reaching the agent or credential
 helper. Use a separate UID, sandbox, or pre-job credential broker for that
 boundary.
 
+## Error-reporting boundary
+
+Configured clients send [Bugsnag error reports](cli.md#bugsnag-error-reports)
+directly to Bugsnag, not through the job-authenticated Agent API. Job-log
+redaction does not protect HTTP payloads; reports omit raw messages and causes
+rather than relying on log masks. An embedded ingestion key is public to binary
+recipients. See [build configuration](development.md#configure-bugsnag) for
+cluster-secret handling and build-output exposure.
+
 ## Operator checklist
 
 1. Leave the plugin `version` unset for the latest stable release, or pin an

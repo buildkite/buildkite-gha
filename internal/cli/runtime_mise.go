@@ -20,6 +20,7 @@ import (
 	"time"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
+	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
@@ -76,7 +77,7 @@ func validateRuntimeMise(ctx context.Context, candidate, expectedDigest string) 
 	}
 	output, err := command.Output()
 	if err != nil {
-		return "", fmt.Errorf("validate runtime mise executable: %w", err)
+		return "", fmt.Errorf("validate runtime mise executable: %w", gharuntime.MarkWorkflowProcessTimeout(ctx, err))
 	}
 	fields := strings.Fields(string(output))
 	if len(fields) == 0 {

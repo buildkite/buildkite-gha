@@ -247,6 +247,9 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		if scenario == "fail-network-create" {
 			os.Exit(42)
 		}
+		if scenario == "block-network-create" {
+			time.Sleep(30 * time.Second)
+		}
 		os.Exit(0)
 	case "create":
 		name := ""
@@ -684,6 +687,17 @@ func fakeJobDockerExec(root, scenario string, args []string) {
 	}
 	if len(helper) > 1 {
 		helper[1] = translate(helper[1])
+	}
+	if helper[0] == "terminate" && (scenario == "fail-terminate" || scenario == "block-terminate") {
+		// Simulate an ambiguous failure after termination takes effect, without
+		// leaving a host payload alive after the fake container is removed.
+		if code := RunContainerProcessHelper(helper); code != 0 {
+			os.Exit(code)
+		}
+		if scenario == "fail-terminate" {
+			os.Exit(42)
+		}
+		time.Sleep(30 * time.Second)
 	}
 	if helper[0] == "run" {
 		// The fake container executes on the host, so resolve image PATH commands
@@ -2247,6 +2261,32 @@ func TestRunJobHostServicePortProtocolCollisionIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestRunJobContainerNetworkTimeoutIsNotUnexpected(t *testing.T) {
+	f := newJobDocker(t, "block-network-create")
+	w := t.TempDir()
+	j := jobContainerPlan(t, w, nil)
+	j.TimeoutMinutes = 0.02
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), j, w)
+	var exit *exec.ExitError
+	if result.Conclusion != "cancelled" || !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &exit) {
+		t.Fatalf("RunJob() result = %#v, error = %v, want killed setup command", result, err)
+	}
+	if selected := UnexpectedFailure(err); selected != nil {
+		t.Fatalf("workflow Docker setup timeout selected as a defect: %v", selected)
+	}
+	created, removed := false, false
+	for _, call := range f.calls(t) {
+		created = created || (len(call.Args) > 1 && call.Args[0] == "network" && call.Args[1] == "create")
+		removed = removed || (len(call.Args) > 1 && call.Args[0] == "network" && call.Args[1] == "rm")
+	}
+	if !created || !removed {
+		t.Fatalf("blocking setup command and detached cleanup were not reached: %#v", f.calls(t))
+	}
+	if _, err := os.Stat(filepath.Join(f.root, "network")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned network was not removed: %v", err)
+	}
+}
+
 func TestRunJobContainerSetupFailuresCleanOwnedResources(t *testing.T) {
 	t.Parallel()
 
@@ -2328,6 +2368,39 @@ func TestRunJobContainerToleratesWorkflowFailureAfterSuccessfulCleanup(t *testin
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), j, w)
 	if err == nil || !IsToleratedJobFailure(err) || result.Conclusion != "success" {
 		t.Fatalf("result=%#v, error=%v", result, err)
+	}
+}
+
+func TestRunJobContainerTerminationFailuresRemainUnexpected(t *testing.T) {
+	for _, scenario := range []string{"fail-terminate", "block-terminate"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newJobDocker(t, scenario)
+			w := t.TempDir()
+			j := jobContainerPlan(t, w, []runtimeTestStep{{
+				ID: "timed", Kind: "run", Shell: "sh", Command: "echo ready > step-ready; sleep 30", TimeoutMinutes: 0.01,
+			}})
+			j.ContinueOnError = true
+			result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}).runTestJob(t.Context(), j, w)
+			if result.Conclusion != "success" || !IsToleratedJobFailure(err) || ClassifyFailure(err) != FailureClassStepProcessExit {
+				t.Fatalf("completion attribution changed: result=%#v error=%v class=%s", result, err, ClassifyFailure(err))
+			}
+			if _, err := os.Stat(filepath.Join(w, "step-ready")); err != nil {
+				t.Fatalf("workflow process did not start before its deadline: %v", err)
+			}
+			selected := UnexpectedFailure(err)
+			var exit *exec.ExitError
+			if selected == nil || !errors.As(selected, &exit) || errors.Is(selected, context.DeadlineExceeded) || ClassifyFailure(selected) != FailureClassUnknown {
+				t.Fatalf("termination failure was hidden by the payload timeout: %v", selected)
+			}
+			if scenario == "fail-terminate" && exit.ExitCode() != 42 {
+				t.Fatalf("wrong command exit selected: %v", selected)
+			}
+			for _, resource := range []string{"network", "container"} {
+				if _, err := os.Stat(filepath.Join(f.root, resource)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("final %s cleanup did not succeed: %v", resource, err)
+				}
+			}
+		})
 	}
 }
 
@@ -2970,39 +3043,49 @@ func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
 	}
 }
 
-func TestRunJobContainerRemoteActionPreparationTimeoutIsCancelled(t *testing.T) {
-	f := newJobDocker(t, "")
-	workspace := t.TempDir()
-	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: remote container action timeout\n")
-	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{{
-		ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID},
-	}})
-	job.Schema = plan.Schema
-	job.RequiredCapabilities = []string{"docker", "network"}
-	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
-	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", "sha256:"+strings.Repeat("0", 64), nil)}
-	job.ContinueOnError = true
-	job.TimeoutMinutes = 0.001
-	attachTestProgram(&job)
-	job.Program.Actions = map[string]executionprogram.Action{
-		lockID: {
-			Name: "remote", Runtime: "node24", Main: "index.js",
-			PreIf:  testProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean),
-			PostIf: testProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean),
-		},
-	}
-	materializer := &fakeActionMaterializer{materialize: func(ctx context.Context, _ source.Resolved) (source.Materialized, error) {
-		<-ctx.Done()
-		return source.Materialized{}, ctx.Err()
-	}}
+func TestRunJobRemoteActionPreparationTimeoutIsCancelled(t *testing.T) {
+	for _, mode := range []string{"host", "container"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newJobDocker(t, "")
+			workspace := t.TempDir()
+			writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: remote action timeout\n")
+			lockID := remoteLifecycleLockID(1)
+			job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{{
+				ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID},
+			}})
+			job.Schema = plan.Schema
+			job.RequiredCapabilities = []string{"network"}
+			if mode == "container" {
+				job.RequiredCapabilities = []string{"docker", "network"}
+				job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+			}
+			job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", "sha256:"+strings.Repeat("0", 64), nil)}
+			job.ContinueOnError = true
+			job.TimeoutMinutes = 0.001
+			attachTestProgram(&job)
+			job.Program.Actions = map[string]executionprogram.Action{
+				lockID: {
+					Name: "remote", Runtime: "node24", Main: "index.js",
+					PreIf:  testProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean),
+					PostIf: testProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean),
+				},
+			}
+			materializer := &fakeActionMaterializer{materialize: func(ctx context.Context, _ source.Resolved) (source.Materialized, error) {
+				<-ctx.Done()
+				return source.Materialized{}, ctx.Err()
+			}}
 
-	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).runTestJob(t.Context(), job, workspace)
-	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
-		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
-	}
-	if len(f.calls(t)) != 0 {
-		t.Fatalf("Docker called after action preparation timeout: %#v", f.calls(t))
+			result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).runTestJob(t.Context(), job, workspace)
+			if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
+				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+			}
+			if selected := UnexpectedFailure(err); selected != nil {
+				t.Fatalf("workflow materialization timeout selected as a defect: %v", selected)
+			}
+			if len(f.calls(t)) != 0 {
+				t.Fatalf("Docker called after action preparation timeout: %#v", f.calls(t))
+			}
+		})
 	}
 }
 

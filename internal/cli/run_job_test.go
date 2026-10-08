@@ -862,6 +862,114 @@ func TestRunJobPublishesHydrationFailureAndRejectsMissingIdentity(t *testing.T) 
 	})
 }
 
+func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		command         string
+		output          string
+		wantError       string
+		jobTimeout      float64
+		stepTimeout     float64
+		miseProbe       bool
+		failPublication bool
+		wantReports     int
+	}{
+		{name: "ordinary process failure", command: "exit 7"},
+		{name: "malformed file command", command: `printf 'invalid\n' >> "$GITHUB_OUTPUT"`, wantError: "invalid file command"},
+		{name: "invalid job output expression", command: "true", output: "${{ fromJSON('invalid') }}", wantError: "job output"},
+		{name: "workflow job timeout", command: "sleep 30", jobTimeout: 0.001, wantError: "context deadline exceeded"},
+		{name: "workflow step timeout", command: "sleep 30", stepTimeout: 0.001, wantError: "context deadline exceeded"},
+		{name: "workflow timeout during mise probe", command: "true", jobTimeout: 0.003, miseProbe: true, wantError: "context deadline exceeded"},
+		{name: "publication failure", command: "true", failPublication: true, wantReports: 1},
+		{name: "publication failure after process failure", command: "exit 7", failPublication: true, wantReports: 1},
+		{name: "publication failure after validation failure", command: `printf 'invalid\n' >> "$GITHUB_OUTPUT"`, wantError: "invalid file command", failPublication: true, wantReports: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := cliRunJobPlan()
+			job.Program.Job.Steps[0].Run.Command.Source = test.command
+			job.TimeoutMinutes = test.jobTimeout
+			job.Program.Job.Steps[0].TimeoutMinutes.Literal = test.stepTimeout
+			var probeMarker string
+			if test.miseProbe {
+				requiresMise := true
+				job.RequiresMise = &requiresMise
+				job.Actions = []plan.ActionLock{{
+					ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
+					SourceDigest: "sha256:" + strings.Repeat("a", 64),
+				}}
+				job.Program.Job.Steps = []executionprogram.Step{cliActionStep("local", "./actions/build", "a-0000000000000001")}
+				root := canonicalTempDir(t)
+				probeMarker = filepath.Join(root, "started")
+				mise := filepath.Join(root, "mise")
+				if err := os.WriteFile(mise, fmt.Appendf(nil, "#!/bin/sh\nprintf ready > %q\nexec /bin/sleep 30\n", probeMarker), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("BUILDKITE_GHA_MISE", mise)
+			}
+			if test.output != "" {
+				job.Outputs = map[string]string{"result": test.output}
+			}
+			planPath, planDigest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, planDigest)
+			t.Setenv("BUGSNAG_API_KEY", strings.Repeat("a", 32))
+			t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+			t.Setenv("BUILDKITE_AGENT_ENDPOINT", "")
+			originalTransport := http.DefaultTransport
+			t.Cleanup(func() { http.DefaultTransport = originalTransport })
+			reports := 0
+			http.DefaultTransport = bugsnagTestTransport(func(request *http.Request) (*http.Response, error) {
+				reports++
+				var payload struct {
+					Events []struct {
+						Context    string
+						Exceptions []struct{ Stacktrace []struct{ Method string } }
+					}
+				}
+				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				if request.URL.Host != "notify.bugsnag.com" || len(payload.Events) != 1 || payload.Events[0].Context != "run_job:result_publication" {
+					t.Fatal("publication error was not attributed correctly")
+				}
+				stack := payload.Events[0].Exceptions[0].Stacktrace
+				if len(stack) == 0 || !strings.Contains(stack[0].Method, "runJobContext") {
+					t.Fatalf("report lost its CLI boundary: %#v", stack)
+				}
+				// A reporting outage must not replace the job's own error.
+				return nil, errors.New("Bugsnag unavailable")
+			})
+			runner := &cliCaptureRunner{}
+			if test.failPublication {
+				runner.failAt = 1
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 {
+				t.Fatalf("job exit code = %d, want 1", code)
+			}
+			if test.wantError != "" && !strings.Contains(stderr.String(), test.wantError) {
+				t.Fatalf("wrong failure: %s", stderr.String())
+			}
+			if test.miseProbe {
+				if _, err := os.Stat(probeMarker); err != nil {
+					t.Fatalf("mise probe did not start before the deadline: %v", err)
+				}
+			}
+			if test.jobTimeout > 0 && publishedCLIManifest(t, runner, job, planDigest).Result != "cancelled" {
+				t.Fatal("job timeout did not publish its cancelled conclusion")
+			}
+			if reports != test.wantReports || strings.Contains(stderr.String(), "Bugsnag unavailable") {
+				t.Fatalf("reports = %d, want %d; stderr = %s", reports, test.wantReports, stderr.String())
+			}
+		})
+	}
+}
+
+type bugsnagTestTransport func(*http.Request) (*http.Response, error)
+
+func (f bugsnagTestTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
 func TestRunJobFailsWhenAuthoritativePublicationFails(t *testing.T) {
 	job := cliRunJobPlan()
 	planPath, planDigest := writeCLIJobPlan(t, job)

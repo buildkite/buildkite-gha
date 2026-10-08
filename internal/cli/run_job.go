@@ -317,6 +317,11 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 				details.setAgentAPIHTTPStatus(status)
 			}
 			setRuntimeBlocker(details, runErr)
+			if unexpected := gharuntime.UnexpectedFailure(runErr); unexpected != nil {
+				reportDetails := details.telemetryDetails()
+				reportDetails.FailureCode = runtimeFailureCode(unexpected)
+				telemetry.ReportError(ctx, telemetry.CommandRunJob, clientVersion, reportDetails, unexpected)
+			}
 		}
 	}
 	if result.Conclusion == "" {
@@ -325,6 +330,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if options.resultPath != "" && result.Conclusion != "" {
 		if err := writeJobResult(options.resultPath, result); err != nil {
 			details.setFailurePhase(telemetry.FailurePhaseResultPublication)
+			telemetry.ReportError(ctx, telemetry.CommandRunJob, clientVersion, telemetry.Details{FailurePhase: telemetry.FailurePhaseResultPublication}, err)
 			runErr = errors.Join(runErr, err)
 			result.Conclusion = terminalErrorConclusion(ctx)
 		}
@@ -362,6 +368,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 		if err != nil {
 			details.setFailurePhase(telemetry.FailurePhaseResultPublication)
+			telemetry.ReportError(ctx, telemetry.CommandRunJob, clientVersion, telemetry.Details{FailurePhase: telemetry.FailurePhaseResultPublication}, err)
 			runErr = errors.Join(runErr, fmt.Errorf("publish terminal result: %w", err))
 		}
 	}

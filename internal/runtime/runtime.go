@@ -620,7 +620,7 @@ func boundedDockerOutputLimit(ctx context.Context, env map[string]string, docker
 	if w.exceeded {
 		return output.String(), fmt.Errorf("docker output exceeds limit")
 	}
-	return output.String(), err
+	return output.String(), MarkWorkflowProcessTimeout(ctx, err)
 }
 
 func boundedDockerCombinedOutput(ctx context.Context, env map[string]string, docker string, args ...string) (string, error) {
@@ -633,7 +633,7 @@ func boundedDockerCombinedOutput(ctx context.Context, env map[string]string, doc
 	if w.exceeded {
 		return output.String(), fmt.Errorf("docker output exceeds limit")
 	}
-	return output.String(), err
+	return output.String(), MarkWorkflowProcessTimeout(ctx, err)
 }
 
 type limitedWriter struct {

@@ -739,6 +739,9 @@ func (b *jobContainerBackend) exec(ctx context.Context, r Runner, processor *com
 		}
 		_ = os.Remove(pidfile)
 		_ = os.Remove(pidfile + containerCancellationMarkerSuffix)
+		if terminateErr != nil {
+			terminateErr = &containerTerminationError{err: terminateErr}
+		}
 		return errors.Join(ctx.Err(), terminateErr)
 	}
 }

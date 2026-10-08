@@ -85,7 +85,7 @@ func IsToleratedJobFailure(err error) bool {
 func tolerateJobSetupFailure(runCtx context.Context, continueOnError bool, result JobResult, err error) (JobResult, error) {
 	if runCtx.Err() != nil {
 		result.Conclusion = "cancelled"
-		return result, errors.Join(err, runCtx.Err())
+		return result, markWorkflowTimeout(runCtx, errors.Join(err, runCtx.Err()))
 	}
 	if continueOnError && isWorkflowJobFailure(err) && !isHardJobFailure(err) {
 		result.Conclusion = "success"

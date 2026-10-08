@@ -127,6 +127,9 @@ func (r *jobRun) installAndVerifyMiseNode(ctx context.Context, major int, mise s
 	if err == nil {
 		err = verifyManagedNodeExecutable(ctx, major, node, r.nodeDigest(major))
 	}
+	if err != nil && ctx.Err() != nil {
+		return "", err
+	}
 	if err != nil && r.MiseDataDir != "" {
 		if removeErr := removeManagedNodeInstallation(r.MiseDataDir, installation); removeErr != nil {
 			return "", errors.Join(fmt.Errorf("cached Node %d failed validation: %w", major, err), removeErr)
@@ -225,7 +228,7 @@ func (r Runner) miseNodeInstallation(ctx context.Context, major int, mise string
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", "", fmt.Errorf("resolve cached %s installation: %w: %s", tool, err, strings.TrimSpace(stderr.String()))
+		return "", "", fmt.Errorf("resolve cached %s installation: %w: %s", tool, MarkWorkflowProcessTimeout(ctx, err), strings.TrimSpace(stderr.String()))
 	}
 	installation, err := filepath.Abs(strings.TrimSpace(string(out)))
 	if err != nil {
@@ -352,7 +355,7 @@ func verifyManagedNodeExecutable(ctx context.Context, major int, path, want stri
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("verify exact Node %d executable: %w: %s", major, err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("verify exact Node %d executable: %w: %s", major, MarkWorkflowProcessTimeout(ctx, err), strings.TrimSpace(stderr.String()))
 	}
 	var wantVersion string
 	switch major {
