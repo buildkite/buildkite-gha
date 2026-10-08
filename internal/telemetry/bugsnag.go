@@ -34,7 +34,7 @@ func ReportError(ctx context.Context, command Command, version string, details D
 }
 
 func reportBugsnagError(ctx context.Context, key string, command Command, version string, details Details, err error, transport http.RoundTripper) {
-	if len(key) != 32 || strings.ContainsAny(key, "\r\n") || err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) {
+	if len(key) != 32 || strings.ContainsAny(key, "\r\n") || err == nil || errors.Is(err, context.Canceled) {
 		return
 	}
 	switch details.FailureCode {

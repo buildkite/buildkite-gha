@@ -41,6 +41,24 @@ type CommandRunner struct {
 	Stderr io.Writer
 }
 
+// CancelledProcessError preserves the exit of a subprocess interrupted by its
+// caller, while allowing cancellation to be distinguished from product errors.
+type CancelledProcessError struct{ err error }
+
+func (e *CancelledProcessError) Error() string        { return e.err.Error() }
+func (e *CancelledProcessError) Unwrap() error        { return e.err }
+func (e *CancelledProcessError) Is(target error) bool { return target == context.Canceled }
+
+// MarkProcessCancellation attributes a raw CommandContext result before it is
+// wrapped or joined with independent cleanup errors. Deadlines are unchanged.
+func MarkProcessCancellation(ctx context.Context, err error) error {
+	var exit *exec.ExitError
+	if ctx.Err() == context.Canceled && errors.As(err, &exit) {
+		return &CancelledProcessError{err: err}
+	}
+	return err
+}
+
 func (r CommandRunner) Run(ctx context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
 	return r.RunWithEnv(ctx, dir, name, args, stdin, nil)
 }
@@ -57,7 +75,7 @@ func (r CommandRunner) RunWithEnv(ctx context.Context, dir, name string, args []
 	command.Stdout = &stdout
 	command.Stderr = r.Stderr
 	if err := command.Run(); err != nil {
-		return stdout.Bytes(), err
+		return stdout.Bytes(), MarkProcessCancellation(ctx, err)
 	}
 	return stdout.Bytes(), nil
 }
@@ -78,7 +96,7 @@ func (r CommandRunner) RunBounded(ctx context.Context, dir, name string, args []
 	if stderr.overflow {
 		return stdout.Bytes(), nil, fmt.Errorf("command error output exceeds %d bytes", maxAgentErrorBytes)
 	}
-	return stdout.Bytes(), stderr.Bytes(), err
+	return stdout.Bytes(), stderr.Bytes(), MarkProcessCancellation(ctx, err)
 }
 
 type boundedBuffer struct {

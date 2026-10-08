@@ -102,6 +102,9 @@ func TestUnexpectedFailureKeepsIndependentDefects(t *testing.T) {
 	deadline, cancel := context.WithTimeoutCause(t.Context(), -time.Second, errWorkflowDeadline)
 	defer cancel()
 	timeout := markWorkflowTimeout(deadline, fmt.Errorf("process: %w", deadline.Err()))
+	cancelled, cancelProcess := context.WithCancel(t.Context())
+	cancelProcess()
+	processCancellation := MarkWorkflowProcessTimeout(cancelled, exitError(t))
 	for _, test := range []struct {
 		name      string
 		err       error
@@ -119,6 +122,10 @@ func TestUnexpectedFailureKeepsIndependentDefects(t *testing.T) {
 		{"deadline then credential", errors.Join(timeout, credential), credential, FailureClassOIDCToken},
 		{"joined during deadline", markWorkflowTimeout(deadline, errors.Join(deadline.Err(), hard)), hard, FailureClassIntegrity},
 		{"cancelled then internal", errors.Join(context.Canceled, internal), internal, FailureClassUnknown},
+		{"cancelled process only", processCancellation, nil, FailureClassUnknown},
+		{"cancelled process then cleanup", errors.Join(processCancellation, hard), hard, FailureClassIntegrity},
+		{"hard cancelled process then cleanup", errors.Join(markHardJobFailure(processCancellation), hard), hard, FailureClassIntegrity},
+		{"hard joined cancellation and cleanup", markHardJobFailure(errors.Join(processCancellation, internal)), internal, FailureClassIntegrity},
 		{"cleanup deadline", markHardJobFailure(context.DeadlineExceeded), context.DeadlineExceeded, FailureClassIntegrity},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -134,6 +141,9 @@ func TestUnexpectedFailureKeepsIndependentDefects(t *testing.T) {
 			}
 			if errors.Is(selected, unsupported) || errors.Is(selected, validation) || errors.Is(selected, timeout) {
 				t.Fatalf("UnexpectedFailure() retained an excluded sibling: %v", selected)
+			}
+			if errors.Is(selected, context.Canceled) {
+				t.Fatalf("UnexpectedFailure() retained cancellation: %v", selected)
 			}
 		})
 	}

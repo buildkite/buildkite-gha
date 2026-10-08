@@ -7,6 +7,7 @@ import (
 	"os/exec"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 // FailureClass attributes a RunJob error for telemetry so ordinary workflow
@@ -81,9 +82,20 @@ func unexpectedFailure(err error, workflowTimeout, stepExit bool) error {
 	switch err := err.(type) {
 	case nil:
 		return nil
-	case *hardJobFailure, *jobSetupFailure, *containerTerminationError:
+	case *hardJobFailure:
+		// Hard cleanup deadlines and process exits remain defects, but a
+		// cancelled setup process must not hide independent cleanup errors.
+		if !errors.Is(err, context.Canceled) {
+			return err
+		}
+		selected := unexpectedFailure(err.err, false, false)
+		if selected == err.err {
+			return err
+		}
+		return markHardJobFailure(selected)
+	case *jobSetupFailure, *containerTerminationError:
 		return err
-	case *unsupportedFeatureError, *metadata.UnsupportedRuntimeError, *workflowValidationError:
+	case *unsupportedFeatureError, *metadata.UnsupportedRuntimeError, *workflowValidationError, *transport.CancelledProcessError:
 		return nil
 	case *toleratedJobFailure:
 		return unexpectedFailure(err.err, workflowTimeout, stepExit)
@@ -154,10 +166,11 @@ func markWorkflowTimeout(ctx context.Context, err error) error {
 }
 
 // MarkWorkflowProcessTimeout attributes a CommandContext result to an owned
-// workflow deadline. Call it on the subprocess result before wrapping or
-// joining cleanup errors; it preserves the original error and classification.
+// workflow deadline or caller cancellation. Call it on the subprocess result
+// before wrapping or joining cleanup errors; it preserves the original error
+// and classification.
 func MarkWorkflowProcessTimeout(ctx context.Context, err error) error {
-	marked := markWorkflowTimeout(ctx, err)
+	marked := markWorkflowTimeout(ctx, transport.MarkProcessCancellation(ctx, err))
 	if timeout, ok := marked.(*workflowTimeoutError); ok {
 		var exit *exec.ExitError
 		timeout.processExit = errors.As(err, &exit)

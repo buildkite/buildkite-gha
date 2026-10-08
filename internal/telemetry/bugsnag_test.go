@@ -146,7 +146,7 @@ func TestBugsnagFiltersExpectedFailuresAndCancellation(t *testing.T) {
 	reportBugsnagError(t.Context(), testBugsnagKey, CommandRunJob, "dev", Details{FailurePhase: FailurePhaseExecution}, fmt.Errorf("cancelled: %w", context.Canceled), transport)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	reportBugsnagError(ctx, testBugsnagKey, CommandRunJob, "dev", Details{FailurePhase: FailurePhaseExecution}, errors.New("interrupted"), transport)
+	reportBugsnagError(ctx, testBugsnagKey, CommandRunJob, "dev", Details{FailurePhase: FailurePhaseExecution}, ctx.Err(), transport)
 }
 
 func TestBugsnagDeliveryTimeoutAndRedirect(t *testing.T) {

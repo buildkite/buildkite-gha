@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -416,6 +418,40 @@ func TestCommandRunnerBoundsOutputWhileReading(t *testing.T) {
 	stdout, _, err := (CommandRunner{}).RunBounded(t.Context(), "", "sh", []string{"-c", "printf 123456789"}, nil, 8)
 	if err == nil || !strings.Contains(err.Error(), "exceeds 8 bytes") || len(stdout) != 0 {
 		t.Fatalf("runBounded() stdout = %q, error = %v", stdout, err)
+	}
+}
+
+func TestAgentUploadCancellationPreservesProcessExit(t *testing.T) {
+	root := t.TempDir()
+	marker := filepath.Join(root, "started")
+	executable := filepath.Join(root, "buildkite-agent")
+	if err := os.WriteFile(executable, fmt.Appendf(nil, "#!/bin/sh\nprintf ready > %q\nexec sleep 30\n", marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- (Agent{Runner: CommandRunner{}}).UploadPipeline(ctx, []byte("steps: []")) }()
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	waiting := true
+	for waiting {
+		select {
+		case <-deadline:
+			t.Fatal("Agent upload did not start")
+		case <-ticker.C:
+			if _, err := os.Stat(marker); err == nil {
+				waiting = false
+			}
+		}
+	}
+	cancel()
+	err := <-result
+	var exit *exec.ExitError
+	if !errors.Is(err, context.Canceled) || !errors.As(err, &exit) {
+		t.Fatalf("Agent upload lost cancellation or original exit: %v", err)
 	}
 }
 

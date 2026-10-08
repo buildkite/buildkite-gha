@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -871,6 +872,7 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 		jobTimeout      float64
 		stepTimeout     float64
 		miseProbe       bool
+		cancel          bool
 		failPublication bool
 		wantReports     int
 	}{
@@ -881,6 +883,10 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 		{name: "workflow step timeout", command: "sleep 30", stepTimeout: 0.001, wantError: "context deadline exceeded"},
 		{name: "workflow timeout during mise probe", command: "true", jobTimeout: 0.003, miseProbe: true, wantError: "context deadline exceeded"},
 		{name: "publication failure", command: "true", failPublication: true, wantReports: 1},
+		{name: "publication failure after cancellation", command: "true", cancel: true, failPublication: true, wantReports: 1},
+		{name: "cancellation without publication failure", command: "true", cancel: true},
+		{name: "cancellation during mise probe", command: "true", cancel: true, miseProbe: true},
+		{name: "publication failure after cancelled mise probe", command: "true", cancel: true, miseProbe: true, failPublication: true, wantReports: 1},
 		{name: "publication failure after process failure", command: "exit 7", failPublication: true, wantReports: 1},
 		{name: "publication failure after validation failure", command: `printf 'invalid\n' >> "$GITHUB_OUTPUT"`, wantError: "invalid file command", failPublication: true, wantReports: 1},
 	} {
@@ -919,6 +925,9 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 			reports := 0
 			http.DefaultTransport = bugsnagTestTransport(func(request *http.Request) (*http.Response, error) {
 				reports++
+				if request.Context().Err() != nil {
+					t.Fatal("error report inherited cancelled context")
+				}
 				var payload struct {
 					Events []struct {
 						Context    string
@@ -943,7 +952,39 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 				runner.failAt = 1
 			}
 			var stdout, stderr bytes.Buffer
-			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 {
+			var code int
+			if test.cancel {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				if test.miseProbe {
+					go func() {
+						ticker := time.NewTicker(time.Millisecond)
+						defer ticker.Stop()
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							case <-ticker.C:
+								if _, err := os.Stat(probeMarker); err == nil {
+									cancel()
+									return
+								}
+							}
+						}
+					}()
+				} else {
+					cancel()
+				}
+				code = runJobContext(ctx, []string{"--plan", planPath}, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner})
+				for _, contextErr := range runner.contextErrors {
+					if contextErr != nil {
+						t.Fatalf("publication inherited cancelled context: %v", contextErr)
+					}
+				}
+			} else {
+				code = run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner)
+			}
+			if code != 1 {
 				t.Fatalf("job exit code = %d, want 1", code)
 			}
 			if test.wantError != "" && !strings.Contains(stderr.String(), test.wantError) {
