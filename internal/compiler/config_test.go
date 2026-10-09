@@ -717,9 +717,9 @@ func TestWindowsRunnerServerRejectionsPreserveCause(t *testing.T) {
 		code, message string
 		mapped        bool
 	}{
-		{RunnerRejectionMissingQueue, "The 'Default' cluster has no hosted Windows amd64 queue. Create a hosted Windows amd64 queue named windows-medium: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md", false},
+		{RunnerRejectionMissingQueue, "The 'Default' cluster has no hosted Windows amd64 queue. Create a hosted Windows amd64 queue named windows-medium: https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility", false},
 		{RunnerRejectionNoCluster, "This job does not belong to a cluster. Move the pipeline into a cluster with compatible queues.", false},
-		{RunnerRejectionIncompatibleLabels, "This runner selector requires an operating system or architecture that Buildkite hosted agents do not provide: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md", false},
+		{RunnerRejectionIncompatibleLabels, "This runner selector requires an operating system or architecture that Buildkite hosted agents do not provide: https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility", false},
 		{"queue_not_found", "The 'windows' queue was not found in this job's cluster.", true},
 		{"queue_platform_mismatch", "The 'windows' queue requires platform linux/amd64, not windows/amd64.", true},
 		{"future_rejection", "This queue is not available.", false},
@@ -738,7 +738,7 @@ func TestWindowsRunnerServerRejectionsPreserveCause(t *testing.T) {
 			if !strings.Contains(message, test.message) || strings.Contains(message, "Windows-Latest") || strings.Contains(message, "aren't currently supported") {
 				t.Fatalf("server cause lost or resolved label leaked: %q", message)
 			}
-			if test.code == RunnerRejectionIncompatibleLabels && (!strings.Contains(message, "/compatibility.md Windows jobs require") || !strings.Contains(message, "contact Buildkite support to check hosted Windows access") || detail != "") {
+			if test.code == RunnerRejectionIncompatibleLabels && (!strings.Contains(message, "/compatibility Windows jobs require") || !strings.Contains(message, "contact Buildkite support to check hosted Windows access") || detail != "") {
 				t.Fatalf("missing eligibility guidance or altered server URL: %q / %q", message, detail)
 			}
 		})
@@ -791,9 +791,9 @@ func TestRunnerRejectionDiagnosticRendersServerRejections(t *testing.T) {
 	}{
 		{
 			name:        "missing queue names the cluster and remedy without altering the trailing URL",
-			rejection:   RunnerRejection{Labels: []string{"macos-latest"}, Code: RunnerRejectionMissingQueue, Message: "The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-14-medium or macos-medium, or map this runner label to an existing queue: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md"},
+			rejection:   RunnerRejection{Labels: []string{"macos-latest"}, Code: RunnerRejectionMissingQueue, Message: "The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-14-medium or macos-medium, or map this runner label to an existing queue: https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility"},
 			labels:      []string{"macos-latest"},
-			wantMessage: `Buildkite could not resolve runner label "macos-latest". The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-14-medium or macos-medium, or map this runner label to an existing queue: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md`,
+			wantMessage: `Buildkite could not resolve runner label "macos-latest". The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-14-medium or macos-medium, or map this runner label to an existing queue: https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility`,
 		},
 		{
 			name:        "no cluster without reportable labels",

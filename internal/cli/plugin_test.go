@@ -1219,7 +1219,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 					"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage},
 					"warnings": []map[string]string{{
 						"code":    "runner_label_fallback",
-						"message": "This runner selector is not supported directly; using the linux-medium queue via a heuristic fallback. Configure an explicit runner mapping to use an appropriate Buildkite queue and avoid this fallback: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md",
+						"message": "This runner selector is not supported directly; using the linux-medium queue via a heuristic fallback. Configure an explicit runner mapping to use an appropriate Buildkite queue and avoid this fallback: https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility",
 					}},
 				}
 			case slices.Equal(requirement.Selector.Labels, []string{"self-hosted", "custom-linux"}):
@@ -1228,7 +1228,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 					"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage},
 					"warnings": []map[string]string{{
 						"code":    "runner_label_fallback",
-						"message": "Expression-selected runner labels [self-hosted, custom-linux] are not supported directly; using the linux-medium queue via a heuristic fallback. Configure an explicit runner mapping to use an appropriate Buildkite queue and avoid this fallback: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md",
+						"message": "Expression-selected runner labels [self-hosted, custom-linux] are not supported directly; using the linux-medium queue via a heuristic fallback. Configure an explicit runner mapping to use an appropriate Buildkite queue and avoid this fallback: https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility",
 					}},
 				}
 			case slices.Equal(requirement.Selector.Labels, []string{"macos-26"}):
@@ -1265,7 +1265,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 			break
 		}
 	}
-	if runnerAnnotation == nil || runnerAnnotation.args[8] != "warning" || !strings.Contains(string(runnerAnnotation.stdin), "heuristic fallback") || !strings.Contains(string(runnerAnnotation.stdin), "custom-linux") || !strings.Contains(string(runnerAnnotation.stdin), "linux-medium") || !strings.Contains(string(runnerAnnotation.stdin), "docs/compatibility.md") {
+	if runnerAnnotation == nil || runnerAnnotation.args[8] != "warning" || !strings.Contains(string(runnerAnnotation.stdin), "heuristic fallback") || !strings.Contains(string(runnerAnnotation.stdin), "custom-linux") || !strings.Contains(string(runnerAnnotation.stdin), "linux-medium") || !strings.Contains(string(runnerAnnotation.stdin), "run-github-actions-workflows/compatibility") {
 		t.Fatalf("runner resolution annotation = %#v", runnerAnnotation)
 	}
 	darwinDigest := transport.Digest(darwinContents)
