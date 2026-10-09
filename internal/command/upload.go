@@ -704,13 +704,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		return err
 	}
 	if uploadArguments.prepared != nil {
-		for _, artifact := range artifacts {
-			if err := transport.ValidateArtifact(artifact); err != nil {
-				return err
-			}
-		}
-		*uploadArguments.prepared = PreparedUpload{Pipeline: aggregatePipeline, Artifacts: artifacts}
-		return nil
+		return uploadArguments.prepared.capture(aggregatePipeline, artifacts)
 	}
 	allSkipped := len(generatedWorkflows) > 0 && len(skippedWorkflows) == len(generatedWorkflows)
 	if len(artifacts) == 0 {
