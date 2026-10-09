@@ -78,43 +78,51 @@ func uploadStage(options stageOptions, stdout, stderr io.Writer, version, client
 }
 
 func uploadStageContext(ctx context.Context, options stageOptions, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) int {
+	return operationExit(uploadStageOperation(ctx, options, stdout, stderr, version, clientVersion, agent))
+}
+
+func uploadStageOperation(ctx context.Context, options stageOptions, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if os.Getenv("BUILDKITE") != "true" || os.Getenv("BUILDKITE_BUILD_ID") == "" || os.Getenv("BUILDKITE_JOB_ID") == "" {
-		return usageError(stderr, "upload: BUILDKITE=true, BUILDKITE_BUILD_ID, and BUILDKITE_JOB_ID are required")
+		return operationUsageError(stderr, "upload: BUILDKITE=true, BUILDKITE_BUILD_ID, and BUILDKITE_JOB_ID are required")
 	}
 	retryGuidance := stageRetryGuidance
-	fail := func(format string, args ...any) int {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: "+format+"\n", args...)
+	fail := func(format string, args ...any) error {
+		err := fmt.Errorf(format, args...)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		_, _ = fmt.Fprintln(stderr, retryGuidance)
-		return 1
+		return err
 	}
 	root, err := os.MkdirTemp("", "buildkite-gha-stage-")
 	if err != nil {
-		return fail("create working directory: %v", err)
+		return fail("create working directory: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(root) }()
 
 	_, _ = fmt.Fprintln(stdout, "~~~ :github: Read stage record")
 	recordPath, err := buildkitepipeline.StagePath(options.digest)
 	if err != nil {
-		return fail("%v", err)
+		return fail("%w", err)
 	}
 	downloadDir := filepath.Join(root, "stage")
 	if err := os.Mkdir(downloadDir, 0o700); err != nil {
-		return fail("create stage download directory: %v", err)
+		return fail("create stage download directory: %w", err)
 	}
 	if err := agent.DownloadArtifact(ctx, recordPath, downloadDir, options.producer); err != nil {
-		return fail("download stage record from job %q: %v", options.producer, err)
+		return fail("download stage record from job %q: %w", options.producer, err)
 	}
 	data, err := readBoundedFile(filepath.Join(downloadDir, filepath.FromSlash(recordPath)), maxStageRecordBytes)
 	if err != nil {
-		return fail("read stage record: %v", err)
+		return fail("read stage record: %w", err)
 	}
 	if actual := sha256Digest(data); actual != options.digest {
 		return fail("stage record digest %s does not match expected %s", actual, options.digest)
 	}
 	record, err := decodeStageRecord(data, version)
 	if err != nil {
-		return fail("%v", err)
+		return fail("%w", err)
 	}
 	if record.Continuation.Descriptor.Shape == compiler.RuntimeRunsOnShape {
 		retryGuidance = "Retry the whole build to select this runner again. If the producer job was retried, only a new build can select it."
@@ -124,14 +132,14 @@ func uploadStageContext(ctx context.Context, options stageOptions, stdout, stder
 	// The event source and the runtimes come from the importer it records.
 	eventPath, err := buildkitepipeline.StageEventPath(record.Event.Digest)
 	if err != nil {
-		return fail("%v", err)
+		return fail("%w", err)
 	}
 	if err := agent.DownloadArtifact(ctx, eventPath, downloadDir, record.Importer); err != nil {
-		return fail("download event from importer %q: %v", record.Importer, err)
+		return fail("download event from importer %q: %w", record.Importer, err)
 	}
 	eventSource, err := readBoundedFile(filepath.Join(downloadDir, filepath.FromSlash(eventPath)), plan.MaxEventPayloadBytes)
 	if err != nil {
-		return fail("read event: %v", err)
+		return fail("read event: %w", err)
 	}
 	if actual := sha256Digest(eventSource); actual != record.Event.Digest {
 		return fail("event digest %s does not match the stage record's %s", actual, record.Event.Digest)
@@ -140,13 +148,13 @@ func uploadStageContext(ctx context.Context, options stageOptions, stdout, stder
 	if checkout == "" {
 		checkout, err = os.Getwd()
 		if err != nil {
-			return fail("resolve checkout: %v", err)
+			return fail("resolve checkout: %w", err)
 		}
 	}
 	workflowPath := filepath.Join(checkout, filepath.FromSlash(record.Workflow.Path))
 	workflowSource, err := readBoundedFile(workflowPath, maxStageWorkflowBytes)
 	if err != nil {
-		return fail("read workflow %s: %v", record.Workflow.Path, err)
+		return fail("read workflow %s: %w", record.Workflow.Path, err)
 	}
 	if actual := sha256Digest(workflowSource); actual != record.Workflow.Digest {
 		return fail("workflow %s in the checkout differs from the workflow the importer compiled", record.Workflow.Path)
@@ -193,7 +201,7 @@ type stageRun struct {
 
 // execute reads the producer results, expands the matrix, recompiles the
 // workflow, and uploads only the jobs this stage adds.
-func (r stageRun) execute(fail func(string, ...any) int) int {
+func (r stageRun) execute(fail func(string, ...any) error) error {
 	record := r.record
 	continuation := record.Continuation
 	descriptor := continuation.Descriptor
@@ -227,7 +235,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	}
 	for _, resolved := range record.Resolved {
 		if _, err := readProducer(resolved.ProducerStepKey); err != nil {
-			return fail("earlier matrix %q producer result is unavailable: %v", resolved.Job, err)
+			return fail("earlier matrix %q producer result is unavailable: %w", resolved.Job, err)
 		}
 		if results[resolved.ProducerStepKey] != resolved.ResultDigest {
 			return fail("earlier matrix %q producer result changed after expansion", resolved.Job)
@@ -238,7 +246,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 		_, _ = fmt.Fprintf(r.stdout, "~~~ :github: Read %s from job %q output %q\n", descriptor.Kind(), descriptor.ProducerJob, descriptor.ProducerOutput)
 		manifest, err := readProducer(root.ProducerStepKey)
 		if err != nil {
-			return fail("%s producer %q result is unavailable: %v", descriptor.Kind(), descriptor.ProducerJob, err)
+			return fail("%s producer %q result is unavailable: %w", descriptor.Kind(), descriptor.ProducerJob, err)
 		}
 		if manifest.Result != "success" {
 			subject := "Matrix"
@@ -276,7 +284,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 		}
 		expanded, err := compiler.ExpandRuntimeMatrixOutput(descriptor, []byte(*output), graphKeys)
 		if err != nil {
-			return fail("matrix from job %q output %q is invalid: %v", descriptor.ProducerJob, descriptor.ProducerOutput, err)
+			return fail("matrix from job %q output %q is invalid: %w", descriptor.ProducerJob, descriptor.ProducerOutput, err)
 		}
 		rows[descriptor.Job] = expanded
 		_, _ = fmt.Fprintf(r.stdout, "Expanding job %q into %d matrix instances.\n", descriptor.Job, len(expanded))
@@ -297,7 +305,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	preflight, report, err := r.compile(rows, skipped, runnerOutputs)
 	if err != nil {
 		_ = r.out.write(r.ctx, report)
-		return fail("compile deferred jobs: %v", err)
+		return fail("compile deferred jobs: %w", err)
 	}
 	bundle := preflight.Bundle
 	// advance proves the recompilation reproduced the earlier stages and
@@ -305,14 +313,14 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	// next stage when some of them feed a later matrix.
 	stage, err := record.advance(bundle, rows, skipped, results, r.digest)
 	if err != nil {
-		return fail("%v", err)
+		return fail("%w", err)
 	}
 	if len(stage.jobs) == 0 {
 		return fail("recompilation produced no deferred jobs")
 	}
 	pipeline, createdGates, err := r.deferredPipeline(bundle, stage, nil)
 	if err != nil {
-		return fail("%v", err)
+		return fail("%w", err)
 	}
 	writeCompilerWarnings(r.stderr, "upload", record.Workflow.Path, bundle.IR.Warnings)
 	_ = compatibility.WriteProcessing(r.stderr, "text", report)
@@ -338,25 +346,25 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	}
 	if err := transport.UploadArtifacts(r.ctx, r.agent, r.root, artifacts, pipeline); err != nil {
 		if r.ctx.Err() != nil || !errors.Is(err, transport.ErrPipelineUpload) {
-			return fail("%v", err)
+			return fail("%w", err)
 		}
 		if r.alreadyApplied(expected, "command") && r.schedulingAlreadyApplied(stage.jobs) {
 			_, _ = fmt.Fprintf(r.stdout, "The %d deferred jobs were already uploaded by an earlier run of this step; nothing to do.\n", len(stage.jobs))
-			return 0
+			return nil
 		}
 		raced := r.existingSteps(createdGates)
 		if len(raced) == 0 {
-			return fail("%v", err)
+			return fail("%w", err)
 		}
 		if err := r.uploadAfterGateRace(bundle, stage, raced); err != nil {
-			return fail("%v", err)
+			return fail("%w", err)
 		}
 	}
 	_, _ = fmt.Fprintf(r.stdout, "Uploaded %d jobs for %q from job %q output %q.\n", len(stage.jobs), descriptor.Job, descriptor.ProducerJob, descriptor.ProducerOutput)
 	for i, step := range stage.steps {
 		_, _ = fmt.Fprintf(r.stdout, "Step %q expands %s once these jobs have run.\n", step.Key, quotedKeys(stage.next[i].Jobs))
 	}
-	return 0
+	return nil
 }
 
 // compile recompiles the workflow with the supplied scheduling values through the
@@ -365,7 +373,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 // with the environment source this job observes.
 func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]bool, runnerOutputs map[string]string) (hostedCompilation, compatibility.ProcessingReport, error) {
 	record := r.record
-	repositorySource, cleanupSource, err := hostedRepositorySource(r.ctx, r.clientVersion, r.eventSource, importerJobActionSourceAuthentication(r.stderr, r.clientVersion), record.PrivateReusableWorkflows)
+	repositorySource, cleanupSource, err := hostedRepositorySource(r.ctx, r.clientVersion, r.eventSource, importerAuthentication(r.ctx, r.stderr, r.clientVersion), record.PrivateReusableWorkflows)
 	if err != nil {
 		return hostedCompilation{}, repositorySourceSetupReport(record.Workflow.Path, "repository source could not be configured", err), err
 	}
@@ -485,7 +493,7 @@ func quotedKeys(keys []string) string {
 // uploadSkipped records every deferred job as skipped when the producer did
 // not succeed, so the workflow's checks and dependents resolve the same way a
 // skipped static job would.
-func (r stageRun) uploadSkipped(fail func(string, ...any) int, result string, graphKeys []string) int {
+func (r stageRun) uploadSkipped(fail func(string, ...any) error, result string, graphKeys []string) error {
 	record := r.record
 	producer := record.Continuation.Descriptor.ProducerJob
 	reason := fmt.Sprintf("%s producer job %q finished with result %s", record.Continuation.Descriptor.Kind(), producer, result)
@@ -517,17 +525,17 @@ func (r stageRun) uploadSkipped(fail func(string, ...any) int, result string, gr
 		}},
 	})
 	if err != nil {
-		return fail("emit skipped jobs: %v", err)
+		return fail("emit skipped jobs: %w", err)
 	}
 	if err := r.agent.UploadPipeline(r.ctx, pipeline); err != nil {
 		if r.ctx.Err() == nil && r.alreadyApplied(expected, "label") {
 			_, _ = fmt.Fprintln(r.stdout, "The skipped jobs were already uploaded by an earlier run of this step; nothing to do.")
-			return 0
+			return nil
 		}
-		return fail("upload skipped jobs: %v", err)
+		return fail("upload skipped jobs: %w", err)
 	}
 	_, _ = fmt.Fprintf(r.stdout, "Uploaded %d skipped jobs for %q.\n", len(jobs), record.Continuation.Descriptor.Job)
-	return 0
+	return nil
 }
 
 // schedulingAlreadyApplied checks scheduler attributes independently of the
