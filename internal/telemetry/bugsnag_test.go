@@ -17,6 +17,11 @@ import (
 const testBugsnagKey = "0123456789abcdef0123456789abcdef"
 
 func TestBugsnagReportIsSynchronousAndOmitsSensitiveText(t *testing.T) {
+	const buildID = "12345678-1234-1234-1234-123456789abc"
+	const jobID = "abcdef12-abcd-abcd-abcd-abcdef123456"
+	t.Setenv("BUILDKITE_BUILD_ID", buildID)
+	t.Setenv("BUILDKITE_JOB_ID", jobID)
+	t.Setenv("CUSTOMER_API_KEY", "private-api-key")
 	var body []byte
 	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.String() != "https://notify.bugsnag.com" || request.Method != http.MethodPost {
@@ -48,7 +53,7 @@ func TestBugsnagReportIsSynchronousAndOmitsSensitiveText(t *testing.T) {
 		if len(body) == 0 {
 			t.Fatal("report did not complete before return")
 		}
-		for _, secret := range []string{"private-token", "private-cause", "private-output", "private-config", "private-wrapper", "private-sibling"} {
+		for _, secret := range []string{"private-token", "private-cause", "private-output", "private-config", "private-wrapper", "private-sibling", "private-api-key", buildID, jobID} {
 			if strings.Contains(string(body), secret) {
 				t.Fatalf("report leaked %s", secret)
 			}
@@ -62,8 +67,10 @@ func TestBugsnagReportIsSynchronousAndOmitsSensitiveText(t *testing.T) {
 				Exceptions []struct {
 					Message    string
 					Stacktrace []struct {
-						Method    string
-						InProject bool
+						Method     string
+						File       string
+						LineNumber int
+						InProject  bool
 					}
 				}
 				Metadata struct {
@@ -94,6 +101,14 @@ func TestBugsnagReportIsSynchronousAndOmitsSensitiveText(t *testing.T) {
 		stack := event.Exceptions[0].Stacktrace
 		if len(stack) == 0 || !strings.Contains(stack[0].Method, "TestBugsnagReportIsSynchronousAndOmitsSensitiveText") || !stack[0].InProject {
 			t.Fatalf("original project stack was lost: %#v", stack)
+		}
+		if stack[0].LineNumber <= 0 {
+			t.Fatal("original stack line number was lost")
+		}
+		for _, frame := range stack {
+			if frame.File != "[REDACTED]" {
+				t.Fatalf("report leaked stack filename: %q", frame.File)
+			}
 		}
 	}
 }

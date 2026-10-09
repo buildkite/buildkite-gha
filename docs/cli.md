@@ -998,8 +998,9 @@ unhandled panics are not reported.
 Container termination failures remain reportable even when the job tolerates
 the step failure. Reporting does not change continue-on-error behavior.
 
-Reports contain the CLI version, error type, stack locations, command, failure
-phase/code, valid Buildkite build/job IDs, and applicable Agent API status.
+Reports contain the CLI version, error type, stack methods and line numbers,
+command, failure phase/code, and applicable Agent API status. Stack filenames
+are replaced with `[REDACTED]` to omit checkout and build paths.
 Development versions use the `development` release stage; other versions use
 `production`. Standard Go errors have a stack at the reporting boundary, not the
 original failure site. Wrapped and joined errors retain the first captured
@@ -1007,9 +1008,9 @@ stack in depth-first order when available. Command, phase, and failure code
 participate in the error class so different categories do not share a group
 solely because they reach the same reporting boundary.
 Reports omit raw error messages and causes, job output, diagnostics,
-workflow/event contents, other environment values, and hostname. Detailed error
-text remains in the job log. Automatic session tracking and the SDK's
-process-forking panic handler are not enabled.
+workflow/event contents, Buildkite build/job IDs, environment values, and
+hostname. Detailed error text remains in the job log. Automatic session tracking
+and the SDK's process-forking panic handler are not enabled.
 
 Delivery is synchronous, with a 1.5-second network timeout per report, no retries,
 and no redirects. Reporting failures are silent and do not change command results.
