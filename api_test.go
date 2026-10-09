@@ -121,7 +121,10 @@ func apiRunnerLabel() string {
 
 func apiFixture(t *testing.T, workflow string) (gha.Client, *memoryBuildkite, gha.CompileRequest) {
 	t.Helper()
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(root)
 	// Execute plans with the current test binary, not a cross-platform runtime.
 	workflow = strings.ReplaceAll(workflow, "runs-on: test-host", "runs-on: "+apiRunnerLabel())
