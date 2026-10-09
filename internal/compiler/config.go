@@ -611,8 +611,8 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 	}
 }
 
-const windowsRunnerDocs = "https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#experimental-windows-jobs"
-const windowsRunnerSetupGuidance = "Experimental Windows jobs require a Windows Server 2022 x86-64 queue. Ask a pipeline administrator to map windows-latest or windows-2022 to that queue, or contact Buildkite support to check hosted Windows access and automatic routing. See " + windowsRunnerDocs
+const windowsRunnerDocs = "https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#windows-jobs"
+const windowsRunnerSetupGuidance = "Windows jobs require a Windows Server 2022 x86-64 queue. Ask a pipeline administrator to map windows-latest or windows-2022 to that queue, or contact Buildkite support to check hosted Windows access and automatic routing. See " + windowsRunnerDocs
 const windowsRunnerVariantGuidance = "Explicit Windows mappings support only windows-latest and windows-2022 on Windows Server 2022 x86-64. Use one only if this job is compatible. Windows 2025 aliases require Agent API resolution and do not provide Server 2025; native Windows arm64 is unsupported. If a documented Windows 2025 alias is rejected, contact Buildkite support to check hosted Windows access and automatic routing. See " + windowsRunnerDocs
 
 // serverRunnerRejectionDiagnostic renders an Agent API rejection. The server

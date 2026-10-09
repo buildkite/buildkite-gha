@@ -26,7 +26,13 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
-var docsURLPattern = regexp.MustCompile(`https://github\.com/buildkite/buildkite-gha/blob/main/(docs/[a-z0-9_-]+\.md)#[a-z0-9-]+`)
+var docsURLPattern = regexp.MustCompile(`https://buildkite\.com/docs/pipelines/migration/run-github-actions-workflows/(compatibility|cli|security)#[a-z0-9-]+`)
+
+var docsLinkText = map[string]string{
+	"compatibility": "compatibility reference",
+	"cli":           "CLI reference",
+	"security":      "security model",
+}
 
 const (
 	processingAnnotationContext   = "buildkite-gha-processing"
@@ -692,9 +698,12 @@ func annotationCode(value string) string {
 	return "<code>" + annotationHTML(value) + "</code>"
 }
 
-// annotationDocsLinks links repository documentation URLs in escaped HTML.
+// annotationDocsLinks links Buildkite documentation URLs in escaped HTML.
 func annotationDocsLinks(escaped string) string {
-	return docsURLPattern.ReplaceAllString(escaped, `<a href="$0" target="_blank">$1</a>`)
+	return docsURLPattern.ReplaceAllStringFunc(escaped, func(url string) string {
+		page := docsURLPattern.FindStringSubmatch(url)[1]
+		return `<a href="` + url + `" target="_blank">` + docsLinkText[page] + `</a>`
+	})
 }
 
 func annotationHTML(value string) string {
