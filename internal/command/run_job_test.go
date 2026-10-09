@@ -941,7 +941,7 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 					t.Fatal("publication error was not attributed correctly")
 				}
 				stack := payload.Events[0].Exceptions[0].Stacktrace
-				if len(stack) == 0 || !strings.Contains(stack[0].Method, "runJobContext") {
+				if len(stack) == 0 || !strings.Contains(stack[0].Method, "runJobOperation") {
 					t.Fatalf("report lost its CLI boundary: %#v", stack)
 				}
 				// A reporting outage must not replace the job's own error.

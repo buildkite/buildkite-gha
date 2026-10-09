@@ -108,6 +108,14 @@ func importerJobActionSourceAuthentication(warnings io.Writer, clientVersion str
 	return authentication
 }
 
+func importerAuthentication(ctx context.Context, warnings io.Writer, clientVersion string) *actionSourceAuthentication {
+	authentication := importerJobActionSourceAuthentication(warnings, clientVersion)
+	if credentials := gharuntime.InvocationCredentials(ctx); credentials != nil {
+		authentication.redactor = credentials
+	}
+	return authentication
+}
+
 func (a *actionSourceAuthentication) option(repository string) actionsource.Option {
 	if a == nil {
 		return nil

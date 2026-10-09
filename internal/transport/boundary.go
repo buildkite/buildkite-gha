@@ -31,9 +31,24 @@ type Runner interface {
 	Run(ctx context.Context, dir, name string, args []string, stdin []byte) ([]byte, error)
 }
 
+// Backend supplies Buildkite effects without prescribing a subprocess protocol.
+type Backend interface {
+	UploadArtifacts(context.Context, string, string) error
+	UploadArtifactFrom(context.Context, string, string) error
+	DownloadArtifact(context.Context, string, string, string) error
+	SearchArtifactProducer(context.Context, string, string) (string, error)
+	UploadPipeline(context.Context, []byte) error
+	SetMetadata(context.Context, string, string) error
+	GetMetadataBounded(context.Context, string, int) ([]byte, error)
+	GetStepAttribute(context.Context, string, string) ([]byte, error)
+	EnsureStepLabelSuffix(context.Context, string) error
+	AnnotateJob(context.Context, string, string, string, string) error
+}
+
 // Agent invokes public buildkite-agent commands. Tests use a capture Runner.
 type Agent struct {
-	Runner Runner
+	Runner  Runner
+	Backend Backend
 }
 
 // CommandRunner executes the Buildkite Agent without a shell.
@@ -134,6 +149,9 @@ func (a Agent) UploadArtifactFrom(ctx context.Context, root, path string) error 
 	if err != nil {
 		return fmt.Errorf("resolve artifact upload root: %w", err)
 	}
+	if a.Backend != nil {
+		return a.Backend.UploadArtifactFrom(ctx, resolvedRoot, path)
+	}
 	_, err = a.runInDir(ctx, resolvedRoot, []string{"artifact", "upload", path}, nil)
 	return err
 }
@@ -142,11 +160,17 @@ func (a Agent) DownloadArtifact(ctx context.Context, path, destination, producer
 	if !keyPattern.MatchString(producerStep) {
 		return fmt.Errorf("invalid producer step key %q", producerStep)
 	}
+	if a.Backend != nil {
+		return a.Backend.DownloadArtifact(ctx, path, destination, producerStep)
+	}
 	_, err := a.run(ctx, []string{"artifact", "download", path, destination, "--step", producerStep}, nil)
 	return err
 }
 
 func (a Agent) SetMetadata(ctx context.Context, key, value string) error {
+	if a.Backend != nil {
+		return a.Backend.SetMetadata(ctx, key, value)
+	}
 	_, err := a.run(ctx, []string{"meta-data", "set", key, value}, nil)
 	return err
 }
@@ -162,6 +186,16 @@ func (a Agent) GetMetadata(ctx context.Context, key string) ([]byte, error) {
 func (a Agent) GetMetadataBounded(ctx context.Context, key string, limit int) ([]byte, error) {
 	if limit < 1 {
 		return nil, fmt.Errorf("metadata output limit must be positive")
+	}
+	if a.Backend != nil {
+		result, err := a.Backend.GetMetadataBounded(ctx, key, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(result) > limit {
+			return nil, fmt.Errorf("metadata output exceeds %d bytes", limit)
+		}
+		return result, nil
 	}
 	runner, ok := a.Runner.(interface {
 		RunBounded(context.Context, string, string, []string, []byte, int) ([]byte, []byte, error)
@@ -203,10 +237,16 @@ func (a Agent) GetStepAttribute(ctx context.Context, stepKey, attribute string) 
 	if !keyPattern.MatchString(attribute) {
 		return nil, fmt.Errorf("invalid step attribute %q", attribute)
 	}
+	if a.Backend != nil {
+		return a.Backend.GetStepAttribute(ctx, stepKey, attribute)
+	}
 	return a.run(ctx, []string{"step", "get", attribute, "--step", stepKey}, nil)
 }
 
 func (a Agent) UploadPipeline(ctx context.Context, pipeline []byte) error {
+	if a.Backend != nil {
+		return a.Backend.UploadPipeline(ctx, pipeline)
+	}
 	_, err := a.run(ctx, []string{"pipeline", "upload", "--no-interpolation"}, pipeline)
 	return err
 }
@@ -216,6 +256,9 @@ func (a Agent) UploadPipeline(ctx context.Context, pipeline []byte) error {
 func (a Agent) EnsureStepLabelSuffix(ctx context.Context, suffix string) error {
 	if suffix == "" || !utf8.ValidString(suffix) {
 		return fmt.Errorf("step label suffix must be nonempty valid UTF-8")
+	}
+	if a.Backend != nil {
+		return a.Backend.EnsureStepLabelSuffix(ctx, suffix)
 	}
 	label, err := a.run(ctx, []string{"step", "get", "label"}, nil)
 	if err != nil {
@@ -245,6 +288,9 @@ func (a Agent) AnnotateJob(ctx context.Context, jobID, annotationContext, style,
 	if body == "" || len(body) > maxAnnotationBodyBytes || !utf8.ValidString(body) {
 		return fmt.Errorf("annotation body must be valid UTF-8 between 1 and %d bytes", maxAnnotationBodyBytes)
 	}
+	if a.Backend != nil {
+		return a.Backend.AnnotateJob(ctx, jobID, annotationContext, style, body)
+	}
 	_, err := a.run(ctx, []string{"annotate", "--scope", "job", "--job", jobID, "--context", annotationContext, "--style", style}, []byte(body))
 	return err
 }
@@ -273,7 +319,7 @@ func UploadArtifacts(ctx context.Context, agent Agent, root string, artifacts []
 	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].Path < artifacts[j].Path })
 	seen := make(map[string]bool, len(artifacts))
 	for _, artifact := range artifacts {
-		if err := validateArtifact(artifact); err != nil {
+		if err := ValidateArtifact(artifact); err != nil {
 			return err
 		}
 		if seen[artifact.Path] {
@@ -316,6 +362,12 @@ func uploadMaterializedArtifacts(ctx context.Context, agent Agent, absoluteRoot 
 			return fmt.Errorf("verify artifact %q at upload: %w", artifact.Path, err)
 		}
 	}
+	if agent.Backend != nil {
+		if err := agent.Backend.UploadArtifacts(ctx, absoluteRoot, importerArtifactPattern); err != nil {
+			return fmt.Errorf("upload artifacts: %w", err)
+		}
+		return nil
+	}
 	if _, err := agent.runInDir(ctx, absoluteRoot, []string{"artifact", "upload", importerArtifactPattern, "--concurrency", importerArtifactConcurrency}, nil); err != nil {
 		return fmt.Errorf("upload artifacts: %w", err)
 	}
@@ -331,7 +383,8 @@ func cloneArtifacts(artifacts []Artifact) []Artifact {
 	return cloned
 }
 
-func validateArtifact(artifact Artifact) error {
+// ValidateArtifact checks the immutable artifact path and content digest.
+func ValidateArtifact(artifact Artifact) error {
 	if !strings.HasPrefix(artifact.Path, ".buildkite-gha/") {
 		return fmt.Errorf("invalid artifact path %q", artifact.Path)
 	}

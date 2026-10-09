@@ -703,9 +703,14 @@ func annotationHTML(value string) string {
 
 // fail emits the report and the failure that ended the command.
 func (o processingOutput) fail(ctx context.Context, report compatibility.ProcessingReport, err error) int {
+	_ = o.failError(ctx, report, err)
+	return 1
+}
+
+func (o processingOutput) failError(ctx context.Context, report compatibility.ProcessingReport, err error) error {
 	_ = o.write(ctx, report)
 	_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: %v\n", o.command, err)
-	return 1
+	return err
 }
 
 // loadProcessingInputs reads the workflow source and acquires the optional

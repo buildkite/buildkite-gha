@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
 	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
@@ -258,7 +259,7 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	request.Header.Set("Authorization", "Token "+c.jobToken)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("User-Agent", c.userAgent)
-	response, err := c.client.Do(request)
+	response, err := agentapi.HTTPClient(requestCtx, c.client).Do(request)
 	if err != nil {
 		return fmt.Errorf("send telemetry event: %w", err)
 	}

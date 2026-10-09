@@ -41,6 +41,12 @@ func runJob(args []string, stdout, stderr io.Writer, version, clientVersion stri
 }
 
 func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) (code int) {
+	options, err := runJobArgs(args)
+	code, _ = runJobOperation(ctx, options, err, stdout, stderr, version, clientVersion, agent)
+	return code
+}
+
+func runJobOperation(ctx context.Context, options runJobOptions, optionsErr error, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) (code int, failure error) {
 	started := time.Now()
 	var result gharuntime.JobResult
 	details := &commandTelemetryDetails{}
@@ -50,9 +56,8 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		outcome := telemetryOutcome(code, result.Conclusion, ctx.Err())
 		emitCommandTelemetry(ctx, telemetry.CommandRunJob, outcome, clientVersion, time.Since(started), details.forOutcome(outcome))
 	}()
-	options, err := runJobArgs(args)
-	if err != nil {
-		return usageError(stderr, "run-job: %v", err)
+	if optionsErr != nil {
+		return usageError(stderr, "run-job: %v", optionsErr), optionsErr
 	}
 	failureVisible := false
 	_, _ = fmt.Fprintln(stdout, "~~~ :package: Prepare GitHub Actions job")
@@ -65,19 +70,19 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		planRoot, mkdirErr := os.MkdirTemp("", "buildkite-gha-plan-")
 		if mkdirErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create plan directory: %v\n", mkdirErr)
-			return 1
+			return 1, mkdirErr
 		}
 		defer func() { _ = os.RemoveAll(planRoot) }()
 		if err := agent.DownloadArtifact(ctx, options.planPath, planRoot, options.planProducer); err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: download plan: %v\n", err)
-			return 1
+			return 1, err
 		}
 		options.planPath = filepath.Join(planRoot, filepath.FromSlash(options.planPath))
 	}
 	source, err := os.ReadFile(options.planPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
-		return 1
+		return 1, err
 	}
 	planDigest := transport.Digest(source)
 	expectedPlanDigest := options.planDigest
@@ -87,56 +92,56 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if expectedPlanDigest != "" {
 		if planDigest != expectedPlanDigest {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: plan digest %q does not match expected digest %q\n", planDigest, expectedPlanDigest)
-			return 1
+			return 1, fmt.Errorf("plan digest %q does not match expected digest %q", planDigest, expectedPlanDigest)
 		}
 	}
 	job, err := plan.Decode(source)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
-		return 1
+		return 1, err
 	}
 	if job.Compiler.Version != version {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: plan compiler version %q does not match runtime version %q\n", job.Compiler.Version, version)
-		return 1
+		return 1, fmt.Errorf("plan compiler version %q does not match runtime version %q", job.Compiler.Version, version)
 	}
 	runtimeDigest, err := executableDigest()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: verify runtime executable: %v\n", err)
-		return 1
+		return 1, err
 	}
 	if expected := job.RuntimeDistributionDigest(); runtimeDigest != expected {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: runtime distribution digest %q does not match plan digest %q\n", runtimeDigest, expected)
-		return 1
+		return 1, fmt.Errorf("runtime distribution digest %q does not match plan digest %q", runtimeDigest, expected)
 	}
 	if err := verifyBuildkiteTarget(job); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
-		return 1
+		return 1, err
 	}
 	if options.artifactProducer == "" {
 		options.artifactProducer = options.planProducer
 	}
 	if err := hydrateEventPayload(ctx, agent, &job, options.artifactProducer); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: hydrate event payload: %v\n", err)
-		return 1
+		return 1, err
 	}
 	if err := gharuntime.ValidateHost(job, runtime.GOOS, runtime.GOARCH); err != nil {
 		details.setFailurePhase(telemetry.FailurePhaseExecution)
 		details.setFailureCode(runtimeFailureCode(err))
 		setRuntimeBlocker(details, err)
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
-		return 1
+		return 1, err
 	}
 	producer, publish, err := resultProducer(job, planDigest, expectedPlanDigest)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
-		return 1
+		return 1, err
 	}
 	var artifactRoot string
 	if publish {
 		artifactRoot, err = os.MkdirTemp("", "buildkite-gha-results-")
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create result artifact root: %v\n", err)
-			return 1
+			return 1, err
 		}
 		defer func() { _ = os.RemoveAll(artifactRoot) }()
 	}
@@ -145,13 +150,13 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		actionCache, err := os.MkdirTemp("", "buildkite-gha-actions-")
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create action cache: %v\n", err)
-			return 1
+			return 1, err
 		}
 		defer func() { _ = os.RemoveAll(actionCache) }()
 		store, err := actionsource.NewStoreContext(ctx, actionCache, nil, actionsource.WithUserAgentVersion(clientVersion))
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure action cache: %v\n", err)
-			return 1
+			return 1, err
 		}
 		actionMaterializer = store
 	}
@@ -159,7 +164,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	cacheRequired, err := cacheServiceRequired(job.Actions)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
-		return 1
+		return 1, err
 	}
 	if cacheRequired || len(job.Actions) > 0 {
 		cacheCredentials, err = gharuntime.NewAgentCacheCredentials(gharuntime.AgentCacheConfig{
@@ -171,7 +176,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		})
 		if err != nil && cacheRequired {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure actions/cache service: %v\n", err)
-			return 1
+			return 1, err
 		}
 		if err != nil {
 			cacheCredentials = nil
@@ -190,7 +195,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		})
 		if tokenErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure GitHub token service: %v\n", tokenErr)
-			return 1
+			return 1, tokenErr
 		}
 		workflowTokens = githubTokens
 	}
@@ -210,7 +215,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		oidcTokens, err = gharuntime.NewAgentOIDCTokens(config)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure OIDC token service: %v\n", err)
-			return 1
+			return 1, err
 		}
 	}
 	var repositoryCredentials *gharuntime.AgentRepositoryCredentials
@@ -222,6 +227,10 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
 			NoHTTP2:  os.Getenv("BUILDKITE_NO_HTTP2"),
 		}
+	}
+	credentials := gharuntime.InvocationCredentials(ctx)
+	if credentials != nil && repositoryCredentials != nil {
+		repositoryCredentials.ResolveHelper = credentials.GitCredentialHelper
 	}
 	runnerToolCache := ""
 	if options.hostedToolCache {
@@ -258,10 +267,14 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			RetryCount:  os.Getenv("BUILDKITE_RETRY_COUNT"),
 		},
 	}
+	if credentials != nil {
+		runner.Secrets = credentials
+		runner.Redactor = credentials
+	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: resolve runtime executable: %v\n", err)
-		return 1
+		return 1, err
 	}
 	var privateRuntime string
 	if job.NeedsMise() {
@@ -375,11 +388,11 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if runErr != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", runErr)
 		if gharuntime.IsToleratedJobFailure(runErr) {
-			return buildkitepipeline.ContinueOnErrorExitStatus
+			return buildkitepipeline.ContinueOnErrorExitStatus, runErr
 		}
-		return 1
+		return 1, runErr
 	}
-	return 0
+	return 0, nil
 }
 
 // runtimeFailureCode attributes a RunJob error so ordinary workflow failures,

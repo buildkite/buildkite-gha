@@ -667,6 +667,15 @@ func TestSubmoduleResolvedCredentialsWithoutCapabilityDoNotInvokeHelper(t *testi
 }
 
 func TestCredentialedSubmoduleFetchUsesExactRepositoryAndCommandScopedSecret(t *testing.T) {
+	for _, injected := range []bool{false, true} {
+		t.Run(fmt.Sprintf("injected=%t", injected), func(t *testing.T) {
+			testCredentialedSubmoduleFetch(t, injected)
+		})
+	}
+}
+
+func testCredentialedSubmoduleFetch(t *testing.T, injected bool) {
+	t.Helper()
 	workspace := t.TempDir()
 	inputLog := filepath.Join(t.TempDir(), "helper-input")
 	agent := filepath.Join(t.TempDir(), "buildkite-agent")
@@ -699,6 +708,10 @@ echo job-secret
 	}
 	var logs bytes.Buffer
 	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "job-secret"}, Stdout: &logs, Stderr: &logs}
+	if injected {
+		runner.RepositoryCredentials.Helper = agentGitCredentialHelperCommand(agent)
+		runner.RepositoryCredentials.Agent = ""
+	}
 	if err := runner.runRepositoryProviderCheckoutGit(t.Context(), newCommandOutputProcessor(&logs, &logs), workspace, map[string]string{}, git, checkoutGitBaseArgs(), []string{"submodule", "update"}, "github.com"); err != nil {
 		t.Fatal(err)
 	}
@@ -1097,6 +1110,15 @@ func TestCheckoutLFSInitializesBeforeFetch(t *testing.T) {
 }
 
 func TestCheckoutUsesCommandScopedAgentCredentialHelper(t *testing.T) {
+	for _, injected := range []bool{false, true} {
+		t.Run(fmt.Sprintf("injected=%t", injected), func(t *testing.T) {
+			testCommandScopedCredentialHelper(t, injected)
+		})
+	}
+}
+
+func testCommandScopedCredentialHelper(t *testing.T, injected bool) {
+	t.Helper()
 	workspace := canonicalTempDir(t)
 	checkoutDirectory := filepath.Join(workspace, "test-catalog")
 	poisonedGlobalConfig := []byte("[url \"https://attacker.invalid/\"]\n\tinsteadOf = https://github.com/\n")
@@ -1276,6 +1298,10 @@ printf '%s|git-lfs %s|%s core.hooksPath=%s\n' "$PWD" "$*" "$helper" "$hooks" >> 
 	}
 	credentials := &AgentRepositoryCredentials{
 		Agent: agent, Endpoint: "https://agent.example/v3", JobID: testCacheJobID, JobToken: "job-secret", NoHTTP2: "true",
+	}
+	if injected {
+		credentials.Agent = ""
+		credentials.ResolveHelper = func() (string, error) { return agentGitCredentialHelperCommand(agent), nil }
 	}
 	credentials, err := resolveAgentRepositoryCredentialsBeforeWorkflow(credentials)
 	if err != nil {

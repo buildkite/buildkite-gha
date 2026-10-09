@@ -55,7 +55,7 @@ Reading environment configuration and protection rules needs the repository
 permission Actions: read; environment secret names need Environments: read.
 
 - `github_action_source_access_token`
-  ([internal/cli/hosted.go](../../internal/cli/hosted.go),
+  ([internal/command/hosted.go](../../internal/command/hosted.go),
   [internal/runtime/github_token_service.go](../../internal/runtime/github_token_service.go))
   mints exactly `metadata: read` on the pipeline repository. The backend fixes
   that permission map and rejects caller-selected permissions, and its feature
@@ -105,7 +105,7 @@ for GitHub unavailability.
 ## Client work (done)
 
 `upload` and `compile` build a `compiler.EnvironmentSource`
-([internal/cli/environments.go](../../internal/cli/environments.go)) over the
+([internal/command/environments.go](../../internal/command/environments.go)) over the
 snapshot endpoint
 ([internal/runtime/environment_resolution.go](../../internal/runtime/environment_resolution.go))
 from the job's Agent connection. Each workflow's declared environments
@@ -118,7 +118,7 @@ without the extension fails the compile with a decode error rather than
 letting `vars` references resolve as empty.
 
 Repository and organization variables use a separate source
-([internal/cli/variables.go](../../internal/cli/variables.go)) over the
+([internal/command/variables.go](../../internal/command/variables.go)) over the
 variables endpoint
 ([internal/runtime/variable_resolution.go](../../internal/runtime/variable_resolution.go)).
 Static analysis (`compiler.Report.ReferencesVars`) finds `vars` references
