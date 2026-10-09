@@ -228,10 +228,6 @@ func runJobOperation(ctx context.Context, options runJobOptions, optionsErr erro
 			NoHTTP2:  os.Getenv("BUILDKITE_NO_HTTP2"),
 		}
 	}
-	credentials := gharuntime.InvocationCredentials(ctx)
-	if credentials != nil && repositoryCredentials != nil {
-		repositoryCredentials.ResolveHelper = credentials.GitCredentialHelper
-	}
 	runnerToolCache := ""
 	if options.hostedToolCache {
 		runnerToolCache = buildkitepipeline.HostedToolCachePath
@@ -267,10 +263,7 @@ func runJobOperation(ctx context.Context, options runJobOptions, optionsErr erro
 			RetryCount:  os.Getenv("BUILDKITE_RETRY_COUNT"),
 		},
 	}
-	if credentials != nil {
-		runner.Secrets = credentials
-		runner.Redactor = credentials
-	}
+	applyInvocationCredentials(ctx, &runner)
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: resolve runtime executable: %v\n", err)
@@ -393,6 +386,18 @@ func runJobOperation(ctx context.Context, options runJobOptions, optionsErr erro
 		return 1, runErr
 	}
 	return 0, nil
+}
+
+func applyInvocationCredentials(ctx context.Context, runner *gharuntime.Runner) {
+	credentials := gharuntime.InvocationCredentials(ctx)
+	if credentials == nil {
+		return
+	}
+	runner.Secrets = credentials
+	runner.Redactor = credentials
+	if runner.RepositoryCredentials != nil {
+		runner.RepositoryCredentials.ResolveHelper = credentials.GitCredentialHelper
+	}
 }
 
 // runtimeFailureCode attributes a RunJob error so ordinary workflow failures,

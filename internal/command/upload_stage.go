@@ -102,25 +102,8 @@ func uploadStageOperation(ctx context.Context, options stageOptions, stdout, std
 	defer func() { _ = os.RemoveAll(root) }()
 
 	_, _ = fmt.Fprintln(stdout, "~~~ :github: Read stage record")
-	recordPath, err := buildkitepipeline.StagePath(options.digest)
-	if err != nil {
-		return fail("%w", err)
-	}
 	downloadDir := filepath.Join(root, "stage")
-	if err := os.Mkdir(downloadDir, 0o700); err != nil {
-		return fail("create stage download directory: %w", err)
-	}
-	if err := agent.DownloadArtifact(ctx, recordPath, downloadDir, options.producer); err != nil {
-		return fail("download stage record from job %q: %w", options.producer, err)
-	}
-	data, err := readBoundedFile(filepath.Join(downloadDir, filepath.FromSlash(recordPath)), maxStageRecordBytes)
-	if err != nil {
-		return fail("read stage record: %w", err)
-	}
-	if actual := sha256Digest(data); actual != options.digest {
-		return fail("stage record digest %s does not match expected %s", actual, options.digest)
-	}
-	record, err := decodeStageRecord(data, version)
+	record, err := loadStageRecord(ctx, agent, options, downloadDir, version)
 	if err != nil {
 		return fail("%w", err)
 	}
@@ -167,6 +150,27 @@ func uploadStageOperation(ctx context.Context, options stageOptions, stdout, std
 		out: newProcessingOutput(ctx, "upload", "text", stderr, stderr, agent),
 	}
 	return run.execute(fail)
+}
+
+func loadStageRecord(ctx context.Context, agent transport.Agent, options stageOptions, downloadDir, version string) (stageRecord, error) {
+	recordPath, err := buildkitepipeline.StagePath(options.digest)
+	if err != nil {
+		return stageRecord{}, err
+	}
+	if err := os.Mkdir(downloadDir, 0o700); err != nil {
+		return stageRecord{}, fmt.Errorf("create stage download directory: %w", err)
+	}
+	if err := agent.DownloadArtifact(ctx, recordPath, downloadDir, options.producer); err != nil {
+		return stageRecord{}, fmt.Errorf("download stage record from job %q: %w", options.producer, err)
+	}
+	data, err := readBoundedFile(filepath.Join(downloadDir, filepath.FromSlash(recordPath)), maxStageRecordBytes)
+	if err != nil {
+		return stageRecord{}, fmt.Errorf("read stage record: %w", err)
+	}
+	if actual := sha256Digest(data); actual != options.digest {
+		return stageRecord{}, fmt.Errorf("stage record digest %s does not match expected %s", actual, options.digest)
+	}
+	return decodeStageRecord(data, version)
 }
 
 func readBoundedFile(path string, limit int) ([]byte, error) {

@@ -33,6 +33,16 @@ type PreparedUpload struct {
 	Artifacts []transport.Artifact
 }
 
+func (p *PreparedUpload) capture(pipeline []byte, artifacts []transport.Artifact) error {
+	for _, artifact := range artifacts {
+		if err := transport.ValidateArtifact(artifact); err != nil {
+			return err
+		}
+	}
+	*p = PreparedUpload{Pipeline: pipeline, Artifacts: artifacts}
+	return nil
+}
+
 // Import uses the same hosted importer as upload and plugin. prepareOnly stops
 // before artifact materialization and pipeline publication.
 func Import(ctx context.Context, input UploadInput, prepareOnly bool, stdout, stderr io.Writer, version string, agent transport.Agent) (PreparedUpload, error) {

@@ -197,6 +197,10 @@ func (a Agent) GetMetadataBounded(ctx context.Context, key string, limit int) ([
 		}
 		return result, nil
 	}
+	return a.getCommandMetadataBounded(ctx, key, limit)
+}
+
+func (a Agent) getCommandMetadataBounded(ctx context.Context, key string, limit int) ([]byte, error) {
 	runner, ok := a.Runner.(interface {
 		RunBounded(context.Context, string, string, []string, []byte, int) ([]byte, []byte, error)
 	})
