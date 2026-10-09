@@ -60,11 +60,6 @@ func reportBugsnagError(ctx context.Context, key string, command Command, versio
 	if details.AgentAPIHTTPStatus >= 100 && details.AgentAPIHTTPStatus <= 599 {
 		metadata["failure"]["agent_api_http_status"] = details.AgentAPIHTTPStatus
 	}
-	for _, name := range []string{"BUILDKITE_BUILD_ID", "BUILDKITE_JOB_ID"} {
-		if value := os.Getenv(name); validJobID(value) {
-			metadata["failure"][strings.ToLower(name)] = value
-		}
-	}
 	notifier := &bugsnag.Notifier{Config: &bugsnag.Configuration{
 		APIKey:          key,
 		Endpoints:       bugsnag.Endpoints{Notify: "https://notify.bugsnag.com"},
@@ -89,6 +84,11 @@ func reportBugsnagError(ctx context.Context, key string, command Command, versio
 		func(event *bugsnag.Event) {
 			event.ErrorClass = fmt.Sprintf("%s/%s/%s: %s", command, details.FailurePhase, details.FailureCode, event.ErrorClass)
 			event.Message = fmt.Sprintf("buildkite-gha %s failed during %s", command, details.FailurePhase)
+			// Captured filenames may include customer checkout or build paths.
+			// Keep methods and line numbers without transmitting filenames.
+			for i := range event.Stacktrace {
+				event.Stacktrace[i].File = "[REDACTED]"
+			}
 			// The SDK otherwise serializes every cause's unredacted message.
 			event.Error = nil
 		},
