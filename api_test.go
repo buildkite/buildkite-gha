@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -111,10 +112,19 @@ func (*nativeCredentials) GitCredentialHelper() (string, error) {
 	return "", errors.New("repository credentials are not configured")
 }
 
+func apiRunnerLabel() string {
+	if runtime.GOOS == "darwin" {
+		return "macos-latest"
+	}
+	return "ubuntu-latest"
+}
+
 func apiFixture(t *testing.T, workflow string) (gha.Client, *memoryBuildkite, gha.CompileRequest) {
 	t.Helper()
 	root := t.TempDir()
 	t.Chdir(root)
+	// Execute plans with the current test binary, not a cross-platform runtime.
+	workflow = strings.ReplaceAll(workflow, "runs-on: test-host", "runs-on: "+apiRunnerLabel())
 	if err := os.WriteFile("ci.yml", []byte(workflow), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -160,8 +170,8 @@ func apiFixture(t *testing.T, workflow string) (gha.Client, *memoryBuildkite, gh
 
 func TestCompileAndUploadPublishIdenticalBundles(t *testing.T) {
 	for name, workflow := range map[string]string{
-		"shell":    "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hello\n",
-		"skipped":  "on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hello\n",
+		"shell":    "on: push\njobs:\n  test:\n    runs-on: test-host\n    steps:\n      - run: echo hello\n",
+		"skipped":  "on: pull_request\njobs:\n  test:\n    runs-on: test-host\n    steps:\n      - run: echo hello\n",
 		"failure":  "on: push\njobs:\n  test:\n    runs-on: unconfigured-platform\n    steps:\n      - run: echo hello\n",
 		"deferred": deferredAPIWorkflow,
 	} {
@@ -191,9 +201,10 @@ func TestCompileAndUploadPublishIdenticalBundles(t *testing.T) {
 }
 
 type pipelineStep struct {
-	Key     string         `yaml:"key"`
-	Command string         `yaml:"command"`
-	Steps   []pipelineStep `yaml:"steps"`
+	Key     string            `yaml:"key"`
+	Command string            `yaml:"command"`
+	Agents  map[string]string `yaml:"agents"`
+	Steps   []pipelineStep    `yaml:"steps"`
 }
 
 func commandSteps(t *testing.T, pipeline []byte) []pipelineStep {
@@ -221,6 +232,7 @@ func runAPIStep(t *testing.T, client gha.Client, step pipelineStep) {
 		t.Fatalf("step %s has no runtime plan argument", step.Key)
 	}
 	t.Setenv("BUILDKITE_STEP_KEY", step.Key)
+	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", step.Agents["queue"])
 	code, err := client.RunJob(t.Context(), gha.RunJobRequest{PlanDigest: match[1], PlanProducer: apiJobID, ArtifactProducer: apiJobID})
 	if code != 0 || err != nil {
 		t.Fatalf("RunJob = %d, %v", code, err)
@@ -228,7 +240,7 @@ func runAPIStep(t *testing.T, client gha.Client, step pipelineStep) {
 }
 
 func TestRunJobUsesNativeSecretsAndPublishesResult(t *testing.T) {
-	workflow := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      GREETING: ${{ secrets.GREETING }}\n    steps:\n      - run: test \"$GREETING\" = native-secret\n"
+	workflow := "on: push\njobs:\n  test:\n    runs-on: test-host\n    env:\n      GREETING: ${{ secrets.GREETING }}\n    steps:\n      - run: test \"$GREETING\" = native-secret\n"
 	client, backend, request := apiFixture(t, workflow)
 	if err := client.Upload(t.Context(), request); err != nil {
 		t.Fatal(err)
@@ -261,7 +273,7 @@ func TestRunJobPreservesExitCodesAndCancelledPublication(t *testing.T) {
 		{name: "cancelled", cancelled: true, code: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			workflow := fmt.Sprintf("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    continue-on-error: %t\n    steps:\n      - run: exit 7\n", test.tolerated)
+			workflow := fmt.Sprintf("on: push\njobs:\n  test:\n    runs-on: test-host\n    continue-on-error: %t\n    steps:\n      - run: exit 7\n", test.tolerated)
 			client, backend, request := apiFixture(t, workflow)
 			if err := client.Upload(t.Context(), request); err != nil {
 				t.Fatal(err)
@@ -273,6 +285,7 @@ func TestRunJobPreservesExitCodesAndCancelledPublication(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("BUILDKITE_STEP_KEY", step.Key)
+			t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", step.Agents["queue"])
 			t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", digest)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -296,7 +309,7 @@ func TestRunJobPreservesExitCodesAndCancelledPublication(t *testing.T) {
 const deferredAPIWorkflow = `on: push
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on: test-host
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
@@ -304,7 +317,7 @@ jobs:
         run: echo 'matrix=[{"target":"first"},{"target":"second"}]' >> "$GITHUB_OUTPUT"
   build:
     needs: plan
-    runs-on: ubuntu-latest
+    runs-on: test-host
     strategy:
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -343,7 +356,7 @@ func TestUploadStageExpandsPublishedProducerOutput(t *testing.T) {
 }
 
 func TestTypedOperationsPreserveFailureCauses(t *testing.T) {
-	client, backend, request := apiFixture(t, "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	client, backend, request := apiFixture(t, "on: push\njobs:\n  test:\n    runs-on: test-host\n    steps:\n      - run: true\n")
 	for _, paths := range [][]string{nil, {"missing.yml"}} {
 		invalid := request
 		invalid.WorkflowPaths = paths
@@ -386,10 +399,10 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
 
 func TestAgentAPITransportIsInvocationLocal(t *testing.T) {
-	client, _, request := apiFixture(t, "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	client, _, request := apiFixture(t, "on: push\njobs:\n  test:\n    runs-on: test-host\n    steps:\n      - run: true\n")
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", "https://agent.invalid/v3")
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
-	request.Runners = map[string]gha.Runner{"ubuntu-latest": {Queue: "native"}}
+	request.Runners = map[string]gha.Runner{apiRunnerLabel(): {Queue: "native"}}
 	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusForbidden} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			calls := 0
