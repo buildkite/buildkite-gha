@@ -147,7 +147,7 @@ Some features support a limited subset or behave differently on Buildkite. Check
 Imported workflows read Buildkite secrets, not GitHub secrets:
 
 - `${{ secrets.NAME }}` resolves a statically named [Buildkite secret](docs/compatibility.md#other-secrets-and-oidc) available to the job.
-- GitHub's API cannot export secret values. [`buildkite-gha migrate-secrets`](docs/cli.md#migrate-github-actions-secrets) generates a reviewable, one-use GitHub Actions workflow that copies selected repository secrets into Buildkite.
+- GitHub's API cannot export secret values. [`bk secret migrate github-actions`](https://github.com/buildkite/cli/blob/main/docs/secret-migration-github-actions.md) generates a reviewable, one-use GitHub Actions workflow that copies selected repository secrets into Buildkite.
 - A job's [deployment environment](docs/compatibility.md#deployment-environments) maps environment secret `NAME` to the Buildkite secret `<ENVIRONMENT>_<NAME>`, for example `PRODUCTION_DEPLOY_KEY`.
 - `${{ vars.NAME }}` resolves [repository, organization, and environment variables](docs/compatibility.md#repository-and-organization-variables) from GitHub. Variable values are visible to anyone who can read the build's artifacts.
 - `GITHUB_TOKEN` is never migrated. Buildkite issues a [scoped token](docs/compatibility.md#github-token) when the organization and pipeline enable it.
