@@ -7,16 +7,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/agentapi"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 const githubTokenResponseLimit = 64 << 10
+const workflowTokenBudget = 45 * time.Second
 
 var githubInstallationTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 var retryAfterSecondsPattern = regexp.MustCompile(`^[0-9]{1,10}$`)
@@ -76,7 +81,7 @@ func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, er
 	}, nil
 }
 
-func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository, workflow string, permissions map[string]string) (string, error) {
+func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository, workflow string, permissions map[string]string) (token string, err error) {
 	if c == nil {
 		return "", fmt.Errorf("GitHub workflow token provider is not configured")
 	}
@@ -86,8 +91,46 @@ func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository, workf
 	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(permissions); err != nil {
 		return "", err
 	}
-	token, err := c.mint(ctx, c.workflowURL, repository, workflow, permissions, "workflow")
-	return token, markJobSetupFailure(FailureClassWorkflowToken, err)
+	permissions = maps.Clone(permissions)
+	budgetCtx, cancel := context.WithTimeout(ctx, workflowTokenBudget)
+	defer cancel()
+	defer func() {
+		if ctx.Err() != nil {
+			token, err = "", ctx.Err()
+			return
+		}
+		// Our acquisition/attempt deadline is a setup failure, not caller cancellation.
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = credentialRequestFailure(ctx, err)
+		}
+		err = markJobSetupFailure(FailureClassWorkflowToken, err)
+	}()
+	for attempt := range 3 {
+		if err = budgetCtx.Err(); err != nil {
+			return "", err
+		}
+		attemptCtx, cancelAttempt := context.WithTimeout(budgetCtx, 15*time.Second)
+		token, err = c.mint(attemptCtx, c.workflowURL, repository, workflow, permissions, "workflow")
+		cancelAttempt()
+		var retry *workflowTokenRetryError
+		if attempt == 2 || !errors.As(err, &retry) {
+			return token, err
+		}
+		base := time.Second << attempt
+		delay := max(base, retry.after) + time.Duration(rand.Int64N(int64(base)))
+		deadline, _ := budgetCtx.Deadline()
+		if delay >= time.Until(deadline) {
+			return "", err
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-budgetCtx.Done():
+			timer.Stop()
+			return "", budgetCtx.Err()
+		case <-timer.C:
+		}
+	}
+	return token, err
 }
 
 func (c *AgentGitHubTokens) ActionSourceToken(ctx context.Context, repository string) (string, error) {
@@ -128,8 +171,16 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, githubTokenResponseLimit))
-		return "", githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"), purpose, c.repositorySettings, c.buildURL)
+		_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, githubTokenResponseLimit))
+		statusErr := githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"), purpose, c.repositorySettings, c.buildURL)
+		// A status alone does not authorize retrying a failed response-body read.
+		if purpose == "workflow" && readErr == nil {
+			after, valid := workflowTokenRetryAfter(response.Header.Get("Retry-After"), time.Now())
+			if response.StatusCode == http.StatusServiceUnavailable || response.StatusCode == http.StatusTooManyRequests && valid {
+				return "", &workflowTokenRetryError{err: statusErr, after: after}
+			}
+		}
+		return "", statusErr
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, githubTokenResponseLimit+1))
 	if err != nil {
@@ -153,6 +204,31 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 		return "", fmt.Errorf("GitHub %s token response contains an invalid token", purpose)
 	}
 	return decoded.Token, nil
+}
+
+type workflowTokenRetryError struct {
+	err   error
+	after time.Duration
+}
+
+func (e *workflowTokenRetryError) Error() string { return e.err.Error() }
+func (e *workflowTokenRetryError) Unwrap() error { return e.err }
+
+// Cap valid delays at the acquisition budget: they cannot fit, and must never
+// overflow into a short wait. Invalid headers do not authorize a 429 retry.
+func workflowTokenRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value != "" && strings.Trim(value, "0123456789") == "" {
+		seconds, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || seconds >= uint64(workflowTokenBudget/time.Second) {
+			return workflowTokenBudget, true
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+	if date, err := http.ParseTime(value); err == nil {
+		return min(workflowTokenBudget, max(0, date.Sub(now))), true
+	}
+	return 0, false
 }
 
 func pipelineRepositorySettingsURL(organization, pipeline string) string {
