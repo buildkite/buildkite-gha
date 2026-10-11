@@ -1027,7 +1027,7 @@ func TestUnprivilegedUploadAllowsOnlyAuditedCacheCommits(t *testing.T) {
 		t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", action, err)
 	}
 	var finding *compiler.ProcessingFinding
-	if !errors.As(err, &finding) || finding.Message != "actions/cache v6.0.2 is unsupported. Use a supported version from https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#cache-action." || !strings.Contains(finding.Detail, "Buildkite cache-v2 service") || !strings.Contains(finding.Detail, action.Commit) || strings.Contains(finding.Message, action.Commit) {
+	if !errors.As(err, &finding) || finding.Message != "actions/cache v6.0.2 is unsupported. Use a supported version from https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#actions-cache-action." || !strings.Contains(finding.Detail, "Buildkite cache-v2 service") || !strings.Contains(finding.Detail, action.Commit) || strings.Contains(finding.Message, action.Commit) {
 		t.Fatalf("hosted cache diagnostic = %#v", finding)
 	}
 }

@@ -7,9 +7,11 @@ Follow the Buildkite [writing style guide](https://github.com/buildkite/docs/blo
 - Use the fewest words that preserve meaning. Prefer examples and tables to long explanations.
 - Write directly, in active voice, with sentence-case headings.
 - Describe current behavior in product documentation. Durable engineering plans may live in `docs/plans/`; keep task tracking and remaining work in Linear.
-- State each fact once, then link to its source of truth. `README.md` is the overview; `docs/compatibility.md` owns supported behavior; the CLI, security, and development guides own their respective details.
+- User documentation lives in the [Buildkite Docs](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows), sourced from `pages/pipelines/migration/run_github_actions_workflows*` in [buildkite/docs](https://github.com/buildkite/docs). Its compatibility reference owns supported behavior; its CLI and security pages own their respective details.
+- This repository keeps contributor documentation only: `README.md` is the overview, and `docs/development.md` and `docs/expression-authority.md` own development and architecture details. `docs/compatibility.md`, `docs/cli.md`, and `docs/security.md` only redirect older links; do not add content to them.
+- State each fact once, then link to its source of truth. Link to Buildkite Docs pages instead of copying their content.
 - Remove repetition, not behavior, boundaries, limits, warnings, or useful examples.
-- Update documentation in the same change as the behavior it describes. Replace outdated text instead of appending dated notes or corrections.
+- Update documentation alongside the behavior it describes; for user-visible changes, open a companion Buildkite Docs pull request. Replace outdated text instead of appending dated notes or corrections.
 - When a plan is complete, move any lasting facts into the owning product document, then remove the plan.
 - Prefer examples covered by tests. Check links and examples when changing nearby documentation.
 - Review compatibility guidance and plans regularly for stale, duplicated, or removable content.
@@ -41,7 +43,7 @@ product but not the subsystem.
 ## Architecture
 
 - For every GitHub Actions compatibility change, follow the
-  [compatibility policy and behavior record](docs/compatibility.md#compatibility-policy).
+  [compatibility policy and behavior record](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#compatibility-policy).
   Match exposed, reproducibly observed GitHub behavior; update that record and
   regression tests together when evidence changes the contract.
 - Read package documentation before assigning ownership. Name packages and

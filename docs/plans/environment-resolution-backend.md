@@ -1,7 +1,7 @@
 # Buildkite-managed GitHub environment resolution
 
 Importer jobs resolve
-[deployment environments](../compatibility.md#deployment-environments) through
+[deployment environments](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#job-syntax-deployment-environments) through
 Buildkite, which already holds the GitHub App installation. The chosen design
 is option 2 below: a dedicated Agent API snapshot endpoint,
 `POST /jobs/{job_id}/github-actions/environments`, implemented on the
@@ -137,5 +137,5 @@ workflows on 400, 429, and 503 with the backend message and `Retry-After`
 delay, never echoing a value. Token-authority planning ignores resolved
 values. When the backend rollout completes and the hosted proof passes, move
 lasting facts into
-[deployment environments](../compatibility.md#deployment-environments) and
+[deployment environments](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#job-syntax-deployment-environments) and
 remove this plan.

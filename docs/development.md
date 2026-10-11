@@ -76,7 +76,7 @@ go build -trimpath \
 An embedded key is extractable by anyone who downloads the client. Use only a
 Bugsnag project ingestion key, never an account-management credential. Runtime
 configuration and report contents are documented in
-[Bugsnag error reports](cli.md#bugsnag-error-reports).
+[Bugsnag error reports](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/cli#disable-telemetry-bugsnag-error-reports).
 
 ## Runner-resolution API contract
 
@@ -112,7 +112,7 @@ The additive target fields are `agents` (a string map) and `tool_cache`
 The client accepts either an immutable `image`, non-empty `agents`, or neither;
 it rejects targets with both and reserves `agents.queue` for the separate
 `queue` field. Agent tags are Linux-only and pass through unchanged. See
-[runner tools](compatibility.md#runner-tools) for `tool_cache` semantics.
+[runner tools](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#runtime-behavior-and-limits-runner-tools) for `tool_cache` semantics.
 Deferred stages retain both fields, including explicit `false` values.
 
 There is no version header or feature flag. Older backends ignore the request
@@ -218,7 +218,7 @@ indeterminate repositories separately and excludes them from the compatibility
 percentage. The tally records workflow result counts; each workflow report
 keeps its diagnostics.
 
-Windows jobs require a [configured Windows runner](compatibility.md#configure-a-windows-runner).
+Windows jobs require a [configured Windows runner](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#windows-jobs-configure-a-windows-runner).
 Corpus validation has no Windows preset, so it still rejects unmapped Windows
 labels. Keep those workflows in raw results so the benchmark describes the full
 sample; a rejected mapping is not proof of runtime incompatibility.
@@ -235,7 +235,7 @@ actions, construct plans, and apply hosted policy.
 When linked-webhook and local-diff evidence is the only missing input, the
 result is `context-required`. This does not claim admission. Malformed filters
 and workflows with another incompatibility remain incompatible. See
-[Names and triggers](compatibility.md#names-and-triggers) for the current
+[Names and triggers](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#workflow-names-and-triggers) for the current
 admission rules.
 
 Sample metadata is written to `records/<record-id>/samples/<sample-key>/validate-tally.json`; per-workflow v3 reports are under `reports/<record-id>/samples/<sample-key>/<validator-digest>/`. Full-corpus tallies and reports retain their existing paths.
@@ -275,7 +275,7 @@ environment variables and places decoy executables in the working directory.
 These checks do not prove Buildkite cache-service persistence.
 
 Before a Windows hosted cache proof, verify the [cache tool installation
-paths](compatibility.md#cache-action), record GNU tar and zstd versions, and run
+paths](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#actions-cache-action), record GNU tar and zstd versions, and run
 `TestWindowsCacheArchiveTools` with `BUILDKITE_GHA_TEST_NODE24` set to an absolute
 Node 24 executable. Then use a unique key in a root `actions/cache` producer:
 assert a miss, write known file contents, and confirm post-save completes. In a
@@ -363,5 +363,5 @@ failed publication must not replace an existing archive for the same stable tag.
 
 ## Related documents
 
-- [Compatibility reference](compatibility.md)
-- [Security model](security.md)
+- [Compatibility reference](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility)
+- [Security model](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/security)

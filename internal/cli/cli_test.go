@@ -550,7 +550,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 		for event, guidance := range map[string]string{
 			"repository_dispatch": "If you need repository_dispatch, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
-			"pull_request_target": "pull_request_target is intentionally unsupported for security reasons. Use pull_request with careful checkout and ref handling instead; changing the event alone does not make untrusted code safe. See https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#names-and-triggers for details.",
+			"pull_request_target": "pull_request_target is intentionally unsupported for security reasons. Use pull_request with careful checkout and ref handling instead; changing the event alone does not make untrusted code safe. See https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#workflow-names-and-triggers for details.",
 		} {
 			want := "on." + event + " is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: push. Move the jobs this trigger guards to one of those triggers if you need them. " + guidance
 			if messages[event] != want {
@@ -1779,7 +1779,7 @@ func TestProcessingAnnotationIsBoundedAndEscapesHTML(t *testing.T) {
 }
 
 func TestProcessingAnnotationPreservesLongerRepositoryURLs(t *testing.T) {
-	const docsURL = "https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#cache-action"
+	const docsURL = "https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#actions-cache-action"
 	diagnostic := compatibility.Diagnostic{
 		Level: "error", Code: "E_TEST", Message: "Unsupported action. Use a supported version from " + docsURL + ".",
 	}
@@ -2126,7 +2126,7 @@ func TestProcessingAnnotationLinksPullRequestTargetGuidance(t *testing.T) {
 	}
 	report.ApplyWarnings(report.Workflow, parsed.Warnings)
 	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
-	want := `<p>See <a href="https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#names-and-triggers" target="_blank">docs/compatibility.md</a> for details.</p>`
+	want := `<p>See <a href="https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#workflow-names-and-triggers" target="_blank">compatibility reference</a> for details.</p>`
 	if !strings.Contains(body, want) {
 		t.Fatalf("annotation = %q, want it to contain %q", body, want)
 	}
@@ -2141,7 +2141,7 @@ func TestProcessingAnnotationLinksDeferredMatrixGuidance(t *testing.T) {
 	}
 	report := compatibility.InitialProcessingReport(workflowPath, "hosted", false, compiled, err)
 	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
-	want := `<a href="https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#matrices-from-job-outputs" target="_blank">docs/compatibility.md</a>)</strong>`
+	want := `<a href="https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#job-syntax-matrices-from-job-outputs" target="_blank">compatibility reference</a>)</strong>`
 	if !strings.Contains(body, want) {
 		t.Fatalf("annotation = %q, want it to contain %q", body, want)
 	}
