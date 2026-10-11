@@ -24,9 +24,20 @@
 // this module. The caller must not mutate dependencies during an invocation.
 //
 // The embedding executable is the default runtime distribution. RunJob verifies
-// its version and digest against the plan. Generated commands retain
-// the CLI bootstrap protocol (upload, run-job, and private runtime helpers);
-// the embedding executable must dispatch that protocol, for example via RunCLI.
-// Native agent command prefixes and bootstrap changes are not provided here.
-// RunJob may publish terminal results with a bounded context after cancellation.
+// its version and digest against the plan. Generated pipeline commands invoke
+// that executable with the CLI bootstrap protocol, so the embedding executable
+// must dispatch these argv forms, for example via RunCLI:
+//
+//	run-job --plan-digest <digest> --plan-producer <job> [--artifact-producer <job>] [--hosted-tool-cache] [--docker-build-load]
+//	run-job --plan <path> [--artifact-producer <job>] [--hosted-tool-cache] [--docker-build-load]
+//	upload --stage-digest <digest> --stage-producer <job>
+//	__container-process ...
+//
+// The second form runs Linux jobs as the experimental runner user with
+// BUILDKITE_GHA_PLAN_DIGEST=<digest> in the environment. The run-job flags map
+// to RunJobRequest fields. The last form begins with
+// ContainerProcessHelperCommand and runs through the runtime executable mounted
+// into job containers. Native agent command prefixes and bootstrap changes are
+// not provided here. RunJob may publish terminal results with a bounded context
+// after cancellation.
 package gha

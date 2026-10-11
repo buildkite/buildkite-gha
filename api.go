@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	"github.com/buildkite/buildkite-gha/internal/agentapi"
-	command "github.com/buildkite/buildkite-gha/internal/command"
+	"github.com/buildkite/buildkite-gha/internal/command"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -17,6 +17,12 @@ import (
 // Buildkite confirms that buildkite:webhook is absent or unavailable. Other
 // errors, including authorization and transport failures, must not use it.
 var ErrMetadataUnavailable = transport.ErrMetadataUnavailable
+
+// ContainerProcessHelperCommand is the first argument of the private runtime
+// helper that generated jobs execute inside job containers through the mounted
+// runtime executable. An embedding executable must pass an argv beginning with
+// it to RunCLI unchanged; it is not a Client operation.
+const ContainerProcessHelperCommand = gharuntime.ContainerProcessHelperCommand
 
 // Backend supplies the Buildkite effects used by import and result publication.
 // Implementations must honor context cancellation. Paths are workspace-relative
@@ -34,6 +40,10 @@ type Backend interface {
 	// UploadPipeline must disable interpolation of the supplied pipeline bytes.
 	UploadPipeline(ctx context.Context, pipeline []byte) error
 	SetMetadata(ctx context.Context, key, value string) error
+	// GetMetadataBounded returns the raw value of key. The result must not
+	// exceed limit bytes: an implementation may stop reading early or reject a
+	// larger value after fetching it, but must not truncate. It returns
+	// ErrMetadataUnavailable only as documented on that variable.
 	GetMetadataBounded(ctx context.Context, key string, limit int) ([]byte, error)
 	GetStepAttribute(ctx context.Context, step, attribute string) ([]byte, error)
 	// EnsureStepLabelSuffix appends suffix to the current label only if absent.

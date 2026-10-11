@@ -91,13 +91,23 @@ identity contract. `Compile` is hosted upload preparation, not the offline CLI
 diagnostics. Pipeline and artifact schemas remain opaque and version-bound.
 Use one module version for preparation and execution.
 
-The importer uses its own executable as the default runtime distribution.
-An embedding executable must dispatch the generated `upload`, `run-job`, and
-private runtime-helper protocol, for example through `gha.RunCLI`. Native
-agent command dispatch and bootstrap integration remain agent-side work.
-`RunJobRequest` accepts the bootstrap's local plan path or digest/producer pair
-and artifact producer. Preserve its returned code, including `78` for tolerated
-failures; do not replace it with `1` merely because the error is non-nil.
+The importer uses its own executable as the default runtime distribution, and
+generated pipelines invoke it with the CLI bootstrap protocol. The embedding
+executable must route these argv forms to `gha.RunCLI` or the matching typed
+method; native agent command dispatch and bootstrap integration remain
+agent-side work.
+
+| Generated command | Used for |
+| --- | --- |
+| `run-job --plan-digest <digest> --plan-producer <job> [--artifact-producer <job>] [--hosted-tool-cache] [--docker-build-load]` | Job execution on every platform. Windows emits neither optional flag. |
+| `run-job --plan <path> [--artifact-producer <job>] [--hosted-tool-cache] [--docker-build-load]` with `BUILDKITE_GHA_PLAN_DIGEST` set | Linux job execution as the experimental runner user. |
+| `upload --stage-digest <digest> --stage-producer <job>` | Deferred expansion of a staged workflow. |
+| `gha.ContainerProcessHelperCommand ...` | The process helper that runs through the runtime executable mounted into job containers. Pass it to `gha.RunCLI` unchanged. |
+
+`RunJobRequest` accepts the bootstrap's local plan path or digest/producer pair,
+artifact producer, and the `HostedToolCache` and `DockerBuildLoad` flags.
+Preserve its returned code, including `78` for tolerated failures; do not
+replace it with `1` merely because the error is non-nil.
 
 For local cross-repository development, point the consumer at this checkout:
 

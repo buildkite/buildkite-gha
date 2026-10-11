@@ -40,6 +40,22 @@ User documentation lives in the [Buildkite Docs](https://buildkite.com/docs/pipe
 
 Use `buildkite-gha help`, `buildkite-gha help <command>`, or `buildkite-gha --version` for the installed command surface.
 
+## Embed as a Go package
+
+Other Go executables, such as the Buildkite agent, can import the importer and runtime instead of shelling out to the CLI:
+
+```go
+import gha "github.com/buildkite/buildkite-gha"
+
+client := gha.Client{Version: version, Backend: backend, Credentials: credentials}
+err := client.Upload(ctx, gha.CompileRequest{
+    WorkflowPaths: []string{".github/workflows/ci.yml"},
+    EventPath:     "event.json",
+})
+```
+
+`Client` exposes `Compile`, `Upload`, `UploadStage`, and `RunJob`; `RunCLI` dispatches the command protocol that generated pipelines invoke. See [Embed the Go package](docs/development.md#embed-the-go-package) for the dependency contracts and the generated command forms.
+
 ## Contributing
 
 - [Development and releases](docs/development.md)

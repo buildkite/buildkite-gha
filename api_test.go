@@ -423,3 +423,18 @@ func TestAgentAPITransportIsInvocationLocal(t *testing.T) {
 		})
 	}
 }
+
+func TestRunCLIDispatchesContainerProcessHelper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the container process helper runs inside Linux containers")
+	}
+	pidfile := filepath.Join(t.TempDir(), "child.pid")
+	var stdout, stderr bytes.Buffer
+	args := []string{gha.ContainerProcessHelperCommand, "run", pidfile, "sh", "-c", "exit 23"}
+	if got := gha.RunCLI(args, &stdout, &stderr, "dev"); got != 23 {
+		t.Fatalf("RunCLI(%q) = %d, stderr %q; want the child's exit status 23", args, got, stderr.String())
+	}
+	if _, err := os.Stat(pidfile); err != nil {
+		t.Fatalf("helper did not publish the child PID: %v", err)
+	}
+}
