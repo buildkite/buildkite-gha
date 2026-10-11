@@ -49,6 +49,74 @@ mise run smoke:local
 mise run release:check
 ```
 
+## Embed the Go package
+
+Import `github.com/buildkite/buildkite-gha` as `gha`. The root package exposes
+the stable API; `internal/command` owns the shared importer and runtime
+orchestration, and `internal/cli` is the executable adapter.
+
+| Entry point | Result |
+| --- | --- |
+| `Client.Compile(ctx, CompileRequest)` | Pipeline bytes and content-addressed artifacts, without uploading either. |
+| `Client.Upload(ctx, CompileRequest)` | The same preparation, followed by verified artifact and pipeline upload. |
+| `Client.UploadStage(ctx, StageRequest)` | Verified deferred expansion and upload from a stage digest and producer. |
+| `Client.RunJob(ctx, RunJobRequest)` | Plan execution and result publication, returning the authoritative exit code and error cause. |
+
+Supply `Backend` for artifacts, pipelines, annotations, metadata, and step
+updates; `Credentials` for secrets, redaction, and trusted Git helper
+configuration; and an optional `http.RoundTripper` in `Client.AgentAPI` for
+job-scoped HTTP calls. Typed entry points have no agent-command fallback.
+The CLI retains its subprocess adapters. See the
+[package documentation](../doc.go) and [API declarations](../api.go) for
+the compatibility promise and dependency contracts.
+
+```go
+import gha "github.com/buildkite/buildkite-gha"
+
+client := gha.Client{
+    Version: "dev",
+    Backend: nativeBuildkite,
+    Credentials: nativeCredentials,
+    AgentAPI: nativeHTTPTransport,
+}
+err := client.Upload(ctx, gha.CompileRequest{
+    WorkflowPaths: []string{".github/workflows/ci.yml"},
+    EventPath: "event.json",
+})
+```
+
+This API retains the current checkout, Buildkite job environment, and executable
+identity contract. `Compile` is hosted upload preparation, not the offline CLI
+`compile` command; it may resolve remote source, read metadata, and annotate
+diagnostics. Pipeline and artifact schemas remain opaque and version-bound.
+Use one module version for preparation and execution.
+
+The importer uses its own executable as the default runtime distribution, and
+generated pipelines invoke it with the CLI bootstrap protocol. The embedding
+executable must route these argv forms to `gha.RunCLI` or the matching typed
+method; native agent command dispatch and bootstrap integration remain
+agent-side work.
+
+| Generated command | Used for |
+| --- | --- |
+| `run-job --plan-digest <digest> --plan-producer <job> [--artifact-producer <job>] [--hosted-tool-cache] [--docker-build-load]` | Job execution on every platform. Windows emits neither optional flag. |
+| `run-job --plan <path> [--artifact-producer <job>] [--hosted-tool-cache] [--docker-build-load]` with `BUILDKITE_GHA_PLAN_DIGEST` set | Linux job execution as the experimental runner user. |
+| `upload --stage-digest <digest> --stage-producer <job>` | Deferred expansion of a staged workflow. |
+| `gha.ContainerProcessHelperCommand ...` | The process helper that runs through the runtime executable mounted into job containers. Pass it to `gha.RunCLI` unchanged. |
+
+`RunJobRequest` accepts the bootstrap's local plan path or digest/producer pair,
+artifact producer, and the `HostedToolCache` and `DockerBuildLoad` flags.
+Preserve its returned code, including `78` for tolerated failures; do not
+replace it with `1` merely because the error is non-nil.
+
+For local cross-repository development, point the consumer at this checkout:
+
+```sh
+go mod edit -replace github.com/buildkite/buildkite-gha=/absolute/path/to/buildkite-gha
+go mod tidy
+go build ./...
+```
+
 ## Configure Bugsnag
 
 GoReleaser embeds `BUGSNAG_API_KEY` when it is present in the build environment.

@@ -57,6 +57,16 @@ func (a Agent) SearchArtifactProducer(ctx context.Context, path, producerStep st
 	if !keyPattern.MatchString(producerStep) {
 		return "", fmt.Errorf("invalid producer step key %q", producerStep)
 	}
+	if a.Backend != nil {
+		producer, err := a.Backend.SearchArtifactProducer(ctx, path, producerStep)
+		if err != nil {
+			return "", err
+		}
+		if !uuidPattern.MatchString(producer) {
+			return "", fmt.Errorf("artifact %q has an invalid producer job", path)
+		}
+		return producer, nil
+	}
 	output, err := a.run(ctx, []string{"artifact", "search", path, "--step", producerStep, "--format", "%j"}, nil)
 	if err != nil {
 		return "", err

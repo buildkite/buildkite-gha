@@ -3,6 +3,7 @@
 package agentapi
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -30,6 +31,24 @@ type Client struct {
 	jobToken  string
 	userAgent string
 	client    *http.Client
+}
+
+type transportKey struct{}
+
+// WithTransport selects an invocation-local Agent API transport. Client policy
+// (scope, authentication, timeout, and redirect rejection) remains owned here.
+func WithTransport(ctx context.Context, transport http.RoundTripper) context.Context {
+	return context.WithValue(ctx, transportKey{}, transport)
+}
+
+// HTTPClient retains the caller's HTTP policy with an invocation-local transport.
+func HTTPClient(ctx context.Context, client *http.Client) *http.Client {
+	if transport, ok := ctx.Value(transportKey{}).(http.RoundTripper); ok {
+		local := *client
+		local.Transport = transport
+		return &local
+	}
+	return client
 }
 
 // New constructs a job-scoped client. The service name identifies the calling
@@ -80,7 +99,7 @@ func (c *Client) Do(request *http.Request) (*http.Response, error) {
 	request.Header.Set("Authorization", "Token "+c.jobToken)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", c.userAgent)
-	return c.client.Do(request)
+	return HTTPClient(request.Context(), c.client).Do(request)
 }
 
 func (c *Client) owns(request *http.Request) bool {

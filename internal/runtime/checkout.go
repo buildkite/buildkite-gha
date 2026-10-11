@@ -29,6 +29,8 @@ var agentProxyEnvironmentNames = [...]string{
 // credential helper for one verified checkout fetch.
 type AgentRepositoryCredentials struct {
 	Agent            string
+	Helper           string
+	ResolveHelper    func() (string, error)
 	Endpoint         string
 	JobID            string
 	JobToken         string
@@ -46,12 +48,26 @@ func resolveAgentRepositoryCredentialsBeforeWorkflow(credentials *AgentRepositor
 	if credentials.JobToken == "" || strings.ContainsAny(credentials.JobToken, "\r\n") {
 		return nil, fmt.Errorf("repository-provider credentials require the current Buildkite Agent access token")
 	}
-	agent, err := resolveHostExecutableBeforeWorkflow(credentials.Agent, "buildkite-agent", "Buildkite Agent Git credential helper")
-	if err != nil {
-		return nil, err
-	}
 	resolved := *credentials
-	resolved.Agent = agent
+	if resolved.ResolveHelper != nil {
+		helper, err := resolved.ResolveHelper()
+		if err != nil {
+			return nil, err
+		}
+		if helper == "" {
+			return nil, fmt.Errorf("repository-provider credentials require a configured Git credential helper")
+		}
+		resolved.Helper = helper
+		resolved.ResolveHelper = nil
+	}
+	if resolved.Helper == "" {
+		agent, err := resolveHostExecutableBeforeWorkflow(credentials.Agent, "buildkite-agent", "Buildkite Agent Git credential helper")
+		if err != nil {
+			return nil, err
+		}
+		resolved.Agent = agent
+		resolved.Helper = agentGitCredentialHelperCommand(agent)
+	}
 	resolved.proxyEnvironment = make(map[string]string, len(agentProxyEnvironmentNames))
 	for _, name := range agentProxyEnvironmentNames {
 		if value, ok := os.LookupEnv(name); ok {
@@ -63,6 +79,13 @@ func resolveAgentRepositoryCredentialsBeforeWorkflow(credentials *AgentRepositor
 
 func agentGitCredentialHelperCommand(agent string) string {
 	return "!'" + strings.ReplaceAll(agent, "'", `'\''`) + "' git-credentials-helper"
+}
+
+func (c *AgentRepositoryCredentials) helper() string {
+	if c.Helper != "" {
+		return c.Helper
+	}
+	return agentGitCredentialHelperCommand(c.Agent)
 }
 
 func validCheckoutRepository(repository string) bool {
@@ -581,10 +604,14 @@ func checkoutInputTrue(value string) bool {
 }
 
 func repositoryProviderCheckoutCredentialArgs(base []string, agent, host string) []string {
+	return repositoryProviderCheckoutHelperArgs(base, agentGitCredentialHelperCommand(agent), host)
+}
+
+func repositoryProviderCheckoutHelperArgs(base []string, helper, host string) []string {
 	return append(append([]string(nil), base...),
 		"-c", "credential.https://"+host+".useHttpPath=true",
 		"-c", "http.followRedirects=false",
-		"-c", "credential.https://"+host+".helper="+agentGitCredentialHelperCommand(agent),
+		"-c", "credential.https://"+host+".helper="+helper,
 	)
 }
 
@@ -593,7 +620,7 @@ func (r Runner) runRepositoryProviderCheckoutGit(ctx context.Context, processor 
 	if err != nil {
 		return err
 	}
-	credentialArgs := repositoryProviderCheckoutCredentialArgs(base, r.RepositoryCredentials.Agent, credentialHost)
+	credentialArgs := repositoryProviderCheckoutHelperArgs(base, r.RepositoryCredentials.helper(), credentialHost)
 	cmd := exec.Command(git, append(credentialArgs, commandArgs...)...)
 	cmd.Dir = workspace
 	cmd.Env = processEnv(credentialEnv)
@@ -605,7 +632,7 @@ func (r Runner) runRepositoryProviderCheckoutLFS(ctx context.Context, processor 
 	if err != nil {
 		return err
 	}
-	credentialArgs := repositoryProviderCheckoutCredentialArgs(nil, r.RepositoryCredentials.Agent, credentialHost)
+	credentialArgs := repositoryProviderCheckoutHelperArgs(nil, r.RepositoryCredentials.helper(), credentialHost)
 	credentialEnv = checkoutGitConfigEnvironment(credentialEnv, credentialArgs)
 	cmd := exec.Command(gitLFS, commandArgs...)
 	cmd.Dir = workspace
@@ -615,7 +642,7 @@ func (r Runner) runRepositoryProviderCheckoutLFS(ctx context.Context, processor 
 
 func (r Runner) repositoryProviderCheckoutCredentialEnvironment(processor *commandOutputProcessor, env map[string]string, credentialHost string) (map[string]string, error) {
 	credentials := r.RepositoryCredentials
-	if credentials == nil || credentials.Agent == "" || !filepath.IsAbs(credentials.Agent) {
+	if credentials == nil || credentials.Helper == "" && (credentials.Agent == "" || !filepath.IsAbs(credentials.Agent)) {
 		return nil, fmt.Errorf("repository-provider credentials were not resolved before workflow execution")
 	}
 	if credentialHost != "github.com" && credentialHost != "origin.cursor.com" {
