@@ -837,6 +837,7 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 	}
 	eval.Env = jobResult.Env
 	outputBindings := job.ExecutionJob().Outputs
+	outputBytes := 0
 	for _, output := range outputBindings {
 		name := output.Name
 		value, err := evaluateProgramTyped[string](output.Value, executionprogram.EvaluationContext{Expression: eval})
@@ -845,8 +846,11 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 			// or other runtime-backed operations. A rejected value is authored.
 			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, errWorkflowValidationf("job output %q: %w", name, err))
 		}
-		if len(value) > maxJobOutputBytes {
-			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, errWorkflowValidationf("job output %q exceeds the %d-byte limit", name, maxJobOutputBytes))
+		if len(value) > transport.MaxResultOutputBytes {
+			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, errUnsupportedf("job output %q is %d bytes, over the %d-byte limit", name, len(value), transport.MaxResultOutputBytes))
+		}
+		if outputBytes += len(value); outputBytes > transport.MaxResultOutputsBytes {
+			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, errUnsupportedf("job outputs total more than %d bytes", transport.MaxResultOutputsBytes))
 		}
 		for _, sensitive := range sensitiveValues {
 			if sensitive != "" && strings.Contains(value, sensitive) {

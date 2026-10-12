@@ -22,6 +22,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 type testSecretResolver map[string]string
@@ -2269,6 +2270,27 @@ func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
 	}
 	if len(result.Outputs) != 0 {
 		t.Fatalf("RunJob() partial outputs = %#v, want none before first sorted error", result.Outputs)
+	}
+}
+
+func TestRuntimeJobOutputSizeLimits(t *testing.T) {
+	workspace := fixturePath(t, "smoke")
+	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []runtimeTestStep{{ID: "shell", Kind: "run", Shell: "sh", Command: "true"}})
+	large := strings.Repeat("x", transport.MaxResultOutputBytes)
+	job.Outputs = map[string]string{"large": large}
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Outputs["large"] != large {
+		t.Fatalf("RunJob() error = %v, output bytes = %d; want a %d-byte output", err, len(result.Outputs["large"]), len(large))
+	}
+
+	job.Outputs = map[string]string{"large": large + "x"}
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || ClassifyFailure(err) != FailureClassUnsupportedFeature || !strings.Contains(err.Error(), `job output "large"`) {
+		t.Fatalf("RunJob() error = %v, want unsupported oversized output", err)
+	}
+
+	job.Outputs = map[string]string{"a": large, "b": large, "c": large, "d": large, "e": "x"}
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || ClassifyFailure(err) != FailureClassUnsupportedFeature || !strings.Contains(err.Error(), "job outputs total") {
+		t.Fatalf("RunJob() error = %v, want unsupported total output size", err)
 	}
 }
 
