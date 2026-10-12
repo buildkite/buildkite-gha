@@ -1,0 +1,81 @@
+name: Job output size proof
+
+on: push
+
+permissions: {}
+
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      # cargo-dist style JSON, over the 100 KB metadata and 128 KiB argument limits.
+      manifest: ${{ steps.manifest.outputs.manifest }}
+      manifest_sha: ${{ steps.manifest.outputs.sha }}
+      # Exactly the 1 MiB per-output limit.
+      max: ${{ steps.half-a.outputs.value }}${{ steps.half-b.outputs.value }}
+      # A matrix over 1 KiB.
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      small: small-value
+    steps:
+      - id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$(seq 2000 | awk 'BEGIN { printf "[" } { printf "%s{\"name\":\"artifact-%d\",\"target\":\"x86_64-unknown-linux-gnu\",\"path\":\"target/distrib/artifact-%d.tar.xz\"}", (NR > 1 ? "," : ""), $1, $1 } END { printf "]" }')"
+          printf 'manifest=%s\n' "$manifest" >> "$GITHUB_OUTPUT"
+          printf 'sha=%s\n' "$(printf '%s' "$manifest" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "manifest bytes: ${#manifest}"
+      - id: half-a
+        shell: bash
+        run: printf 'value=%s\n' "$(head -c 524288 /dev/zero | tr '\0' a)" >> "$GITHUB_OUTPUT"
+      - id: half-b
+        shell: bash
+        run: printf 'value=%s\n' "$(head -c 524288 /dev/zero | tr '\0' b)" >> "$GITHUB_OUTPUT"
+      - id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          pad="$(head -c 400 /dev/zero | tr '\0' x)"
+          matrix="[{\"target\":\"one-$pad\"},{\"target\":\"two-$pad\"},{\"target\":\"three-$pad\"}]"
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+          echo "matrix bytes: ${#matrix}"
+
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: |
+          set -euo pipefail
+          manifest='${{ needs.producer.outputs.manifest }}'
+          test "$(printf '%s' "$manifest" | sha256sum | cut -d' ' -f1)" = '${{ needs.producer.outputs.manifest_sha }}'
+          max='${{ needs.producer.outputs.max }}'
+          test "${#max}" -eq 1048576
+          test "$(printf '%s' "$max" | tr -d a | wc -c)" -eq 524288
+          test '${{ needs.producer.outputs.small }}' = small-value
+          echo "OUTPUT_SIZE_PROOF manifest=${#manifest} max=${#max}"
+
+  matrix-consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.matrix) }}
+    steps:
+      - shell: bash
+        run: |
+          target='${{ matrix.target }}'
+          echo "OUTPUT_SIZE_PROOF matrix target ${target%%-*} (${#target} bytes)"
+
+  # Expected to fail: one byte over the per-output limit.
+  oversize:
+    runs-on: ubuntu-latest
+    outputs:
+      too-large: ${{ steps.half-a.outputs.value }}${{ steps.half-b.outputs.value }}x
+    steps:
+      - id: half-a
+        shell: bash
+        run: printf 'value=%s\n' "$(head -c 524288 /dev/zero | tr '\0' a)" >> "$GITHUB_OUTPUT"
+      - id: half-b
+        shell: bash
+        run: printf 'value=%s\n' "$(head -c 524288 /dev/zero | tr '\0' b)" >> "$GITHUB_OUTPUT"

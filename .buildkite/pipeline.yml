@@ -1,3 +1,4 @@
+# Temporary PB-3812 proof branch: runs only the job output size proof.
 env:
   MISE_JOBS: "1"
   MISE_LOCKED: "1"
@@ -6,199 +7,19 @@ agents:
   queue: "hosted"
 
 steps:
-  - group: ":toolbox: On-demand suites"
-    key: "on-demand-suites"
-    steps:
-      - label: ":pipeline: Load compatibility proof"
-        key: "compatibility-proof-loader"
-        if: build.env("COMPATIBILITY_PROOF") != null && build.env("SMOKE_PROBE") != "hosted"
-        command: |
-          set -euo pipefail
-          proof="$${COMPATIBILITY_PROOF:?COMPATIBILITY_PROOF is required}"
-          case "$$proof" in
-            shell-upload|concurrent-steps|public-actions|hosted-docker|dockerfile-action|container-runtime|summary-annotation|workflow-annotations|skipped-workflow-annotation|hash-files|upload-artifact|artifact-roundtrip|experimental-runner-user|scheduling) ;;
-            *) echo "Unknown compatibility proof: $$proof" >&2; exit 2 ;;
-          esac
-          buildkite-agent pipeline upload ".buildkite/$$proof-proof.yml"
-
-      - label: ":github: Load released plugin demo"
-        key: "plugin-demo-loader"
-        if: build.env("DEMO_SUITE") == "plugin"
-        command: |
-          set -euo pipefail
-          commit="$${DEMO_COMMIT:?DEMO_COMMIT is required}"
-          [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
-          scripts/verify-source-checkout "$$commit"
-          test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
-          test -z "$$(git status --porcelain --untracked-files=all)"
-          buildkite-agent pipeline upload .buildkite/plugin-demo.yml
-
-      - label: ":pipeline: Load consolidated hosted smoke proof"
-        key: "hosted-smoke-loader"
-        if: build.env("SMOKE_PROBE") == "hosted"
-        command: |
-          set -euo pipefail
-          commit="$${SMOKE_COMMIT:?SMOKE_COMMIT is required}"
-          [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
-          proof_commit="$${COMPATIBILITY_PROOF_COMMIT:-}"
-          [[ -z "$$proof_commit" || "$$proof_commit" == "$$commit" ]] || {
-            echo "COMPATIBILITY_PROOF_COMMIT $$proof_commit conflicts with SMOKE_COMMIT" >&2
-            exit 1
-          }
-          scripts/verify-source-checkout "$$commit"
-          test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
-          test -z "$$(git status --porcelain --untracked-files=all)"
-          buildkite-agent pipeline upload .buildkite/shell-upload-proof.yml
-          buildkite-agent pipeline upload .buildkite/concurrent-steps-proof.yml
-          buildkite-agent pipeline upload .buildkite/public-actions-proof.yml
-          buildkite-agent pipeline upload .buildkite/hosted-docker-proof.yml
-          buildkite-agent pipeline upload .buildkite/dockerfile-action-proof.yml
-          buildkite-agent pipeline upload .buildkite/container-runtime-proof.yml
-          buildkite-agent pipeline upload .buildkite/summary-annotation-proof.yml
-          buildkite-agent pipeline upload .buildkite/workflow-annotations-proof.yml
-          buildkite-agent pipeline upload .buildkite/upload-artifact-proof.yml
-          buildkite-agent pipeline upload .buildkite/artifact-roundtrip-proof.yml
-          buildkite-agent pipeline upload .buildkite/hosted-smoke-control.yml
-
-  - group: ":test_tube: CI"
-    key: "ci"
-    if: build.env("VULNERABILITY_SCAN") != "1"
-    steps:
-      - label: ":go: Repository checks"
-        key: "checks"
-        if: build.env("DEMO_SUITE") != "plugin"
-        cache: ".buildkite/cache-volume"
-        env:
-          BUILDKITE_GHA_LIVE_REQUIRED: "1"
-        plugins:
-          - setup-go#v0.1.0:
-              mise-version: "2026.5.12"
-          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
-        command: |
-          set -euo pipefail
-          # A golangci-lint cache shared across builds returns issues with the
-          # previous build's checkout paths, which breaks nolint filtering
-          # (golangci/golangci-lint#3502). Keep the cache local to this VM.
-          export GOLANGCI_LINT_CACHE=/tmp/golangci-lint
-          mise run check:ci
-
-      - label: ":test_tube: Go tests %n/%t"
-        key: "go-tests"
-        if: build.env("DEMO_SUITE") != "plugin"
-        parallelism: 1
-        cache: ".buildkite/cache-volume"
-        plugins:
-          - setup-go#v0.1.0:
-              mise-version: "2026.5.12"
-          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
-          - tests#v1.0.0:
-              client-version: "3.0.0"
-              test-runner: "gotest"
-              test-cmd: "go test -count=1 -json {{packages}}"
-              result-path: "gotest-results.jsonl"
-        command: "bktec run"
-
-      - label: ":go: macOS arm64 build and tests"
-        key: "macos-arm64"
-        timeout_in_minutes: 20
-        agents:
-          queue: "mac-small"
-        plugins:
-          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
-        command: |
-          set -euo pipefail
-          test "$$(mise exec -- go env GOOS)" = "darwin"
-          test "$$(mise exec -- go env GOARCH)" = "arm64"
-          mise exec -- go build ./...
-          mise exec -- go test -count=1 ./...
-
-      - label: ":github: Starter workflow compatibility"
-        key: "starter-workflows-corpus"
-        soft_fail: true
-        timeout_in_minutes: 10
-        plugins:
-          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
-        command: "mise run corpus:starter-profile"
-
-      - label: ":github: Documented compatibility gaps"
-        key: "compatibility-gaps"
-        soft_fail: true
-        timeout_in_minutes: 20
-        plugins:
-          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
-        command: "mise run compatibility:gaps"
-
-      - label: ":pipeline: Load public actions runtime proof"
-        key: "public-actions-ci-loader"
-        if: build.env("DEMO_SUITE") != "plugin" && build.env("SMOKE_PROBE") != "hosted" && build.env("COMPATIBILITY_PROOF") == null
-        command: "buildkite-agent pipeline upload .buildkite/public-actions-proof.yml"
-
-      - label: ":github: Composite hashFiles runtime smoke"
-        key: "composite-hash-files-importer"
-        if: build.env("DEMO_SUITE") != "plugin"
-        timeout_in_minutes: 20
-        retry:
-          automatic: false
-        plugins:
-          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
-        command: |
-          set -euo pipefail
-          commit="$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}"
-          scripts/verify-source-checkout "$$commit"
-          test -z "$$(git status --porcelain --untracked-files=all)"
-          distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-composite-hash-files.XXXXXXXX")"
-          trap 'rm -rf -- "$$distribution_root"' EXIT
-          CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.revision=$$commit" -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
-          # An explicit dispatch snapshot avoids skipping this manual workflow
-          # during push/PR builds and binds checkout to the build's exact SHA.
-          jq --arg sha "$$commit" --arg branch "$$BUILDKITE_BRANCH" --arg tag "$${BUILDKITE_TAG:-}" \
-            '.sha = $$sha | .ref = (if $$tag != "" then "refs/tags/" + $$tag else "refs/heads/" + $$branch end)' \
-            testdata/smoke/events/workflow_dispatch.json > "$$distribution_root/event.json"
-          "$$distribution_root/buildkite-gha" upload \
-            --event-path "$$distribution_root/event.json" \
-            --runner-queue ubuntu-latest=hosted \
-            .github/workflows/composite-hash-files.yml
-
-      - label: ":github: Exact-source plugin smoke"
-        key: "plugin-source-smoke-importer"
-        if: build.env("DEMO_SUITE") != "plugin"
-        env:
-          BUILDKITE_PLUGIN_CONFIGURATION: '{"workflow":"testdata/smoke/.github/workflows/shell.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted"}]}'
-        timeout_in_minutes: 20
-        retry:
-          automatic: false
-        plugins:
-          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
-        command: |
-          revision="$$(git rev-parse HEAD)"
-          mise exec -- go run -ldflags "-X main.revision=$$revision" ./cmd/buildkite-gha plugin
-
-  - label: ":shield: Scheduled vulnerability scan"
-    key: "vulnerability-scan"
-    if: build.env("VULNERABILITY_SCAN") == "1"
-    cache: ".buildkite/cache-volume"
-    plugins:
-      - setup-go#v0.1.0:
-          mise-version: "2026.5.12"
-      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-          version: "2026.5.12"
-    command: "mise run vulnerability"
-
-  - wait: ~
-
-  - label: ":rocket: Publish release"
-    key: "publish-release"
-    # Credential isolation is enforced by the external Buildkite Secret policy,
-    # not by this scheduling condition. See docs/development.md.
-    if: build.tag != null
+  - label: ":pipeline: Job output size proof importer"
+    key: "output-size-proof-importer"
+    timeout_in_minutes: 10
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
-    command: "mise exec -- scripts/ci-buildkite-release"
+    command: |
+      set -euo pipefail
+      distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-output-size.XXXXXXXX")"
+      trap 'rm -rf -- "$$distribution_root"' EXIT
+      revision="$$(git rev-parse HEAD)"
+      CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.revision=$$revision" -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+      "$$distribution_root/buildkite-gha" upload \
+        --event-path testdata/smoke/events/push.json \
+        --runner-queue ubuntu-latest=hosted \
+        testdata/output-size/.github/workflows/output-size.yml
