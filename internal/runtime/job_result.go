@@ -27,8 +27,6 @@ type JobResult struct {
 // FailureVisible reports whether the runtime expanded a section containing the failure.
 func (r JobResult) FailureVisible() bool { return r.failureVisible }
 
-const maxJobOutputBytes = 1024
-
 type toleratedJobFailure struct {
 	err error
 }
