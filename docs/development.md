@@ -255,6 +255,21 @@ action execution. In particular:
 Preserve the snapshot, corpus record, sample seed, and sample size when
 comparing commits.
 
+## Resolve workflow repository roots
+
+The compiler infers a repository root from `.github/workflows/<file>` for
+standalone fixtures. For other top-level locations, such as
+`.buildkite/mirrors/speed-budgets.yml`, it asks Git for the enclosing checkout
+root. Directory symlinks inside a checkout cannot select another repository;
+the canonical workflow path must stay within that root. A symlink alias for
+the checkout itself remains valid. Local actions resolve from the checkout
+root, not the workflow's directory or the process working directory.
+Workflow names and plan paths remain repository-relative.
+
+Root discovery grants no source identity or token authority. Keep the
+[self-repository verification](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#step-syntax-self-repository-actions)
+and workflow-token policy checks separate from filesystem root discovery.
+
 ## Verify runtime behavior
 
 The compiler writes a normalized execution program into every v2 job plan.

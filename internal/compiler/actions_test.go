@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -213,6 +214,110 @@ func writeAction(tb testing.TB, root, name, body string) {
 				tb.Fatal(err)
 			}
 		}
+	}
+}
+
+func TestCompileActionsOutsideGitHubWorkflows(t *testing.T) {
+	const workflowPath = ".buildkite/mirrors/speed-budgets.yml"
+	const actionBody = "runs:\n  using: composite\n  steps:\n    - run: echo locked\n      shell: bash\n"
+	for _, uses := range []string{"owner/action@v1", "./tools/action", "$/tools/action"} {
+		t.Run(uses, func(t *testing.T) {
+			workspace, remote := t.TempDir(), t.TempDir()
+			if output, err := exec.Command("git", "-C", workspace, "init", "-q").CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v: %s", err, output)
+			}
+			text := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: " + uses + "\n"
+			caller := filepath.Join(workspace, filepath.FromSlash(workflowPath))
+			for _, root := range []string{workspace, remote} {
+				file := filepath.Join(root, filepath.FromSlash(workflowPath))
+				if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeAction(t, workspace, "tools/action", actionBody)
+			writeAction(t, remote, "tools/action", actionBody)
+			writeAction(t, remote, "", actionBody)
+			fake := newFakeReusableRepositorySource(t, map[string]string{"owner/action": remote, "source/repo": remote})
+			options := defaultOptions()
+			options.WorkflowSource = &WorkflowSourceReference{Repository: "source/repo", Commit: fake.commits["source/repo"]}
+			options.RepositorySource = MemoizeRepositorySource(fake)
+			options.ActionSource, options.ResolveActions = options.RepositorySource, true
+			plans, err := compilePlansForTest(t.Context(), caller, []byte(text), pushEvent(t), "test", testDistributionDigest, options)
+			if strings.HasPrefix(uses, "$/") {
+				if err == nil || !strings.Contains(err.Error(), "must name a file directly under .github/workflows") {
+					t.Fatalf("self source location boundary = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := plans[0]
+			if job.Workflow.Path != "./"+workflowPath || job.Workflow.RunPath != "" || job.Workflow.Name != workflowPath || job.Workflow.Digest != "sha256:"+sha256Sum([]byte(text)) || len(job.Actions) != 1 {
+				t.Fatalf("workflow identity or action locks = %#v", job)
+			}
+			lock := job.Actions[0]
+			if uses == "./tools/action" {
+				if lock.Source != "workspace" || lock.Path != "tools/action" {
+					t.Fatalf("local action identity = %#v", lock)
+				}
+			} else {
+				repository := "owner/action"
+				if lock.Source != "github" || lock.Repository != repository || lock.Commit != fake.commits[repository] || lock.SourceDigest == "" {
+					t.Fatalf("remote action identity = %#v", lock)
+				}
+			}
+			validateCompiledPlansAgainstSchema(t, plans)
+		})
+	}
+}
+
+func TestMirroredWorkflowDirectorySymlinkContainment(t *testing.T) {
+	for _, checkoutAlias := range []bool{false, true} {
+		t.Run(fmt.Sprintf("checkout_alias=%t", checkoutAlias), func(t *testing.T) {
+			workspace, other := t.TempDir(), t.TempDir()
+			for _, root := range []string{workspace, other} {
+				if output, err := exec.Command("git", "-C", root, "init", "-q").CombinedOutput(); err != nil {
+					t.Fatalf("git init: %v: %s", err, output)
+				}
+			}
+			text := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./tools/action\n"
+			mirrors := filepath.Join(other, ".buildkite", "mirrors")
+			if err := os.MkdirAll(mirrors, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(mirrors, "speed-budgets.yml"), []byte(text), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeAction(t, other, "tools/action", "runs:\n  using: composite\n  steps:\n    - run: echo other\n      shell: bash\n")
+			link, destination := filepath.Join(workspace, "mirrors"), mirrors
+			if checkoutAlias {
+				link, destination = filepath.Join(t.TempDir(), "checkout"), other
+			}
+			if err := os.Symlink(destination, link); err != nil {
+				t.Fatal(err)
+			}
+			caller := filepath.Join(link, "speed-budgets.yml")
+			if checkoutAlias {
+				caller = filepath.Join(link, ".buildkite", "mirrors", "speed-budgets.yml")
+			}
+			plans, err := compilePlansForTest(t.Context(), caller, []byte(text), pushEvent(t), "test", testDistributionDigest, defaultOptions())
+			if !checkoutAlias {
+				if err == nil || !strings.Contains(err.Error(), "escapes repository root") {
+					t.Fatalf("directory symlink escape accepted: plans=%v err=%v", plans, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 1 || plans[0].Workflow.Path != "./.buildkite/mirrors/speed-budgets.yml" || len(plans[0].Actions) != 1 || plans[0].Actions[0].Path != "tools/action" {
+				t.Fatalf("checkout alias plan = %#v", plans)
+			}
+		})
 	}
 }
 
