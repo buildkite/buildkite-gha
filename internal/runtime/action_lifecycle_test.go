@@ -1263,6 +1263,68 @@ if [ "${1##*/}" = post.js ]; then touch '`+postMarker+`'; fi
 	}
 }
 
+func TestCompiledCompositeJobStatusDistinguishesStepAndJobTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		jobTimeout bool
+		wantStatus string
+	}{
+		{name: "step timeout", wantStatus: "success"},
+		{name: "job timeout", jobTimeout: true, wantStatus: "cancelled"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := filepath.Join(workspace, ".github", "workflows", "test.yml")
+			workflow := []byte(`on: push
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    outputs:
+      composite-status: ${{ steps.observe.outputs.status }}
+    steps:
+      - id: observe
+        uses: ./.github/actions/observe
+`)
+			writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
+			action := `name: observe
+outputs:
+  status:
+    value: ${{ job.status }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: sleep 5
+`
+			if !test.jobTimeout {
+				// A subsequent child must not confuse the step's expired context
+				// with cancellation of the whole job.
+				action += "    - if: always()\n      shell: sh\n      run: echo cleanup\n"
+			}
+			writeFixtureFile(t, workspace, ".github/actions/observe/action.yml", action)
+			event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			plans, err := compileUntrustedPlans(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+			if err != nil || len(plans) != 1 {
+				t.Fatalf("compiled plans = %d, error = %v; want 1", len(plans), err)
+			}
+			job := plans[0]
+			if test.jobTimeout {
+				job.TimeoutMinutes = 0.005
+				job.Program.Job.TimeoutMinutes = 0.005
+			} else {
+				job.Program.Job.Steps[0].TimeoutMinutes.Literal = 0.005
+			}
+			result, runErr := (Runner{}).runTestJob(t.Context(), job, workspace)
+			if !errors.Is(runErr, context.DeadlineExceeded) || result.Outputs["composite-status"] != test.wantStatus {
+				t.Fatalf("RunJob() result = %#v, error = %v; want composite job.status = %q", result, runErr, test.wantStatus)
+			}
+		})
+	}
+}
+
 func TestNestedCompositePreservesInheritedJobStatus(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
