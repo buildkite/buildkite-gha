@@ -104,15 +104,15 @@ instances:
 }
 
 func canonicalWorkflowRunPath(workflowPath string) (string, error) {
-	if !isRepositoryWorkflowPath(workflowPath) {
+	repositoryRoot, canonicalPath, err := workflowRepository(workflowPath)
+	if err != nil {
+		return "", err
+	}
+	if repositoryRoot == "" {
 		if filepath.IsAbs(workflowPath) {
 			return "", nil
 		}
 		return filepath.ToSlash(filepath.Clean(workflowPath)), nil
-	}
-	repositoryRoot, canonicalPath, err := workflowRepository(workflowPath)
-	if err != nil {
-		return "", err
 	}
 	return repositoryWorkflowPath(repositoryRoot, canonicalPath)
 }

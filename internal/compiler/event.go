@@ -611,12 +611,10 @@ func eventBaseRef(event Event) string {
 }
 
 func canonicalWorkflowName(path string) string {
-	if isRepositoryWorkflowPath(path) {
-		root, canonicalPath, err := workflowRepository(path)
-		if err == nil {
-			if relative, err := repositoryWorkflowPath(root, canonicalPath); err == nil {
-				return strings.TrimPrefix(relative, "./")
-			}
+	root, canonicalPath, err := workflowRepository(path)
+	if err == nil && root != "" {
+		if relative, err := repositoryWorkflowPath(root, canonicalPath); err == nil {
+			return strings.TrimPrefix(relative, "./")
 		}
 	}
 	return filepath.ToSlash(filepath.Clean(path))

@@ -9,6 +9,7 @@ import (
 	"maps"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -151,14 +152,12 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 	scan := workflowScan{runtimeMatrixBoundary: hasRuntimeMatrixBoundary(parsed), referencesVars: workflowReferencesVars(parsed)}
 	if !hasReusableCall(parsed) {
 		sourcePath := path
-		root := ""
-		if isRepositoryWorkflowPath(path) {
-			repositoryRoot, canonicalPath, err := workflowRepository(path)
-			if err != nil {
-				return nil, nil, scan, err
-			}
-			root = repositoryRoot
-			sourcePath, err = repositoryWorkflowPath(repositoryRoot, canonicalPath)
+		root, canonicalPath, err := workflowRepository(path)
+		if err != nil {
+			return nil, nil, scan, err
+		}
+		if root != "" {
+			sourcePath, err = repositoryWorkflowPath(root, canonicalPath)
 			if err != nil {
 				return nil, nil, scan, err
 			}
@@ -1651,10 +1650,32 @@ func workflowRepository(path string) (string, string, error) {
 		return "", "", fmt.Errorf("resolve workflow path: %w", err)
 	}
 	workflowDir := filepath.Dir(absPath)
-	if filepath.Base(workflowDir) != "workflows" || filepath.Base(filepath.Dir(workflowDir)) != ".github" {
-		return "", "", fmt.Errorf("%s: local reusable workflows require the caller under .github/workflows", path)
-	}
 	repositoryDir := filepath.Dir(filepath.Dir(workflowDir))
+	if !isRepositoryWorkflowPath(absPath) {
+		// Mirrored top-level workflows may live anywhere in a checkout. Git
+		// locates their workspace; it does not establish remote source identity.
+		repositoryDir = ""
+		for directory := workflowDir; directory != filepath.Dir(directory); directory = filepath.Dir(directory) {
+			info, err := os.Lstat(directory)
+			if err != nil || info.Mode()&os.ModeSymlink == 0 {
+				continue
+			}
+			// A directory link inside a checkout cannot redefine its boundary.
+			// Walk outward so nested links retain the original lexical checkout.
+			output, err := exec.Command("git", "-C", filepath.Dir(directory), "rev-parse", "--show-toplevel").Output()
+			if err == nil {
+				repositoryDir = strings.TrimSpace(string(output))
+			}
+		}
+		if repositoryDir == "" {
+			// A link to the checkout itself has no enclosing checkout boundary.
+			output, err := exec.Command("git", "-C", workflowDir, "rev-parse", "--show-toplevel").Output()
+			if err != nil {
+				return "", absPath, nil
+			}
+			repositoryDir = strings.TrimSpace(string(output))
+		}
+	}
 	root, err := filepath.EvalSymlinks(repositoryDir)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve repository root for %q: %w", path, err)
