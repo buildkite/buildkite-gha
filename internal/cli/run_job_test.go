@@ -15,8 +15,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1052,6 +1054,68 @@ func TestRunJobTelemetryClassifiesExecutionFailure(t *testing.T) {
 	}
 }
 
+func TestRunJobTelemetryClassifiesServiceReadiness(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("service containers require Linux amd64")
+	}
+	for _, padding := range []int{0, 900, 1500} {
+		t.Run(fmt.Sprintf("output-padding=%d", padding), func(t *testing.T) {
+			secret := "health\"secret-" + strings.Repeat("boundary-secret-", 40)
+			healthOutput := "connection refused " + strings.Repeat("x", padding/2) + secret + strings.Repeat("y", padding-padding/2) + " end of health output"
+			docker := filepath.Join(t.TempDir(), "docker")
+			if err := os.WriteFile(docker, []byte(fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  create) echo service-container ;;
+  inspect)
+    case "$3" in
+      *State.Status*) echo 'container status="running" exit_code=0 oom_killed=false; health status="unhealthy" failing_streak=3; last health check exit_code=7 output=%s' ;;
+      *) echo unhealthy ;;
+    esac ;;
+  logs) echo 'connection refused %s' ;;
+esac
+`, strconv.Quote(healthOutput), secret)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("BUILDKITE_GHA_DOCKER", docker)
+			job := cliRunJobPlan()
+			job.RequiredCapabilities = []string{"docker", "network"}
+			job.Program.Job.Services = executionprogram.Services{Static: []executionprogram.Service{
+				{Name: "nats", Container: executionprogram.ServiceContainer{
+					Image:       cliProgramSite("nats:2"),
+					Credentials: &executionprogram.ContainerCredentials{Username: cliProgramSite("registry-user"), Password: cliProgramSite(secret)},
+				}},
+			}}
+			planPath, planDigest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, planDigest)
+			events := captureCommandTelemetry(t)
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
+				t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+			}
+			event := <-events
+			if event.Command != telemetry.CommandRunJob || event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != "E_SERVICE_READINESS" {
+				t.Fatalf("telemetry = %#v", event)
+			}
+			for _, want := range []string{`service "nats" failed readiness`, `container status="running"`, `health status="unhealthy"`, `last health check exit_code=7`, `connection refused`, "***"} {
+				if !strings.Contains(event.ErrorMessage, want) || !strings.Contains(stderr.String(), want) {
+					t.Errorf("missing %q: telemetry=%q stderr=%q", want, event.ErrorMessage, stderr.String())
+				}
+			}
+			if len(event.ErrorMessage) > telemetry.MaxErrorMessageBytes || event.ErrorMessageTruncated != (padding != 0) {
+				t.Errorf("telemetry length=%d truncated=%t", len(event.ErrorMessage), event.ErrorMessageTruncated)
+			}
+			for _, fragment := range []string{"boundary-secret", "health\"secret", `health\"secret`} {
+				if strings.Contains(event.ErrorMessage+stderr.String(), fragment) {
+					t.Errorf("unmasked secret fragment %q", fragment)
+				}
+			}
+			if !strings.Contains(stderr.String(), "end of health output") {
+				t.Error("job stderr lost the complete bounded health evidence")
+			}
+		})
+	}
+}
+
 func TestRunJobTelemetryClassifiesUnsupportedShell(t *testing.T) {
 	job := cliRunJobPlan()
 	job.Program.Job.Steps[0].Run.Shell.Source = "cmd"
@@ -1367,6 +1431,9 @@ func attachCLIExecutionProgram(job *plan.Job) {
 		normalized.Job.Guards[i].Condition = cliProgramSite(guard.Condition)
 	}
 	normalized.Job.Steps = steps
+	if job.Program != nil {
+		normalized.Job.Services = job.Program.Job.Services
+	}
 	if job.Container != nil {
 		normalized.Job.Container = &executionprogram.Container{Image: cliProgramSite(job.Container.Image), Env: cliProgramBindings(job.Container.Env), Ports: cliProgramSites(job.Container.Ports)}
 	}

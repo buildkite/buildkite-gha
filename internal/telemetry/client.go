@@ -92,6 +92,7 @@ const (
 	FailureCodeWorkflowToken      FailureCode = "E_WORKFLOW_TOKEN_UNAVAILABLE"
 	FailureCodeOIDCToken          FailureCode = "E_OIDC_TOKEN_UNAVAILABLE"
 	FailureCodeCacheCredential    FailureCode = "E_CACHE_CREDENTIAL_UNAVAILABLE"
+	FailureCodeServiceReadiness   FailureCode = "E_SERVICE_READINESS"
 )
 
 type Severity string
@@ -288,7 +289,7 @@ func validFailureCode(code FailureCode) bool {
 		FailureCodeActionResolution, FailureCodePlanConstruction, FailureCodePipelineGeneration,
 		FailureCodeEnvironment, FailureCodeVariableResolution, FailureCodeProfile, FailureCodeStepProcessExit,
 		FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable,
-		FailureCodeWorkflowToken, FailureCodeOIDCToken, FailureCodeCacheCredential:
+		FailureCodeWorkflowToken, FailureCodeOIDCToken, FailureCodeCacheCredential, FailureCodeServiceReadiness:
 		return true
 	default:
 		return false
