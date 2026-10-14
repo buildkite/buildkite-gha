@@ -2,6 +2,7 @@ package expression
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -642,6 +643,9 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 		err = fmt.Errorf("unknown expression profile %q", site.Profile)
 	}
 	if err != nil {
+		if site.Profile == ProfileActionStepTemplate && errors.Is(err, errUnavailableGitHubToken) {
+			err = fmt.Errorf("%w: this job has no available workflow token; this composite expression cannot authorize a token. Declare a token input on the action, pass it from the workflow step with: token: ${{ github.token }}, and use ${{ inputs.token }} inside the composite", err)
+		}
 		return nil, siteError(site, err)
 	}
 	if !matchesEngineResult(value, site.Result) {

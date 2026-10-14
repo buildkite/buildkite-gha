@@ -555,6 +555,16 @@ runs:
   using: node24
   main: index.js
 `)
+	writeAction(t, w, "composite-token", `name: composite token default
+inputs:
+  github_token:
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: echo safe
+`)
 	writeAction(t, w, "actor", `name: actor default
 inputs:
   actor:
@@ -598,6 +608,8 @@ runs:
 		wantErr  string
 	}{
 		{name: "effective default", ref: "./token", want: true},
+		{name: "effective composite default", ref: "./composite-token", want: true},
+		{name: "overridden composite default", ref: "./composite-token", supplied: map[string]string{"github_token": ""}},
 		{name: "explicit empty input", ref: "./token", supplied: map[string]string{"github_token": ""}},
 		{name: "case-insensitive explicit input", ref: "./token", supplied: map[string]string{"GITHUB_TOKEN": "explicit"}},
 		{name: "unrelated GitHub default", ref: "./actor"},
@@ -748,6 +760,30 @@ runs:
 	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
 	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant github.token authority") {
 		t.Fatalf("composite metadata token error = %v", err)
+	}
+	for _, want := range []string{"with: token: ${{ github.token }}", "forward ${{ inputs.token }}"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("composite metadata token error = %v, want remedy %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "settings/repository") {
+		t.Fatalf("composite metadata rejection suggested token settings: %v", err)
+	}
+
+	writeAction(t, workspace, "forwarded", `name: forwarded
+inputs:
+  token:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        token: ${{ inputs.token }}
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./forwarded"}, []map[string]string{{"token": "${{ github.token }}"}})
+	if err != nil || !compiled.requiresGitHubToken {
+		t.Fatalf("workflow-authorized forwarded input: token=%v, error=%v", compiled.requiresGitHubToken, err)
 	}
 }
 

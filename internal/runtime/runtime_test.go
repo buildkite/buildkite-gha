@@ -1881,6 +1881,60 @@ printf '%s\n' 'derived-mask-value' >> "$GITHUB_STEP_SUMMARY"`,
 	}
 }
 
+func TestCompositeMissingTokenExplainsWorkflowInputRemedy(t *testing.T) {
+	for _, test := range []struct {
+		name, action, location string
+	}{
+		{name: "step environment", location: `evaluate "DEFAULT_GITHUB_TOKEN"`, action: `name: Tokenless composite
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        DEFAULT_GITHUB_TOKEN: ${{ github.token }}
+      run: echo must-not-run
+`},
+		{name: "output", location: `composite output "token"`, action: `name: Tokenless composite
+outputs:
+  token:
+    value: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: "true"
+`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+			writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", test.action)
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+			var logs bytes.Buffer
+			_, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+			if err == nil {
+				t.Fatal("tokenless composite succeeded")
+			}
+			for _, want := range []string{
+				test.location,
+				`unavailable github value "token"`,
+				"this composite expression cannot authorize a token",
+				"with: token: ${{ github.token }}",
+				"use ${{ inputs.token }} inside the composite",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("RunJob() error = %v, want %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "settings/repository") || strings.Contains(err.Error(), "composite step metadata") || strings.Contains(logs.String(), "must-not-run") {
+				t.Fatalf("incorrect remedy or step-specific guidance or action executed: error=%v logs=%s", err, logs.String())
+			}
+			t.Logf("RunJob() diagnostic: %v", err)
+		})
+	}
+}
+
 func TestCompositeExposesOnlyDeclaredOutputs(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

@@ -41,7 +41,7 @@ conservative without granting credentials to known-unreachable paths:
 - A known-false or provider-inapplicable branch must not grant token authority.
 - A branch that depends on an unknown runtime value may grant token authority.
 - Action metadata cannot grant ordinary secret authority.
-- Composite metadata cannot grant `github.token` authority.
+- Composite step and output metadata cannot grant `github.token` authority.
 - Workflow-authored `toJSON(github)` and direct `github.token` access retain
   distinct provenance from action-authored access.
 
@@ -184,7 +184,7 @@ The following boundaries are deliberate:
 - Commands and workflow-command mutations produce unknown planning values.
   Later token authority joins conservatively.
 - Action metadata cannot introduce ordinary secret authority.
-- Composite-authored expressions cannot introduce `github.token` authority.
+- Composite step and output expressions cannot introduce `github.token` authority.
 - Whole-context `github` serialization is allowed only by profiles that admit
   it and retains its author provenance.
 - Validation inspects unreachable branches for unsupported or prohibited
@@ -202,6 +202,22 @@ The following boundaries are deliberate:
 This architecture does not broaden expression syntax, allow dynamic secret
 access, make private actions available, or weaken immutable source
 verification.
+
+### Missing composite tokens
+
+Action input defaults have a separate profile: an effective default that reaches
+`github.token` can retain token authority, including on a composite action.
+Composite step and output expressions do not authorize a token. A child action's
+`with` that would grant token authority fails during compilation; a reference in
+a composite step's environment or an output can fail at runtime when the job has
+no token.
+
+These diagnostics direct the author to declare a token input, pass
+`${{ github.token }}` from the workflow step's `with`, and use
+`${{ inputs.token }}` inside the composite. They do not suggest pipeline token
+settings: enabling issuance does not change the metadata authority boundary.
+Issuance failures own settings guidance; see the
+[security documentation](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/security).
 
 ## Implemented outcome
 
