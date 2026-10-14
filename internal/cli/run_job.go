@@ -406,6 +406,8 @@ func runtimeFailureCode(err error) telemetry.FailureCode {
 		return telemetry.FailureCodeOIDCToken
 	case gharuntime.FailureClassCacheCredential:
 		return telemetry.FailureCodeCacheCredential
+	case gharuntime.FailureClassServiceReadiness:
+		return telemetry.FailureCodeServiceReadiness
 	default:
 		return ""
 	}

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"text/template"
 	"time"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
@@ -375,9 +376,31 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 			fmt.Print(string(data))
 			os.Exit(0)
 		}
+		if strings.Contains(args[2], ".State.Status") {
+			if scenario == "service-evidence-unavailable" {
+				os.Exit(42)
+			}
+			if scenario == "service-evidence-truncated" {
+				fmt.Print(strings.Repeat("x", 4090) + "sibling-secret")
+				os.Exit(0)
+			}
+			state := map[string]any{"Status": "exited", "ExitCode": 23, "OOMKilled": true, "Error": "container sibling-secret", "Health": map[string]any{
+				"Status": "unhealthy", "FailingStreak": 3, "Log": []map[string]any{
+					{"ExitCode": 0, "Output": "earlier success"},
+					{"ExitCode": 7, "Output": "connection refused sibling-secret health\"secret\n::error::not-an-annotation"},
+				},
+			}}
+			format, err := template.New("inspect").Parse(args[2])
+			if err != nil || format.Execute(os.Stdout, map[string]any{"State": state}) != nil {
+				os.Exit(43)
+			}
+			os.Exit(0)
+		}
 		switch scenario {
-		case "service-unhealthy":
+		case "service-unhealthy", "service-evidence-unavailable", "service-evidence-truncated", "service-logs-truncated":
 			fmt.Print("unhealthy\n")
+		case "service-inspect-failed":
+			os.Exit(42)
 		case "service-starting":
 			counter := filepath.Join(root, "inspect-count")
 			data, _ := os.ReadFile(counter)
@@ -393,6 +416,10 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	case "logs":
+		if scenario == "service-logs-truncated" {
+			fmt.Print(strings.Repeat("x", 4090) + "sibling-secret")
+			os.Exit(0)
+		}
 		if scenario == "service-log-command" {
 			fmt.Print("::warning::not-an-annotation\n::add-mask::not-a-mask\nnot-a-mask\n")
 			os.Exit(0)
@@ -1848,17 +1875,61 @@ func TestRunServiceContainerOptionNameUsesCreatedReference(t *testing.T) {
 }
 
 func TestRunJobContainerServiceFailureDiagnosticsAreMasked(t *testing.T) {
-	f := newJobDocker(t, "service-unhealthy")
-	w, tmp := t.TempDir(), t.TempDir()
-	var output bytes.Buffer
-	p := newCommandOutputProcessor(&output, &output)
-	p.addMask("sibling-secret")
-	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(t.Context(), p, w, tmp, &plan.Container{Image: "alpine"}, map[string]plan.ServiceContainer{"db": {Image: "postgres"}})
-	if err == nil || !strings.Contains(err.Error(), `service "db"`) || !strings.Contains(err.Error(), `status "unhealthy"`) {
-		t.Fatalf("error=%v", err)
-	}
-	if strings.Contains(output.String(), "sibling-secret") || !strings.Contains(output.String(), "***") || jobDockerCallIndex(f.calls(t), "logs", "--tail", "200") < 0 {
-		t.Fatalf("unmasked or missing diagnostics: %q", output.String())
+	for _, test := range []struct {
+		name, scenario string
+		host           bool
+	}{
+		{name: "container", scenario: "service-unhealthy"},
+		{name: "host", scenario: "service-unhealthy", host: true},
+		{name: "inspect failure", scenario: "service-inspect-failed", host: true},
+		{name: "unavailable evidence", scenario: "service-evidence-unavailable", host: true},
+		{name: "truncated evidence", scenario: "service-evidence-truncated", host: true},
+		{name: "truncated logs", scenario: "service-logs-truncated", host: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newJobDocker(t, test.scenario)
+			w := t.TempDir()
+			job := jobContainerPlan(t, w, nil)
+			if test.host {
+				job.Container = nil
+			}
+			job.Services = map[string]plan.ServiceContainer{"db": {Image: "postgres", Credentials: &plan.ContainerCredentials{Username: "registry-user", Password: "health\"secret"}}}
+			job.ServiceOrder = []string{"db"}
+			job.RequiredSecrets = []string{"DB_PASSWORD"}
+			job.RequiredCapabilities = append(job.RequiredCapabilities, "secrets")
+			var output bytes.Buffer
+			result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Stdout: &output, Stderr: &output,
+				Secrets: testSecretResolver{"DB_PASSWORD": "sibling-secret"}, Redactor: &testRedactor{},
+			}).runTestJob(t.Context(), job, w)
+			if err == nil || result.Conclusion != "failure" || ClassifyFailure(err) != FailureClassServiceReadiness {
+				t.Fatalf("result=%#v, error=%v, class=%s", result, err, ClassifyFailure(err))
+			}
+			for _, secret := range []string{"sibling-secret", "health\"secret", `health\"secret`} {
+				if strings.Contains(err.Error()+output.String(), secret) {
+					t.Fatalf("unmasked diagnostics: error=%v output=%q", err, output.String())
+				}
+			}
+			if !strings.Contains(err.Error(), `service "db"`) || !strings.Contains(output.String(), `Service "db" container logs`) || !strings.Contains(err.Error()+output.String(), "***") {
+				t.Fatalf("missing attributed diagnostics: error=%v output=%q", err, output.String())
+			}
+			if test.scenario == "service-logs-truncated" && (!strings.Contains(output.String(), "container logs unavailable or truncated") || strings.Contains(output.String(), strings.Repeat("x", 100))) {
+				t.Fatalf("incomplete logs were not discarded: %q", output.String())
+			}
+			if strings.Contains(test.scenario, "evidence-") {
+				if !strings.Contains(err.Error(), "container health evidence unavailable or truncated") || strings.Contains(err.Error(), strings.Repeat("x", 100)) {
+					t.Fatalf("incomplete evidence was not discarded: %v", err)
+				}
+			} else {
+				for _, want := range []string{`container status="exited" exit_code=23 oom_killed=true`, `last health check exit_code=7`, `connection refused ***`, `health status="unhealthy" failing_streak=3`} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("missing %q in %v", want, err)
+					}
+				}
+				if strings.Contains(err.Error(), "earlier success") || result.ErrorAnnotations != "" {
+					t.Fatalf("included old check or interpreted a command: result=%#v error=%v", result, err)
+				}
+			}
+		})
 	}
 }
 
@@ -1873,6 +1944,9 @@ func TestRunJobContinueOnErrorToleratesServiceStartupFailure(t *testing.T) {
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), job, w)
 	if err == nil || !IsToleratedJobFailure(err) || result.Conclusion != "success" || !strings.Contains(err.Error(), `service "db"`) {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if ClassifyFailure(err) != FailureClassServiceReadiness {
+		t.Fatalf("tolerated readiness class = %s", ClassifyFailure(err))
 	}
 }
 
@@ -1889,6 +1963,9 @@ func TestRunJobContinueOnErrorDoesNotTolerateServiceStartupTimeout(t *testing.T)
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), job, w)
 	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if ClassifyFailure(err) == FailureClassServiceReadiness {
+		t.Fatal("workflow timeout classified as service readiness failure")
 	}
 }
 
@@ -2180,6 +2257,9 @@ jobs:
       db:
         image: postgres
         ports: ['6379', '6543:6380']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 3s
+          --health-timeout 2s --health-retries 5 --health-start-period 10s
     outputs:
       dynamic: ${{ job.services.db.ports[6379] }}
       fixed: ${{ job.services.db.ports[6380] }}
@@ -2204,6 +2284,16 @@ jobs:
 	}
 	if !maps.Equal(result.Outputs, map[string]string{"dynamic": "49152", "fixed": "6543"}) {
 		t.Fatalf("service outputs = %v", result.Outputs)
+	}
+	create := jobDockerCallIndex(f.calls(t), "create")
+	if create < 0 {
+		t.Fatal("service container was not created")
+	}
+	args := f.calls(t)[create].Args
+	for option, want := range map[string]string{"--health-cmd": "pg_isready -U postgres", "--health-interval": "3s", "--health-timeout": "2s", "--health-retries": "5", "--health-start-period": "10s"} {
+		if got := argumentAfter(t, args, option); got != want {
+			t.Errorf("Docker option %s = %q, want %q", option, got, want)
+		}
 	}
 	for _, call := range f.calls(t) {
 		if call.Args[0] == "exec" {

@@ -272,6 +272,29 @@ and workflow-token policy checks separate from filesystem root discovery.
 
 ## Verify runtime behavior
 
+Service readiness failures emit `E_SERVICE_READINESS` in `run_job` completion
+telemetry. The error identifies the service and includes Docker's container
+state and latest health-check exit code and output. Evidence collection shares
+a three-second budget with the existing bounded container log tail. Registered
+secrets and service registry passwords are masked; full container configuration
+and health-check commands are not printed. Failed or truncated evidence does
+not replace the readiness error. Cancellation and workflow timeouts retain
+their existing attribution, and cleanup failures retain integrity precedence.
+
+The Agent API accepts only allowlisted failure codes. Deploy backend support
+for `E_SERVICE_READINESS` before distributing a CLI that emits it; otherwise,
+the Agent API rejects the entire completion event with HTTP 400. The allowlist
+lives in
+[`GitHubActions::TelemetryRecorder`](https://github.com/buildkite/buildkite/blob/main/app/models/github_actions/telemetry_recorder.rb).
+
+Service `options` already forwards Docker health flags, including
+`--health-interval`, `--health-timeout`, `--health-retries`, and
+`--health-start-period`. Docker controls health-check timing; the runtime polls
+with a two-to-32-second backoff until readiness fails, succeeds, or the job is
+cancelled or times out. See the
+[container compatibility reference](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility)
+for supported workflow configuration.
+
 The compiler writes a normalized execution program into every v2 job plan.
 The runtime rejects plans without that program and executes its typed sites;
 it does not reconstruct expressions from projected plan fields or action

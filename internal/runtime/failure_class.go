@@ -37,6 +37,8 @@ const (
 	// FailureClassCacheCredential means the runtime could not acquire an
 	// action's cache credential.
 	FailureClassCacheCredential FailureClass = "cache_credential"
+	// FailureClassServiceReadiness means a service failed its readiness check.
+	FailureClassServiceReadiness FailureClass = "service_readiness"
 )
 
 // ClassifyFailure reports the most specific class found in a RunJob error
@@ -56,6 +58,10 @@ func ClassifyFailure(err error) FailureClass {
 	}
 	if isHardJobFailure(err) {
 		return FailureClassIntegrity
+	}
+	var readiness *serviceReadinessError
+	if errors.As(err, &readiness) {
+		return FailureClassServiceReadiness
 	}
 	var setup *jobSetupFailure
 	if errors.As(err, &setup) {
@@ -178,6 +184,11 @@ func MarkWorkflowProcessTimeout(ctx context.Context, err error) error {
 	}
 	return marked
 }
+
+type serviceReadinessError struct{ err error }
+
+func (e *serviceReadinessError) Error() string { return e.err.Error() }
+func (e *serviceReadinessError) Unwrap() error { return e.err }
 
 type containerTerminationError struct{ err error }
 
