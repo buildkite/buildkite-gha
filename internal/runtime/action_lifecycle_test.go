@@ -1832,6 +1832,60 @@ fi
 	}
 }
 
+func TestRemoteCompositePreKeepsRootJobStatus(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: composite pre status\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: owner/repo/fails@v1\n    - uses: owner/repo/observe@v1\n")
+	for _, action := range []struct{ name, preIf string }{
+		{"fails", "always()"},
+		{"observe", "job.status == 'success'"},
+		{"after", "job.status == 'failure'"},
+	} {
+		writeFixtureFile(t, remote, action.name+"/action.yml", "name: "+action.name+"\ninputs:\n  status:\n    default: ${{ job.status }}\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: "+action.preIf+"\n  main: main.js\n")
+		writeFixtureFile(t, remote, action.name+"/pre.js", "")
+		writeFixtureFile(t, remote, action.name+"/main.js", "")
+	}
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+if [ "${1##*/}" = pre.js ]; then
+  printf '%s:%s\n' "$action" "$INPUT_STATUS" >> "$STATUS_LOG"
+  if [ "$action" = fails ]; then exit 7; fi
+fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parentID, failsID, observeID, afterID := remoteLifecycleLockID(1), remoteLifecycleLockID(2), remoteLifecycleLockID(3), remoteLifecycleLockID(4)
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "parent", Kind: "uses", Uses: remoteLifecycleUses("parent"), Action: &plan.ActionSelector{Lock: parentID}},
+		{ID: "after", Kind: "uses", Uses: remoteLifecycleUses("after"), Action: &plan.ActionSelector{Lock: afterID}},
+	})
+	logPath := filepath.Join(workspace, "status.log")
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"STATUS_LOG": logPath}
+	digest := digestTree(t, remote)
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(parentID, "parent", digest, map[string]plan.ActionSelector{remoteLifecycleUses("fails"): {Lock: failsID}, remoteLifecycleUses("observe"): {Lock: observeID}}),
+		remoteLifecycleLock(failsID, "fails", digest, nil),
+		remoteLifecycleLock(observeID, "observe", digest, nil),
+		remoteLifecycleLock(afterID, "after", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, runErr := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
+	if runErr == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v; want pre failure", result, runErr)
+	}
+	log, err := os.ReadFile(logPath)
+	if want := "fails:success\nobserve:success\nafter:failure\n"; err != nil || string(log) != want {
+		t.Fatalf("pre status log = %q, %v; want %q", log, err, want)
+	}
+}
+
 func TestRemoteCompositeSoftPreFailurePreservesSuccessForLaterPre(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

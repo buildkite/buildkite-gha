@@ -577,7 +577,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes.Literal)
 			bindHashFilesContext(preCtx, &preEval)
 			wasUnsuccessful := preStatus.unsuccessful
-			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, posts, actions, prepared, &preStatus, true, nil, nil, nil)
+			preResult, preErr := r.prepareRemoteAction(runCtx, preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, posts, actions, prepared, &preStatus, true, nil, nil, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
 			maps.Copy(jobResult.State, preResult.State)
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
@@ -1814,9 +1814,15 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 	return out, nil
 }
 
-func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutputProcessor, workspace string, step executionprogram.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error, inheritedTimeout *remotePreparationTimeout, inheritedEnvOverlay map[string]string) (Result, error) {
+func (r *jobRun) prepareRemoteAction(jobCtx, ctx context.Context, processor *commandOutputProcessor, workspace string, step executionprogram.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error, inheritedTimeout *remotePreparationTimeout, inheritedEnvOverlay map[string]string) (Result, error) {
 	result := newResult()
-	eval.JobStatus = jobStatusValue(status.unsuccessful, ctx.Err() != nil)
+	// A composite's pre failures reach the job only when its preparation
+	// returns. Nested pre hooks retain the enclosing job status meanwhile.
+	if workflowStep {
+		eval.JobStatus = jobStatusValue(status.unsuccessful, jobCtx.Err() != nil)
+	} else if jobCtx.Err() != nil {
+		eval.JobStatus = "cancelled"
+	}
 	bindHashFilesContext(ctx, &eval)
 	if inheritedTimeout != nil && inheritedTimeout.bounded != nil {
 		// Later children share the deadline started by an earlier pre hook.
@@ -1985,7 +1991,7 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 			childProcessEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 			eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
 			wasUnsuccessful := status.unsuccessful
-			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, false, compositeEvalErr, preparationTimeout, lifecycleEnvOverlay)
+			childResult, childErr := r.prepareRemoteAction(jobCtx, ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, false, compositeEvalErr, preparationTimeout, lifecycleEnvOverlay)
 			mergeEnvironmentInto(result.Env, childResult.Env)
 			if childResult.pathBaseSet {
 				result.pathBase = childResult.pathBase
