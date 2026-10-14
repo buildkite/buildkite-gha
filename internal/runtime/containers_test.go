@@ -3004,6 +3004,88 @@ runs:
 	}
 }
 
+func TestRunJobContainerRemoteCompositeWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, directory  string
+		reject, workflow bool
+	}{
+		{name: "action path", directory: "${{ github.action_path }}"},
+		{name: "traversal outside source", directory: "${{ github.action_path }}/../..", reject: true},
+		{name: "workflow cannot inherit source root", directory: "${{ github.action_path }}", reject: true, workflow: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newJobDocker(t, "")
+			workspace, remote := t.TempDir(), t.TempDir()
+			workflow := ".github/workflows/container.yml"
+			writeFixtureFile(t, workspace, workflow, "name: remote composite working directory\n")
+			writeFixtureFile(t, remote, "selected/value", "verified-action")
+			writeFixtureFile(t, remote, "selected/action.yml", `name: remote working directory
+outputs:
+  value:
+    value: ${{ steps.read.outputs.value }}
+runs:
+  using: composite
+  steps:
+    - id: read
+      shell: sh
+      working-directory: `+test.directory+`
+      run: |
+        touch "$COMPOSITE_MARKER"
+        echo "value=$(cat value)" >> "$GITHUB_OUTPUT"
+`)
+			id := remoteLifecycleLockID(1)
+			steps := []runtimeTestStep{{ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: id}}}
+			target := remoteMountTarget("owner/repo", strings.Repeat("a", 40)) + "/selected"
+			if test.workflow {
+				steps = append(steps, runtimeTestStep{ID: "outside", Kind: "run", Shell: "sh", WorkingDirectory: target, Command: `touch "$WORKFLOW_MARKER"`})
+			}
+			job := runtimePlan(t, workspace, workflow, steps)
+			digest := digestTree(t, remote)
+			job.RequiredCapabilities = []string{"docker", "network"}
+			job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+			job.Actions = []plan.ActionLock{remoteLifecycleLock(id, "selected", digest, nil)}
+			job.Outputs = map[string]string{"value": "${{ steps.remote.outputs.value }}"}
+			job.Env = map[string]string{"COMPOSITE_MARKER": filepath.Join(workspace, "composite-ran"), "WORKFLOW_MARKER": filepath.Join(workspace, "workflow-ran")}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+			result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).runTestJob(t.Context(), job, workspace)
+			if test.reject {
+				blocker, _, classified := UnsupportedFeature(err)
+				if err == nil || result.Conclusion != "failure" || !classified || blocker != "working_directory" {
+					t.Fatalf("outside container directory: result=%#v error=%v blocker=%s", result, err, blocker)
+				}
+				marker := job.Env["COMPOSITE_MARKER"]
+				if test.workflow {
+					marker = job.Env["WORKFLOW_MARKER"]
+				}
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("rejected payload executed: marker=%q error=%v", marker, err)
+				}
+			} else if err != nil || result.Conclusion != "success" || result.Outputs["value"] != "verified-action" {
+				t.Fatalf("remote container working directory: result=%#v error=%v", result, err)
+			}
+			payloads := 0
+			for _, call := range f.calls(t) {
+				if len(call.Args) == 0 || call.Args[0] != "exec" || !strings.Contains(strings.Join(call.Args, "\x00"), "value=$(cat value)") {
+					continue
+				}
+				payloads++
+				index := slices.Index(call.Args, "--workdir")
+				if index < 0 || index+1 >= len(call.Args) || call.Args[index+1] != target {
+					t.Fatalf("payload must use container action directory %q: %#v", target, call.Args)
+				}
+			}
+			wantPayloads := 1
+			if test.reject && !test.workflow {
+				wantPayloads = 0
+			}
+			if payloads != wantPayloads {
+				t.Fatalf("composite payloads=%d, want %d", payloads, wantPayloads)
+			}
+		})
+	}
+}
+
 func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
 	t.Parallel()
 

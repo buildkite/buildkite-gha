@@ -1075,6 +1075,30 @@ func TestRunJobTelemetryClassifiesUnsupportedShell(t *testing.T) {
 	}
 }
 
+func TestRunJobTelemetryClassifiesOutsideWorkingDirectory(t *testing.T) {
+	job := cliRunJobPlan()
+	job.Program.Job.Steps[0].Run.WorkingDirectory.Source = t.TempDir()
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	events := captureCommandTelemetry(t)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var event telemetry.Properties
+	select {
+	case event = <-events:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no completion telemetry; stderr = %q", stderr.String())
+	}
+	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeUnsupportedFeature || event.Blocker != "working_directory" {
+		t.Fatalf("telemetry = %#v", event)
+	}
+	if !strings.Contains(event.ErrorMessage, "outside the permitted execution roots") {
+		t.Fatalf("telemetry error message = %q", event.ErrorMessage)
+	}
+}
+
 func TestRunJobValidateHostErrorsClassifyAsUnsupported(t *testing.T) {
 	job := plan.Job{RequiredCapabilities: []string{"docker"}}
 	err := gharuntime.ValidateHost(job, "darwin", "arm64")
