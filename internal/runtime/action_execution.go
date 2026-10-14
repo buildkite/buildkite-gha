@@ -2319,7 +2319,7 @@ func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutpu
 		case step.Run == nil || strings.TrimSpace(step.Run.Command.Source) == "":
 			childErr = fmt.Errorf("composite action step %d has no run command", i+1)
 		default:
-			childErr = r.runCompositeShellStep(ctx, processor, workspace, step, childJobEnv, eval, &stepResult)
+			childErr = r.runCompositeShellStep(ctx, processor, workspace, action.metadata.SourceRoot, step, childJobEnv, eval, &stepResult)
 		}
 		mergeEnvironmentInto(result.Env, stepResult.Env)
 		if stepResult.pathBaseSet {

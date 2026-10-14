@@ -11,6 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 func TestPowerShellExecution(t *testing.T) {
@@ -337,6 +340,81 @@ runs:
 	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRemoteCompositeWorkingDirectories(t *testing.T) {
+	for _, test := range []struct {
+		name, directory, want string
+		reject                bool
+		workflow              bool
+	}{
+		{name: "action path", directory: "${{ github.action_path }}", want: "action"},
+		{name: "action subdirectory", directory: "${{ github.action_path }}/sub", want: "action-sub"},
+		{name: "verified repository sibling", directory: "${{ github.action_path }}/../shared", want: "shared"},
+		{name: "default workspace", want: "workspace"},
+		{name: "relative workspace", directory: "sub", want: "workspace-sub"},
+		{name: "outside absolute", directory: "${{ inputs.outside }}", reject: true},
+		{name: "action traversal", directory: "${{ github.action_path }}/../..", reject: true},
+		{name: "workspace symlink escape", directory: "escape", reject: true},
+		{name: "workflow cannot inherit source root", directory: "${{ github.action_path }}", workflow: true, reject: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace, remote, outside := canonicalTempDir(t), canonicalTempDir(t), canonicalTempDir(t)
+			workflow := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflow, "name: working directory roots\n")
+			writeFixtureFile(t, workspace, "identity", "workspace")
+			writeFixtureFile(t, workspace, "sub/identity", "workspace-sub")
+			writeFixtureFile(t, remote, "composite/identity", "action")
+			writeFixtureFile(t, remote, "composite/sub/identity", "action-sub")
+			writeFixtureFile(t, remote, "shared/identity", "shared")
+			if test.name == "workspace symlink escape" {
+				if err := os.Symlink(outside, filepath.Join(workspace, "escape")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeFixtureFile(t, remote, "composite/action.yml", `name: working directories
+inputs:
+  outside:
+    required: false
+outputs:
+  identity:
+    value: ${{ steps.read.outputs.identity }}
+runs:
+  using: composite
+  steps:
+    - id: read
+      shell: sh
+      working-directory: `+test.directory+`
+      run: echo "identity=$(cat identity)" >> "$GITHUB_OUTPUT"
+`)
+			id := remoteLifecycleLockID(1)
+			job := runtimePlan(t, workspace, workflow, []runtimeTestStep{{
+				ID: "composite", Kind: "uses", Uses: remoteLifecycleUses("composite"),
+				Action: &plan.ActionSelector{Lock: id}, With: map[string]string{"outside": outside},
+			}})
+			if test.workflow {
+				job.Program.Job.Steps = append(job.Program.Job.Steps, normalizeRuntimeTestStep(runtimeTestStep{
+					ID: "outside", Kind: "run", Shell: "sh", Command: "true", WorkingDirectory: filepath.Join(remote, "composite"),
+				}))
+			}
+			digest := digestTree(t, remote)
+			job.Actions = []plan.ActionLock{remoteLifecycleLock(id, "composite", digest, nil)}
+			job.RequiredCapabilities = []string{"network"}
+			job.Outputs = map[string]string{"identity": "${{ steps.composite.outputs.identity }}"}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+			result, err := (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace)
+			if test.reject {
+				blocker, _, classified := UnsupportedFeature(err)
+				if err == nil || result.Conclusion != "failure" || ClassifyFailure(err) != FailureClassUnsupportedFeature || !classified || blocker != "working_directory" {
+					t.Fatalf("outside directory: result=%#v error=%v class=%s blocker=%s", result, err, ClassifyFailure(err), blocker)
+				}
+				return
+			}
+			if err != nil || result.Conclusion != "success" || result.Outputs["identity"] != test.want {
+				t.Fatalf("directory identity: result=%#v error=%v, want %q", result, err, test.want)
+			}
+		})
 	}
 }
 

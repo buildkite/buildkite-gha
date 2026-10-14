@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -47,7 +48,7 @@ func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOut
 	if err != nil {
 		return result, fmt.Errorf("working-directory: %w", err)
 	}
-	dir, err := r.shellWorkingDirectory(workspace, workingDirectory)
+	dir, err := r.shellWorkingDirectory(workspace, workingDirectory, "")
 	if err != nil {
 		return result, err
 	}
@@ -55,7 +56,7 @@ func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOut
 	return result, err
 }
 
-func (r *jobRun) runCompositeShellStep(ctx context.Context, processor *commandOutputProcessor, workspace string, step *executionprogram.ActionStep, jobEnv map[string]string, eval expression.Context, result *Result) error {
+func (r *jobRun) runCompositeShellStep(ctx context.Context, processor *commandOutputProcessor, workspace, sourceRoot string, step *executionprogram.ActionStep, jobEnv map[string]string, eval expression.Context, result *Result) error {
 	env, err := executionprogram.EvaluateBindings(step.Env, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
 		return fmt.Errorf("env: %w", err)
@@ -68,7 +69,7 @@ func (r *jobRun) runCompositeShellStep(ctx context.Context, processor *commandOu
 	if err != nil {
 		return fmt.Errorf("working-directory: %w", err)
 	}
-	dir, err := r.shellWorkingDirectory(workspace, workingDirectory)
+	dir, err := r.shellWorkingDirectory(workspace, workingDirectory, sourceRoot)
 	if err != nil {
 		return err
 	}
@@ -79,11 +80,11 @@ func (r *jobRun) runCompositeShellStep(ctx context.Context, processor *commandOu
 	return r.runShellProcess(ctx, processor, dir, mergeStepEnvironment(jobEnv, env), result, shell, script)
 }
 
-func (r *jobRun) shellWorkingDirectory(workspace, workingDirectory string) (string, error) {
+func (r *jobRun) shellWorkingDirectory(workspace, workingDirectory, sourceRoot string) (string, error) {
 	if r.jobContainer != nil {
 		workingDirectory = r.jobContainer.hostPath(workingDirectory)
 	}
-	return stepWorkingDirectory(workspace, workingDirectory)
+	return stepWorkingDirectory(workspace, workingDirectory, sourceRoot)
 }
 
 func shellCommand(shell, script string) ([]string, error) {
@@ -179,13 +180,18 @@ func shellScriptExtension(command string) string {
 // stepWorkingDirectory resolves a run step's working directory and requires it
 // to exist. Failing here names the directory instead of surfacing the child
 // process's chdir failure as a misleading "fork/exec <shell>" error.
-func stepWorkingDirectory(root, path string) (string, error) {
+// Relative paths always use the workspace. Composite steps may also select an
+// absolute directory inside their own verified source tree.
+func stepWorkingDirectory(root, path, sourceRoot string) (string, error) {
 	resolved, err := workspacePath(root, path)
+	if err != nil && sourceRoot != "" && filepath.IsAbs(path) {
+		resolved, err = workspacePath(sourceRoot, path)
+	}
 	if err != nil {
-		return "", err
+		return "", errUnsupportedFeature("working_directory", "", "working directory %q is outside the permitted execution roots: %w", path, err)
 	}
 	if info, statErr := os.Stat(resolved); statErr != nil || !info.IsDir() {
-		return "", fmt.Errorf("working directory %q does not exist in the workspace", path)
+		return "", fmt.Errorf("working directory %q does not exist or is not a directory", path)
 	}
 	return resolved, nil
 }

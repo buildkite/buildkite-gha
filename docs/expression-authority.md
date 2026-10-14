@@ -166,6 +166,12 @@ a second execution model. Workspace actions created by checkout remain lazy;
 container preparation classifies them from their normalized program rather
 than resolving their source before checkout.
 
+Composite shell execution receives the verified action's `SourceRoot` for
+working-directory containment. Relative directories still resolve from the job
+workspace. Only that invocation can use its source root; workflow steps don't
+inherit it, and `workspacePath` retains its single-root contract. Container paths
+map back to host paths before containment checks.
+
 Reusable workflows flatten before program construction. Direct and called
 jobs therefore use the same lowering and authority paths.
 
