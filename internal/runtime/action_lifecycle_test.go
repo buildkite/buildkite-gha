@@ -1854,7 +1854,7 @@ if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
 action=$(basename "$(dirname "$1")")
 if [ "${1##*/}" = pre.js ]; then
   printf '%s:%s\n' "$action" "$INPUT_STATUS" >> "$STATUS_LOG"
-  if [ "$action" = fails ]; then exit 7; fi
+  if [ "$action" = fails ] || [ "$action" = after ]; then exit 7; fi
 fi
 `)
 	if err := os.Chmod(fakeNode, 0o700); err != nil {
@@ -1863,11 +1863,12 @@ fi
 	parentID, failsID, observeID, afterID := remoteLifecycleLockID(1), remoteLifecycleLockID(2), remoteLifecycleLockID(3), remoteLifecycleLockID(4)
 	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
 		{ID: "parent", Kind: "uses", Uses: remoteLifecycleUses("parent"), Action: &plan.ActionSelector{Lock: parentID}},
-		{ID: "after", Kind: "uses", Uses: remoteLifecycleUses("after"), Action: &plan.ActionSelector{Lock: afterID}},
+		{ID: "after", Kind: "uses", Uses: remoteLifecycleUses("after"), Action: &plan.ActionSelector{Lock: afterID}, ContinueOnErrorExpression: "${{ job.status == 'failure' }}"},
 	})
 	logPath := filepath.Join(workspace, "status.log")
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"STATUS_LOG": logPath}
+	job.Outputs = map[string]string{"after": "${{ steps.after.outcome }}-${{ steps.after.conclusion }}"}
 	digest := digestTree(t, remote)
 	job.Actions = []plan.ActionLock{
 		remoteLifecycleLock(parentID, "parent", digest, map[string]plan.ActionSelector{remoteLifecycleUses("fails"): {Lock: failsID}, remoteLifecycleUses("observe"): {Lock: observeID}}),
@@ -1883,6 +1884,9 @@ fi
 	log, err := os.ReadFile(logPath)
 	if want := "fails:success\nobserve:success\nafter:failure\n"; err != nil || string(log) != want {
 		t.Fatalf("pre status log = %q, %v; want %q", log, err, want)
+	}
+	if got := result.Outputs["after"]; got != "failure-success" {
+		t.Fatalf("later pre outcome-conclusion = %q, want failure-success", got)
 	}
 }
 

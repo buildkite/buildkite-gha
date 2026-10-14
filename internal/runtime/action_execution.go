@@ -539,7 +539,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 	preFailures := r.preFailures
 	if len(job.Actions) != 0 {
 		for stepIndex, step := range executionJob.Steps {
-			eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
+			eval.JobStatus = jobStatusValue(runErr != nil || preStatus.unsuccessful, runCtx.Err() != nil)
 			if step.Kind != "uses" {
 				continue
 			}
