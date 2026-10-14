@@ -992,6 +992,40 @@ func TestEngineServiceFallbacksRejectUnavailableReferences(t *testing.T) {
 	}
 }
 
+func TestEngineCompositeTokenGuidanceIsSpecificToMissingCompositeToken(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		profile ProfileID
+		source  string
+		github  map[string]any
+		want    string
+		wantErr string
+	}{
+		{name: "missing composite token", profile: ProfileActionStepTemplate, source: "${{ github['token'] }}", wantErr: "this composite expression cannot authorize a token"},
+		{name: "missing workflow token", profile: ProfileStepTemplate, source: "${{ github.token }}", wantErr: `unavailable github value "token"`},
+		{name: "missing default token", profile: ProfileActionInputDefault, source: "${{ github.token }}", wantErr: `unavailable github value "token"`},
+		{name: "other missing value", profile: ProfileActionStepTemplate, source: "${{ github.actor }}", wantErr: `unavailable github value "actor"`},
+		{name: "available composite token", profile: ProfileActionStepTemplate, source: "${{ github.token }}", github: map[string]any{"token": "available"}, want: "available"},
+		{name: "unreached composite token", profile: ProfileActionStepTemplate, source: "${{ false && github.token || 'safe' }}", want: "safe"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value, err := NewEngine().Evaluate(Site{Source: test.source, Profile: test.profile, Result: ResultString}, Values{Runtime: Context{GitHub: test.github}})
+			if test.wantErr == "" {
+				if err != nil || value != test.want {
+					t.Fatalf("Evaluate() = %v, %v; want %q", value, err, test.want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("Evaluate() error = %v; want %q", err, test.wantErr)
+			}
+			if test.name != "missing composite token" && strings.Contains(err.Error(), "this composite expression") {
+				t.Fatalf("unrelated failure received composite token guidance: %v", err)
+			}
+		})
+	}
+}
+
 func profileIDs() []ProfileID {
 	return []ProfileID{
 		ProfileRunsOn, ProfileRunsOnTemplate,

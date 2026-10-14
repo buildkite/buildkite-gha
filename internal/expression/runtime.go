@@ -5,6 +5,7 @@ package expression
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/rhysd/actionlint"
 )
+
+var errUnavailableGitHubToken = errors.New(`expression references unavailable github value "token"`)
 
 // NeedStatus contains the expression-visible state of one prerequisite.
 type NeedStatus struct {
@@ -603,6 +606,9 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {
 			if !allowMissing || context.GitHub == nil || requiredGitHubRuntimeValue(path[0]) {
+				if len(path) == 1 && strings.EqualFold(path[0], "token") {
+					return "", errUnavailableGitHubToken
+				}
 				return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
 			}
 			return nil, nil
