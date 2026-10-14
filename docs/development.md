@@ -280,6 +280,8 @@ secrets and service registry passwords are masked; full container configuration
 and health-check commands are not printed. Failed or truncated evidence does
 not replace the readiness error. Cancellation and workflow timeouts retain
 their existing attribution, and cleanup failures retain integrity precedence.
+Completion telemetry keeps the beginning of the masked readiness error within
+its 1,024-byte limit; job logs retain the complete bounded evidence.
 
 The Agent API accepts only allowlisted failure codes. Deploy backend support
 for `E_SERVICE_READINESS` before distributing a CLI that emits it; otherwise,

@@ -313,6 +313,10 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		if runErr != nil {
 			details.setFailurePhase(telemetry.FailurePhaseExecution)
 			details.setFailureCode(runtimeFailureCode(runErr))
+			if details.failureCode == telemetry.FailureCodeServiceReadiness {
+				// Runtime masks the complete evidence before telemetry bounds it.
+				details.failureMessage = runErr.Error()
+			}
 			if status, ok := gharuntime.AgentAPIHTTPStatus(runErr); ok {
 				details.setAgentAPIHTTPStatus(status)
 			}
