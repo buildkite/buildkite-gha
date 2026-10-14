@@ -24,6 +24,7 @@ type ConditionContext struct {
 	GitHub       map[string]any
 	Runner       map[string]string
 	Services     map[string]ServiceContext
+	JobStatus    string
 	Failure      bool
 	Cancelled    bool
 	Unsuccessful bool
@@ -318,10 +319,10 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 		if scope == JobCondition {
 			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
 		}
-		if len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports") || len(path) == 3 && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")) {
+		if isJobStatusReference(root, path) || len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports") || len(path) == 3 && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")) {
 			return nil
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected job.services.<service>.id, job.services.<service>.network, or job.services.<service>.ports[<port>]", reference)
+		return fmt.Errorf("condition reference %q is unsupported; expected job.status, job.services.<service>.id, job.services.<service>.network, or job.services.<service>.ports[<port>]", reference)
 	default:
 		return fmt.Errorf("condition context %q is unsupported", root)
 	}
@@ -620,6 +621,11 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		if isRunnerDebugReference(root, path) {
 			return nil, nil
 		}
+	case isJobStatusReference(root, path):
+		if context.JobStatus == "" {
+			return nil, fmt.Errorf("condition references unavailable job.status")
+		}
+		return context.JobStatus, nil
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return resolveServicePort(context.Services, path[1], path[3], "condition")
 	case len(path) == 3 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")):
