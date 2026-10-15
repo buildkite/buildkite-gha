@@ -338,14 +338,16 @@ func (e *jobGraphExpansion) expandMatrices() {
 		}
 		if err != nil {
 			line, column := matrixErrorPosition(job, err)
-			detail := ""
-			if !sourced.matrixDetailUnsafe {
+			message, detail := "matrix could not be expanded or validated", ""
+			if sourced.matrixDetailUnsafe {
+				message += inputValueHiddenNote
+			} else {
 				detail = matrixErrorDetail(err)
 			}
 			e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 				Path: sourced.path, Line: line, Column: column, Job: job.ID,
-				Message: "matrix could not be expanded or validated", Detail: detail, Err: err,
+				Message: message, Detail: detail, Err: err,
 			})
 			e.failedMatrices[id] = true
 			e.failedJobs[id] = true
@@ -550,15 +552,15 @@ func (e *jobGraphExpansion) mergeContinuations() {
 func (e *jobGraphExpansion) rejectRuntimeMatrix(sourced sourcedJob, err error) {
 	job := sourced.Job
 	line, column := matrixErrorPosition(job, err)
-	detail := err.Error()
+	message, detail := runtimeMatrixDeferredMessage, err.Error()
 	if sourced.matrixDetailUnsafe {
-		detail = ""
+		message, detail = runtimeMatrixDeferredMessage+inputValueHiddenNote, ""
 	}
 	e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 		Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 		Blocker: "expression",
 		Path:    sourced.path, Line: line, Column: column, Job: job.ID,
-		Message: runtimeMatrixDeferredMessage, Detail: detail,
+		Message: message, Detail: detail,
 		Err: locatedJobError(sourced.path, job, line, column, err.Error()),
 	})
 	e.failedMatrices[job.ID] = true
@@ -825,13 +827,19 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			valid = false
 		}
 		runnerContext := instanceContext
-		if supplied, ok := e.runsOnContexts[id]; ok {
-			runnerContext = supplied
+		_, outputBacked := e.runsOnContexts[id]
+		if outputBacked {
+			runnerContext = e.runsOnContexts[id]
 			runnerContext.Strategy = strategy
 		}
 		labels, runsOnErr := resolveRunsOn(job, runnerContext, matrix)
 		if runsOnErr != nil {
-			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, key, "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, runsOnErr.Error())))
+			unsafe := sourced
+			unsafe.Job, unsafe.path = job, jobPath
+			// An evaluation error can quote the producer output the runs-on
+			// expression read, as well as substituted input values.
+			unsafe.runsOnDetailUnsafe = unsafe.runsOnDetailUnsafe || outputBacked
+			e.diagnostics = append(e.diagnostics, runsOnFinding(unsafe, key, runsOnErr))
 			valid = false
 		}
 		candidate.RunsOn = labels

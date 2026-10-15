@@ -171,6 +171,88 @@ func TestContinueRunsOnRejectsInvalidValuesAndTargets(t *testing.T) {
 	}
 }
 
+// A producer output is data from a running job, so a deferred compile failure
+// must report it through the redacted diagnostics only, not a raw error line.
+func TestContinueRunsOnDoesNotEchoRejectedOutputLabels(t *testing.T) {
+	const sentinel = "OUTPUT_SECRET_LABEL_8675309"
+	initial := runContinueInitialUploads(t, continueRunsOnWorkflow)[0]
+	runner := initial.continueRunner(initial.producerManifest(t, "success", `["`+sentinel+`"]`))
+	code, _, stderr := runContinue(t, runner, initial.digest)
+	if code != 1 || pipelineUploads(runner) != 0 || !strings.Contains(stderr, "compile deferred jobs") {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if strings.Contains(stderr, sentinel) {
+		t.Fatalf("stderr repeated the producer output: %s", stderr)
+	}
+}
+
+// A reusable-workflow input built from a dispatch input and a job output is
+// evaluated only when the deferred jobs compile. Its error must not quote the
+// dispatch input.
+func TestContinueRunsOnDoesNotEchoSubstitutedInputs(t *testing.T) {
+	const sentinel = "EVENT_SECRET_KEY_8675309"
+	sources := map[string]string{
+		"build.yml": `on:
+  workflow_dispatch:
+    inputs:
+      fmt:
+        type: string
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.select.outputs.runner }}
+    steps:
+      - id: select
+        run: echo 'runner=ubuntu-latest' >> "$GITHUB_OUTPUT"
+  call:
+    needs: plan
+    uses: ./.github/workflows/callee.yml
+    with:
+      target: ${{ format(inputs.fmt, needs.plan.outputs.runner) }}
+`,
+		"callee.yml": `on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+jobs:
+  build:
+    runs-on: ${{ inputs.target }}
+    steps: [{run: echo ready}]
+`,
+	}
+	repository := writeUploadWorkflowRepository(t, sources)
+	commitUploadWorkflows(t, repository)
+	workflows := enterUploadWorkflows(t, repository, map[string]string{"build.yml": sources["build.yml"]})
+	eventPath := writeUploadEvent(t, repository, "workflow_dispatch", "refs/heads/main", map[string]any{"inputs": map[string]any{"fmt": "{" + sentinel + "}"}})
+	initial := runContinueInitialUploadsInCheckout(t, workflows, eventPath)[0]
+	runner := initial.continueRunner(initial.producerManifest(t, "success", "ubuntu-latest"))
+	code, stdout, stderr := runContinue(t, runner, initial.digest)
+	if code != 1 || pipelineUploads(runner) != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if strings.Contains(stdout, sentinel) || strings.Contains(stderr, sentinel) {
+		t.Fatalf("deferred compile repeated the dispatch input: stdout=%s stderr=%s", stdout, stderr)
+	}
+}
+
+// A runs-on expression that reads a producer output is evaluated only when the
+// deferred jobs compile. Its error must not quote the output.
+func TestContinueRunsOnDoesNotEchoOutputInEvaluationErrors(t *testing.T) {
+	const sentinel = "OUTPUT_SECRET_8675309"
+	workflow := strings.Replace(continueRunsOnWorkflow, "runs-on: ${{ fromJSON(needs.plan.outputs.runner) }}", "runs-on: ${{ format(needs.plan.outputs.runner, 'x') }}", 1)
+	initial := runContinueInitialUploads(t, workflow)[0]
+	runner := initial.continueRunner(initial.producerManifest(t, "success", "{"+sentinel+"}"))
+	code, stdout, stderr := runContinue(t, runner, initial.digest)
+	if code != 1 || pipelineUploads(runner) != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if strings.Contains(stdout, sentinel) || strings.Contains(stderr, sentinel) {
+		t.Fatalf("deferred compile repeated the producer output: stdout=%s stderr=%s", stdout, stderr)
+	}
+}
+
 func TestContinueRunsOnUsesLiveRunnerResolution(t *testing.T) {
 	for _, reject := range []bool{false, true} {
 		t.Run(map[bool]string{false: "selected queue", true: "server rejects preset"}[reject], func(t *testing.T) {

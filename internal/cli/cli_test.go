@@ -1259,7 +1259,7 @@ func TestProcessingReportRedactsEventDerivedMatrixKeys(t *testing.T) {
 	}
 }
 
-func TestProcessingReportRedactsInputSubstitutedMatrixErrors(t *testing.T) {
+func TestProcessingReportRedactsInputSubstitutedErrors(t *testing.T) {
 	const sentinel = "EVENT_SECRET_KEY_8675309"
 	const header = "on:\n  workflow_dispatch:\n    inputs:\n      key:\n        type: string\njobs:\n"
 	root := t.TempDir()
@@ -1268,12 +1268,27 @@ func TestProcessingReportRedactsInputSubstitutedMatrixErrors(t *testing.T) {
 	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	const prep = "  prep:\n    runs-on: ubuntu-latest\n    outputs:\n      value: ${{ steps.s.outputs.value }}\n    steps:\n      - id: s\n        run: true\n"
+	const callee = "on:\n  workflow_call:\n    inputs:\n      value:\n        type: string\njobs:\n  inner:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
 	for _, test := range []struct{ name, jobs string }{
 		{"matrix expression", "  test:\n    strategy:\n      matrix: ${{ github[inputs.key] }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"},
 		{"needs-derived scheduling", "  prep:\n    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.s.outputs.matrix }}\n    steps:\n      - id: s\n        run: true\n  test:\n    needs: prep\n    concurrency: ${{ needs[inputs.key].outputs.group }}\n    strategy:\n      matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"},
+		{"runs-on label", "  test:\n    runs-on: [\"${{ inputs.key }}-${{ github.run_attempt }}\"]\n    steps:\n      - run: true\n"},
+		{"needs-derived runs-on", prep + "  test:\n    needs: prep\n    runs-on: ${{ needs[inputs.key].outputs.value }}\n    steps:\n      - run: true\n"},
+		{"reusable call matrix", "  call:\n    strategy:\n      matrix: ${{ github[inputs.key] }}\n    uses: ./.github/workflows/callee.yml\n"},
+		{"reusable call input", prep + "  call:\n    needs: prep\n    uses: ./.github/workflows/callee.yml\n    with:\n      value: ${{ needs[inputs.key].outputs.value }}\n"},
+		{"step timeout", "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        timeout-minutes: ${{ github[inputs.key] }}\n"},
+		{"step continue-on-error", "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        continue-on-error: ${{ github[inputs.key] }}\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			workflowPath := filepath.Join(t.TempDir(), "input-matrix.yml")
+			workflows := filepath.Join(t.TempDir(), ".github", "workflows")
+			if err := os.MkdirAll(workflows, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workflows, "callee.yml"), []byte(callee), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			workflowPath := filepath.Join(workflows, "input.yml")
 			if err := os.WriteFile(workflowPath, []byte(header+test.jobs), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -1288,10 +1303,49 @@ func TestProcessingReportRedactsInputSubstitutedMatrixErrors(t *testing.T) {
 			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 				t.Fatal(err)
 			}
-			if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid || report.Diagnostics[0].Detail != "" {
+			if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "error" || report.Diagnostics[0].Detail != "" || !strings.HasSuffix(report.Diagnostics[0].Message, "so the cause is not shown") {
 				t.Fatalf("diagnostics = %#v", report.Diagnostics)
 			}
 		})
+	}
+}
+
+// A substituted number input can leave a step control that no longer lexes.
+// The lexer error quotes the number, so the report must not repeat it.
+func TestProcessingReportRedactsStepControlSubstitutionErrors(t *testing.T) {
+	const sentinel = "8675309"
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, "input.yml")
+	eventPath := filepath.Join(root, "event.json")
+	workflow := []byte("on:\n  workflow_dispatch:\n    inputs:\n      pin:\n        type: number\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        timeout-minutes: ${{ inputs['pin']oops }}\n")
+	event := []byte(`{"provider":"github","event":"workflow_dispatch","repository":{"owner":"owner","name":"repo"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"actor","payload":{"inputs":{"pin":"` + sentinel + `"}}}`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+		t.Fatalf("report leaked event input value: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+
+	// The same syntax error written directly is the author's own text, so it
+	// stays visible even though the workflow declares an unrelated input.
+	authored := []byte("on:\n  workflow_dispatch:\n    inputs:\n      pin:\n        type: number\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        timeout-minutes: ${{ 42oops }}\n")
+	if err := os.WriteFile(workflowPath, authored, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "42") || strings.Contains(stdout.String(), "cause is not shown") {
+		t.Fatalf("authored step-control syntax error was hidden: %s", stdout.String())
 	}
 }
 
