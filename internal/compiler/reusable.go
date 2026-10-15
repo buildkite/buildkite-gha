@@ -46,8 +46,12 @@ type sourcedJob struct {
 	jobPermissionsIgnored bool
 	reusableCall          workflow.Position
 	blockerDetailUnsafe   bool
-	callGuards            []sourcedCallGuard
-	concurrencyGates      []WorkflowConcurrencyGate
+	// matrixDetailUnsafe reports that static input substitution changed the
+	// matrix or its scheduling values, so their expression source can quote
+	// input values and matrix errors must not be shown as detail.
+	matrixDetailUnsafe bool
+	callGuards         []sourcedCallGuard
+	concurrencyGates   []WorkflowConcurrencyGate
 }
 
 type secretAuthority struct {
@@ -178,7 +182,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix)}
+			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix), matrixDetailUnsafe: matrixInputsApplied(originalJob, job)}
 			workflowJobs[job.ID] = job
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
@@ -325,6 +329,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				secretAuthority: cloneSecretAuthority(secrets), needBindings: needBindings,
 				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
 				blockerDetailUnsafe: blockerDetailUnsafe,
+				matrixDetailUnsafe:  matrixInputsApplied(originalJob, job),
 				callGuards:          cloneSourcedCallGuards(callGuards),
 				concurrencyGates:    append([]WorkflowConcurrencyGate(nil), concurrencyGates...),
 			})
@@ -1470,6 +1475,65 @@ func deferredInputPlaceholders(inputs map[string]deferredInput) map[string]any {
 		placeholders[name] = "deferred"
 	}
 	return placeholders
+}
+
+// matrixInputsApplied reports whether static input substitution changed the
+// job's matrix or the scheduling values that matrix errors can quote.
+func matrixInputsApplied(before, after workflow.Job) bool {
+	if (before.Concurrency == nil) != (after.Concurrency == nil) ||
+		before.Concurrency != nil && before.Concurrency.Group != after.Concurrency.Group ||
+		expressionText(before.MaxParallelExpression) != expressionText(after.MaxParallelExpression) {
+		return true
+	}
+	return matrixChanged(before.Matrix, after.Matrix)
+}
+
+// matrixChanged compares matrix content rather than the whole struct, because
+// cloning turns nil include and exclude lists into empty ones.
+func matrixChanged(before, after *workflow.Matrix) bool {
+	if before == nil || after == nil {
+		return before != after
+	}
+	if expressionText(before.Expression) != expressionText(after.Expression) ||
+		expressionText(before.IncludeExpression) != expressionText(after.IncludeExpression) ||
+		expressionText(before.ExcludeExpression) != expressionText(after.ExcludeExpression) ||
+		len(before.Rows) != len(after.Rows) || len(before.Include) != len(after.Include) || len(before.Exclude) != len(after.Exclude) {
+		return true
+	}
+	for i := range before.Rows {
+		if expressionText(before.Rows[i].Expression) != expressionText(after.Rows[i].Expression) || len(before.Rows[i].Values) != len(after.Rows[i].Values) {
+			return true
+		}
+		for j := range before.Rows[i].Values {
+			if !reflect.DeepEqual(before.Rows[i].Values[j].Data, after.Rows[i].Values[j].Data) {
+				return true
+			}
+		}
+	}
+	for i := range before.Include {
+		if !matrixCombinationValuesEqual(before.Include[i], after.Include[i]) {
+			return true
+		}
+	}
+	for i := range before.Exclude {
+		if !matrixCombinationValuesEqual(before.Exclude[i], after.Exclude[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+func matrixCombinationValuesEqual(before, after workflow.MatrixCombination) bool {
+	if len(before.Values) != len(after.Values) {
+		return false
+	}
+	for name, value := range before.Values {
+		other, ok := after.Values[name]
+		if !ok || !reflect.DeepEqual(value.Data, other.Data) {
+			return false
+		}
+	}
+	return true
 }
 
 func cloneMatrixWithInputs(matrix *workflow.Matrix, inputs map[string]any) *workflow.Matrix {

@@ -1259,6 +1259,42 @@ func TestProcessingReportRedactsEventDerivedMatrixKeys(t *testing.T) {
 	}
 }
 
+func TestProcessingReportRedactsInputSubstitutedMatrixErrors(t *testing.T) {
+	const sentinel = "EVENT_SECRET_KEY_8675309"
+	const header = "on:\n  workflow_dispatch:\n    inputs:\n      key:\n        type: string\njobs:\n"
+	root := t.TempDir()
+	eventPath := filepath.Join(root, "event.json")
+	event := []byte(`{"provider":"github","event":"workflow_dispatch","repository":{"owner":"owner","name":"repo"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"actor","payload":{"inputs":{"key":"` + sentinel + `"}}}`)
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ name, jobs string }{
+		{"matrix expression", "  test:\n    strategy:\n      matrix: ${{ github[inputs.key] }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"},
+		{"needs-derived scheduling", "  prep:\n    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.s.outputs.matrix }}\n    steps:\n      - id: s\n        run: true\n  test:\n    needs: prep\n    concurrency: ${{ needs[inputs.key].outputs.group }}\n    strategy:\n      matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflowPath := filepath.Join(t.TempDir(), "input-matrix.yml")
+			if err := os.WriteFile(workflowPath, []byte(header+test.jobs), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+				t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+			}
+			if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+				t.Fatalf("report leaked event input value: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			var report compatibility.ProcessingReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid || report.Diagnostics[0].Detail != "" {
+				t.Fatalf("diagnostics = %#v", report.Diagnostics)
+			}
+		})
+	}
+}
+
 func TestProcessingReportExplainsWorkflowAuthoredMatrixErrors(t *testing.T) {
 	const sentinel = "EVENT_SECRET_KEY_8675309"
 	root := t.TempDir()

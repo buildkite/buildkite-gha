@@ -338,10 +338,14 @@ func (e *jobGraphExpansion) expandMatrices() {
 		}
 		if err != nil {
 			line, column := matrixErrorPosition(job, err)
+			detail := ""
+			if !sourced.matrixDetailUnsafe {
+				detail = matrixErrorDetail(err)
+			}
 			e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 				Path: sourced.path, Line: line, Column: column, Job: job.ID,
-				Message: "matrix could not be expanded or validated", Detail: matrixErrorDetail(err), Err: err,
+				Message: "matrix could not be expanded or validated", Detail: detail, Err: err,
 			})
 			e.failedMatrices[id] = true
 			e.failedJobs[id] = true
@@ -540,16 +544,21 @@ func (e *jobGraphExpansion) mergeContinuations() {
 }
 
 // rejectRuntimeMatrix records why a needs-derived matrix, or a job that
-// depends on one, cannot be compiled. The reason quotes only job and output
-// identifiers from the workflow, never event data, so it can travel in Detail.
+// depends on one, cannot be compiled. The reason quotes job and output
+// identifiers from the workflow source, so it travels in Detail unless static
+// input substitution rewrote that source.
 func (e *jobGraphExpansion) rejectRuntimeMatrix(sourced sourcedJob, err error) {
 	job := sourced.Job
 	line, column := matrixErrorPosition(job, err)
+	detail := err.Error()
+	if sourced.matrixDetailUnsafe {
+		detail = ""
+	}
 	e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 		Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 		Blocker: "expression",
 		Path:    sourced.path, Line: line, Column: column, Job: job.ID,
-		Message: runtimeMatrixDeferredMessage, Detail: err.Error(),
+		Message: runtimeMatrixDeferredMessage, Detail: detail,
 		Err: locatedJobError(sourced.path, job, line, column, err.Error()),
 	})
 	e.failedMatrices[job.ID] = true
