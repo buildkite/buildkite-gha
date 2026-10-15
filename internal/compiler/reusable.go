@@ -50,6 +50,9 @@ type sourcedJob struct {
 	// matrix or its scheduling values, so their expression source can quote
 	// input values and matrix errors must not be shown as detail.
 	matrixDetailUnsafe bool
+	// runsOnDetailUnsafe reports that static input substitution changed
+	// runs-on, so runs-on errors must not quote its expression source.
+	runsOnDetailUnsafe bool
 	callGuards         []sourcedCallGuard
 	concurrencyGates   []WorkflowConcurrencyGate
 }
@@ -182,7 +185,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix), matrixDetailUnsafe: matrixInputsApplied(originalJob, job)}
+			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix), matrixDetailUnsafe: matrixInputsApplied(originalJob, job), runsOnDetailUnsafe: runsOnInputsApplied(originalJob, job)}
 			workflowJobs[job.ID] = job
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
@@ -330,6 +333,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
 				blockerDetailUnsafe: blockerDetailUnsafe,
 				matrixDetailUnsafe:  matrixInputsApplied(originalJob, job),
+				runsOnDetailUnsafe:  runsOnInputsApplied(originalJob, job),
 				callGuards:          cloneSourcedCallGuards(callGuards),
 				concurrencyGates:    append([]WorkflowConcurrencyGate(nil), concurrencyGates...),
 			})
@@ -442,6 +446,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		matrixContext.Strategy = nil
 		matrices, err := expandMatrix(path, job, matrixContext)
 		if err != nil {
+			if matrixInputsApplied(originalJob, job) {
+				return reusableResolution{}, inputSubstitutedFinding(path, job, StageMatrix, CodeMatrixInvalid, job.Matrix.Span.Start, "matrix could not be expanded or validated"+inputValueHiddenNote)
+			}
 			return reusableResolution{}, err
 		}
 		if job.MaxParallelExpression != nil {
@@ -904,6 +911,9 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 			} else {
 				resolved, err = evaluateStaticCallValue(text, parentInputs.values, matrix, context)
 			}
+			if err != nil && replaceStaticInputs(text, parentInputs.values) != text {
+				return reusableInputs{}, inputSubstitutedFinding(path, job, StageGraph, CodeGraphInvalid, value.Span.Start, fmt.Sprintf("Reusable workflow input %q cannot be resolved", name)+inputValueHiddenNote)
+			}
 			if err != nil {
 				detail := fmt.Sprintf("Reusable-workflow input %q is not statically resolvable: %v", name, err)
 				message := fmt.Sprintf("Reusable workflow input %q uses a value that is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.", name)
@@ -1227,14 +1237,18 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 		if step.ContinueOnErrorExpression != "" {
 			resolved, err := expression.SubstituteCompileInputs(step.ContinueOnErrorExpression, inputs)
 			if err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("resolve continue-on-error expression: %v", err))
+				// A failure the authored source already has is safe to quote.
+				// Otherwise substitution caused it and it can quote input values.
+				_, sourceErr := expression.SubstituteCompileInputs(step.ContinueOnErrorExpression, nil)
+				return job, stepControlError(path, job, *step, "continue-on-error", "resolve", sourceErr == nil, err)
 			}
+			substituted := resolved != step.ContinueOnErrorExpression
 			if err := validateCompileSite(resolved, expression.ProfileStepControl, expression.ResultBoolean); err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("validate continue-on-error expression: %v", err))
+				return job, stepControlError(path, job, *step, "continue-on-error", "validate", substituted, err)
 			}
 			reduced, err := reduceCompileSite(resolved, expression.ProfileReusableStepControl, expression.ResultAny, expression.CompileContext{})
 			if err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("evaluate continue-on-error expression: %v", err))
+				return job, stepControlError(path, job, *step, "continue-on-error", "evaluate", substituted, err)
 			}
 			if !reduced.Known {
 				step.ContinueOnErrorExpression = resolved
@@ -1247,14 +1261,18 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 		if step.TimeoutMinutesExpression != "" {
 			resolved, err := expression.SubstituteCompileInputs(step.TimeoutMinutesExpression, inputs)
 			if err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("resolve timeout-minutes expression: %v", err))
+				// A failure the authored source already has is safe to quote.
+				// Otherwise substitution caused it and it can quote input values.
+				_, sourceErr := expression.SubstituteCompileInputs(step.TimeoutMinutesExpression, nil)
+				return job, stepControlError(path, job, *step, "timeout-minutes", "resolve", sourceErr == nil, err)
 			}
+			substituted := resolved != step.TimeoutMinutesExpression
 			if err := validateCompileSite(resolved, expression.ProfileStepControl, expression.ResultNumber); err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("validate timeout-minutes expression: %v", err))
+				return job, stepControlError(path, job, *step, "timeout-minutes", "validate", substituted, err)
 			}
 			reduced, err := reduceCompileSite(resolved, expression.ProfileReusableStepControl, expression.ResultAny, expression.CompileContext{})
 			if err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("evaluate timeout-minutes expression: %v", err))
+				return job, stepControlError(path, job, *step, "timeout-minutes", "evaluate", substituted, err)
 			}
 			if !reduced.Known {
 				step.TimeoutMinutesExpression = resolved
@@ -1272,6 +1290,16 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 		step.With = replaceRuntimeMapInputs(step.With, inputs)
 	}
 	return job, nil
+}
+
+// stepControlError reports a step-control expression that failed validation or
+// evaluation. When input substitution rewrote the expression, the error can
+// quote input values, so a fixed message replaces it.
+func stepControlError(path string, job workflow.Job, step workflow.Step, control, action string, substituted bool, err error) error {
+	if substituted {
+		return inputSubstitutedFinding(path, job, StageGraph, CodeGraphInvalid, step.Span.Start, fmt.Sprintf("step %s expression cannot be resolved", control)+inputValueHiddenNote)
+	}
+	return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("%s %s expression: %v", action, control, err))
 }
 
 func blockerFieldsChanged(before, after workflow.Job) bool {
@@ -1475,6 +1503,29 @@ func deferredInputPlaceholders(inputs map[string]deferredInput) map[string]any {
 		placeholders[name] = "deferred"
 	}
 	return placeholders
+}
+
+// inputValueHiddenNote ends a diagnostic whose cause is withheld because the
+// failing expression was rewritten with workflow input values or read a job
+// output, so the cause can quote event data or job results.
+const inputValueHiddenNote = "; it uses a workflow input or job output value, so the cause is not shown"
+
+// inputSubstitutedFinding reports a failure in expression source that static
+// input substitution rewrote. The underlying error can quote input values,
+// which can carry event data, so only the fixed message is reported.
+func inputSubstitutedFinding(path string, job workflow.Job, stage ProcessingStage, code string, position workflow.Position, message string) error {
+	return &ProcessingFinding{
+		Stage: stage, Code: code, Category: "compatibility",
+		Path: path, Line: position.Line, Column: position.Column, Job: job.ID,
+		Message: message,
+		Err:     locatedJobError(path, job, position.Line, position.Column, message),
+	}
+}
+
+// runsOnInputsApplied reports whether static input substitution changed the
+// job's runs-on labels or expression.
+func runsOnInputsApplied(before, after workflow.Job) bool {
+	return !slices.Equal(before.RunsOn, after.RunsOn) || expressionText(before.RunsOnExpr) != expressionText(after.RunsOnExpr)
 }
 
 // matrixInputsApplied reports whether static input substitution changed the

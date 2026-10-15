@@ -333,6 +333,14 @@ func matrixCombinationsFromValue(name string, value any) ([]workflow.MatrixCombi
 	return combinations, nil
 }
 
+// runsOnShapeError reports a runs-on value of the wrong type. Its text names
+// only Go types and item positions, never the value, so it is safe to show even
+// when the value came from workflow inputs or a job output.
+type runsOnShapeError struct{ err error }
+
+func (e runsOnShapeError) Error() string { return e.err.Error() }
+func (e runsOnShapeError) Unwrap() error { return e.err }
+
 func resolveRunsOn(job workflow.Job, context expression.CompileContext, matrix map[string]any) ([]string, error) {
 	context.Matrix = matrix
 	sites := runsOnSites(job)
@@ -352,13 +360,13 @@ func resolveRunsOn(job workflow.Job, context expression.CompileContext, matrix m
 			for i, item := range value {
 				label, ok := item.(string)
 				if !ok {
-					return nil, fmt.Errorf("runs-on expression item %d resolved to %T, want string", i, item)
+					return nil, runsOnShapeError{fmt.Errorf("runs-on expression item %d resolved to %T, want string", i, item)}
 				}
 				labels[i] = label
 			}
 			return labels, nil
 		default:
-			return nil, fmt.Errorf("runs-on expression resolved to %T, want string or array", value)
+			return nil, runsOnShapeError{fmt.Errorf("runs-on expression resolved to %T, want string or array", value)}
 		}
 	}
 	labels := make([]string, len(job.RunsOn))

@@ -2116,8 +2116,10 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 				step.TimeoutMinutesExpression = source
 			}
 			_, err := applyStaticInputs("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, map[string]any{"allow": true})
-			if err == nil || !strings.Contains(err.Error(), "unsupported runtime function") {
-				t.Fatalf("applyStaticInputs() error = %v, want unsupported runtime function", err)
+			// Substitution rewrote the expression, so the cause can quote input
+			// values; the control is still rejected without quoting it.
+			if err == nil || !strings.Contains(err.Error(), "step "+field+" expression cannot be resolved") {
+				t.Fatalf("applyStaticInputs() error = %v, want %s rejection", err, field)
 			}
 		})
 	}
@@ -2140,7 +2142,7 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 	}{
 		{name: "boolean string", expression: "${{ inputs.value }}", inputs: map[string]any{"value": "true"}, want: "must produce a boolean"},
 		{name: "numeric string", expression: "${{ inputs.value }}", inputs: map[string]any{"value": "5"}, want: "must produce a number"},
-		{name: "invalid static expression", expression: "${{ fromJSON(inputs.value) && matrix.experimental }}", inputs: map[string]any{"value": "invalid"}, want: "evaluate timeout-minutes expression"},
+		{name: "invalid static expression", expression: "${{ fromJSON(inputs.value) && matrix.experimental }}", inputs: map[string]any{"value": "invalid"}, want: "step timeout-minutes expression cannot be resolved"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			step := workflow.Step{Span: span}

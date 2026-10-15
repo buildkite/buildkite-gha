@@ -115,7 +115,9 @@ func describeRuntimeRunsOn(sourced sourcedJob, context expression.CompileContext
 		if output != nil {
 			value, err := engine.Evaluate(expression.Site{Source: input.template, Profile: expression.ProfileRunsOnTemplate, Result: expression.ResultString}, expression.Values{Compile: expression.CompileContext{Needs: values}})
 			if err != nil {
-				return descriptor, context, fmt.Errorf("resolve scheduling input %q: %w", name, err)
+				// The template was built from the caller's input values and is
+				// evaluated with a producer output, so its error can quote either.
+				return descriptor, context, fmt.Errorf("resolve scheduling input %q: the value cannot be evaluated with the producer output", name)
 			}
 			if context.Inputs == nil {
 				context.Inputs = make(map[string]any)
@@ -133,10 +135,32 @@ func describeRuntimeRunsOn(sourced sourcedJob, context expression.CompileContext
 }
 
 func (e *jobGraphExpansion) rejectRuntimeRunsOn(sourced sourcedJob, err error) {
-	position := runsOnPosition(sourced.Job)
-	e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", sourced.path, position.Line, position.Column, sourced.ID, "", "", 0, locatedJobError(sourced.path, sourced.Job, position.Line, position.Column, err.Error())))
+	e.diagnostics = append(e.diagnostics, runsOnFinding(sourced, "", err))
 	e.failedJobs[sourced.ID] = true
 	e.failedMatrices[sourced.ID] = true
+}
+
+// runsOnInputsMessage replaces runs-on errors that can quote workflow input
+// values or job outputs.
+const runsOnInputsMessage = "runs-on cannot be resolved" + inputValueHiddenNote
+
+// runsOnFinding reports a runs-on error. It quotes the error unless the error
+// can quote input values or job outputs, in which case a fixed message
+// replaces it. Shape errors never quote the value, so they are always shown.
+func runsOnFinding(sourced sourcedJob, instance string, err error) error {
+	job := sourced.Job
+	position := runsOnPosition(job)
+	var shape runsOnShapeError
+	if sourced.runsOnDetailUnsafe && !errors.As(err, &shape) {
+		message := fmt.Sprintf("job %q: %s", job.ID, runsOnInputsMessage)
+		return &ProcessingFinding{
+			Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
+			Path: sourced.path, Line: position.Line, Column: position.Column, Job: job.ID, Instance: instance,
+			Message: message,
+			Err:     locatedJobError(sourced.path, job, position.Line, position.Column, runsOnInputsMessage),
+		}
+	}
+	return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", sourced.path, position.Line, position.Column, job.ID, instance, "", 0, locatedJobError(sourced.path, job, position.Line, position.Column, err.Error()))
 }
 
 // rejectRuntimeRunsOnConcurrency reports a job whose runner comes from a job
