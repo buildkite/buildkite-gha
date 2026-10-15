@@ -3586,9 +3586,11 @@ func liveContainerJob(t *testing.T, docker string, steps []runtimeTestStep) JobR
 	t.Helper()
 	w := t.TempDir()
 	j := jobContainerPlan(t, w, steps)
+	// Build before starting the deadline: a cold build can take most of it on a busy agent.
+	runtimeExecutable := buildLiveContainerRuntime(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
-	r, e := (Runner{Docker: docker, RuntimeExecutable: buildLiveContainerRuntime(t), InterruptGrace: 100 * time.Millisecond, TerminateGrace: 100 * time.Millisecond}).runTestJob(ctx, j, w)
+	r, e := (Runner{Docker: docker, RuntimeExecutable: runtimeExecutable, InterruptGrace: 100 * time.Millisecond, TerminateGrace: 100 * time.Millisecond}).runTestJob(ctx, j, w)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -3622,9 +3624,10 @@ func TestLiveJobContainerDefaultNonRootUser(t *testing.T) {
 	w := t.TempDir()
 	j := jobContainerPlan(t, w, []runtimeTestStep{{ID: "u", Kind: "run", Shell: "sh", Command: `test "$(id -u)" != 0`}})
 	j.Container.Image = "nginxinc/nginx-unprivileged:stable-alpine"
+	runtimeExecutable := buildLiveContainerRuntime(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	if _, err := (Runner{Docker: d, RuntimeExecutable: buildLiveContainerRuntime(t)}).runTestJob(ctx, j, w); err != nil {
+	if _, err := (Runner{Docker: d, RuntimeExecutable: runtimeExecutable}).runTestJob(ctx, j, w); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -3666,9 +3669,10 @@ runs:
 		{ID: compositeID, Source: "workspace", Path: ".github/actions/composite", SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/composite"))},
 	}
 	job.Outputs = map[string]string{"value": "${{ steps.js.outputs.value }}"}
+	runner := Runner{Docker: docker, RuntimeExecutable: buildLiveContainerRuntime(t), Node24: requireNode24(t)}
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	result, err := (Runner{Docker: docker, RuntimeExecutable: buildLiveContainerRuntime(t), Node24: requireNode24(t)}).runTestJob(ctx, job, workspace)
+	result, err := runner.runTestJob(ctx, job, workspace)
 	if err != nil || result.Outputs["value"] != "live" || result.Env["COMPOSITE_LIVE"] != "yes" {
 		t.Fatalf("live container actions result = %#v, error = %v", result, err)
 	}
