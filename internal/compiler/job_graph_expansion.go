@@ -234,7 +234,8 @@ func (e *jobGraphExpansion) expandMatrices() {
 				err = errors.New("job-output-derived runs-on cannot depend on a deferred upload")
 			}
 			if err == nil && (e.workflowConcurrency || len(sourced.concurrencyGates) != 0) {
-				err = errors.New("workflow concurrency cannot be combined with job-output-derived runs-on")
+				e.rejectRuntimeRunsOnConcurrency(sourced)
+				continue
 			}
 			if err != nil {
 				e.rejectRuntimeRunsOn(sourced, err)
@@ -261,9 +262,9 @@ func (e *jobGraphExpansion) expandMatrices() {
 			switch {
 			case err != nil:
 			case len(sourced.concurrencyGates) != 0:
-				err = errors.New("reusable-workflow concurrency cannot be combined with a needs-derived matrix")
+				err = deferredConcurrencyError("reusable-workflow", "a needs-derived matrix", "matrix")
 			case e.workflowConcurrency:
-				err = errors.New("workflow concurrency cannot be combined with a needs-derived matrix")
+				err = deferredConcurrencyError("workflow", "a needs-derived matrix", "matrix")
 			}
 			if err != nil {
 				e.rejectRuntimeMatrix(sourced, err)
@@ -340,7 +341,7 @@ func (e *jobGraphExpansion) expandMatrices() {
 			e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 				Path: sourced.path, Line: line, Column: column, Job: job.ID,
-				Message: "matrix could not be expanded or validated", Err: err,
+				Message: "matrix could not be expanded or validated", Detail: matrixErrorDetail(err), Err: err,
 			})
 			e.failedMatrices[id] = true
 			e.failedJobs[id] = true
