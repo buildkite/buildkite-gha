@@ -138,3 +138,24 @@ func (e *jobGraphExpansion) rejectRuntimeRunsOn(sourced sourcedJob, err error) {
 	e.failedJobs[sourced.ID] = true
 	e.failedMatrices[sourced.ID] = true
 }
+
+// rejectRuntimeRunsOnConcurrency reports a job whose runner comes from a job
+// output while a workflow-level concurrency group holds the run. The
+// expression is valid; the job graph cannot be scheduled that way.
+func (e *jobGraphExpansion) rejectRuntimeRunsOnConcurrency(sourced sourcedJob) {
+	scope := "workflow"
+	if !e.workflowConcurrency {
+		scope = "reusable-workflow"
+	}
+	err := deferredConcurrencyError(scope, "job-output-derived runs-on", "runs-on")
+	position := runsOnPosition(sourced.Job)
+	e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", sourced.path, position.Line, position.Column, sourced.ID, "", "", 0, locatedJobError(sourced.path, sourced.Job, position.Line, position.Column, err.Error())))
+	e.failedJobs[sourced.ID] = true
+	e.failedMatrices[sourced.ID] = true
+}
+
+// deferredConcurrencyError explains why a workflow-level concurrency group
+// cannot hold a job that a later pipeline upload adds.
+func deferredConcurrencyError(scope, feature, static string) error {
+	return fmt.Errorf("%s concurrency cannot be combined with %s: jobs that depend on a job output are uploaded after that job runs, and the %s concurrency group cannot hold jobs uploaded later; move concurrency to the job level, where it holds one job rather than the whole run, or use a static %s", scope, feature, scope, static)
+}

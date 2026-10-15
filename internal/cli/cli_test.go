@@ -1254,8 +1254,83 @@ func TestProcessingReportRedactsEventDerivedMatrixKeys(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid || report.Diagnostics[0].Message != "matrix could not be expanded or validated" {
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid || report.Diagnostics[0].Message != "matrix could not be expanded or validated" || report.Diagnostics[0].Detail != "" {
 		t.Fatalf("diagnostics = %#v", report.Diagnostics)
+	}
+}
+
+func TestProcessingReportRedactsInputSubstitutedMatrixErrors(t *testing.T) {
+	const sentinel = "EVENT_SECRET_KEY_8675309"
+	const header = "on:\n  workflow_dispatch:\n    inputs:\n      key:\n        type: string\njobs:\n"
+	root := t.TempDir()
+	eventPath := filepath.Join(root, "event.json")
+	event := []byte(`{"provider":"github","event":"workflow_dispatch","repository":{"owner":"owner","name":"repo"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"actor","payload":{"inputs":{"key":"` + sentinel + `"}}}`)
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ name, jobs string }{
+		{"matrix expression", "  test:\n    strategy:\n      matrix: ${{ github[inputs.key] }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"},
+		{"needs-derived scheduling", "  prep:\n    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.s.outputs.matrix }}\n    steps:\n      - id: s\n        run: true\n  test:\n    needs: prep\n    concurrency: ${{ needs[inputs.key].outputs.group }}\n    strategy:\n      matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflowPath := filepath.Join(t.TempDir(), "input-matrix.yml")
+			if err := os.WriteFile(workflowPath, []byte(header+test.jobs), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+				t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+			}
+			if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+				t.Fatalf("report leaked event input value: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			var report compatibility.ProcessingReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid || report.Diagnostics[0].Detail != "" {
+				t.Fatalf("diagnostics = %#v", report.Diagnostics)
+			}
+		})
+	}
+}
+
+func TestProcessingReportExplainsWorkflowAuthoredMatrixErrors(t *testing.T) {
+	const sentinel = "EVENT_SECRET_KEY_8675309"
+	root := t.TempDir()
+	eventPath := filepath.Join(root, "event.json")
+	event := []byte(`{"provider":"github","event":"push","repository":{"owner":"owner","name":"repo"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"actor","payload":{"matrix":{"` + sentinel + `":[]}}}`)
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ name, matrix, detail string }{
+		{"needs-derived dimension", "matrix:\n        image: ${{ fromJSON(needs.prep.outputs.images) }}", `matrix dimension "image": runtime-dependent matrix expressions are unsupported: unsupported compile-time context "needs"; a matrix from job outputs must be the whole matrix: or include: value, such as matrix: ${{ fromJSON(needs.<job>.outputs.<name>) }}`},
+		{"unavailable variable", "matrix:\n        image: ${{ fromJSON(vars.images) }}", `matrix dimension "image": matrix expression cannot be resolved at compile time: compile-time expression references unavailable value "vars.images"`},
+		{"invalid JSON", "matrix:\n        image: ${{ fromJSON('[') }}", `matrix dimension "image": matrix expression cannot be resolved at compile time: fromJSON argument is invalid JSON`},
+		{"every combination excluded", "matrix:\n        os: [linux]\n        exclude:\n          - os: linux", "matrix excludes every combination"},
+		{"event-derived empty dimension", "matrix: ${{ github.event.matrix }}", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflowPath := filepath.Join(t.TempDir(), "matrix.yml")
+			workflow := "on: push\njobs:\n  prep:\n    runs-on: ubuntu-latest\n    outputs:\n      images: ${{ steps.s.outputs.images }}\n    steps:\n      - id: s\n        run: true\n  test:\n    needs: prep\n    runs-on: ubuntu-latest\n    strategy:\n      " + test.matrix + "\n    steps:\n      - run: true\n"
+			if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+				t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+			}
+			if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+				t.Fatalf("report leaked event payload key: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			var report compatibility.ProcessingReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid || report.Diagnostics[0].Message != "matrix could not be expanded or validated" || report.Diagnostics[0].Detail != test.detail {
+				t.Fatalf("diagnostics = %#v, want detail %q", report.Diagnostics, test.detail)
+			}
+		})
 	}
 }
 

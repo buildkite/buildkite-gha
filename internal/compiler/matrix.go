@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math/big"
@@ -27,6 +28,29 @@ type matrixPositionError struct {
 func (e matrixPositionError) Error() string { return e.err.Error() }
 func (e matrixPositionError) Unwrap() error { return e.err }
 
+// matrixDetailError marks a matrix error whose text quotes only
+// workflow-authored text, such as dimension names written in the workflow,
+// context and function names, and fixed limits. Reports show it as detail.
+// Errors without this mark can quote event-derived data, such as keys of a
+// matrix object read from github.event, and stay hidden.
+type matrixDetailError struct{ err error }
+
+func (e matrixDetailError) Error() string { return e.err.Error() }
+func (e matrixDetailError) Unwrap() error { return e.err }
+
+func matrixDetailErrorf(format string, args ...any) error {
+	return matrixDetailError{fmt.Errorf(format, args...)}
+}
+
+// matrixErrorDetail returns the reportable text of a marked matrix error.
+func matrixErrorDetail(err error) string {
+	var detail matrixDetailError
+	if errors.As(err, &detail) {
+		return detail.Error()
+	}
+	return ""
+}
+
 func expandMatrix(path string, job workflow.Job, context expression.CompileContext) ([]map[string]any, error) {
 	if job.Matrix == nil {
 		return []map[string]any{nil}, nil
@@ -38,7 +62,7 @@ func expandMatrix(path string, job workflow.Job, context expression.CompileConte
 	}
 	matrices, err := expandMatrixDefinition(matrix)
 	if err != nil {
-		return nil, jobError(path, job, err.Error())
+		return nil, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "", err)
 	}
 	return matrices, nil
 }
@@ -50,6 +74,11 @@ func expandMatrixDefinition(matrix *workflow.Matrix) ([]map[string]any, error) {
 	}
 	for _, row := range matrix.Rows {
 		if len(row.Values) == 0 {
+			// Only rows parsed from the workflow have a source span; rows
+			// built from an evaluated object are named by evaluated keys.
+			if row.Span.Start.Line != 0 {
+				return nil, matrixDetailErrorf("matrix dimension %q has no values", row.Name)
+			}
 			return nil, fmt.Errorf("matrix dimension %q has no values", row.Name)
 		}
 		var next []map[string]any
@@ -60,7 +89,7 @@ func expandMatrixDefinition(matrix *workflow.Matrix) ([]map[string]any, error) {
 				combination[row.Name] = value.Data
 				next = append(next, combination)
 				if len(next) > maxMatrixInstances {
-					return nil, fmt.Errorf("matrix expands beyond %d instances", maxMatrixInstances)
+					return nil, matrixDetailErrorf("matrix expands beyond %d instances", maxMatrixInstances)
 				}
 			}
 		}
@@ -92,7 +121,7 @@ func expandMatrixDefinition(matrix *workflow.Matrix) ([]map[string]any, error) {
 			included = append(included, includedMatrix{values: cloneAnyMap(values)})
 		}
 		if len(included) > maxMatrixInstances {
-			return nil, fmt.Errorf("matrix expands beyond %d instances", maxMatrixInstances)
+			return nil, matrixDetailErrorf("matrix expands beyond %d instances", maxMatrixInstances)
 		}
 	}
 	matrices = matrices[:0]
@@ -100,7 +129,7 @@ func expandMatrixDefinition(matrix *workflow.Matrix) ([]map[string]any, error) {
 		matrices = append(matrices, matrix.values)
 	}
 	if len(matrices) == 0 {
-		return nil, fmt.Errorf("matrix excludes every combination")
+		return nil, matrixDetailErrorf("matrix excludes every combination")
 	}
 	return matrices, nil
 }
@@ -109,11 +138,11 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 	if matrix.Expression != nil {
 		value, err := evaluateCompileSite(matrix.Expression.Text, expression.ProfileCompile, expression.ResultAny, context)
 		if err != nil {
-			return nil, matrixPositionError{err: matrixExpressionError(err), line: matrix.Expression.Span.Start.Line, column: matrix.Expression.Span.Start.Column}
+			return nil, matrixPositionError{err: matrixExpressionError("", err, true), line: matrix.Expression.Span.Start.Line, column: matrix.Expression.Span.Start.Column}
 		}
 		object, ok := value.(map[string]any)
 		if !ok {
-			return nil, matrixPositionError{err: fmt.Errorf("matrix expression resolved to %T, want object", value), line: matrix.Expression.Span.Start.Line, column: matrix.Expression.Span.Start.Column}
+			return nil, matrixPositionError{err: matrixDetailErrorf("matrix expression resolved to %T, want object", value), line: matrix.Expression.Span.Start.Line, column: matrix.Expression.Span.Start.Column}
 		}
 		return matrixFromObject(object)
 	}
@@ -126,7 +155,7 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 			for j, matrixValue := range row.Values {
 				value, err := resolveAuthoredMatrixValue(matrixValue.Data, matrixValue.Span, context)
 				if err != nil {
-					return nil, matrixPositionError{err: fmt.Errorf("matrix dimension %q: %w", row.Name, matrixExpressionError(err)), line: matrixValue.Span.Start.Line, column: matrixValue.Span.Start.Column}
+					return nil, matrixPositionError{err: matrixExpressionError(fmt.Sprintf("matrix dimension %q: ", row.Name), err, false), line: matrixValue.Span.Start.Line, column: matrixValue.Span.Start.Column}
 				}
 				resolved.Rows[i].Values[j] = matrixValue
 				resolved.Rows[i].Values[j].Data = value
@@ -135,11 +164,11 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 		}
 		value, err := evaluateCompileSite(row.Expression.Text, expression.ProfileCompile, expression.ResultAny, context)
 		if err != nil {
-			return nil, matrixPositionError{err: fmt.Errorf("matrix dimension %q: %w", row.Name, matrixExpressionError(err)), line: row.Expression.Span.Start.Line, column: row.Expression.Span.Start.Column}
+			return nil, matrixPositionError{err: matrixExpressionError(fmt.Sprintf("matrix dimension %q: ", row.Name), err, false), line: row.Expression.Span.Start.Line, column: row.Expression.Span.Start.Column}
 		}
 		values, ok := value.([]any)
 		if !ok {
-			return nil, matrixPositionError{err: fmt.Errorf("matrix dimension %q resolved to %T, want array", row.Name, value), line: row.Expression.Span.Start.Line, column: row.Expression.Span.Start.Column}
+			return nil, matrixPositionError{err: matrixDetailErrorf("matrix dimension %q resolved to %T, want array", row.Name, value), line: row.Expression.Span.Start.Line, column: row.Expression.Span.Start.Column}
 		}
 		resolved.Rows[i].Expression = nil
 		resolved.Rows[i].Values = make([]workflow.Value, len(values))
@@ -175,7 +204,7 @@ func resolveMatrixCombinations(name string, combinations []workflow.MatrixCombin
 				matrixValue := combination.Values[key]
 				value, err := resolveAuthoredMatrixValue(matrixValue.Data, matrixValue.Span, context)
 				if err != nil {
-					return nil, matrixPositionError{err: fmt.Errorf("matrix %s: %w", name, matrixExpressionError(err)), line: matrixValue.Span.Start.Line, column: matrixValue.Span.Start.Column}
+					return nil, matrixPositionError{err: matrixExpressionError("matrix "+name+": ", err, false), line: matrixValue.Span.Start.Line, column: matrixValue.Span.Start.Column}
 				}
 				matrixValue.Data = value
 				resolved[i].Values[key] = matrixValue
@@ -185,7 +214,7 @@ func resolveMatrixCombinations(name string, combinations []workflow.MatrixCombin
 	}
 	value, err := evaluateCompileSite(expr.Text, expression.ProfileCompile, expression.ResultAny, context)
 	if err != nil {
-		return nil, fmt.Errorf("matrix %s: %w", name, matrixExpressionError(err))
+		return nil, matrixExpressionError("matrix "+name+": ", err, name == "include")
 	}
 	resolved, err := matrixCombinationsFromValue(name, value)
 	if err != nil {
@@ -230,11 +259,24 @@ func resolveAuthoredMatrixValue(value any, span workflow.Span, context expressio
 	}
 }
 
-func matrixExpressionError(err error) error {
-	if strings.Contains(err.Error(), `compile-time context "needs"`) || strings.Contains(err.Error(), `compile-time context "steps"`) {
-		return fmt.Errorf("runtime-dependent matrix expressions are unsupported: %w", err)
+// matrixExpressionError explains an expression that failed at a matrix site.
+// prefix must contain only workflow-authored text. whole reports whether the
+// site is the whole matrix or include value, the only sites that may read a
+// job output.
+func matrixExpressionError(prefix string, err error, whole bool) error {
+	var wrapped error
+	switch {
+	case strings.Contains(err.Error(), `compile-time context "needs"`) && !whole:
+		wrapped = fmt.Errorf("%sruntime-dependent matrix expressions are unsupported: %w; a matrix from job outputs must be the whole matrix: or include: value, such as matrix: ${{ fromJSON(needs.<job>.outputs.<name>) }}", prefix, err)
+	case strings.Contains(err.Error(), `compile-time context "needs"`) || strings.Contains(err.Error(), `compile-time context "steps"`):
+		wrapped = fmt.Errorf("%sruntime-dependent matrix expressions are unsupported: %w", prefix, err)
+	default:
+		wrapped = fmt.Errorf("%smatrix expression cannot be resolved at compile time: %w", prefix, err)
 	}
-	return fmt.Errorf("matrix expression cannot be resolved at compile time: %w", err)
+	if _, authored := expression.AuthoredErrorText(err); authored {
+		return matrixDetailError{wrapped}
+	}
+	return wrapped
 }
 
 func matrixFromObject(object map[string]any) (*workflow.Matrix, error) {
@@ -274,13 +316,13 @@ func matrixFromObject(object map[string]any) (*workflow.Matrix, error) {
 func matrixCombinationsFromValue(name string, value any) ([]workflow.MatrixCombination, error) {
 	items, ok := value.([]any)
 	if !ok {
-		return nil, fmt.Errorf("matrix %s resolved to %T, want array", name, value)
+		return nil, matrixDetailErrorf("matrix %s resolved to %T, want array", name, value)
 	}
 	combinations := make([]workflow.MatrixCombination, len(items))
 	for i, item := range items {
 		object, ok := item.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("matrix %s entry %d resolved to %T, want object", name, i, item)
+			return nil, matrixDetailErrorf("matrix %s entry %d resolved to %T, want object", name, i, item)
 		}
 		values := make(map[string]workflow.Value, len(object))
 		for key, value := range object {
@@ -300,7 +342,7 @@ func resolveRunsOn(job workflow.Job, context expression.CompileContext, matrix m
 	if job.RunsOnExpr != nil {
 		value, err := evaluate(sites[0])
 		if err != nil {
-			return nil, fmt.Errorf("runs-on expression cannot be resolved at compile time: %w", err)
+			return nil, fmt.Errorf("runs-on expression cannot be resolved at compile time: %w%s", err, runsOnRunValueNote(err))
 		}
 		switch value := value.(type) {
 		case string:
@@ -324,11 +366,20 @@ func resolveRunsOn(job workflow.Job, context expression.CompileContext, matrix m
 		value, err := evaluate(sites[i])
 		resolved, _ := value.(string)
 		if err != nil {
-			return nil, fmt.Errorf("runs-on label %q cannot be resolved at compile time: %w", label, err)
+			return nil, fmt.Errorf("runs-on label %q cannot be resolved at compile time: %w%s", label, err, runsOnRunValueNote(err))
 		}
 		labels[i] = resolved
 	}
 	return labels, nil
+}
+
+// runsOnRunValueNote explains why runs-on cannot read a per-run value such
+// as github.run_attempt.
+func runsOnRunValueNote(err error) string {
+	if errors.Is(err, expression.ErrRunValueUnavailable) {
+		return "; the runner is chosen when the workflow is imported and does not change when a job is retried"
+	}
+	return ""
 }
 
 func reportableRunnerLabels(job workflow.Job, labels []string) []string {

@@ -2334,7 +2334,7 @@ jobs:
 		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
 		var finding *ProcessingFinding
-		if err == nil || !errors.As(err, &finding) || !strings.HasPrefix(finding.Message, `Reusable workflow input "target" uses a needs expression in an unsupported form: compile-time expression references unavailable value "github.run_id".`) {
+		if err == nil || !errors.As(err, &finding) || !strings.HasPrefix(finding.Message, `Reusable workflow input "target" uses a needs expression in an unsupported form: compile-time expression references unavailable value "github.run_id": run_id, run_number, and run_attempt exist only while a job runs, not when the workflow is imported; github values available at import: actor,`) {
 			t.Fatalf("Compile() finding = %#v", finding)
 		}
 	})
