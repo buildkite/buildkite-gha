@@ -179,7 +179,8 @@
                   }
                 }
               }
-            }
+            },
+            "github_action": "produce"
           },
           {
             "id": "step-2",
@@ -294,7 +295,8 @@
                   }
                 }
               }
-            }
+            },
+            "github_action": "__run"
           }
         ],
         "outputs": [
@@ -365,7 +367,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:2a34995be54dea25a5fed668c2c255321f2e51f806ed5f63a5735a0c07e40707"
+          "plan_digest": "sha256:2bd6c163a5df9d68a6260b7fbc78a4a841d5431b5022e9641c72a662a1875a13"
         }
       ]
     },
@@ -553,7 +555,8 @@
                   }
                 }
               }
-            }
+            },
+            "github_action": "__run"
           }
         ]
       }
@@ -604,7 +607,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:2a34995be54dea25a5fed668c2c255321f2e51f806ed5f63a5735a0c07e40707"
+          "plan_digest": "sha256:2bd6c163a5df9d68a6260b7fbc78a4a841d5431b5022e9641c72a662a1875a13"
         }
       ]
     },
@@ -792,7 +795,8 @@
                   }
                 }
               }
-            }
+            },
+            "github_action": "__run"
           }
         ]
       }
