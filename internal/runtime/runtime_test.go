@@ -1068,7 +1068,7 @@ func TestStepExpressionContextExposesScopedTokenWithoutMutatingJobContext(t *tes
 		GitHub:  map[string]any{"actor": "octocat"},
 		Secrets: map[string]string{"GITHUB_TOKEN": "ghs_scoped_step"},
 	}
-	stepEval := stepExpressionContext(eval, executionprogram.Step{})
+	stepEval := stepExpressionContext(eval)
 	value, err := evaluateLegacyTemplate("${{ github.token }}", expression.ProfileRuntimeTemplate, stepEval)
 	if err != nil || value != "ghs_scoped_step" {
 		t.Fatalf("step github.token = %q, %v", value, err)
@@ -1115,9 +1115,9 @@ func TestGitHubContextExposesRuntimeEventIdentity(t *testing.T) {
 			if github["repository_owner"] != test.wantOwner || github["ref_name"] != test.wantRefName || github["ref_type"] != test.wantRefType || github["base_ref"] != test.wantBaseRef || github["action"] != "" || github["action_path"] != "" || github["action_ref"] != "" || github["action_repository"] != "" {
 				t.Fatalf("GitHub context = %#v", github)
 			}
-			stepContext := stepExpressionContext(expression.Context{GitHub: github, Secrets: map[string]string{"GITHUB_TOKEN": "ghs_test"}}, executionprogram.Step{GitHubAction: "__run"})
+			stepContext := stepExpressionContext(expression.Context{GitHub: github, Secrets: map[string]string{"GITHUB_TOKEN": "ghs_test"}})
 			serialized, err := evaluateLegacyTemplate("${{ toJSON(github) }}", expression.ProfileStepTemplate, stepContext)
-			if err != nil || !strings.Contains(serialized, `"action": "__run"`) || !strings.Contains(serialized, `"action_path": ""`) || !strings.Contains(serialized, `"action_ref": ""`) || !strings.Contains(serialized, `"action_repository": ""`) {
+			if err != nil || !strings.Contains(serialized, `"action": ""`) || !strings.Contains(serialized, `"action_path": ""`) || !strings.Contains(serialized, `"action_ref": ""`) || !strings.Contains(serialized, `"action_repository": ""`) {
 				t.Fatalf("serialized top-level GitHub context = %q, %v", serialized, err)
 			}
 			condition := "github.repository_owner == '" + test.wantOwner + "' && github.ref_name == '" + test.wantRefName + "' && github.ref_type == '" + test.wantRefType + "' && github.base_ref == '" + test.wantBaseRef + "'"
@@ -1253,7 +1253,7 @@ func TestRuntimeWorkflowIdentityUsesImmutableCallerPlanData(t *testing.T) {
 			} {
 				value, err := engine.Evaluate(
 					expression.Site{Source: expressionSource, Profile: expression.ProfileStepTemplate, Result: expression.ResultString, Purpose: expression.PurposeExpression},
-					expression.Values{Runtime: stepExpressionContext(expression.Context{GitHub: github}, executionprogram.Step{})},
+					expression.Values{Runtime: stepExpressionContext(expression.Context{GitHub: github})},
 				)
 				got, _ := value.(string)
 				if err != nil || got != want {

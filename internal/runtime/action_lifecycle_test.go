@@ -286,7 +286,7 @@ func TestConditionInspectionFailureAfterMainFailureStillRunsPostPhase(t *testing
 		Program: &executionprogram.Program{Version: executionprogram.Version, Job: executionprogram.Job{Steps: []executionprogram.Step{{ID: "inspect", Kind: "run", Condition: invalidStepCondition}}}},
 	}
 	run.processor = newCommandOutputProcessor(io.Discard, io.Discard)
-	run.eval = expression.Context{Env: map[string]string{}, Steps: map[string]expression.StepStatus{}}
+	run.eval = expression.Context{GitHub: githubContext(run.job), Env: map[string]string{}, Steps: map[string]expression.StepStatus{}}
 	run.result = JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}}
 	run.runtimeEnv = map[string]string{}
 	run.posts = &postRegistry{}
@@ -905,16 +905,52 @@ printf '%s:%s\n' "$(basename "$1" .js)" "$INPUT_NAME" >> "$PHASES"
 	})
 	phases := filepath.Join(workspace, "phases")
 	job.Env = map[string]string{"JOB_ACTION": "${{ github.action }}", "PHASES": phases}
+	job.Outputs = map[string]string{"action": "${{ github.action }}"}
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(jsID, "js", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	var logs bytes.Buffer
-	if result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v\nlogs: %s", result, err, logs.String())
+	}
+	if got := result.Outputs["action"]; got != "__owner_repo" {
+		t.Fatalf("job output action = %q, want last post action __owner_repo", got)
 	}
 	if got, err := os.ReadFile(phases); err != nil || string(got) != "pre:__owner_repo\nmain:__owner_repo\npost:__owner_repo\n" {
 		t.Fatalf("phases = %q, %v; want the invoking step name in pre, main, and post", got, err)
+	}
+}
+
+func TestCompiledGitHubActionRetainsSkippedStepNameForOutputs(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github/workflows/test.yml")
+	workflow := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      action: ${{ github.action }}
+    steps:
+      - run: test '${{ github.action }}' = __run
+      - id: named
+        run: test '${{ github.action }}' = named
+      - if: false
+        run: exit 1
+`)
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil || len(plans) != 1 {
+		t.Fatalf("compiled plans = %d, error = %v; want 1", len(plans), err)
+	}
+	result, err := (Runner{}).RunJob(t.Context(), plans[0], workspace)
+	if err != nil || result.Conclusion != "success" || result.Outputs["action"] != "__run_2" {
+		t.Fatalf("RunJob() result = %#v, error = %v; want skipped step name __run_2", result, err)
 	}
 }
 
