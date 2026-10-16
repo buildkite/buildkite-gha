@@ -299,9 +299,75 @@ func TestAgentGitHubTokensRejectedWorkflowTokenGuidance(t *testing.T) {
 	}
 }
 
+func TestAgentGitHubTokensWorkflowDenialCodes(t *testing.T) {
+	for _, test := range []struct {
+		name, body, want string
+		status           int
+	}{
+		{"permissions", `{"code":"permissions_unavailable","message":"secret-provider-text"}`, "App registration", 400},
+		{"repository", `{"code":"repository_unavailable","message":"secret-provider-text"}`, "repository exists", 400},
+		{"connection", `{"code":"code_access_connection_unavailable"}`, "Buildkite organization admin", 400},
+		{"pull request", `{"code":"pr_permission_ceiling"}`, "does not execute untrusted PR code", 400},
+		{"workflow policy", `{"code":"workflow_policy_exceeded"}`, "top-level permissions at this build's commit", 400},
+		{"invalid policy", `{"code":"workflow_policy_invalid"}`, "explicit permission map", 400},
+		{"provenance", `{"code":"workflow_provenance_invalid"}`, "validate this build's source and ancestry", 400},
+		{"merge queue", `{"code":"merge_queue_not_supported"}`, "not supported for merge-queue builds", 400},
+		{"pipeline disabled", `{"code":"pipeline_disabled"}`, "Ask a pipeline administrator", 404},
+		{"disabled wrong status", `{"code":"pipeline_disabled"}`, "top-level permissions", 400},
+		{"permissions wrong status", `{"code":"permissions_unavailable"}`, "not enabled for this organization or pipeline", 404},
+		{"unknown code", `{"code":"secret-provider-text"}`, "top-level permissions", 400},
+		{"missing code", `{"message":"secret-provider-text"}`, "top-level permissions", 400},
+		{"malformed", `{"code":"permissions_unavailable"`, "top-level permissions", 400},
+		{"trailing JSON", `{"code":"permissions_unavailable"}{}`, "top-level permissions", 400},
+		{"oversized", `{"code":"permissions_unavailable","message":"` + strings.Repeat("x", githubTokenResponseLimit) + `"}`, "top-level permissions", 400},
+		{"wrong status", `{"code":"permissions_unavailable"}`, "request was denied", 403},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer server.Close()
+			provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{
+				Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret",
+				OrganizationSlug: "acme", PipelineSlug: "widgets",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = provider.WorkflowToken(t.Context(), "acme/widgets", "ci.yml", map[string]string{"issues": "write", "contents": "read"})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("WorkflowToken() = %v, want %q", err, test.want)
+			}
+			for _, secret := range []string{"secret-provider-text", "job-secret"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("error leaked %q: %v", secret, err)
+				}
+			}
+			if test.name == "permissions" {
+				for _, want := range []string{"acme/widgets", "contents:read, issues:write", "GitHub installation admin", "only if the App already requests", "https://buildkite.com/acme/widgets/settings/repository"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q lacks %q", err, want)
+					}
+				}
+				if strings.Contains(err.Error(), "pending approval") {
+					t.Fatal("inferred pending approval")
+				}
+			}
+			if test.name == "connection" && !strings.Contains(err.Error(), "https://buildkite.com/organizations/acme/repository-providers") {
+				t.Errorf("connection error lacks admin settings link: %v", err)
+			}
+			if test.name == "pull request" && (!strings.Contains(err.Error(), "triggered or rebuilt") || !strings.Contains(err.Error(), "will not change this restriction")) {
+				t.Errorf("PR error lacks ancestor scope and distinct remedy: %v", err)
+			}
+		})
+	}
+}
+
 func TestAgentGitHubTokensKeepsActionSourceFailureUnclassified(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"code":"permissions_unavailable","message":"secret-provider-text"}`)
 	}))
 	defer server.Close()
 	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-token"})

@@ -539,8 +539,29 @@ func TestRunJobRejectedWorkflowTokenGuidanceAndTelemetry(t *testing.T) {
 	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
+	runner := &cliCaptureRunner{}
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var annotations []cliCommand
+	for _, command := range runner.commands {
+		if len(command.args) > 0 && command.args[0] == "annotate" {
+			annotations = append(annotations, command)
+		}
+	}
+	if len(annotations) != 1 {
+		t.Fatalf("annotations = %#v, want one workflow-token annotation", annotations)
+	}
+	annotation := string(annotations[0].stdin)
+	for _, want := range []string{"GitHub workflow token unavailable", "top-level permissions", "contact Buildkite support", buildURL} {
+		if !strings.Contains(annotation, want) {
+			t.Errorf("annotation %q lacks %q", annotation, want)
+		}
+	}
+	for _, secret := range []string{jobToken, responseData} {
+		if strings.Contains(annotation, secret) {
+			t.Errorf("annotation leaked %q", secret)
+		}
 	}
 	for _, want := range []string{"top-level permissions", "Buildkite GitHub App", "contact Buildkite support", buildURL} {
 		if !strings.Contains(stderr.String(), want) {
@@ -563,6 +584,62 @@ func TestRunJobRejectedWorkflowTokenGuidanceAndTelemetry(t *testing.T) {
 		if strings.Contains(event.ErrorMessage, secret) {
 			t.Errorf("telemetry error message contains secret %q", secret)
 		}
+	}
+}
+
+func TestRunJobAnnotatesWorkflowPermissionDenial(t *testing.T) {
+	for _, failAnnotation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("annotation failure %t", failAnnotation), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"code":"permissions_unavailable","message":"<script>provider-secret</script>"}`)
+			}))
+			defer server.Close()
+			job := cliRunJobPlan()
+			job.Workflow.Path = ".github/workflows/ci.yml"
+			job.Event.Repository = "acme/widgets"
+			job.RequiredCapabilities = []string{"provider-token-write"}
+			job.GitHubToken = &plan.GitHubToken{Workflow: "ci.yml", Permissions: map[string]string{"contents": "read", "issues": "write"}}
+			planPath, digest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, digest)
+			truePath, err := exec.LookPath("true")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+			t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-secret")
+			t.Setenv("BUILDKITE_GHA_AGENT", truePath)
+			t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "1")
+			runner := &cliCaptureRunner{failAnnotation: failAnnotation}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 {
+				t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+			}
+			var annotations []cliCommand
+			for _, command := range runner.commands {
+				if len(command.args) > 0 && command.args[0] == "annotate" {
+					annotations = append(annotations, command)
+				}
+			}
+			if len(annotations) != 1 || !slices.Equal(annotations[0].args, []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", "github-workflow-token", "--style", "error"}) {
+				t.Fatalf("annotations = %#v", annotations)
+			}
+			for _, output := range []string{stderr.String(), string(annotations[0].stdin)} {
+				for _, want := range []string{"App registration", "only if the App already requests", "Workflow requested contents:read, issues:write for acme/widgets"} {
+					if !strings.Contains(output, want) {
+						t.Errorf("output %q lacks %q", output, want)
+					}
+				}
+				for _, secret := range []string{"provider-secret", "job-secret", "<script>"} {
+					if strings.Contains(output, secret) {
+						t.Errorf("output leaked %q", secret)
+					}
+				}
+			}
+			if got := strings.Contains(stderr.String(), "warning: workflow token annotation"); got != failAnnotation {
+				t.Errorf("annotation warning = %t, want %t", got, failAnnotation)
+			}
+		})
 	}
 }
 
