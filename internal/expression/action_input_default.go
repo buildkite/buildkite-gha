@@ -31,9 +31,6 @@ func validateActionInputDefaultTemplate(template string) error {
 func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 	validator := newSemanticValidator(actionInputDefaultSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
-		if isJobStatusReference(root, path) {
-			return nil
-		}
 		if isJobCheckRunIDReference(root, path) {
 			return nil
 		}
@@ -142,12 +139,6 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 	}
 	evaluator := newSemanticEvaluator(actionInputDefaultSurface)
 	evaluator.resolve = func(root string, path []string) (any, error) {
-		if isJobStatusReference(root, path) {
-			if context.JobStatus == "" {
-				return nil, fmt.Errorf("expression references unavailable job.status")
-			}
-			return context.JobStatus, nil
-		}
 		if isJobCheckRunIDReference(root, path) {
 			// Buildkite creates no GitHub check run. GitHub documents this
 			// property as unavailable on GitHub Enterprise Server; unavailable

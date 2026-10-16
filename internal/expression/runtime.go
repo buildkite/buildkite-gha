@@ -65,6 +65,7 @@ const (
 	runtimeReferenceNeedOutput
 	runtimeReferenceNeedResult
 	runtimeReferenceRunner
+	runtimeReferenceJobStatus
 )
 
 // validateRuntimeTemplate verifies that every expression in a runtime template
@@ -78,7 +79,9 @@ func validateRuntimeTemplate(template string) error {
 func validateRuntimeReferenceNode(node actionlint.ExprNode) error {
 	validator := newSemanticValidator(runtimeReferenceSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
-		if isRunnerDebugReference(root, path) {
+		// Direct runtime templates, such as job containers and run defaults,
+		// are evaluated before steps establish a job status.
+		if isRunnerDebugReference(root, path) || isJobStatusReference(root, path) {
 			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
 		}
 		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
@@ -589,6 +592,11 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 			return nil, nil
 		}
 		return "", fmt.Errorf("expression references unavailable runner value %q", path[0])
+	case runtimeReferenceJobStatus:
+		if context.JobStatus == "" {
+			return nil, fmt.Errorf("expression references unavailable job.status")
+		}
+		return context.JobStatus, nil
 	case runtimeReferenceServicePort:
 		return resolveServicePort(context.Services, path[1], path[3], "expression")
 	case runtimeReferenceServiceValue:
@@ -693,6 +701,8 @@ func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 	switch {
 	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") || strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "debug")):
 		return runtimeReferenceRunner
+	case isJobStatusReference(root, path):
+		return runtimeReferenceJobStatus
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return runtimeReferenceServicePort
 	case len(path) == 3 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")):

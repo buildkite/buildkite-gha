@@ -408,6 +408,58 @@ func TestEngineAnalysisDefersRunnerEnvironmentToRuntime(t *testing.T) {
 	}
 }
 
+func TestEngineJobStatusIsLimitedToRunningJobPositions(t *testing.T) {
+	engine := NewEngine()
+	values := Values{Runtime: Context{JobStatus: "failure"}, Condition: ConditionContext{JobStatus: "failure", Unsuccessful: true, Failure: true}}
+	for _, test := range []struct {
+		profile ProfileID
+		source  string
+		result  ResultType
+		want    any
+	}{
+		{profile: ProfileStepTemplate, source: "status=${{ job.status }}", result: ResultString, want: "status=failure"},
+		{profile: ProfileActionStepTemplate, source: "${{ job['status'] }}", result: ResultString, want: "failure"},
+		{profile: ProfileJobOutput, source: "${{ job.status }}", result: ResultString, want: "failure"},
+		{profile: ProfileStepControl, source: "${{ job.status == 'failure' }}", result: ResultBoolean, want: true},
+		{profile: ProfileStepCondition, source: "always() && job.status == 'failure'", result: ResultBoolean, want: true},
+		{profile: ProfileActionStepCondition, source: "always() && job.status == 'success'", result: ResultBoolean, want: false},
+		{profile: ProfileActionLifecycle, source: "job.status == 'failure'", result: ResultBoolean, want: true},
+	} {
+		site := Site{Source: test.source, Profile: test.profile, Result: test.result, Purpose: PurposeExpression}
+		if got, err := engine.Evaluate(site, values); err != nil || got != test.want {
+			t.Errorf("%s Evaluate(%q) = %#v, %v; want %#v", test.profile, test.source, got, err, test.want)
+		}
+		if _, err := engine.Evaluate(site, Values{}); err == nil || !strings.Contains(err.Error(), "unavailable job.status") {
+			t.Errorf("%s Evaluate(%q) without status error = %v", test.profile, test.source, err)
+		}
+	}
+	// Positions evaluated before steps run, or outside the job, keep rejecting
+	// job.status even in unreachable branches.
+	for _, profile := range []ProfileID{ProfileJobEnvironment, ProfileJobDefault, ProfileRuntimeTemplate, ProfileServiceEnvironment, ProfileServiceCredential, ProfileDockerActionArg} {
+		if _, err := engine.Validate(Site{Source: "${{ false && job.status || 'ok' }}", Profile: profile, Result: ResultString}); err == nil {
+			t.Errorf("%s admitted job.status", profile)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileJobCondition, ProfileCompileJobCondition, ProfileCallCondition, ProfileCompileCallCondition} {
+		if _, err := engine.Validate(Site{Source: "false && job.status == 'success'", Profile: profile, Result: ResultBoolean}); err == nil {
+			t.Errorf("%s admitted job.status", profile)
+		}
+	}
+	// job.status is not a status function, so the implicit success() guard
+	// still applies, and planning treats the value as unknown.
+	guarded := Site{Source: "job.status == 'failure'", Profile: ProfileStepCondition, Result: ResultBoolean}
+	if got, err := engine.Evaluate(guarded, values); err != nil || got != false {
+		t.Errorf("implicit success guard = %#v, %v; want false", got, err)
+	}
+	if references, err := engine.ReferencesStatus(guarded); err != nil || references {
+		t.Errorf("ReferencesStatus(job.status) = %v, %v; want false", references, err)
+	}
+	token, err := engine.Analyze(Site{Source: "${{ job.status == 'success' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}, AbstractValues{})
+	if err != nil || token.Value.Known || token.Effects.GitHubToken != GitHubTokenDirect {
+		t.Errorf("Analyze() = %#v, %v; want unknown value with conservative token authority", token, err)
+	}
+}
+
 func TestEngineAnalysisTreatsRunnerDebugAsKnownDisabled(t *testing.T) {
 	for _, test := range []struct {
 		name string

@@ -428,8 +428,8 @@ func TestEvaluateActionInputDefaultSupportsJobStatus(t *testing.T) {
 	if _, err := EvaluateActionInputDefault("${{ job.status }}", Context{}); err == nil {
 		t.Fatal("EvaluateActionInputDefault() accepted unavailable job.status")
 	}
-	if _, err := Evaluate("${{ job.status }}", Context{JobStatus: "success"}); err == nil {
-		t.Fatal("Evaluate() accepted action-default-only job.status")
+	if err := ValidateRuntimeTemplate("${{ job.status }}"); err == nil {
+		t.Fatal("ValidateRuntimeTemplate() accepted job.status before steps run")
 	}
 }
 
@@ -626,7 +626,7 @@ func TestServiceRuntimeContext(t *testing.T) {
 			t.Fatalf("unknown Analyze(%q) = %#v, %v", source, got, err)
 		}
 	}
-	for _, source := range []string{"job", "job['services']", "job.services[env.NAME].id", "job.services.s3.docker.test.id", "true || job['status']"} {
+	for _, source := range []string{"job", "job['services']", "job.services[env.NAME].id", "job.services.s3.docker.test.id", "true || job['name']"} {
 		if _, err := engine.Validate(Site{Source: source, Profile: ProfileStepCondition, Result: ResultBoolean}); err == nil {
 			t.Errorf("Validate(%q) unexpectedly succeeded", source)
 		}
@@ -1094,7 +1094,7 @@ func TestEvaluateJobSurfacesErrors(t *testing.T) {
 		{name: "projected needs", evaluate: EvaluateJobDefault, template: "${{ false && toJSON(needs.*) || 'ok' }}"},
 		{name: "aggregate steps", evaluate: EvaluateJobOutput, template: "${{ false && toJSON(steps) || 'ok' }}"},
 		{name: "dynamic service", evaluate: EvaluateJobOutput, template: "${{ false && job.services[env.KEY].id || 'ok' }}"},
-		{name: "job status", evaluate: EvaluateJobOutput, template: "${{ false && job.status || 'ok' }}"},
+		{name: "job identity", evaluate: EvaluateJobOutput, template: "${{ false && job.name || 'ok' }}"},
 		{name: "hash files", evaluate: EvaluateJobDefault, template: "${{ false && hashFiles('go.sum') || 'ok' }}"},
 	}
 	for _, test := range tests {
