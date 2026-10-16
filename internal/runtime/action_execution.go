@@ -573,7 +573,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 				continue
 			}
 			preEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
-			preEval := stepExpressionContext(eval)
+			preEval := stepExpressionContext(eval, step)
 			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes.Literal)
 			bindHashFilesContext(preCtx, &preEval)
 			wasUnsuccessful := preStatus.unsuccessful
@@ -663,7 +663,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 		if runErr != nil || runCtx.Err() != nil {
 			referencesStatus, err := executionprogram.ReferencesStatus(step.Condition)
 			if err != nil {
-				stepEval := stepExpressionContext(eval)
+				stepEval := stepExpressionContext(eval, step)
 				execution := classifyStepExecutionWithControls(ctx, runCtx, step, newResult(), fmt.Errorf("condition: %w", err), stepEval)
 				runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
 				continue
@@ -674,7 +674,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			}
 		}
 		evaluationCtx, cancelEvaluation := stepContext(runCtx, step.TimeoutMinutes.Literal)
-		stepEval := stepExpressionContext(eval)
+		stepEval := stepExpressionContext(eval, step)
 		bindHashFilesContext(evaluationCtx, &stepEval)
 		stepEnv, err := executionprogram.EvaluateBindings(step.Env, executionprogram.EvaluationContext{Expression: stepEval})
 		if err != nil {
@@ -1196,8 +1196,10 @@ func stepDisplayName(step executionprogram.Step, eval expression.Context) (strin
 	return step.ID, nil
 }
 
-func stepExpressionContext(context expression.Context) expression.Context {
+func stepExpressionContext(context expression.Context, step executionprogram.Step) expression.Context {
 	context = cloneExpressionContext(context)
+	// Pre, main, post, and nested composite sites inherit this step's name.
+	context.GitHub["action"] = step.GitHubAction
 	if token, ok := context.Secrets["GITHUB_TOKEN"]; ok {
 		context.GitHub["token"] = token
 	}
@@ -1440,6 +1442,7 @@ func githubContext(job plan.Job) map[string]any {
 	}
 	workflowRef, workflowSHA := workflowRunIdentity(job)
 	return map[string]any{
+		"action":            "",
 		"action_path":       "",
 		"action_ref":        "",
 		"action_repository": "",
