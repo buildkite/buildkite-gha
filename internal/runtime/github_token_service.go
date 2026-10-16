@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -57,11 +58,12 @@ type AgentGitHubTokenConfig struct {
 // AgentGitHubTokens mints repository-scoped tokens through Buildkite's
 // job-bound Agent API endpoint.
 type AgentGitHubTokens struct {
-	actionSourceURL    string
-	workflowURL        string
-	repositorySettings string
-	buildURL           string
-	agent              *agentapi.Client
+	actionSourceURL     string
+	workflowURL         string
+	repositorySettings  string
+	repositoryProviders string
+	buildURL            string
+	agent               *agentapi.Client
 }
 
 func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, error) {
@@ -72,12 +74,17 @@ func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, er
 	if err != nil {
 		return nil, err
 	}
+	var repositoryProviders string
+	if buildkiteSlugPattern.MatchString(config.OrganizationSlug) {
+		repositoryProviders = "https://buildkite.com/organizations/" + config.OrganizationSlug + "/repository-providers"
+	}
 	return &AgentGitHubTokens{
-		actionSourceURL:    agent.URL("github_action_source_access_token"),
-		workflowURL:        agent.URL("github_workflow_access_token"),
-		repositorySettings: pipelineRepositorySettingsURL(config.OrganizationSlug, config.PipelineSlug),
-		buildURL:           safeBuildkiteBuildURL(config.BuildURL),
-		agent:              agent,
+		actionSourceURL:     agent.URL("github_action_source_access_token"),
+		workflowURL:         agent.URL("github_workflow_access_token"),
+		repositorySettings:  pipelineRepositorySettingsURL(config.OrganizationSlug, config.PipelineSlug),
+		repositoryProviders: repositoryProviders,
+		buildURL:            safeBuildkiteBuildURL(config.BuildURL),
+		agent:               agent,
 	}, nil
 }
 
@@ -171,8 +178,18 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, githubTokenResponseLimit))
+		payload, readErr := io.ReadAll(io.LimitReader(response.Body, githubTokenResponseLimit))
 		statusErr := githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"), purpose, c.repositorySettings, c.buildURL)
+		if purpose == "workflow" && response.StatusCode == http.StatusBadRequest && readErr == nil && len(payload) < githubTokenResponseLimit {
+			var denied struct {
+				Code string `json:"code"`
+			}
+			if json.Unmarshal(payload, &denied) == nil {
+				if message := c.workflowDenialMessage(denied.Code, repository, permissions); message != "" {
+					statusErr = credentialStatusError(response.StatusCode, "%s", message)
+				}
+			}
+		}
 		// A status alone does not authorize retrying a failed response-body read.
 		if purpose == "workflow" && readErr == nil {
 			after, valid := workflowTokenRetryAfter(response.Header.Get("Retry-After"), time.Now())
@@ -204,6 +221,61 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 		return "", fmt.Errorf("GitHub %s token response contains an invalid token", purpose)
 	}
 	return decoded.Token, nil
+}
+
+func (c *AgentGitHubTokens) workflowDenialMessage(code, repository string, permissions map[string]string) string {
+	var cause string
+	switch code {
+	case "permissions_unavailable":
+		cause = "GitHub rejected token permissions while preparing this job. Compare the App registration with the installation's granted permissions. " +
+			"A GitHub installation admin can approve permissions only if the App already requests them; otherwise the App owner must review the registration. " +
+			"This response does not identify an individual missing grant or an approval waiting for review."
+	case "repository_unavailable":
+		cause = "GitHub could not grant access to this repository. Ask a GitHub installation admin to check that the repository exists and is selected for the App installation."
+	case "code_access_connection_unavailable":
+		cause = "No active GitHub repository provider with code access matches this pipeline. Buildkite (Limited Access) cannot issue workflow tokens. " +
+			"Ask a Buildkite organization admin to review Repository Providers, including account matching and suspension. " +
+			"If a new installation is needed, a GitHub installation admin must review its permissions and selected repositories."
+	case "pr_permission_ceiling":
+		cause = "This build is a pull-request build, or was triggered or rebuilt from one. Buildkite limits its workflow token to contents:read. " +
+			"Ask the workflow maintainer to remove extra permissions only if they are unused. " +
+			"Operations requiring more access need a separately trusted workflow that does not execute untrusted PR code. " +
+			"Reinstalling the GitHub App or approving installation permissions will not change this restriction."
+	default:
+		return ""
+	}
+	requested := make([]string, 0, len(permissions))
+	for name, level := range permissions {
+		requested = append(requested, name+":"+level)
+	}
+	sort.Strings(requested)
+	message := cause + "\nWorkflow requested " + strings.Join(requested, ", ") + " for " + repository + "."
+	switch {
+	case code == "pr_permission_ceiling":
+		message += "\nWorkflow compatibility: https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility"
+	case code == "code_access_connection_unavailable" && c.repositoryProviders != "":
+		message += "\nRepository Providers: " + c.repositoryProviders
+	case c.repositorySettings != "":
+		message += "\nPipeline repository settings: " + c.repositorySettings
+	}
+	if c.buildURL != "" {
+		message += "\nIf unresolved, contact Buildkite support with this build: " + c.buildURL
+	}
+	return message
+}
+
+// WorkflowTokenFailureMessage selects the sanitized HTTP failure, excluding
+// unrelated errors joined during cleanup or result publication.
+func WorkflowTokenFailureMessage(err error) string {
+	var setup *jobSetupFailure
+	if !errors.As(err, &setup) || setup.class != FailureClassWorkflowToken {
+		return ""
+	}
+	var request *credentialRequestError
+	if !errors.As(setup.err, &request) || request.status == 0 {
+		return ""
+	}
+	return request.Error()
 }
 
 type workflowTokenRetryError struct {

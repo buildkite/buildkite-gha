@@ -348,6 +348,9 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintln(stdout, "~~~ :package: Publish GitHub Actions result")
 		publication, err := publishTerminalResult(ctx, agent, artifactRoot, job, planDigest, producer, result)
 		secretAnnotationError := publishSecretResolutionAnnotation(ctx, agent, producer.JobID, runErr)
+		if annotationErr := publishWorkflowTokenAnnotation(ctx, agent, producer.JobID, runErr); annotationErr != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: workflow token annotation: %v\n", annotationErr)
+		}
 		if publication.MetadataMirrorError != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: result metadata mirror: %v\n", publication.MetadataMirrorError)
 		}
@@ -543,6 +546,21 @@ func publishTerminalResult(parent context.Context, agent transport.Agent, root s
 	defer cancel()
 	workflow := strings.TrimPrefix(job.Workflow.Digest, "sha256:")
 	return gharuntime.PublishJobResult(ctx, agent, root, workflow, job.Target.StepKey, planDigest, producer, result)
+}
+
+func publishWorkflowTokenAnnotation(parent context.Context, agent transport.Agent, jobID string, runErr error) error {
+	message := gharuntime.WorkflowTokenFailureMessage(runErr)
+	if message == "" {
+		return nil
+	}
+	paragraphs := strings.Split(message, "\n")
+	for i, paragraph := range paragraphs {
+		paragraphs[i] = annotationHTML(paragraph)
+	}
+	body := "#### GitHub workflow token unavailable\n\n" + strings.Join(paragraphs, "\n\n")
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), resultPublicationTimeout)
+	defer cancel()
+	return agent.AnnotateJob(ctx, jobID, "github-workflow-token", "error", body)
 }
 
 func publishSecretResolutionAnnotation(parent context.Context, agent transport.Agent, jobID string, runErr error) error {
