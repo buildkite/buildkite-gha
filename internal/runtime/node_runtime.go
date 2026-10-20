@@ -155,16 +155,14 @@ func (r *jobRun) installAndVerifyMiseNode(ctx context.Context, major int, mise s
 }
 
 func (r Runner) installMiseNode(ctx context.Context, mise, tool string) error {
-	cmd := exec.CommandContext(ctx, mise, "--no-config", "install", tool)
+	cmd := exec.Command(mise, "--no-config", "install", tool)
 	cmd.Env = processEnv(r.miseEnv())
-	var output strings.Builder
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	if err := cmd.Run(); err != nil {
+	stdout, stderr, err := r.runCapturedCommand(ctx, cmd)
+	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fmt.Errorf("install exact %s with mise: %w: %s", tool, err, strings.TrimSpace(output.String()))
+		return fmt.Errorf("install exact %s with mise: %w: %s", tool, err, strings.TrimSpace(stdout+stderr))
 	}
 	return nil
 }
@@ -222,15 +220,13 @@ func nodeDigest(goos, goarch string, major int) string {
 
 func (r Runner) miseNodeInstallation(ctx context.Context, major int, mise string) (string, string, error) {
 	tool := nodeTool(major)
-	cmd := exec.CommandContext(ctx, mise, "--no-config", "where", tool)
+	cmd := exec.Command(mise, "--no-config", "where", tool)
 	cmd.Env = processEnv(r.miseEnv())
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	out, stderr, err := r.runCapturedCommand(ctx, cmd)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve cached %s installation: %w: %s", tool, MarkWorkflowProcessTimeout(ctx, err), strings.TrimSpace(stderr.String()))
+		return "", "", fmt.Errorf("resolve cached %s installation: %w: %s", tool, MarkWorkflowProcessTimeout(ctx, err), strings.TrimSpace(stderr))
 	}
-	installation, err := filepath.Abs(strings.TrimSpace(string(out)))
+	installation, err := filepath.Abs(strings.TrimSpace(out))
 	if err != nil {
 		return "", "", fmt.Errorf("resolve %s installation path: %w", tool, err)
 	}

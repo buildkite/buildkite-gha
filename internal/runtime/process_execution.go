@@ -115,6 +115,52 @@ func resolveExecutableInPath(name, path string) (string, error) {
 }
 
 func (r Runner) runStreamingCommand(ctx context.Context, processor *commandOutputProcessor, cmd *exec.Cmd) error {
+	streamErrs := make([]error, 2)
+	waitErr := r.runCommand(ctx, cmd, func(index int, reader io.Reader) {
+		label, target := "stdout", processor.stdout
+		if index == 1 {
+			label, target = "stderr", processor.stderr
+		}
+		var commandErr error
+		streamErr := streamLines(reader, func(line string) {
+			commandErr = errors.Join(commandErr, processor.process(target, line))
+		}, processor.suppress)
+		if streamErr != nil {
+			streamErr = fmt.Errorf("%s stream: %w", label, streamErr)
+		}
+		if commandErr != nil {
+			commandErr = fmt.Errorf("%s stream: %w", label, commandErr)
+		}
+		streamErrs[index] = errors.Join(streamErr, commandErr)
+	})
+	if ctx.Err() != nil {
+		waitErr = ctx.Err()
+	}
+	if waitErr != nil {
+		waitErr = fmt.Errorf("process %s: %w", cmd.Path, waitErr)
+	}
+	return errors.Join(waitErr, streamErrs[0], streamErrs[1])
+}
+
+// Tool output is data, not workflow commands. Keep the streams separate and
+// drain them outside exec.Cmd.Wait so Windows can close the job on parent exit
+// even when a descendant still holds an output pipe open.
+func (r Runner) runCapturedCommand(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
+	var output [2]strings.Builder
+	var copyErrs [2]error
+	err := r.runCommand(ctx, cmd, func(index int, reader io.Reader) {
+		_, copyErrs[index] = io.Copy(&output[index], reader)
+	})
+	if err == nil {
+		err = ctx.Err()
+	}
+	return output[0].String(), output[1].String(), errors.Join(err, copyErrs[0], copyErrs[1])
+}
+
+func (r Runner) runCommand(ctx context.Context, cmd *exec.Cmd, stream func(int, io.Reader)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	configureProcessGroup(cmd)
 	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
@@ -167,35 +213,20 @@ func (r Runner) runStreamingCommand(ctx context.Context, processor *commandOutpu
 	}()
 
 	var wg sync.WaitGroup
-	streamErrs := make([]error, 2)
-	stream := func(index int, label string, reader io.Reader, target io.Writer) {
-		defer wg.Done()
-		var commandErr error
-		streamErr := streamLines(reader, func(line string) {
-			commandErr = errors.Join(commandErr, processor.process(target, line))
-		}, processor.suppress)
-		if streamErr != nil {
-			streamErr = fmt.Errorf("%s stream: %w", label, streamErr)
-		}
-		if commandErr != nil {
-			commandErr = fmt.Errorf("%s stream: %w", label, commandErr)
-		}
-		streamErrs[index] = errors.Join(streamErr, commandErr)
-	}
 	wg.Add(2)
-	go stream(0, "stdout", stdout, processor.stdout)
-	go stream(1, "stderr", stderr, processor.stderr)
+	go func() {
+		defer wg.Done()
+		stream(0, stdout)
+	}()
+	go func() {
+		defer wg.Done()
+		stream(1, stderr)
+	}()
 	wg.Wait()
 	<-processDone
 	close(finished)
 	<-terminationDone
-	if ctx.Err() != nil {
-		waitErr = ctx.Err()
-	}
-	if waitErr != nil {
-		waitErr = fmt.Errorf("process %s: %w", cmd.Path, waitErr)
-	}
-	return errors.Join(waitErr, streamErrs[0], streamErrs[1])
+	return waitErr
 }
 
 func (r Runner) interruptGrace() time.Duration {
