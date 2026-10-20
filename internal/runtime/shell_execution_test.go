@@ -21,6 +21,11 @@ func TestPowerShellExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PowerShell is required; run mise install: %v", err)
 	}
+	t.Setenv("JAVA_HOME", "host JDK")
+	javaHome := "JAVA_HOME"
+	if runtime.GOOS == "windows" {
+		javaHome = "java_home"
+	}
 	command := strconv.Quote(pwsh)
 	if runtime.GOOS == "windows" {
 		// Use native separators, including in Program Files, not Go escapes.
@@ -55,14 +60,19 @@ func TestPowerShellExecution(t *testing.T) {
 			writeFixtureFile(t, workspace, workflow, "name: PowerShell test\n")
 			job := runtimePlan(t, workspace, workflow, []runtimeTestStep{
 				{ID: "first", Kind: "run", Shell: shell, Command: `"script=$PSCommandPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-"GREETING=héllo 世界" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`},
+"java=$env:JAVA_HOME" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+"GREETING=héllo 世界" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+"JAVA_HOME=selected JDK" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`},
 				{ID: "second", Kind: "run", Shell: shell, Command: `if ($env:GREETING -ne 'héllo 世界') { throw 'environment lost' }
+if ($env:JAVA_HOME -ne 'selected JDK') { throw 'Java selection lost' }
 "value=$env:GREETING" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append`},
+				{ID: "empty", Kind: "run", Shell: shell, Env: map[string]string{javaHome: ""}, Command: `if ($env:JAVA_HOME) { throw 'empty Java override lost' }`},
+				{ID: "restore", Kind: "run", Shell: shell, Command: `if ($env:JAVA_HOME -ne 'selected JDK') { throw 'step Java override leaked' }`},
 			})
-			job.Outputs = map[string]string{"value": "${{ steps.second.outputs.value }}", "script": "${{ steps.first.outputs.script }}"}
+			job.Outputs = map[string]string{"value": "${{ steps.second.outputs.value }}", "script": "${{ steps.first.outputs.script }}", "java": "${{ steps.first.outputs.java }}"}
 			var stdout, stderr bytes.Buffer
 			result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).runTestJob(t.Context(), job, workspace)
-			if err != nil || result.Outputs["value"] != "héllo 世界" {
+			if err != nil || result.Outputs["value"] != "héllo 世界" || result.Outputs["java"] != "host JDK" {
 				t.Fatalf("outputs = %#v, error = %v\nstdout: %s\nstderr: %s", result.Outputs, err, stdout.String(), stderr.String())
 			}
 			script := result.Outputs["script"]
