@@ -318,10 +318,10 @@ for (const name of ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_
 for (const name of ["ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL", "BUILDKITE_AGENT_ACCESS_TOKEN"])
   if (process.env[name]) throw new Error(name + " leaked");
 if (process.env.GITHUB_SERVER_URL !== "https://origin.cursor.com") throw new Error("ordinary action server URL changed");
-if (process.env.PATH === %q) throw new Error("ordinary action PATH was isolated");
+if (process.env.PATH.replace(/;[^;]*[/\\]buildkite-gha-cache-tools-[0-9]+(?=;)/, "") === %q) throw new Error("ordinary action PATH was isolated");
 fs.appendFileSync(process.env.LIFECYCLE_LOG, "ordinary-%s|" + process.env.ACTIONS_RUNTIME_TOKEN + "|" + process.env.ACTIONS_RESULTS_URL + "|" + process.env.ACTIONS_CACHE_SERVICE_V2 + "\n");
 console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
-`, cacheActionToolPath, phase))
+`, strings.ReplaceAll(cacheActionToolPath, ";<verified-zstd>", ""), phase))
 	}
 	digest, err := source.DigestTree(remote)
 	if err != nil {
