@@ -460,6 +460,48 @@ func TestEngineJobStatusIsLimitedToRunningJobPositions(t *testing.T) {
 	}
 }
 
+func TestEngineGitHubActionIsLimitedToRuntimeGitHubPositions(t *testing.T) {
+	engine := NewEngine()
+	values := Values{Runtime: Context{GitHub: map[string]any{"action": "__actions_checkout_2"}}}
+	for _, test := range []struct {
+		profile ProfileID
+		source  string
+		result  ResultType
+		want    any
+	}{
+		{profile: ProfileStepTemplate, source: "name=${{ github.action }}", result: ResultString, want: "name=__actions_checkout_2"},
+		{profile: ProfileActionStepTemplate, source: "${{ github['action'] }}", result: ResultString, want: "__actions_checkout_2"},
+		{profile: ProfileStepControl, source: "${{ github.action == '__actions_checkout_2' }}", result: ResultBoolean, want: true},
+	} {
+		site := Site{Source: test.source, Profile: test.profile, Result: test.result, Purpose: PurposeExpression}
+		if got, err := engine.Evaluate(site, values); err != nil || got != test.want {
+			t.Errorf("%s Evaluate(%q) = %#v, %v; want %#v", test.profile, test.source, got, err, test.want)
+		}
+	}
+	// Conditions and compile-time positions keep their closed github
+	// subsets, even in unreachable branches.
+	for _, profile := range []ProfileID{ProfileStepCondition, ProfileActionStepCondition, ProfileActionLifecycle, ProfileJobCondition, ProfileCompileStepCondition} {
+		if _, err := engine.Validate(Site{Source: "false && github.action == '__run'", Profile: profile, Result: ResultBoolean}); err == nil {
+			t.Errorf("%s admitted github.action", profile)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunsOnTemplate, ProfileRunName} {
+		if _, err := engine.Validate(Site{Source: "${{ false && github.action || 'ok' }}", Profile: profile, Result: ResultString}); err == nil {
+			t.Errorf("%s admitted github.action", profile)
+		}
+	}
+	// The step name is unknown to planning: it grants no authority itself and
+	// keeps every branch it guards.
+	plain, err := engine.Analyze(Site{Source: "${{ github.action }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}, AbstractValues{})
+	if err != nil || plain.Value.Known || plain.Effects != (Effects{}) {
+		t.Errorf("Analyze(github.action) = %#v, %v; want unknown value without effects", plain, err)
+	}
+	token, err := engine.Analyze(Site{Source: "${{ github.action == '__run' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}, AbstractValues{})
+	if err != nil || token.Value.Known || token.Effects.GitHubToken != GitHubTokenDirect {
+		t.Errorf("Analyze() = %#v, %v; want unknown value with conservative token authority", token, err)
+	}
+}
+
 func TestEngineAnalysisTreatsRunnerDebugAsKnownDisabled(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -745,6 +787,18 @@ func TestEngineAbstractEvaluationNarrowsMonotonicallyToConcrete(t *testing.T) {
 			site:       Site{Source: "${{ vars.ENABLED == 'yes' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput},
 			references: map[string]any{"vars.enabled": "yes", "github.token": "ghs_scoped"},
 			values:     Values{Runtime: Context{Vars: map[string]string{"ENABLED": "yes"}, GitHub: map[string]any{"token": "ghs_scoped"}}},
+		},
+		{
+			name:       "step name selects token branch",
+			site:       Site{Source: "${{ github.action == '__run' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput},
+			references: map[string]any{"github.action": "__run", "github.token": "ghs_scoped"},
+			values:     Values{Runtime: Context{GitHub: map[string]any{"action": "__run", "token": "ghs_scoped"}}},
+		},
+		{
+			name:       "step name skips token branch",
+			site:       Site{Source: "${{ github.action == '__run' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput},
+			references: map[string]any{"github.action": "__run_2"},
+			values:     Values{Runtime: Context{GitHub: map[string]any{"action": "__run_2"}}},
 		},
 		{
 			name:       "service env uses job value",

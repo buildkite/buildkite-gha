@@ -572,6 +572,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 			if entry := actions.locks[selector.Lock]; entry != nil && (usesUploadArtifactAdapter(entry.lock) || usesDownloadArtifactAdapter(entry.lock)) {
 				continue
 			}
+			eval.GitHub["action"] = step.GitHubAction
 			preEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
 			preEval := stepExpressionContext(eval)
 			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes.Literal)
@@ -656,6 +657,9 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			eval.Steps[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: outcome, Conclusion: conclusion, Outputs: map[string]string{}}
 			continue
 		}
+		// GitHub updates the shared job context before evaluating the step,
+		// even when its condition skips it. Each invocation receives a copy.
+		eval.GitHub["action"] = step.GitHubAction
 		if execution, ok := preFailures[stepIndex]; ok {
 			runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
 			continue
@@ -769,6 +773,7 @@ func (r *jobRun) runPostActions(runCtx context.Context) (JobResult, error) {
 		invocation := post.invocation
 		action := invocation.action
 		postEval := cloneExpressionContext(invocation.eval)
+		eval.GitHub["action"] = postEval.GitHub["action"]
 		if !invocation.isolated {
 			postEval.Steps = cloneStepStatuses(eval.Steps)
 		}
@@ -1440,6 +1445,7 @@ func githubContext(job plan.Job) map[string]any {
 	}
 	workflowRef, workflowSHA := workflowRunIdentity(job)
 	return map[string]any{
+		"action":            "",
 		"action_path":       "",
 		"action_ref":        "",
 		"action_repository": "",
