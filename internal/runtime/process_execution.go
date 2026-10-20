@@ -288,8 +288,8 @@ func processEnv(overrides map[string]string) []string {
 func processEnvValues(overrides map[string]string) map[string]string {
 	// This allowlist is also the mise trust boundary: ambient MISE_* values must
 	// never redirect compatibility runtime downloads or verification.
-	values := make(map[string]string, 6+len(overrides))
-	inherited := []string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"}
+	values := make(map[string]string, 7+len(overrides))
+	inherited := []string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "JAVA_HOME"}
 	if runtime.GOOS == "windows" {
 		// Known-folder lookups (including WiX installers) expand system-drive
 		// and profile paths rather than reading ProgramData alone.
