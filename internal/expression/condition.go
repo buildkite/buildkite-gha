@@ -46,6 +46,8 @@ const (
 	// actionLifecycleCondition is evaluated for action pre-if and post-if
 	// metadata. It has its own context policy and no implicit success guard.
 	actionLifecycleCondition
+	// actionStepCondition retains step semantics with composite-only references.
+	actionStepCondition
 )
 
 // validateCallCondition verifies the caller-only runtime surface of a local
@@ -147,7 +149,7 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error
 			}
 			return nil
 		case "hashfiles":
-			if scope != StepCondition && scope != actionLifecycleCondition {
+			if scope != StepCondition && scope != actionStepCondition && scope != actionLifecycleCondition {
 				return fmt.Errorf("condition function %q is unavailable in job conditions", node.Callee)
 			}
 			if len(node.Args) == 0 || len(node.Args) > 255 {
@@ -269,9 +271,17 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			switch strings.ToLower(path[0]) {
 			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow_ref", "workflow_sha":
 				return nil
+			case "server_url":
+				if scope == actionStepCondition {
+					return nil
+				}
 			}
 		}
-		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are actor, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, sha, workflow_ref, and workflow_sha", reference)
+		supported := "actor, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, sha, workflow_ref, and workflow_sha"
+		if scope == actionStepCondition {
+			supported += ", plus server_url in composite step conditions"
+		}
+		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are %s", reference, supported)
 	case "needs":
 		if len(path) == 2 && strings.EqualFold(path[1], "result") || len(path) == 3 && strings.EqualFold(path[1], "outputs") {
 			return nil

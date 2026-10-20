@@ -2227,6 +2227,80 @@ runs:
 	}
 }
 
+func TestCompiledCompositeServerURLCondition(t *testing.T) {
+	for _, test := range []struct {
+		name, provider, disabled, server string
+		tokenBody, wantRun               bool
+	}{
+		{"GitHub enabled", "github", "false", "https://github.com", false, true},
+		{"GitHub disabled", "github", "true", "https://github.com", false, false},
+		{"Origin enabled", "cursor-origin", "false", "https://origin.cursor.com", false, false},
+		{"Origin disabled", "cursor-origin", "true", "https://origin.cursor.com", false, false},
+		{"token body cannot authorize token", "github", "false", "https://github.com", true, true},
+		{"disabled token body", "github", "true", "https://github.com", true, false},
+		{"Origin token body", "cursor-origin", "false", "https://origin.cursor.com", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			workflow := fmt.Sprintf(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/conditional
+        with:
+          disable-nix-access-token: '%s'
+`, test.disabled)
+			writeFixtureFile(t, workspace, workflowPath, workflow)
+			command := "touch conditional-ran"
+			if test.tokenBody {
+				command = "echo '${{ github.token }}' > conditional-ran"
+			}
+			// Guard from jetify-com/devbox-install-action@8c6a66ed6273138b1915457069de78cb52fe3bd7/action.yml#L132.
+			// Replace installation and token configuration with bounded local effects.
+			writeFixtureFile(t, workspace, ".github/actions/conditional/action.yml", fmt.Sprintf(`inputs:
+  disable-nix-access-token:
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - if: inputs.disable-nix-access-token == 'false' && github.server_url == 'https://github.com'
+      shell: bash
+      run: %s
+    - shell: bash
+      run: echo '${{ github.server_url }}' > provider-url
+`, command))
+			event := []byte(fmt.Sprintf(`{"provider":%q,"event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat"}`, test.provider))
+			jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+			if err != nil || len(jobs) != 1 {
+				t.Fatalf("compile composite condition = %#v, %v", jobs, err)
+			}
+			if jobs[0].GitHubToken != nil {
+				t.Fatal("composite condition or body granted token authority")
+			}
+			result, err := (Runner{}).RunJob(t.Context(), jobs[0], workspace)
+			if test.tokenBody && test.wantRun {
+				if err == nil || !strings.Contains(err.Error(), "github.token") || result.Conclusion != "failure" {
+					t.Fatalf("RunJob() = %#v, %v; want missing composite token failure", result, err)
+				}
+				return
+			}
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("RunJob() = %#v, %v", result, err)
+			}
+			_, statErr := os.Stat(filepath.Join(workspace, "conditional-ran"))
+			if test.wantRun && statErr != nil || !test.wantRun && !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("conditional marker stat = %v, want run=%v", statErr, test.wantRun)
+			}
+			server, err := os.ReadFile(filepath.Join(workspace, "provider-url"))
+			if err != nil || strings.TrimSpace(string(server)) != test.server {
+				t.Fatalf("provider URL = %q, %v; want %q", server, err, test.server)
+			}
+		})
+	}
+}
+
 func TestCompositeStepSupportsCompoundInputExpression(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
