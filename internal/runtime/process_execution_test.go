@@ -296,7 +296,7 @@ test -z "${HTTP_PROXY+x}" && test -z "${HTTPS_PROXY+x}" && test -z "${ALL_PROXY+
 test -z "${http_proxy+x}" && test -z "${https_proxy+x}" && test -z "${all_proxy+x}" && test -z "${no_proxy+x}"
 printf '%s\n' environment-ok
 `
-	if err := (Runner{}).runStreaming(t.Context(), processor, "", map[string]string{"DECLARED": "visible"}, "sh", "-c", command); err != nil {
+	if err := (Runner{}).runStreaming(t.Context(), processor, "", map[string]string{"DECLARED": "visible"}, "sh", "-e", "-c", command); err != nil {
 		t.Fatalf("runStreaming() error = %v", err)
 	}
 	if logs.String() != "environment-ok\n" {
