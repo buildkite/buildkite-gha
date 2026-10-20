@@ -10,5 +10,5 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Test descendants must be gone before this process returns, while the agent's
 # enclosing Job Object and the hosted VM are both still alive.
-& .\runtime.test.exe -test.run '^TestWindowsProcessTree$' -test.v -test.count=3 -test.timeout=3m
+& .\runtime.test.exe '-test.run=^TestWindowsProcessTree$' '-test.v' '-test.count=3' '-test.timeout=3m'
 exit $LASTEXITCODE
