@@ -1,0 +1,22 @@
+steps:
+  - label: ":go: Build Windows process tests"
+    key: "windows-process-build"
+    agents:
+      queue: "linux-small"
+    timeout_in_minutes: 10
+    plugins:
+      - setup-go#v0.1.0:
+          mise-version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      scripts/verify-source-checkout "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}"
+      CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go test -c -o runtime.test.exe ./internal/runtime
+      buildkite-agent artifact upload runtime.test.exe
+
+  - label: ":windows: Process tree cleanup"
+    key: "windows-process-test"
+    depends_on: "windows-process-build"
+    agents:
+      queue: "windows-medium"
+    timeout_in_minutes: 5
+    command: "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .buildkite/windows-process-proof.ps1"
