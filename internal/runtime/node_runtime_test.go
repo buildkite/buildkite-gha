@@ -11,11 +11,63 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 )
+
+func TestMiseCancellationTerminatesDescendants(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("shell fixture requires Unix")
+	}
+	for _, phase := range []string{"install", "where"} {
+		t.Run(phase, func(t *testing.T) {
+			root := t.TempDir()
+			pidFile := filepath.Join(root, "child.pid")
+			mise := filepath.Join(root, "mise")
+			// The child ignores graceful signals and retains both output pipes.
+			// Killing only mise makes Run wait for the child's five-second sleep.
+			script := fmt.Sprintf("#!/bin/sh\n(trap '' INT TERM; sleep 5) &\necho $! > %q\nwait\n", pidFile)
+			if err := os.WriteFile(mise, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+			defer cancel()
+			runner := Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}
+			started := time.Now()
+			var err error
+			if phase == "install" {
+				err = runner.installMiseNode(ctx, mise, nodeTool(24))
+			} else {
+				_, _, err = runner.miseNodeInstallation(ctx, 24, mise)
+			}
+			if err == nil || ctx.Err() != context.DeadlineExceeded {
+				t.Fatalf("mise %s did not time out: %v", phase, err)
+			}
+			if elapsed := time.Since(started); elapsed > 3*time.Second {
+				t.Fatalf("mise %s retained descendant output pipes for %s", phase, elapsed)
+			}
+			data, err := os.ReadFile(pidFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for testProcessExists(pid) && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if testProcessExists(pid) {
+				t.Fatalf("mise %s child %d survived cancellation", phase, pid)
+			}
+		})
+	}
+}
 
 func TestManagedNodeDigestsCoverSupportedPlatforms(t *testing.T) {
 	for _, platform := range [][2]string{{"linux", "amd64"}, {"linux", "arm64"}, {"darwin", "arm64"}} {

@@ -309,6 +309,25 @@ rationale, security invariants, and remaining design work.
 
 Every normal Buildkite build runs repository checks, Test Engine-split Go tests, native macOS tests, the starter workflow compatibility report, and the shell, public-action, and [composite hashFiles](../.github/workflows/composite-hash-files.yml) smoke workflows against the build's exact CLI source. The public-action proof executes pinned checkout, Node, Go, Python, and Java setup actions. The composite hashFiles importer supplies a dispatch snapshot pinned to the build commit, so the manual workflow also executes in Buildkite CI. Test Engine records the Linux test results; the repository checks retain the race-enabled suite. GitHub Actions differential oracles run only when manually dispatched.
 
+Workflow commands and managed Node's mise install and lookup commands share
+runtime process-tree supervision. On Windows, the runtime assigns each suspended
+process to a kill-on-close Job Object before resuming it. Cancellation terminates
+the object; parent exit closes it before output draining completes. Tool output
+is captured without interpreting workflow commands. Keep new installer processes
+under this supervision: the agent's enclosing Job Object and hosted VM teardown
+do not replace cancellation within a running workflow.
+
+The [Windows process proof](../.buildkite/windows-process-proof.yml) cross-builds
+the runtime tests on `linux-small` and runs them on the lab's hosted
+`windows-medium` queue. It checks cancellation, parent exit, inherited output
+pipes, raw tool output, and native and batch-wrapped commands before VM teardown.
+Run it against a pushed commit:
+
+```sh
+bk build create --pipeline sj26-testier/buildkite-gha-windows-process \
+  --branch "$(git branch --show-current)" --commit "$(git rev-parse HEAD)" --yes
+```
+
 The **Windows runtime** GitHub Actions workflow checks cache credential lifecycle
 isolation and local GNU tar round trips with zstd and gzip. It poisons tool
 environment variables and places decoy executables in the working directory.
