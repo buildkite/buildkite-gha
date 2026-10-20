@@ -331,7 +331,8 @@ bk build create --pipeline sj26-testier/buildkite-gha-windows-process \
 The **Windows runtime** GitHub Actions workflow checks cache credential lifecycle
 isolation and local GNU tar round trips with zstd and gzip. It poisons tool
 environment variables and places decoy executables in the working directory.
-These checks do not prove Buildkite cache-service persistence.
+The tests use the image's installed zstd without copying it into Program Files.
+These checks do not prove Buildkite cache-service persistence or cross-OS restores.
 
 Before a Windows hosted cache proof, verify the [cache tool installation
 paths](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#actions-cache-action), record GNU tar and zstd versions, and run

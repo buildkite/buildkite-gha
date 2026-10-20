@@ -202,7 +202,7 @@ func shouldOverrideGitHubServerURL(serverURL string) bool {
 	return !isGitHub && !isGheCloud && !isLocal
 }
 
-func isolateCacheActionEnvironment(env map[string]string) (map[string]string, error) {
+func isolateCacheActionEnvironment(env map[string]string) (map[string]string, func(), error) {
 	isolated := removeCacheServiceEnvironment(env)
 	for _, name := range []string{
 		"NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_AUDIT", "LD_PRELOAD", "LD_LIBRARY_PATH",
@@ -213,10 +213,11 @@ func isolateCacheActionEnvironment(env map[string]string) (map[string]string, er
 	} {
 		deleteEnvironment(isolated, name)
 	}
-	if err := isolateCacheToolEnvironment(isolated); err != nil {
-		return nil, err
+	cleanup, err := isolateCacheToolEnvironment(isolated)
+	if err != nil {
+		return nil, nil, err
 	}
-	return isolated, nil
+	return isolated, cleanup, nil
 }
 
 func applyGitHubServerURLOverride(env map[string]string) {
