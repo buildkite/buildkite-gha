@@ -130,6 +130,66 @@ func (stubEnvironmentSource) ResolveEnvironment(context.Context, string, string,
 	return compiler.EnvironmentProtection{}, nil
 }
 
+func TestHostedWorkflowConcurrencyUsesBuildIdentity(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), ".github", "workflows", "concurrency.yml")
+	workflow := []byte(`name: CodeQL
+on: push
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps: [{run: echo check}]
+`)
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := hostedCompileRequest{
+		WorkflowPath: workflowPath, WorkflowSource: workflow, EventSource: event,
+		Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("d", 64), ImporterStep: "importer",
+	}
+	var previous hostedCompilation
+	for i, buildID := range []string{"build-a", "build-a", "build-b"} {
+		request.BuildID = buildID
+		if _, err := validateHostedRequest(t.Context(), request); err != nil {
+			t.Fatal(err)
+		}
+		compiled, err := compileHostedRequest(t.Context(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !compiled.Admitted || compiled.Bundle.IR.Workflow.ConcurrencyGroup != "CodeQL-"+buildID {
+			t.Fatalf("build %s: admitted=%v group=%q", buildID, compiled.Admitted, compiled.Bundle.IR.Workflow.ConcurrencyGroup)
+		}
+		if i > 0 {
+			same := reflect.DeepEqual(previous.Bundle.GeneratedWorkflow, compiled.Bundle.GeneratedWorkflow)
+			if same != (i == 1) {
+				t.Fatalf("same generated pipeline = %v on evaluation %d", same, i)
+			}
+		}
+		previous = compiled
+	}
+	// Neither an event snapshot nor the process environment gives offline
+	// validation a hosted build identity.
+	t.Setenv("BUILDKITE_BUILD_ID", "ambient-build")
+	request.BuildID = ""
+	_, validationErr := validateHostedRequest(t.Context(), request)
+	_, compileErr := compileHostedRequest(t.Context(), request)
+	_, offlineErr := compiler.Validate(workflowPath, workflow)
+	for _, err := range []error{validationErr, compileErr, offlineErr} {
+		if err == nil || !strings.Contains(err.Error(), "github.run_id requires a Buildkite build identity") {
+			t.Errorf("missing build identity: %v", err)
+		}
+	}
+}
+
 func TestCompileHostedRequestReproducesTheCompilerPipelineForTheSameInputs(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), ".github", "workflows", "matrix.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {

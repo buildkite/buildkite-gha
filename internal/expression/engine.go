@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/rhysd/actionlint"
@@ -16,6 +17,7 @@ type ProfileID string
 const (
 	ProfileCompile                  ProfileID = "compile"
 	ProfileCompileTemplate          ProfileID = "compile-template"
+	ProfileWorkflowConcurrency      ProfileID = "workflow-concurrency"
 	ProfileCompileContainerImage    ProfileID = "compile-container-image"
 	ProfileRunsOn                   ProfileID = "runs-on"
 	ProfileRunsOnTemplate           ProfileID = "runs-on-template"
@@ -98,6 +100,7 @@ type profileSemantics uint8
 const (
 	semanticsCompile profileSemantics = iota
 	semanticsCompileTemplate
+	semanticsWorkflowConcurrency
 	semanticsCompileStringTemplate
 	semanticsRunsOn
 	semanticsPartialTemplate
@@ -133,6 +136,7 @@ var profiles = map[ProfileID]Profile{
 	ProfileRunsOnTemplate:           {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars", "needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsRunsOn},
 	ProfileCompile:                  {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompile},
 	ProfileCompileTemplate:          {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileTemplate},
+	ProfileWorkflowConcurrency:      {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsWorkflowConcurrency},
 	ProfileCompileContainerImage:    {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileStringTemplate},
 	ProfilePartialTemplate:          {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"env", "event", "github", "inputs", "job", "jobs", "matrix", "needs", "runner", "secrets", "steps", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsPartialTemplate},
 	ProfileCompileJobCondition:      {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "needs", "runner", "strategy", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileCondition, condition: JobCondition},
@@ -380,6 +384,10 @@ func (Engine) Validate(site Site) (Validation, error) {
 		}
 	case semanticsCompileTemplate, semanticsCompileStringTemplate:
 		err = visitTemplateExpressions(site.Source, validateCompileExpressionNode)
+	case semanticsWorkflowConcurrency:
+		err = visitTemplateExpressions(site.Source, func(node actionlint.ExprNode) error {
+			return validateCompileExpressionNodeWithRunID(node, true)
+		})
 	case semanticsRunsOn:
 		if profile.Form == FormExpression {
 			var node actionlint.ExprNode
@@ -577,6 +585,18 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 		}
 	case semanticsCompileTemplate:
 		value, err = evaluateCompileTemplate(site.Source, values.Compile)
+	case semanticsWorkflowConcurrency:
+		context := values.Compile
+		if context.WorkflowRunID != "" {
+			context.GitHub = maps.Clone(context.GitHub)
+			if context.GitHub == nil {
+				context.GitHub = make(map[string]any)
+			}
+			context.GitHub["run_id"] = context.WorkflowRunID
+		}
+		value, err = evaluateRuntimeTemplate(site.Source, Context{}, func(node actionlint.ExprNode, _ Context) (any, error) {
+			return evaluateCompileNode(node, context)
+		})
 	case semanticsCompileStringTemplate:
 		value, err = evaluateCompileStringTemplate(site.Source, values.Compile)
 	case semanticsRunsOn:

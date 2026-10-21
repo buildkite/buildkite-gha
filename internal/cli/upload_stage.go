@@ -378,6 +378,7 @@ func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]b
 	}
 	defer cleanupSource()
 	request := record.compileRequest(r.workflowPath, r.workflowSource, r.eventSource, rows, skipped, runnerOutputs, repositorySource)
+	request.BuildID = r.buildID
 	if record.Continuation.Scheduling {
 		request.RuntimeSchedulingOutputs = map[string]map[string]string{record.Continuation.Descriptor.Job: r.producerOutputs}
 		request.RuntimeSchedulingBuildID = r.buildID

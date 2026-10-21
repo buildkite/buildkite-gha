@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: expression-oracle-${{ github.run_id }}
+
 jobs:
   reusable-defaults:
     uses: ./.github/workflows/expression-oracle-reusable.yml
@@ -30,6 +33,8 @@ jobs:
           FILTERED: ${{ join(fromJSON(format('[{{{0}:{1}}}, {{{0}:{2}}}]', toJSON('name'), toJSON('bug'), toJSON('help wanted'))).*.name, ',') }}
           MISSING: ${{ github.event.missing }}
           LAZY_CASE: ${{ case(false, fromJSON(format('invalid-{0}', github.run_id)), true, 'matched', fromJSON(format('invalid-{0}', github.run_id)) == null, 'late', 'default') }}
+          RUN_GROUP: expression-oracle-${{ github.run_id }}
+          REPEATED_RUN_GROUP: expression-oracle-${{ github.run_id }}
         run: |
           test "$NULL_EQUALS_ZERO" = "true"
           test "$ORDERED_COMPARISON" = "true"
@@ -41,6 +46,8 @@ jobs:
           test "$FILTERED" = "bug,help wanted"
           test -z "$MISSING"
           test "$LAZY_CASE" = "matched"
+          test "$RUN_GROUP" = "expression-oracle-$GITHUB_RUN_ID"
+          test "$REPEATED_RUN_GROUP" = "$RUN_GROUP"
           printf '%s\n' \
             "NULL_EQUALS_ZERO=$NULL_EQUALS_ZERO" \
             "ORDERED_COMPARISON=$ORDERED_COMPARISON" \
@@ -51,4 +58,6 @@ jobs:
             "JOINED=$JOINED" \
             "FILTERED=$FILTERED" \
             "MISSING=$MISSING" \
-            "LAZY_CASE=$LAZY_CASE"
+            "LAZY_CASE=$LAZY_CASE" \
+            "RUN_GROUP=$RUN_GROUP" \
+            "REPEATED_RUN_GROUP=$REPEATED_RUN_GROUP"
