@@ -32,6 +32,8 @@ type hostedCompileRequest struct {
 	// EventFile records that the event came from a file instead of the
 	// build, so compiled jobs read the payload from an uploaded artifact.
 	EventFile bool
+	// BuildID is the build owning the importer and every later stage.
+	BuildID string
 
 	// Version is the compiler version stamped into plans; DistributionDigest
 	// is the importer's own runtime distribution digest.
@@ -81,6 +83,7 @@ type hostedCompileRequest struct {
 // inputs that never affect admission.
 func (r hostedCompileRequest) validationOptions() compiler.Options {
 	options := hostedOptions("", r.RunnerTargets, nil)
+	options.BuildID = r.BuildID
 	options.WorkflowSource = candidateWorkflowSource(r.EventSource)
 	applyRunnerResolution(&options, r.RunnerResolution)
 	options.StepKeyNamespace = r.StepKeyNamespace
@@ -97,6 +100,7 @@ func (r hostedCompileRequest) validationOptions() compiler.Options {
 // repository source is attached.
 func (r hostedCompileRequest) options() compiler.Options {
 	options := hostedOptions(r.GroupLabel, r.RunnerTargets, r.RuntimeDistributions)
+	options.BuildID = r.BuildID
 	options.WorkflowSource = candidateWorkflowSource(r.EventSource)
 	options.EventFile = r.EventFile
 	applyRunnerResolution(&options, r.RunnerResolution)

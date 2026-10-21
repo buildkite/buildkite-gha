@@ -181,6 +181,9 @@ type Options struct {
 	Runners    RunnerPolicy
 	EventTrust EventTrust
 	OIDC       *plan.OIDCConfiguration
+	// BuildID supplies github.run_id to workflow concurrency only. Offline
+	// callers leave it empty; an event payload cannot supply run identity.
+	BuildID string
 	// EventFile exposes the supplied payload through GITHUB_EVENT_PATH in every
 	// generated job. Set only for webhook or explicit snapshot input, not an
 	// event synthesized from the Buildkite environment. This grants no authority.

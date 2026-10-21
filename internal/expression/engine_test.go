@@ -170,6 +170,7 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		ProfileRunsOn:                   {"${{ inputs.name }}", ResultString, "value"},
 		ProfileRunsOnTemplate:           {"linux-${{ inputs.name }}", ResultString, "linux-value"},
 		ProfileCompileTemplate:          {"${{ case(true, true, false) }}", ResultString, "true"},
+		ProfileWorkflowConcurrency:      {"${{ case(true, true, false) }}", ResultString, "true"},
 		ProfileCompileContainerImage:    {"node:${{ case(true, 24, 25) }}", ResultString, "node:24"},
 		ProfilePartialTemplate:          {"value-${{ inputs.name }}", ResultString, "value-value"},
 		ProfileCompileJobCondition:      {"github.event_name == 'push'", ResultBoolean, true},
@@ -228,6 +229,44 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 				t.Fatalf("Analyze() = %#v, %v", analysis, err)
 			}
 		})
+	}
+}
+
+func TestEngineWorkflowConcurrencyRunIdentity(t *testing.T) {
+	engine := NewEngine()
+	values := Values{Compile: CompileContext{GitHub: map[string]any{"workflow": "CodeQL"}, WorkflowRunID: "build-a"}}
+	site := Site{Source: "${{ github.workflow }}-${{ github['run_id'] }}-${{ GITHUB.RUN_ID }}", Profile: ProfileWorkflowConcurrency, Result: ResultString}
+	got, err := engine.Evaluate(site, values)
+	if err != nil || got != "CodeQL-build-a-build-a" {
+		t.Fatalf("Evaluate() = %#v, %v", got, err)
+	}
+	analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{"github.workflow": "CodeQL", "github.run_id": "build-a"}})
+	if err != nil || !analysis.Value.Known || analysis.Value.Value != got || analysis.Effects != (Effects{}) {
+		t.Fatalf("known Analyze() = %#v, %v", analysis, err)
+	}
+	analysis, err = engine.Analyze(site, AbstractValues{})
+	if err != nil || analysis.Value.Known || analysis.Effects != (Effects{}) {
+		t.Fatalf("unknown Analyze() = %#v, %v", analysis, err)
+	}
+	// Evaluating concurrency must not make the run ID available to folding
+	// at other graph-time positions through a shared GitHub context map.
+	if _, exists := values.Compile.GitHub["run_id"]; exists {
+		t.Fatal("concurrency changed the shared GitHub context")
+	}
+	for _, source := range []string{
+		"${{ true || github.token }}", "${{ true || toJSON(github) }}",
+		"${{ github.run_number }}", "${{ github.run_attempt }}", "${{ needs.build.outputs.group }}",
+	} {
+		site.Source = source
+		if _, err := engine.Evaluate(site, values); err == nil {
+			t.Errorf("concurrency admitted %s", source)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunName, ProfileRunsOnTemplate} {
+		site.Profile, site.Source = profile, "${{ github.run_id }}"
+		if _, err := engine.Evaluate(site, values); err == nil {
+			t.Errorf("%s admitted run identity", profile)
+		}
 	}
 }
 
@@ -1220,7 +1259,7 @@ func TestEngineCompositeTokenGuidanceIsSpecificToMissingCompositeToken(t *testin
 func profileIDs() []ProfileID {
 	return []ProfileID{
 		ProfileRunsOn, ProfileRunsOnTemplate,
-		ProfileCompile, ProfileCompileTemplate, ProfileCompileContainerImage, ProfilePartialTemplate, ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
+		ProfileCompile, ProfileCompileTemplate, ProfileWorkflowConcurrency, ProfileCompileContainerImage, ProfilePartialTemplate, ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileJobControl, ProfileStepCondition, ProfileCallCondition,
 		ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput, ProfileStepTemplate,
 		ProfileStepControl, ProfileReusableStepControl, ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileDeferredInput, ProfileServiceCredential, ProfileServiceMap,

@@ -2167,7 +2167,7 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 		{expression: "${{ case(true, 'safe', github.token) }}", want: `unavailable value "github.token"`},
 		{expression: "${{ case(true, 'safe', secrets.TOKEN) }}", want: `unsupported compile-time context "secrets"`},
 		{expression: "${{ toJSON(github.event) }}", want: `unavailable value "github.event"`},
-		{expression: "${{ github.run_attempt }}", want: `unavailable value "github.run_attempt": run_id, run_number, and run_attempt exist only while a job runs, not when the workflow is imported; github values available at import: actor, base_ref, event.<property>, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, sha, workflow`},
+		{expression: "${{ github.run_attempt }}", want: `unavailable value "github.run_attempt": run identity is unavailable in this import-time expression position; github values available at import: actor, base_ref, event.<property>, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, sha, workflow`},
 		{expression: "${{ github.job }}", want: `unavailable value "github.job"; github values available at import: actor,`},
 		{expression: "${{ toJSON(github.event.*) }}", want: `whole event projection is unsupported`},
 		{expression: "${{ toJSON(event) }}", want: `whole event access is unsupported`},
