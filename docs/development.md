@@ -414,6 +414,10 @@ binary builds, fixture creation, and assertions are outside the timer. Tools are
 already installed; two warm-up pairs per case warm filesystem caches. The script
 then measures 12 baseline/candidate pairs, alternating which runs first. Each
 sample starts a fresh benchmark process and workspace on the same host.
+Shell and composite samples average 20 complete jobs to reduce interruption
+noise in these short workloads; JavaScript samples run one longer job. Results
+and budgets are always per job, not per batch. Each job gets a fresh runner and
+runtime-managed temporary files; jobs within a batch reuse the fixture workspace.
 
 The initial budget requires **both >20% and >25 ms added per job in at least
 11 of 12 pairs**. A single outlier does not fail a stable control. A median

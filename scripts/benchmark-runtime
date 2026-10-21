@@ -19,6 +19,9 @@ import tempfile
 # previous-commit baseline would hide a slowdown spread across several merges.
 BASELINE = "f21555d419953eb93176b39cd1d57642c05ba4c5"
 CASES = ("shell", "composite", "javascript")
+# Batch short jobs so one filesystem/scheduler interruption does not dominate a
+# sample. ns/op remains time per job; both sides use the same fixed batch size.
+JOBS_PER_SAMPLE = {"shell": 20, "composite": 20, "javascript": 1}
 PAIRS = 12
 WARMUPS = 2
 RELATIVE_BUDGET = 0.20
@@ -70,14 +73,15 @@ def save_report(output, report):
     lines = ["# Runtime benchmark", "", f"Status: **{report['status']}**", "",
              f"Baseline: `{report.get('baseline', BASELINE)}`",
              f"Candidate: `{report.get('candidate', 'unknown')}`", "",
-             "| Case | Baseline ms | Candidate ms | Paired change | Over budget | Result |",
-             "| --- | ---: | ---: | ---: | ---: | --- |"]
+             "| Case | Baseline ms | Candidate ms | Paired change | Over budget | Max MAD | Result |",
+             "| --- | ---: | ---: | ---: | ---: | ---: | --- |"]
     for case, result in report.get("comparisons", {}).items():
         medians = result["median_ns"]
         lines.append(f"| {case} | {medians['baseline'] / 1e6:.2f} | "
                      f"{medians['candidate'] / 1e6:.2f} | "
                      f"{(result['median_ratio'] - 1) * 100:+.1f}% | "
-                     f"{result['pairs_over_budget']}/{PAIRS} | {result['status']} |")
+                     f"{result['pairs_over_budget']}/{PAIRS} | "
+                     f"{max(result['relative_mad'].values()) * 100:.1f}% | {result['status']} |")
     lines += ["", "Budget: >20% AND >25 ms per job in at least 11/12 pairs. "
               "Relative MAD >10% or an inconsistent over-budget median is inconclusive.",
               "", "Only pass exits 0. Inconclusive/error exits 2; regression exits 1."]
@@ -97,6 +101,7 @@ def main():
     report = {"schema": 1, "status": "error", "baseline": BASELINE,
               "samples": {case: [] for case in CASES}, "comparisons": {},
               "policy": {"pairs": PAIRS, "warmups": WARMUPS,
+                         "jobs_per_sample": JOBS_PER_SAMPLE,
                          "relative_budget": RELATIVE_BUDGET,
                          "absolute_budget_ns": ABSOLUTE_BUDGET_NS,
                          "max_relative_mad": MAX_RELATIVE_MAD},
@@ -147,16 +152,17 @@ def main():
 
                 for case in CASES:
                     print(f"--- Runtime benchmark: {case}", flush=True)
+                    jobs = JOBS_PER_SAMPLE[case]
                     for index in range(WARMUPS + PAIRS):
                         pair = {}
                         order = ("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")
                         for side in order:
                             text = run([str(binaries[side]), "-test.run=^$",
                                         f"-test.bench=^BenchmarkRuntimeWorkflow$/{case}$",
-                                        "-test.benchtime=1x", "-test.count=1", "-test.timeout=60s"],
+                                        f"-test.benchtime={jobs}x", "-test.count=1", "-test.timeout=60s"],
                                        cwd=work, env=env)
                             (output / f"{case}-{index:02d}-{side}.log").write_text(text + "\n")
-                            matches = re.findall(rf"^BenchmarkRuntimeWorkflow/{case}-\d+\s+1\s+([\d.]+) ns/op$", text, re.M)
+                            matches = re.findall(rf"^BenchmarkRuntimeWorkflow/{case}-\d+\s+{jobs}\s+([\d.]+) ns/op$", text, re.M)
                             if len(matches) != 1:
                                 raise ValueError(f"missing or duplicate measurement: {case}/{side}")
                             pair[side] = float(matches[0])

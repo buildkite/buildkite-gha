@@ -34,7 +34,7 @@ run = "echo '--- Run race tests'; go test -race ./..."
 description = "Check benchmark correctness and regression classification without a speed gate"
 run = '''
 python3 scripts/benchmark-runtime-test.py
-BENCHMARK_NODE24="$(mise where node@24)/bin/node" go test ./testdata/runtime-benchmark -run '^$' -bench '^BenchmarkRuntimeWorkflow$' -benchtime=1x -count=1
+BENCHMARK_NODE24="$(mise where node@24)/bin/node" go test ./testdata/runtime-benchmark -run '^$' -bench '^BenchmarkRuntimeWorkflow$' -benchtime=2x -count=1
 '''
 
 [tasks."lint:go"]
