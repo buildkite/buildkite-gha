@@ -14,7 +14,7 @@ Runtime tests require the pinned `pwsh` executable on `PATH`. Run them through
 skips its execution tests. CI uses the same toolchain on Linux and macOS.
 
 `mise.lock` lets CI install tools without looking up releases. After changing a
-tool version, regenerate the lock with `mise` 2026.5.12 or newer:
+tool version, regenerate the lock with `mise` 2026.10.17 or newer:
 
 ```sh
 mise lock --platform linux-x64,linux-x64-musl,linux-arm64,linux-arm64-musl,macos-x64,macos-arm64,windows-x64
