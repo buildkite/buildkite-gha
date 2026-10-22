@@ -87,6 +87,11 @@ An expression site selects a closed semantic profile. The profile owns:
 The same engine validates and evaluates a profile. Adding a context or function
 to one field does not implicitly add it to another field.
 
+Workflow concurrency has its own compile-time profile. The hosted adapter
+supplies the owning build ID separately from the shared GitHub context, so
+evaluating a group cannot make run identity available to other graph-time
+positions. Offline callers leave that identity unavailable.
+
 Program sites serialize source text and diagnostic location. Their position in
 the program derives profile, result type, provenance, and purpose after decode.
 This prevents a plan from claiming broader semantics in serialized profile

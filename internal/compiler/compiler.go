@@ -265,6 +265,7 @@ func ValidateWithOptionsContext(ctx context.Context, path string, source []byte,
 		Payload: map[string]any{},
 	}
 	context := compileContext(event, nil, path, parsed.Name)
+	context.WorkflowRunID = options.BuildID
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	context.GitHub["head_ref"] = "validation"
 	runNameErr := ValidateWorkflowRunName(path, parsed)
@@ -320,6 +321,7 @@ func ValidateEventWithOptionsContext(ctx context.Context, path string, source, e
 	}
 	event.Trust = options.EventTrust
 	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
+	context.WorkflowRunID = options.BuildID
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	_, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
@@ -390,6 +392,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	event.Trust = options.EventTrust
 	organizationVars, repositoryVars := cloneMap(options.Vars.Organization), cloneMap(options.Vars.Repository)
 	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
+	context.WorkflowRunID = options.BuildID
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	runName, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
@@ -781,7 +784,11 @@ func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, c
 		return "", nil
 	}
 	context.Matrix = matrix
-	value, err := evaluateCompileSite(concurrency.Group, expression.ProfileCompileTemplate, expression.ResultString, context)
+	profile := expression.ProfileCompileTemplate
+	if jobID == "" {
+		profile = expression.ProfileWorkflowConcurrency
+	}
+	value, err := evaluateCompileSite(concurrency.Group, profile, expression.ResultString, context)
 	group, _ := value.(string)
 	if err != nil {
 		message := fmt.Sprintf("concurrency group cannot be resolved at compile time: %v", err)

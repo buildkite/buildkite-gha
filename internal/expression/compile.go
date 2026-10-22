@@ -17,9 +17,12 @@ import (
 // never reads the process environment or a secret provider.
 type CompileContext struct {
 	GitHub map[string]any
-	Event  map[string]any
-	Vars   map[string]string
-	Inputs map[string]any
+	// WorkflowRunID is available only to workflow concurrency, not other
+	// graph-time expressions. It is the owning Buildkite build ID.
+	WorkflowRunID string
+	Event         map[string]any
+	Vars          map[string]string
+	Inputs        map[string]any
 	// InputsComplete distinguishes absent properties from inputs that have
 	// not been resolved yet, such as reusable inputs supplied by job outputs.
 	InputsComplete bool
@@ -192,6 +195,10 @@ func evaluateRunName(template string, context CompileContext) (string, error) {
 }
 
 func validateCompileExpressionNode(node actionlint.ExprNode) error {
+	return validateCompileExpressionNodeWithRunID(node, false)
+}
+
+func validateCompileExpressionNodeWithRunID(node actionlint.ExprNode, allowRunID bool) error {
 	validator := newSemanticValidator(compileTimeSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		reference := referenceName(root, path)
@@ -209,6 +216,10 @@ func validateCompileExpressionNode(node actionlint.ExprNode) error {
 			switch strings.ToLower(path[0]) {
 			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow":
 				return nil
+			case "run_id":
+				if allowRunID {
+					return nil
+				}
 			}
 		case strings.EqualFold(root, "github") && len(path) >= 2 && strings.EqualFold(path[0], "event"):
 			return nil
@@ -539,6 +550,9 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 				current = nil
 				missing = true
 				continue
+			}
+			if strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "run_id") {
+				return nil, compileRuntimeDependencyError{authoredErrorf("github.run_id requires a Buildkite build identity; use hosted upload, or use github.workflow and github.ref for branch-scoped concurrency")}
 			}
 			return nil, compileRuntimeDependencyError{authoredErrorf("compile-time expression references unavailable value %q", root+"."+strings.Join(path, "."))}
 		}

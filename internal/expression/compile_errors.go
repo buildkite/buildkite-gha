@@ -8,7 +8,7 @@ import (
 
 // ErrRunValueUnavailable reports a compile-time reference to a value GitHub
 // assigns to each run, such as github.run_attempt.
-var ErrRunValueUnavailable = errors.New("run_id, run_number, and run_attempt exist only while a job runs, not when the workflow is imported")
+var ErrRunValueUnavailable = errors.New("run identity is unavailable in this import-time expression position")
 
 // importGitHubValues lists the github properties a compile-time expression may
 // read. It mirrors the compile-time validator allowlist.
