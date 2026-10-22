@@ -135,8 +135,8 @@ release age and receive the `security` label. Failed Renovate builds notify
 Every pull request runs `govulncheck` as part of the required repository checks.
 The aggregate `buildkite/buildkite-gha` status is required on the default
 branch. A daily 06:00 UTC default-branch build sets `VULNERABILITY_SCAN=1` and
-runs only the vulnerability task. A failure blocks dependency updates or marks
-the scheduled build failed.
+runs the vulnerability task and [runtime regression check](#measure-runtime-regressions).
+A failure blocks dependency updates or marks the scheduled build failed.
 
 The following controls require GitHub or security-product administration. Check
 them when onboarding the repository and after changing app access:
@@ -377,6 +377,75 @@ scripts/verify-workflow-annotations <build-number> <commit>
 scripts/verify-upload-artifact <build-number> <commit>
 scripts/verify-artifact-roundtrip <build-number> <commit>
 ```
+
+## Measure runtime regressions
+
+The **Runtime regression check** runs on main builds, tagged release builds,
+and the existing daily scheduled scan. It gates release publication rather than
+detecting a slowdown after shipping. Pull requests run fixture correctness and
+comparison-policy tests, without a timing gate. Set `RUNTIME_BENCHMARK=1` on a
+branch build to run the full comparison before merging.
+
+Run locally on Linux with Python 3 and the mise toolchain:
+
+```sh
+mise run test:runtime-benchmark
+mise exec -- scripts/benchmark-runtime --output /tmp/runtime-comparison
+```
+
+The output directory must not exist. Avoid other CPU-heavy work during a run.
+The script builds the candidate working tree and the fixed source baseline in
+[`scripts/benchmark-runtime`](../scripts/benchmark-runtime), using identical
+benchmark code, Go, Node 24, build flags, and `GOMAXPROCS=2`. The initial
+baseline is the main revision before this check was added. It does not move
+automatically, so a series of small slowdowns cannot silently reset the budget.
+
+The [workloads](../testdata/runtime-benchmark/runtime_test.go) call production
+`Runner.RunJob` with real compiled plans, processes, and files:
+
+| Case | Work per job | Correctness checks |
+| --- | --- | --- |
+| Shell | 12 chained Bash steps | Chained outputs and final environment match expected values. |
+| Composite | 12 local actions, each with two Bash steps | Action inputs, nested outputs, and environment reach the final job output. |
+| JavaScript | 12 local Node 24 actions with pre, main, and post scripts | All lifecycle phases run; main state reaches post; outputs propagate and secrets are masked. |
+
+Timing includes runtime preparation, step execution, and cleanup. Compilation,
+binary builds, fixture creation, and assertions are outside the timer. Tools are
+already installed; two warm-up pairs per case warm filesystem caches. The script
+then measures 12 baseline/candidate pairs, alternating which runs first. Each
+sample starts a fresh benchmark process and workspace on the same host.
+Shell and composite samples average 20 complete jobs to reduce interruption
+noise in these short workloads; JavaScript samples run one longer job. Results
+and budgets are always per job, not per batch. Each job gets a fresh runner and
+runtime-managed temporary files; jobs within a batch reuse the fixture workspace.
+
+The initial budget requires **both >20% and >25 ms added per job in at least
+11 of 12 pairs** to report a regression. Passing requires at least **11 of 12
+pairs within budget**; 2–10 over-budget pairs are **inconclusive**. This applies
+the same consistency requirement to both outcomes and tolerates one outlier.
+Each pair must exceed both limits to count as over budget. Median absolute
+deviation (MAD) remains diagnostic: shared host drift can increase both sides'
+timings without changing their paired budget decisions. These are controlled
+runtime-overhead budgets, not customer latency targets or a claimed statistical
+confidence interval. Small absolute changes below 25 ms are not gated.
+
+Exit codes are zero for pass, one for regression, and two for inconclusive or
+execution/setup failure. Both nonzero outcomes block release publication. Inspect
+the build annotation and artifacts before manually rerunning an inconclusive
+result; do not retry until green or increase a budget to hide a failure.
+Artifacts retain raw nanosecond pairs, warm-up and sample logs, summary Markdown,
+the exact harness, binary hashes, source revisions, tool versions, and host details.
+Download evidence needed for long-term comparisons before Buildkite's artifact
+retention expires. The Pipelines team owns investigation and baseline changes.
+
+Advance the baseline only in a reviewed PR with the old comparison, the accepted
+performance change, and a new unchanged control. If an API change prevents the
+baseline harness from building, the check fails explicitly; preserve the old
+evidence before changing the harness or baseline. Tool upgrades apply to both
+versions, so this does not isolate toolchain regressions or certify a released
+archive. It also excludes CLI startup, imports, scheduling, network downloads,
+Agent API publication, Docker/services, and native macOS/Windows performance.
+Cross-offering whole-job comparisons remain separate from this check.
 
 ## Test released and native entry points
 

@@ -180,6 +180,33 @@ steps:
           revision="$$(git rev-parse HEAD)"
           mise exec -- go run -ldflags "-X main.revision=$$revision" ./cmd/buildkite-gha plugin
 
+  - label: ":stopwatch: Runtime regression check"
+    key: "runtime-benchmark"
+    # Include the existing daily scheduled scan, which skips the CI group.
+    # Tag builds must pass this gate before the release-publishing wait step.
+    if: (build.branch == "main" && build.pull_request.id == null) || build.tag != null || build.env("VULNERABILITY_SCAN") == "1" || build.env("RUNTIME_BENCHMARK") == "1"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    artifact_paths:
+      - ".runtime-benchmark/**/*"
+    plugins:
+      - setup-go#v0.1.0:
+          mise-version: "2026.5.12"
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      output=".runtime-benchmark/$${BUILDKITE_JOB_ID}-$${BUILDKITE_RETRY_COUNT:-0}"
+      status=0
+      mise exec -- scripts/benchmark-runtime --output "$$output" || status=$$?
+      if test -f "$$output/summary.md"; then
+        style=success
+        if test "$$status" -ne 0; then style=error; fi
+        buildkite-agent annotate --context runtime-benchmark --style "$$style" < "$$output/summary.md"
+      fi
+      exit "$$status"
+
   - label: ":shield: Scheduled vulnerability scan"
     key: "vulnerability-scan"
     if: build.env("VULNERABILITY_SCAN") == "1"
