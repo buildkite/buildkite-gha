@@ -420,11 +420,14 @@ and budgets are always per job, not per batch. Each job gets a fresh runner and
 runtime-managed temporary files; jobs within a batch reuse the fixture workspace.
 
 The initial budget requires **both >20% and >25 ms added per job in at least
-11 of 12 pairs**. A single outlier does not fail a stable control. A median
-absolute deviation above 10% of either side's median, or an over-budget paired
-median without 11 consistent pairs, is **inconclusive**, not a pass. These are
-controlled runtime-overhead budgets, not customer latency targets or a claimed
-statistical confidence interval. Small absolute changes below 25 ms are not gated.
+11 of 12 pairs** to report a regression. Passing requires at least **11 of 12
+pairs within budget**; 2–10 over-budget pairs are **inconclusive**. This applies
+the same consistency requirement to both outcomes and tolerates one outlier.
+Each pair must exceed both limits to count as over budget. Median absolute
+deviation (MAD) remains diagnostic: shared host drift can increase both sides'
+timings without changing their paired budget decisions. These are controlled
+runtime-overhead budgets, not customer latency targets or a claimed statistical
+confidence interval. Small absolute changes below 25 ms are not gated.
 
 Exit codes are zero for pass, one for regression, and two for inconclusive or
 execution/setup failure. Both nonzero outcomes block release publication. Inspect

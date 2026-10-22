@@ -26,7 +26,6 @@ PAIRS = 12
 WARMUPS = 2
 RELATIVE_BUDGET = 0.20
 ABSOLUTE_BUDGET_NS = 25_000_000
-MAX_RELATIVE_MAD = 0.10
 
 
 def compare(pairs):
@@ -44,16 +43,15 @@ def compare(pairs):
     ratios = [p["candidate"] / p["baseline"] for p in pairs]
     over = sum(delta > ABSOLUTE_BUDGET_NS and ratio > 1 + RELATIVE_BUDGET
                for delta, ratio in zip(deltas, ratios))
-    exceeds = (statistics.median(deltas) > ABSOLUTE_BUDGET_NS
-               and statistics.median(ratios) > 1 + RELATIVE_BUDGET)
-    if max(spread.values()) > MAX_RELATIVE_MAD:
-        status = "inconclusive"
-    elif over >= 11:
+    # Judge agreement across paired budget decisions, not each binary's timing
+    # spread: shared host drift can leave every comparison within budget. Use
+    # the same evidence requirement to pass as to report a regression.
+    if over >= 11:
         status = "regression"
-    elif exceeds:
-        status = "inconclusive"
-    else:
+    elif PAIRS - over >= 11:
         status = "pass"
+    else:
+        status = "inconclusive"
     return {"status": status, "median_ns": medians, "relative_mad": spread,
             "median_delta_ns": statistics.median(deltas),
             "median_ratio": statistics.median(ratios), "pairs_over_budget": over}
@@ -83,7 +81,8 @@ def save_report(output, report):
                      f"{result['pairs_over_budget']}/{PAIRS} | "
                      f"{max(result['relative_mad'].values()) * 100:.1f}% | {result['status']} |")
     lines += ["", "Budget: >20% AND >25 ms per job in at least 11/12 pairs. "
-              "Relative MAD >10% or an inconsistent over-budget median is inconclusive.",
+              "Pass requires at least 11/12 pairs within budget; otherwise inconclusive. "
+              "Max MAD describes timing spread, not paired uncertainty.",
               "", "Only pass exits 0. Inconclusive/error exits 2; regression exits 1."]
     if "error" in report:
         lines += ["", "```text", report["error"], "```"]
@@ -98,13 +97,13 @@ def main():
     # Never mix evidence from separate runs or hide a stale successful report.
     output.mkdir(parents=True, exist_ok=False)
     root = Path(__file__).resolve().parent.parent
-    report = {"schema": 1, "status": "error", "baseline": BASELINE,
+    report = {"schema": 2, "status": "error", "baseline": BASELINE,
               "samples": {case: [] for case in CASES}, "comparisons": {},
               "policy": {"pairs": PAIRS, "warmups": WARMUPS,
                          "jobs_per_sample": JOBS_PER_SAMPLE,
                          "relative_budget": RELATIVE_BUDGET,
                          "absolute_budget_ns": ABSOLUTE_BUDGET_NS,
-                         "max_relative_mad": MAX_RELATIVE_MAD},
+                         "required_agreement": 11},
               "build_url": os.environ.get("BUILDKITE_BUILD_URL")}
     try:
         report["candidate"] = run(["git", "rev-parse", "HEAD"], cwd=root)

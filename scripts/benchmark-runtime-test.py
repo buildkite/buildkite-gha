@@ -23,17 +23,28 @@ class ComparisonTest(unittest.TestCase):
                 self.assertEqual(compare(pairs)["status"], expected)
 
     def test_outliers_and_uncertainty(self):
-        pairs = [{"baseline": 100_000_000, "candidate": 100_000_000}] * 12
-        pairs[0] = {"baseline": 100_000_000, "candidate": 900_000_000}
-        self.assertEqual(compare(pairs)["status"], "pass")
-        # Ten consistent slow pairs are not enough to call a regression, but
-        # the over-budget median must not silently pass either.
-        pairs[:10] = [{"baseline": 100_000_000, "candidate": 140_000_000}] * 10
-        self.assertEqual(compare(pairs)["status"], "inconclusive")
-        pairs[10] = {"baseline": 100_000_000, "candidate": 140_000_000}
-        self.assertEqual(compare(pairs)["status"], "regression")
-        # Even matching medians cannot certify an unstable machine.
-        pairs = [{"baseline": n, "candidate": n} for n in [50_000_000, 150_000_000] * 6]
+        # One outlier is tolerated on either side of the budget. Mixed evidence
+        # must not pass merely because its median is below the budget.
+        for over, expected in ((0, "pass"), (1, "pass"), (2, "inconclusive"),
+                               (6, "inconclusive"), (10, "inconclusive"),
+                               (11, "regression"), (12, "regression")):
+            with self.subTest(over=over):
+                pairs = ([{"baseline": 100_000_000, "candidate": 900_000_000}] * over
+                         + [{"baseline": 100_000_000, "candidate": 100_000_000}] * (12 - over))
+                self.assertEqual(compare(pairs)["status"], expected)
+
+    def test_shared_drift_and_unpaired_noise(self):
+        # Large common host movement does not make a consistent paired result
+        # uncertain, and must not hide a slowdown present throughout that drift.
+        for added, expected in ((0, "pass"), (40_000_000, "regression")):
+            pairs = [{"baseline": n, "candidate": n + added}
+                     for n in [50_000_000, 150_000_000] * 6]
+            with self.subTest(added=added):
+                self.assertEqual(compare(pairs)["status"], expected)
+        # Same marginal distributions, but opposing movement within each pair:
+        # half the comparisons exceed the budget. This really is uncertain.
+        pairs = [{"baseline": n, "candidate": 200_000_000 - n}
+                 for n in [50_000_000, 150_000_000] * 6]
         self.assertEqual(compare(pairs)["status"], "inconclusive")
 
     def test_invalid_evidence(self):
