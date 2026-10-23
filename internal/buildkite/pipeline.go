@@ -38,7 +38,7 @@ const DarwinHostedToolCachePath = "/Users/runner/hostedtoolcache"
 
 // MinimumMiseVersion is the oldest supported mise release and the exact
 // release installed when no compatible runtime executable is available.
-const MinimumMiseVersion = "2026.5.12"
+const MinimumMiseVersion = "2026.10.17"
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)

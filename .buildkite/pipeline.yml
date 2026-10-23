@@ -72,9 +72,9 @@ steps:
           BUILDKITE_GHA_LIVE_REQUIRED: "1"
         plugins:
           - setup-go#v0.1.0:
-              mise-version: "2026.5.12"
+              mise-version: "2026.10.17"
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
+              version: "2026.10.17"
         command: |
           set -euo pipefail
           # A golangci-lint cache shared across builds returns issues with the
@@ -90,9 +90,9 @@ steps:
         cache: ".buildkite/cache-volume"
         plugins:
           - setup-go#v0.1.0:
-              mise-version: "2026.5.12"
+              mise-version: "2026.10.17"
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
+              version: "2026.10.17"
           - tests#v1.0.0:
               client-version: "3.0.0"
               test-runner: "gotest"
@@ -107,7 +107,7 @@ steps:
           queue: "mac-small"
         plugins:
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
+              version: "2026.10.17"
         command: |
           set -euo pipefail
           test "$$(mise exec -- go env GOOS)" = "darwin"
@@ -121,7 +121,7 @@ steps:
         timeout_in_minutes: 10
         plugins:
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
+              version: "2026.10.17"
         command: "mise run corpus:starter-profile"
 
       - label: ":github: Documented compatibility gaps"
@@ -130,7 +130,7 @@ steps:
         timeout_in_minutes: 20
         plugins:
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
+              version: "2026.10.17"
         command: "mise run compatibility:gaps"
 
       - label: ":pipeline: Load public actions runtime proof"
@@ -146,7 +146,7 @@ steps:
           automatic: false
         plugins:
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
+              version: "2026.10.17"
         command: |
           set -euo pipefail
           commit="$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}"
@@ -175,7 +175,7 @@ steps:
           automatic: false
         plugins:
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.5.12"
+              version: "2026.10.17"
         command: |
           revision="$$(git rev-parse HEAD)"
           mise exec -- go run -ldflags "-X main.revision=$$revision" ./cmd/buildkite-gha plugin
@@ -213,9 +213,9 @@ steps:
     cache: ".buildkite/cache-volume"
     plugins:
       - setup-go#v0.1.0:
-          mise-version: "2026.5.12"
+          mise-version: "2026.10.17"
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-          version: "2026.5.12"
+          version: "2026.10.17"
     command: "mise run vulnerability"
 
   - wait: ~
@@ -227,5 +227,5 @@ steps:
     if: build.tag != null
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-          version: "2026.5.12"
+          version: "2026.10.17"
     command: "mise exec -- scripts/ci-buildkite-release"

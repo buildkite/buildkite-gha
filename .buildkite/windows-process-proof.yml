@@ -6,7 +6,7 @@ steps:
     timeout_in_minutes: 10
     plugins:
       - setup-go#v0.1.0:
-          mise-version: "2026.5.12"
+          mise-version: "2026.10.17"
     command: |
       set -euo pipefail
       scripts/verify-source-checkout "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}"
