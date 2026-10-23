@@ -1027,7 +1027,7 @@ func TestRunnerTargetAgentEnvironmentIdentity(t *testing.T) {
 	for _, target := range []RunnerTarget{
 		{Platform: PlatformLinuxAMD64, Image: "example.com/image@sha256:" + strings.Repeat("a", 64), Agents: first.Agents},
 		{Platform: PlatformLinuxAMD64, Agents: map[string]string{"queue": "other"}},
-		{Platform: PlatformDarwinARM64, Queue: "macos", Agents: first.Agents},
+		{Platform: PlatformWindowsAMD64, Queue: "windows", Agents: first.Agents},
 	} {
 		if err := validateRunnerTarget(map[string]RunnerTarget{}, "runner", target); err == nil {
 			t.Fatalf("accepted invalid target: %#v", target)

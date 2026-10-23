@@ -48,14 +48,14 @@ var cacheNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Z
 var cacheNameVariablePattern = regexp.MustCompile(`\$\{BUILDKITE_[A-Z0-9_]+\}`)
 var cacheSizePattern = regexp.MustCompile(`^[0-9]+g$`)
 
-// ValidateRunnerAgents checks opaque Linux host-selection tags. Queue remains
+// ValidateRunnerAgents checks opaque host-selection tags. Queue remains
 // a separate authority boundary and must never be replaced by an extra tag.
 func ValidateRunnerAgents(platform, image string, agents map[string]string) error {
 	if len(agents) == 0 {
 		return nil
 	}
-	if platform != "linux/amd64" {
-		return fmt.Errorf("runner agent tags are only supported on linux/amd64")
+	if platform != "linux/amd64" && platform != "darwin/arm64" {
+		return fmt.Errorf("runner agent tags are only supported on linux/amd64 and darwin/arm64")
 	}
 	if image != "" {
 		return fmt.Errorf("runner agent tags and runtime image are mutually exclusive")

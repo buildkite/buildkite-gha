@@ -112,9 +112,10 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 		ConfiguredTarget *ConfiguredRunnerTarget `json:"configured_target,omitempty"`
 	}
 	body := struct {
-		Requirements      []requirement `json:"requirements"`
-		SupportsAgentTags bool          `json:"supports_agent_tags"`
-	}{Requirements: make([]requirement, len(requirements)), SupportsAgentTags: true}
+		Requirements           []requirement `json:"requirements"`
+		SupportsAgentTags      bool          `json:"supports_agent_tags"`
+		SupportsMacOSAgentTags bool          `json:"supports_macos_agent_tags"`
+	}{Requirements: make([]requirement, len(requirements)), SupportsAgentTags: true, SupportsMacOSAgentTags: true}
 	expected := make(map[string]bool, len(requirements))
 	for i, input := range requirements {
 		if input.ID == "" || expected[input.ID] {
