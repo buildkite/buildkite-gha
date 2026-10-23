@@ -18,8 +18,9 @@ func TestAgentRunnerResolverBatchesRequirementsIgnoresUnknownFieldsAndReturnsSug
 			t.Errorf("request = %s %s, headers %#v", r.Method, r.URL.Path, r.Header)
 		}
 		var body struct {
-			SupportsAgentTags bool `json:"supports_agent_tags"`
-			Requirements      []struct {
+			SupportsAgentTags      bool `json:"supports_agent_tags"`
+			SupportsMacOSAgentTags bool `json:"supports_macos_agent_tags"`
+			Requirements           []struct {
 				ID       string `json:"id"`
 				Selector struct {
 					Labels []string `json:"labels"`
@@ -31,6 +32,9 @@ func TestAgentRunnerResolverBatchesRequirementsIgnoresUnknownFieldsAndReturnsSug
 		}
 		if !body.SupportsAgentTags {
 			t.Error("runner request did not opt into agent-tag targets")
+		}
+		if !body.SupportsMacOSAgentTags {
+			t.Error("runner request did not opt into macOS agent-tag targets")
 		}
 		resolutions := make([]map[string]any, len(body.Requirements))
 		for i, requirement := range body.Requirements {

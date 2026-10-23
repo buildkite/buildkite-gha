@@ -534,6 +534,44 @@ func TestCompileBundleKeepsNativeHostSeparateFromJobContainer(t *testing.T) {
 	}
 }
 
+func TestCompileBundleEmitsMacOSGitHubRunnerImage(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: macos-15\n    steps:\n      - run: sw_vers\n")
+	toolCache := false
+	options := defaultOptions()
+	options.Runners = RunnerPolicy{Targets: map[string]RunnerTarget{"macos-15": {
+		Queue: "macos-medium", Platform: PlatformDarwinARM64,
+		Agents: map[string]string{"nsc-image-selectors": "macos.version=15.x,macos.purpose=githubrunner"}, ToolCache: &toolCache,
+	}}, UntrustedQueues: []string{"macos-medium"}}
+	options.RuntimeDistributions = map[Platform]string{PlatformDarwinARM64: testDistributionDigest}
+	bundle, err := CompileBundleWithOptions("workflow.yml", workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Image   string            `yaml:"image"`
+			Agents  map[string]string `yaml:"agents"`
+			Command string            `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 {
+		t.Fatalf("steps = %#v", document.Steps)
+	}
+	step := document.Steps[0]
+	wantAgents := map[string]string{"queue": "macos-medium", "nsc-image-selectors": "macos.version=15.x,macos.purpose=githubrunner"}
+	if step.Image != "" || !reflect.DeepEqual(step.Agents, wantAgents) || !strings.Contains(step.Command, "run-job") {
+		t.Fatalf("macOS step = %#v", step)
+	}
+	for _, forbidden := range []string{"--hosted-tool-cache", "/Users/runner/hostedtoolcache", "--docker-build-load"} {
+		if strings.Contains(step.Command, forbidden) {
+			t.Errorf("macOS command contains %q: %s", forbidden, step.Command)
+		}
+	}
+}
+
 func TestCompileBundleEmitsMixedLinuxAndDarwinRuntimes(t *testing.T) {
 	workflow := []byte(`on: push
 jobs:

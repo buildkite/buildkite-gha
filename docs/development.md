@@ -86,6 +86,7 @@ job's Agent API credentials. It advertises support for opaque agent tags:
 ```json
 {
   "supports_agent_tags": true,
+  "supports_macos_agent_tags": true,
   "requirements": [
     {"id": "r1", "selector": {"labels": ["ubuntu-latest"]}}
   ]
@@ -111,15 +112,44 @@ The additive target fields are `agents` (a string map) and `tool_cache`
 
 The client accepts either an immutable `image`, non-empty `agents`, or neither;
 it rejects targets with both and reserves `agents.queue` for the separate
-`queue` field. Agent tags are Linux-only and pass through unchanged. See
+`queue` field. Agent tags are supported on `linux/amd64` and `darwin/arm64`
+and pass through unchanged. See
 [runner tools](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#runtime-behavior-and-limits-runner-tools) for `tool_cache` semantics.
 Deferred stages retain both fields, including explicit `false` values.
 
-There is no version header or feature flag. Older backends ignore the request
+Linux selection has no version header or feature flag. Older backends ignore the request
 extension and return images; newer backends retain image-only responses when
 the capability is absent or `false`. Either side can ship first. Native
 selection requires both implementations, including the
 [companion backend change](https://github.com/buildkite/buildkite/pull/34514).
+
+macOS selection also requires `supports_macos_agent_tags: true` and the backend
+organization flag `GitHubActionsMacOSRunnerImages`. Older Linux tag-capable
+clients reject Darwin tags, so `supports_agent_tags` alone is not sufficient.
+Either side can ship first; flag-off requests retain the queue's existing image.
+Eligible Namespace-registered macOS queues receive, for example:
+
+```json
+{
+  "queue": "macos-medium",
+  "platform": "darwin/arm64",
+  "agents": {"nsc-image-selectors": "macos.version=15.x,macos.purpose=githubrunner"},
+  "tool_cache": false
+}
+```
+
+The backend maps `macos-14`, `macos-15`, `macos-26`, and `macos-27` to their
+corresponding major versions, including recognized provider aliases.
+`macos-latest` selects 26, Buildkite's current default major version, not
+GitHub's rolling latest alias. Queue selection is unchanged: versioned queue
+first, then `macos-medium`; the image selector still uses the requested version.
+Other selectors retain the existing queue image. `tool_cache: false` skips
+the legacy cache-directory bootstrap and uses the job-private `RUNNER_TOOL_CACHE`;
+it does not claim or select Namespace's preinstalled tool-cache path.
+The image selector does not guarantee the queue's pinned Xcode configuration.
+Image/tool parity and Hosted execution evidence are tracked in
+[PB-3888](https://linear.app/buildkite/issue/PB-3888).
+
 Explicit client mappings override automatic selection, but the backend validates
 their queue and platform before upload. Backend eligibility and label mapping
 remain server-owned.

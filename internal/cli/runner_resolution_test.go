@@ -21,7 +21,7 @@ func TestSuggestedRunnerTargetsAgentEnvironment(t *testing.T) {
 		{name: "configured backend queue", fields: map[string]any{}},
 		{name: "conflicting environment", fields: map[string]any{"image": defaultNobleRunnerImage, "agents": map[string]string{"nsc-gha-image": "ubuntu-24.04"}}, wantErr: "mutually exclusive"},
 		{name: "queue override", fields: map[string]any{"agents": map[string]string{"queue": "other"}}, wantErr: "cannot override queue"},
-		{name: "macos tags", fields: map[string]any{"platform": "darwin/arm64", "agents": map[string]string{"nsc-image-selectors": "macos.version=27.x"}}, wantErr: "only supported on linux"},
+		{name: "macos tags", fields: map[string]any{"platform": "darwin/arm64", "agents": map[string]string{"nsc-image-selectors": "macos.version=15.x,macos.purpose=githubrunner"}, "tool_cache": false}},
 		{name: "windows tags", fields: map[string]any{"platform": "windows/amd64", "agents": map[string]string{"image": "windows"}}, wantErr: "only supported on linux"},
 		{name: "empty tag", fields: map[string]any{"agents": map[string]string{"nsc-gha-image": ""}}, wantErr: "non-empty"},
 		{name: "non-string tag", fields: map[string]any{"agents": map[string]any{"image": 42}}, wantErr: "decode runner"},
@@ -51,7 +51,7 @@ func TestSuggestedRunnerTargetsAgentEnvironment(t *testing.T) {
 				t.Fatalf("selectors = %#v", got.selectors)
 			}
 			selected := got.selectors[0].Target
-			if selected.Queue != "linux-medium" || selected.Platform != compiler.PlatformLinuxAMD64 {
+			if selected.Queue != "linux-medium" || selected.Platform.String() != target["platform"] {
 				t.Fatalf("target = %#v", selected)
 			}
 			if tags, ok := test.fields["agents"]; ok && !reflect.DeepEqual(selected.Agents, tags) {
