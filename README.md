@@ -47,6 +47,7 @@ Use `buildkite-gha help`, `buildkite-gha help <command>`, or `buildkite-gha --ve
 
 ## Contributing
 
+- [Compatibility contract and evidence](docs/compatibility-contract.md)
 - [Development and releases](docs/development.md)
 - [Expression authority architecture](docs/expression-authority.md)
 
