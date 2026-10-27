@@ -259,6 +259,54 @@ func TestGitHubAPIStatsNameCacheLayersAndKeepCommandsIndependent(t *testing.T) {
 	}
 }
 
+func TestGitHubAPIStatsCountCompilationMissingRefHits(t *testing.T) {
+	var requests atomic.Uint64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := Parse("owner/action@missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, stats := WithGitHubAPIStats(t.Context())
+	ctx = WithMissingRefResolutions(ctx)
+	for _, test := range []struct {
+		name         string
+		newScope     bool
+		wantCalls    uint64
+		wantHitCount uint64
+	}{
+		{name: "cold", wantCalls: 3},
+		{name: "cached miss", wantCalls: 3, wantHitCount: 1},
+		{name: "new compilation", newScope: true, wantCalls: 6, wantHitCount: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.newScope {
+				ctx = WithMissingRefResolutions(ctx)
+			}
+			_, err := resolver.Resolve(ctx, ref)
+			var missing *NotPublicError
+			if !errors.As(err, &missing) {
+				t.Fatalf("Resolve() error = %v, want missing-ref diagnostic", err)
+			}
+			summary := stats.Snapshot()
+			var wantHits []SourceCacheHitCount
+			if test.wantHitCount != 0 {
+				wantHits = []SourceCacheHitCount{{Cache: "compilation_missing_ref", Count: test.wantHitCount}}
+			}
+			if requests.Load() != test.wantCalls || summary.HTTPAttempts != test.wantCalls || summary.HTTPResponses != test.wantCalls || !slices.Equal(summary.CacheHits, wantHits) {
+				t.Fatalf("stats = %#v, wire requests = %d; want %d requests and hits %#v", summary, requests.Load(), test.wantCalls, wantHits)
+			}
+		})
+	}
+}
+
 func TestGitHubAPIStatsConcurrentRequestsAndSnapshots(t *testing.T) {
 	const workers = 40
 	var requests atomic.Uint64
