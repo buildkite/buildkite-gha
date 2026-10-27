@@ -162,6 +162,12 @@ type JobInstance struct {
 	reusableCall              workflow.Position
 }
 
+// inputScope is the workflow input scope for this job's runtime expressions.
+// Deferred inputs are absent until the runtime hydrates them.
+func (instance JobInstance) inputScope() expression.InputScope {
+	return expression.InputScope{Values: instance.Inputs, Complete: len(instance.DeferredInputs) == 0}
+}
+
 // CallGuard is one immutable caller-scoped condition inherited by a flattened
 // reusable-workflow job.
 type CallGuard struct {
@@ -880,6 +886,8 @@ func supported(path string, job workflow.Job) error {
 func resolveCompileTimeConditions(job workflow.Job, context expression.CompileContext, matrix map[string]any) workflow.Job {
 	context.Matrix = matrix
 	context.Vars = nil
+	// Runtime conditions read inputs from the plan; keep them residual.
+	context.Inputs, context.InputsComplete = nil, false
 	if resolved, ok := resolveCompileTimeCondition(job.If, expression.ProfileCompileJobCondition, context); ok {
 		job.If = resolved
 	}

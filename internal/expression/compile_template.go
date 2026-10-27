@@ -331,6 +331,72 @@ func substituteCompileInputsOnce(template string, inputs map[string]any) (string
 	}
 }
 
+// SubstituteSecretSelectorInputs resolves secrets[<index>] selectors whose
+// index reads workflow inputs, such as secrets[inputs.name], to literal secret
+// names. Secret inventory requires static names, so this is the only runtime
+// position where inputs are substituted. Other input reads stay in the source.
+func SubstituteSecretSelectorInputs(template string, inputs map[string]any, inputsComplete bool) (string, error) {
+	const open = "${{"
+	var substituted strings.Builder
+	remaining := template
+	for {
+		start := strings.Index(remaining, open)
+		if start < 0 {
+			substituted.WriteString(remaining)
+			return substituted.String(), nil
+		}
+		substituted.WriteString(remaining[:start+len(open)])
+		source := remaining[start+len(open):]
+		tokens, consumed, lexErr := actionlint.LexExpression(source)
+		if lexErr != nil {
+			return "", fmt.Errorf("invalid expression: %w", lexErr)
+		}
+		expressionSource := source[:consumed]
+		var rewritten strings.Builder
+		copied := 0
+		for i := 0; i+1 < len(tokens); i++ {
+			if tokens[i].Kind != actionlint.TokenKindIdent || !strings.EqualFold(tokens[i].Value, "secrets") ||
+				i > 0 && tokens[i-1].Kind == actionlint.TokenKindDot || tokens[i+1].Kind != actionlint.TokenKindLeftBracket {
+				continue
+			}
+			end, depth := i+2, 1
+			for ; end < len(tokens); end++ {
+				switch tokens[end].Kind {
+				case actionlint.TokenKindLeftBracket:
+					depth++
+				case actionlint.TokenKindRightBracket:
+					depth--
+				}
+				if depth == 0 {
+					break
+				}
+			}
+			if end == len(tokens) {
+				break
+			}
+			index := expressionSource[tokens[i+2].Offset:tokens[end].Offset]
+			node, err := parseCompleteExpression(open + index + "}}")
+			if err != nil || !nodeReferencesContext(node, "inputs") {
+				i = end
+				continue
+			}
+			value, available, err := evaluateCompileAvailable(Expression{Text: open + index + "}}"}, CompileContext{Inputs: inputs, InputsComplete: inputsComplete})
+			name, isString := value.(string)
+			if err != nil || !available || !isString {
+				return "", fmt.Errorf("secret name must resolve from compile-known workflow inputs")
+			}
+			literal, _ := compileInputLiteral(name)
+			rewritten.WriteString(expressionSource[copied:tokens[i+2].Offset])
+			rewritten.WriteString(literal)
+			copied = tokens[end].Offset
+			i = end
+		}
+		rewritten.WriteString(expressionSource[copied:])
+		substituted.WriteString(rewritten.String())
+		remaining = source[consumed:]
+	}
+}
+
 func findCompileInput(inputs map[string]any, target string) (any, bool) {
 	for name, value := range inputs {
 		if strings.EqualFold(name, target) {

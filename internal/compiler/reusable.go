@@ -175,7 +175,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 		replacements := make(map[string]needBinding, len(parsed.Jobs))
 		for i, job := range parsed.Jobs {
 			originalJob := job
-			resolvedJob, err := applyStaticInputs(sourcePath, job, context.Inputs)
+			resolvedJob, err := applyStaticInputs(sourcePath, job, expression.InputScope{Values: context.Inputs, Complete: context.InputsComplete})
 			if err != nil {
 				return nil, nil, scan, err
 			}
@@ -301,13 +301,13 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			}
 		}
 		originalJob := job
-		job, err = applyStaticInputs(path, job, inputs.values)
+		job, err = applyStaticInputs(path, job, expression.InputScope{Values: inputs.values, Complete: len(inputs.deferred) == 0})
 		if err != nil {
 			return reusableResolution{}, err
 		}
 		blockerDetailUnsafe := blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix)
 		if parsed.Callable {
-			if err := rejectUnresolvedInputExpressions(path, job, inputs.deferred); err != nil {
+			if err := rejectUnresolvedInputExpressions(path, job, inputs); err != nil {
 				return reusableResolution{}, err
 			}
 		}
@@ -1175,21 +1175,45 @@ func inputTypeMatches(inputType string, value any) bool {
 	}
 }
 
-func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (workflow.Job, error) {
+func applyStaticInputs(path string, job workflow.Job, scope expression.InputScope) (workflow.Job, error) {
+	inputs := scope.Values
 	if len(inputs) == 0 {
 		return job, nil
 	}
+	// Runtime fields keep input reads; only secret selectors need static names.
+	var selectorErr error
+	selectSecrets := func(position workflow.Position, values ...*string) {
+		for _, value := range values {
+			resolved, err := expression.SubstituteSecretSelectorInputs(*value, inputs, scope.Complete)
+			if err != nil && selectorErr == nil {
+				selectorErr = locatedJobError(path, job, position.Line, position.Column, err.Error())
+			}
+			*value = resolved
+		}
+	}
+	selectMapSecrets := func(position workflow.Position, values map[string]string) map[string]string {
+		if values == nil {
+			return nil
+		}
+		out := make(map[string]string, len(values))
+		for name, value := range values {
+			selectSecrets(position, &value)
+			out[name] = value
+		}
+		return out
+	}
+	selectSecrets(job.Span.Start, &job.DefaultShell, &job.DefaultWorkingDirectory)
+	job.Env = selectMapSecrets(job.Span.Start, job.Env)
+	job.Outputs = selectMapSecrets(job.Span.Start, job.Outputs)
 	job.Name = replaceStaticInputs(job.Name, inputs)
-	job.If = replaceStaticInputCondition(job.If, inputs)
-	job.DefaultShell = replaceStaticInputs(job.DefaultShell, inputs)
-	job.DefaultWorkingDirectory = replaceStaticInputs(job.DefaultWorkingDirectory, inputs)
+	if job.Reusable != nil {
+		job.If = replaceStaticInputCondition(job.If, inputs)
+	}
 	if job.Concurrency != nil {
 		concurrency := *job.Concurrency
 		concurrency.Group = replaceStaticInputs(concurrency.Group, inputs)
 		job.Concurrency = &concurrency
 	}
-	job.Env = replaceMapInputs(job.Env, inputs)
-	job.Outputs = replaceMapInputs(job.Outputs, inputs)
 	job.Services = append([]workflow.Service(nil), job.Services...)
 	for i := range job.Services {
 		container := job.Services[i].Container
@@ -1225,50 +1249,39 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 	job.Steps = append([]workflow.Step(nil), job.Steps...)
 	for i := range job.Steps {
 		step := &job.Steps[i]
-		step.Name = replaceStaticInputs(step.Name, inputs)
-		step.Run = replaceStaticInputs(step.Run, inputs)
 		step.Uses = replaceStaticInputs(step.Uses, inputs)
-		step.Shell = replaceStaticInputs(step.Shell, inputs)
-		step.WorkingDirectory = replaceStaticInputs(step.WorkingDirectory, inputs)
+		selectSecrets(step.Span.Start, &step.Name, &step.Run, &step.Shell, &step.WorkingDirectory)
+		step.Env = selectMapSecrets(step.Span.Start, step.Env)
+		step.With = selectMapSecrets(step.Span.Start, step.With)
 		if step.ContinueOnErrorExpression != "" {
-			resolved, err := expression.SubstituteCompileInputs(step.ContinueOnErrorExpression, inputs)
-			if err != nil {
-				// A failure the authored source already has is safe to quote.
-				// Otherwise substitution caused it and it can quote input values.
-				_, sourceErr := expression.SubstituteCompileInputs(step.ContinueOnErrorExpression, nil)
-				return job, stepControlError(path, job, *step, "continue-on-error", "resolve", sourceErr == nil, err)
-			}
-			substituted := resolved != step.ContinueOnErrorExpression
+			resolved := step.ContinueOnErrorExpression
+			readsInputs, _ := referencesContext(resolved, expression.ProfileStepControl, "inputs", false)
 			if err := validateCompileSite(resolved, expression.ProfileStepControl, expression.ResultBoolean); err != nil {
-				return job, stepControlError(path, job, *step, "continue-on-error", "validate", substituted, err)
+				return job, stepControlError(path, job, *step, "continue-on-error", "validate", readsInputs, err)
 			}
-			reduced, err := reduceCompileSite(resolved, expression.ProfileReusableStepControl, expression.ResultAny, expression.CompileContext{})
+			reduced, err := reduceCompileSite(resolved, expression.ProfileReusableStepControl, expression.ResultAny, expression.CompileContext{Inputs: inputs, InputsComplete: scope.Complete})
 			if err != nil {
-				return job, stepControlError(path, job, *step, "continue-on-error", "evaluate", substituted, err)
+				return job, stepControlError(path, job, *step, "continue-on-error", "evaluate", readsInputs, err)
 			}
 			if !reduced.Known {
 				step.ContinueOnErrorExpression = resolved
 			} else if enabled, ok := reduced.Value.(bool); ok {
-				step.ContinueOnError, step.ContinueOnErrorExpression = enabled, ""
+				if !readsInputs {
+					step.ContinueOnError, step.ContinueOnErrorExpression = enabled, ""
+				}
 			} else {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "continue-on-error expression must produce a boolean")
 			}
 		}
 		if step.TimeoutMinutesExpression != "" {
-			resolved, err := expression.SubstituteCompileInputs(step.TimeoutMinutesExpression, inputs)
-			if err != nil {
-				// A failure the authored source already has is safe to quote.
-				// Otherwise substitution caused it and it can quote input values.
-				_, sourceErr := expression.SubstituteCompileInputs(step.TimeoutMinutesExpression, nil)
-				return job, stepControlError(path, job, *step, "timeout-minutes", "resolve", sourceErr == nil, err)
-			}
-			substituted := resolved != step.TimeoutMinutesExpression
+			resolved := step.TimeoutMinutesExpression
+			readsInputs, _ := referencesContext(resolved, expression.ProfileStepControl, "inputs", false)
 			if err := validateCompileSite(resolved, expression.ProfileStepControl, expression.ResultNumber); err != nil {
-				return job, stepControlError(path, job, *step, "timeout-minutes", "validate", substituted, err)
+				return job, stepControlError(path, job, *step, "timeout-minutes", "validate", readsInputs, err)
 			}
-			reduced, err := reduceCompileSite(resolved, expression.ProfileReusableStepControl, expression.ResultAny, expression.CompileContext{})
+			reduced, err := reduceCompileSite(resolved, expression.ProfileReusableStepControl, expression.ResultAny, expression.CompileContext{Inputs: inputs, InputsComplete: scope.Complete})
 			if err != nil {
-				return job, stepControlError(path, job, *step, "timeout-minutes", "evaluate", substituted, err)
+				return job, stepControlError(path, job, *step, "timeout-minutes", "evaluate", readsInputs, err)
 			}
 			if !reduced.Known {
 				step.TimeoutMinutesExpression = resolved
@@ -1276,23 +1289,22 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 				if minutes <= 0 || minutes > 360 || math.IsNaN(minutes) || math.IsInf(minutes, 0) {
 					return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "timeout-minutes expression must produce a number greater than 0 and at most 360")
 				}
-				step.TimeoutMinutes, step.TimeoutMinutesExpression = minutes, ""
+				if !readsInputs {
+					step.TimeoutMinutes, step.TimeoutMinutesExpression = minutes, ""
+				}
 			} else {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "timeout-minutes expression must produce a number")
 			}
 		}
-		step.If = replaceStaticInputCondition(step.If, inputs)
-		step.Env = replaceMapInputs(step.Env, inputs)
-		step.With = replaceRuntimeMapInputs(step.With, inputs)
 	}
-	return job, nil
+	return job, selectorErr
 }
 
 // stepControlError reports a step-control expression that failed validation or
-// evaluation. When input substitution rewrote the expression, the error can
-// quote input values, so a fixed message replaces it.
-func stepControlError(path string, job workflow.Job, step workflow.Step, control, action string, substituted bool, err error) error {
-	if substituted {
+// evaluation. Evaluator errors can quote input values, so input-reading sites
+// use a fixed message.
+func stepControlError(path string, job workflow.Job, step workflow.Step, control, action string, readsInputs bool, err error) error {
+	if readsInputs {
 		return inputSubstitutedFinding(path, job, StageGraph, CodeGraphInvalid, step.Span.Start, fmt.Sprintf("step %s expression cannot be resolved", control)+inputValueHiddenNote)
 	}
 	return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("%s %s expression: %v", action, control, err))
@@ -1346,7 +1358,8 @@ func replaceSliceInputs(values []string, inputs map[string]any) []string {
 	return result
 }
 
-func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInputs map[string]deferredInput) error {
+func rejectUnresolvedInputExpressions(path string, job workflow.Job, inputs reusableInputs) error {
+	deferredInputs := inputs.deferred
 	reject := func(line, column int, message string) error {
 		return &ProcessingFinding{
 			Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
@@ -1415,11 +1428,11 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 	if slices.ContainsFunc(jobValues, hasInputExpression) {
 		return rejectJob("reusable-workflow input expression is not statically resolvable")
 	}
-	if hasUnresolvedConditionInput(job.If, deferredInputs) {
+	if readsUndeclaredInput(job.If, expression.ProfileJobCondition, inputs) {
 		return rejectJob("reusable-workflow input expression is not statically resolvable")
 	}
 	for _, value := range jobRuntimeValues {
-		if hasUnresolvedTemplateInput(value, deferredInputs) {
+		if readsUndeclaredInput(value, expression.ProfileStepTemplate, inputs) {
 			return rejectJob("reusable-workflow input expression is not statically resolvable")
 		}
 	}
@@ -1427,19 +1440,39 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 		if hasInputExpression(step.Uses) {
 			return reject(step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow action reference input expression is not statically resolvable")
 		}
-		if hasUnresolvedConditionInput(step.If, deferredInputs) {
+		if readsUndeclaredInput(step.If, expression.ProfileStepCondition, inputs) {
 			return reject(step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
 		}
 		stepValues := []string{step.Name, step.Run, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression}
 		stepValues = appendMapValues(stepValues, step.Env)
 		stepValues = appendMapValues(stepValues, step.With)
 		for _, value := range stepValues {
-			if hasUnresolvedTemplateInput(value, deferredInputs) {
+			if readsUndeclaredInput(value, expression.ProfileStepTemplate, inputs) {
 				return reject(step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
 			}
 		}
 	}
 	return nil
+}
+
+func readsUndeclaredInput(source string, profile expression.ProfileID, inputs reusableInputs) bool {
+	names, _, err := compilerExpressionEngine.InputReferences(compileExpressionSite(source, profile, expression.ResultAny))
+	if err != nil {
+		return true
+	}
+	for _, name := range names {
+		known := false
+		for candidate := range inputs.values {
+			known = known || strings.EqualFold(candidate, name)
+		}
+		for candidate := range inputs.deferred {
+			known = known || strings.EqualFold(candidate, name)
+		}
+		if !known {
+			return true
+		}
+	}
+	return false
 }
 
 func appendMapValues(out []string, values map[string]string) []string {
@@ -1479,17 +1512,6 @@ func hasUnresolvedTemplateInput(value string, deferredInputs map[string]deferred
 	}
 	usesInputs, err := referencesContext(resolved, expression.ProfilePartialTemplate, "inputs", true)
 	return err != nil || usesInputs
-}
-
-func hasUnresolvedConditionInput(value string, deferredInputs map[string]deferredInput) bool {
-	if strings.TrimSpace(value) == "" {
-		return false
-	}
-	template := value
-	if !strings.Contains(value, "${{") {
-		template = "${{ " + value + " }}"
-	}
-	return hasUnresolvedTemplateInput(template, deferredInputs)
 }
 
 func deferredInputPlaceholders(inputs map[string]deferredInput) map[string]any {
@@ -1674,17 +1696,6 @@ func replaceMapInputs(values map[string]string, inputs map[string]any) map[strin
 	return out
 }
 
-func replaceRuntimeMapInputs(values map[string]string, inputs map[string]any) map[string]string {
-	if values == nil {
-		return nil
-	}
-	out := make(map[string]string, len(values))
-	for name, value := range values {
-		out[name] = replaceRuntimeInputs(value, inputs)
-	}
-	return out
-}
-
 func replaceStaticInputCondition(value string, inputs map[string]any) string {
 	match := staticInputCondition.FindStringSubmatch(value)
 	if match == nil {
@@ -1725,14 +1736,6 @@ func replaceStaticInputCondition(value string, inputs map[string]any) string {
 }
 
 func replaceStaticInputs(value string, inputs map[string]any) string {
-	return replaceInputs(value, inputs, false)
-}
-
-func replaceRuntimeInputs(value string, inputs map[string]any) string {
-	return replaceInputs(value, inputs, true)
-}
-
-func replaceInputs(value string, inputs map[string]any, preserveRuntime bool) string {
 	resolved, err := expression.SubstituteCompileInputs(value, inputs)
 	if err != nil || resolved == value {
 		return value
@@ -1742,9 +1745,6 @@ func replaceInputs(value string, inputs map[string]any, preserveRuntime bool) st
 			return reduced.Value.(string)
 		}
 		return reduced.Source
-	}
-	if preserveRuntime {
-		return resolved
 	}
 	return value
 }

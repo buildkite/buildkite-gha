@@ -2,8 +2,10 @@
 
 ## Problem
 
-When the compiler expands a `workflow_call`, it substitutes caller input values
-into callee expression source.
+The compiler originally substituted caller input values into callee expression
+source when expanding a `workflow_call`. Graph, scheduling, and service fields
+still use this path; runtime fields now use
+[scoped input evaluation](../expression-authority.md#normalized-execution-program).
 [`SubstituteCompileInputs`](../../internal/expression/compile_template.go) is
 called only from [`internal/compiler/reusable.go`](../../internal/compiler/reusable.go).
 
@@ -39,9 +41,10 @@ from exactly one place:
 | Deferred input template | Caller inputs captured with the template (new) |
 | Action body and defaults | Action invocation inputs, which shadow workflow inputs |
 
-The runtime already supplies `Job.Inputs` through `WorkflowInputs` and
-condition contexts. The gaps are compile-time consumers, caller scope for
-nested calls and deferred inputs, and authority analysis.
+The runtime supplies `Job.Inputs` through `WorkflowInputs` and condition
+contexts. Runtime literal consumers and authority analysis use scoped inputs.
+The remaining gaps are graph-time consumers, call guards, and caller capture
+for nested arguments and deferred inputs.
 
 ### Invariants
 
@@ -93,8 +96,10 @@ substitution.
    dynamic `inputs` access. Add a residual reduction that keeps `inputs.*`
    references. No emitted-plan change.
 2. **Runtime fields.** Step and job `env`, `run`, `with` and `if` evaluate
-   against `Job.Inputs`. Compile-time literal consumers and caller-scoped
-   authority move in the same change.
+   against `Job.Inputs`, as do job outputs, defaults, step names, shells,
+   working directories, and step controls. Compile-time literal consumers move
+   in the same change. Input-selected secret names are still substituted,
+   because secret inventory needs static names.
 3. **Calls and graph fields.** Nested call arguments, call guards, matrix,
    labels, containers, runs-on and concurrency use an explicit caller scope.
    Deferred input templates gain a caller-input capture. The job plan schema,

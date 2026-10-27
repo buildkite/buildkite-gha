@@ -391,10 +391,15 @@ func evaluateCompileNodeAvailable(node actionlint.ExprNode, context CompileConte
 		}
 		return available, nil
 	}
+	// Named input reads can be known without the whole object being available.
+	root, path, referenceErr := referencePath(node)
+	staticInput := referenceErr == nil && strings.EqualFold(root, "inputs") && len(path) != 0
 	switch node := node.(type) {
 	case *actionlint.ObjectDerefNode:
-		if available, err := children(node.Receiver); err != nil || !available {
-			return nil, available, err
+		if !staticInput {
+			if available, err := children(node.Receiver); err != nil || !available {
+				return nil, available, err
+			}
 		}
 	case *actionlint.ArrayDerefNode:
 		if available, err := children(node.Receiver); err != nil || !available {
@@ -417,8 +422,10 @@ func evaluateCompileNodeAvailable(node actionlint.ExprNode, context CompileConte
 			return nil, available, err
 		}
 	case *actionlint.IndexAccessNode:
-		if available, err := children(node.Operand, node.Index); err != nil || !available {
-			return nil, available, err
+		if !staticInput {
+			if available, err := children(node.Operand, node.Index); err != nil || !available {
+				return nil, available, err
+			}
 		}
 	}
 	value, err := evaluateCompileNode(node, context)
@@ -436,6 +443,7 @@ func compileScalarLiteral(value any) (string, bool) {
 
 func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any, error) {
 	evaluator := newSemanticEvaluator(compileTimeSurface)
+	evaluator.policy.resolveStaticIndexedReference = true
 	evaluator.resolve = func(root string, path []string) (any, error) {
 		return resolveCompileReference(root, path, context)
 	}
@@ -462,7 +470,7 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 			}
 			return context.Matrix, nil
 		case "inputs":
-			if context.Inputs == nil {
+			if context.Inputs == nil || !context.InputsComplete {
 				return nil, compileRuntimeDependencyError{authoredErrorf("compile-time context %q is unavailable", root)}
 			}
 			return context.Inputs, nil

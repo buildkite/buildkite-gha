@@ -180,6 +180,23 @@ map back to host paths before containment checks.
 Reusable workflows flatten before program construction. Direct and called
 jobs therefore use the same lowering and authority paths.
 
+Runtime job and step expressions retain reusable-workflow input references.
+Evaluation and authority analysis read each job's typed `Job.Inputs`; action
+bodies use invocation inputs instead. Call guards do not read inputs yet, so
+their input reads stay unknown. Unknown deferred values keep authority
+conservative. Planning distinguishes known individual input properties from a
+complete input object. With deferred inputs, named known reads can still prune
+branches, but computed and whole-object reads remain unknown.
+
+Event reduction preserves input reads, including mixed event/input expressions.
+Shell checks and native action adapters evaluate a separate literal view without
+rewriting program source. Secret inventory needs static names, so flattening
+rewrites input-selected secret names, such as `secrets[inputs.name]`, to
+literals. It rejects selectors that deferred inputs could change. Evaluator
+diagnostics must not quote input-derived values. Graph and scheduling fields
+still use substitution during the
+[input-evaluation migration](plans/reusable-workflow-input-evaluation.md).
+
 Deferred runner selection supplies verified job outputs only to the `runs-on`
 expression profiles. It does not resolve job conditions or reusable inputs in
 the execution program. Those inputs retain their producer bindings, so
