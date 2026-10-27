@@ -229,8 +229,6 @@ func pushPathFilterFailureMessage(reason string) string {
 		detail = "The linked webhook has no usable commits array. Buildkite needs the original GitHub push commit list; changing workflow checkout settings cannot supply it."
 	case "push before commit is unavailable in the local checkout":
 		detail = "The webhook's before commit is missing from the importer's already non-shallow checkout. Buildkite needs that exact commit to compare the push; fetching more branch history is not a proven fix."
-	case "combined added and deleted files require provider rename conformance data", "renamed and copied files require provider conformance data":
-		detail = "Buildkite cannot yet match GitHub's path-filter behavior for possible renames or copies in this diff. This is a Buildkite compatibility limit, not an invalid workflow."
 	case "push path filters require a complete non-shallow checkout":
 		detail = "Buildkite could not confirm a non-shallow importer checkout. If git rev-parse --is-shallow-repository returns true there, ask the agent administrator to fetch full history before import. Workflow actions/checkout runs too late to fix this."
 		nextStep = " If the checkout is not shallow or the check fails, contact Buildkite support with this build's URL and the diagnostic detail."
