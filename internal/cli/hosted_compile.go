@@ -129,12 +129,20 @@ func validateHostedRequest(ctx context.Context, request hostedCompileRequest) (c
 // enables them. The importer and every later stage build their source this
 // way, so a stage reads exactly what the importer could.
 func hostedRepositorySource(ctx context.Context, clientVersion string, eventSource []byte, authentication *actionSourceAuthentication, privateReusableWorkflows bool) (compiler.RepositorySource, func(), error) {
+	event, err := compiler.ParseEvent(eventSource)
+	if err != nil {
+		return nil, nil, err
+	}
+	publicGitHub := plan.EventServerURL(event.Provider, event.ServerURL) == "https://github.com"
+	if event.Provider == "github" && !publicGitHub && privateReusableWorkflows {
+		return nil, nil, fmt.Errorf("private reusable workflows are not yet supported for GitHub Enterprise Server imports")
+	}
 	privateOptions, err := privateRepositorySourceOptions(privateReusableWorkflows)
 	if err != nil {
 		return nil, nil, err
 	}
 	sourceOptions := slices.Clone(privateOptions)
-	if event, err := compiler.ParseEvent(eventSource); err == nil && event.Provider == "github" {
+	if publicGitHub {
 		if option := authentication.option(event.Repository.Owner + "/" + event.Repository.Name); option != nil {
 			sourceOptions = append(sourceOptions, option)
 		}

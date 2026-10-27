@@ -187,7 +187,7 @@ func hostedOptions(groupLabel string, configuredTargets map[string]compiler.Runn
 // events use an all-zero placeholder SHA and cannot identify source.
 func candidateWorkflowSource(eventSource []byte) *compiler.WorkflowSourceReference {
 	event, err := compiler.ParseEvent(eventSource)
-	if err != nil || event.Provider != "github" || strings.Trim(event.SHA, "0") == "" {
+	if err != nil || plan.EventServerURL(event.Provider, event.ServerURL) != "https://github.com" || strings.Trim(event.SHA, "0") == "" {
 		return nil
 	}
 	return &compiler.WorkflowSourceReference{Repository: event.Repository.Owner + "/" + event.Repository.Name, Commit: event.SHA}

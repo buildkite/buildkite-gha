@@ -116,7 +116,7 @@ func pushChangedPaths(event compiler.Event, workflows []workflowInput, checkoutP
 	if err != nil {
 		return nil, nil, fmt.Errorf("push path filters require the local origin repository")
 	}
-	provider, owner, name, _, err := parseBuildkiteRepository(strings.TrimSpace(string(remoteURLBytes)))
+	provider, owner, name, _, err := parseBuildkiteRepository(strings.TrimSpace(string(remoteURLBytes)), event.ServerURL)
 	if err != nil || provider != event.Provider || owner != event.Repository.Owner || name != event.Repository.Name {
 		return nil, nil, fmt.Errorf("local origin repository does not match the Buildkite build")
 	}

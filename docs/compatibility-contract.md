@@ -119,6 +119,42 @@ and [old-path PR run](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18
 demonstrate that rename sources participate in filtering. These small fixtures
 do not establish GitHub's file ordering or behavior beyond diff limits.
 
+### GitHub server identity
+
+For selected GHES imports, the backend supplies `BUILDKITE_GITHUB_SERVER_URL`
+from the authorized App connection, with precedence over build and step input.
+Never infer GitHub identity from an arbitrary `BUILDKITE_REPO` host. Persist the
+canonical HTTPS origin as `server_url` in event snapshots and digest-bound job
+plans; omission retains github.com behavior.
+
+Checkout, credential-helper scoping, workflow-token `repo_url`, expression
+contexts, and runtime environment must use that same origin. GHES REST and
+GraphQL URLs use `/api/v3` and `/api/graphql`. The origin identifies the requested
+repository; it does not authorize access. The backend still binds each token
+to the job, repository, App installation, and workflow policy at the build commit.
+
+Public action sources remain on github.com. Never attach GHES workflow tokens
+to public action requests or infer a github.com self-repository identity from
+a GHES event. Private reusable source resolution requires host-bound identity;
+reject it for GHES imports until that contract exists.
+
+The [GHES spike](https://ampcode.com/threads/T-01a15c91-9015-754b-a5f3-bebba85e76e8)
+ran a real GHES 3.17.14 repository against an isolated Buildkite backend and a
+candidate runtime. The [read-only fixture](https://buildkite-ghe.com/sj26-testier/gha-e2e-ghes-r-9059cd8ae32b/commit/0ec96bc9c7fdf4497bb0dd569dfd67ef5c032a2b)
+denied issue writes despite a broader App grant; the
+[explicit-write fixture](https://buildkite-ghe.com/sj26-testier/gha-e2e-ghes-r-9059cd8ae32b/commit/28e75f8f6ee03fc28756305573da91898f439c54)
+created and closed one issue. Its
+[same-repository PR](https://buildkite-ghe.com/sj26-testier/gha-e2e-ghes-r-9059cd8ae32b/pull/2)
+was denied a workflow token before steps ran. These runs establish the tested
+Buildkite paths, not native GitHub execution, all App permissions, backend-importer
+parity, or released availability.
+
+The [combined execution fixture](https://buildkite-ghe.com/sj26-testier/gha-e2e-ghes-r-9059cd8ae32b/commit/50e1c53abd0917fd64ea168ea7b5f5b0209df73d)
+passed through a signed push, agent importer and runtime with backend import
+enabled. It checked exact-SHA checkout, server/API identity, a one-repository
+token scope and denied hook access. This used an unpublished CLI launcher and
+local Agent API proxy; it does not prove released plugin acquisition.
+
 ### Expressions and authority
 
 Use the shared positional expression profiles and normalized execution program.

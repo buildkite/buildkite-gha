@@ -19,6 +19,7 @@ import (
 )
 
 const githubEventNameEnvironment = "GITHUB_EVENT_NAME"
+const githubServerURLEnvironment = "BUILDKITE_GITHUB_SERVER_URL"
 
 var githubEventNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,99}$`)
 
@@ -28,9 +29,13 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	if getenv("BUILDKITE") != "true" {
 		return nil, fmt.Errorf("BUILDKITE must be true")
 	}
-	provider, owner, name, cloneURL, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+	serverURL := getenv(githubServerURLEnvironment)
+	provider, owner, name, cloneURL, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"), serverURL)
 	if err != nil {
 		return nil, fmt.Errorf("BUILDKITE_REPO: %w", err)
+	}
+	if provider != "github" {
+		serverURL = ""
 	}
 	sha := getenv("BUILDKITE_COMMIT")
 	if !git.ValidObjectID(sha) {
@@ -65,7 +70,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		event, ref = "pull_request", fmt.Sprintf("refs/pull/%d/head", number)
 		headOwner, headName, headCloneURL := owner, name, cloneURL
 		if pullRequestRepo := strings.TrimSpace(getenv("BUILDKITE_PULL_REQUEST_REPO")); pullRequestRepo != "" {
-			_, headOwner, headName, headCloneURL, err = parseBuildkiteRepository(pullRequestRepo)
+			_, headOwner, headName, headCloneURL, err = parseBuildkiteRepository(pullRequestRepo, serverURL)
 			if err != nil {
 				return nil, fmt.Errorf("BUILDKITE_PULL_REQUEST_REPO: %w", err)
 			}
@@ -141,7 +146,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		}
 	}
 	if workflowRef := getenv(githubWorkflowRefEnvironment); workflowRef != "" {
-		_, ref, err = parsePipelineTriggerWorkflowRef(workflowRef, event, getenv("BUILDKITE_REPO"))
+		_, ref, err = parsePipelineTriggerWorkflowRef(workflowRef, event, getenv("BUILDKITE_REPO"), serverURL)
 		if err != nil {
 			return nil, err
 		}
@@ -176,14 +181,15 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		}
 	}
 	snapshot := struct {
-		Provider string         `json:"provider"`
-		Event    string         `json:"event"`
-		Repo     map[string]any `json:"repository"`
-		Ref      string         `json:"ref"`
-		SHA      string         `json:"sha"`
-		Actor    string         `json:"actor"`
-		Payload  map[string]any `json:"payload"`
-	}{provider, event, repository, ref, sha, actor, payload}
+		Provider  string         `json:"provider"`
+		ServerURL string         `json:"server_url,omitempty"`
+		Event     string         `json:"event"`
+		Repo      map[string]any `json:"repository"`
+		Ref       string         `json:"ref"`
+		SHA       string         `json:"sha"`
+		Actor     string         `json:"actor"`
+		Payload   map[string]any `json:"payload"`
+	}{provider, serverURL, event, repository, ref, sha, actor, payload}
 	result, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("encode Buildkite compatibility snapshot: %w", err)
@@ -287,7 +293,7 @@ func validateBuildkiteMergeGroup(snapshot map[string]any, getenv func(string) st
 		}
 		repository, _ := payload["repository"].(map[string]any)
 		fullName, _ := repository["full_name"].(string)
-		provider, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+		provider, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"), getenv(githubServerURLEnvironment))
 		if err != nil || provider != "github" || !strings.EqualFold(fullName, owner+"/"+name) {
 			return fmt.Errorf("merge_group webhook repository does not match BUILDKITE_REPO")
 		}
@@ -351,7 +357,7 @@ func validateBuildkiteRelease(snapshot map[string]any, getenv func(string) strin
 		}
 		repository, _ := payload["repository"].(map[string]any)
 		fullName, _ := repository["full_name"].(string)
-		_, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+		_, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"), getenv(githubServerURLEnvironment))
 		if err != nil || !strings.EqualFold(fullName, owner+"/"+name) {
 			return fmt.Errorf("release webhook repository does not match BUILDKITE_REPO")
 		}
@@ -396,7 +402,7 @@ func validateBuildkiteIssueEvent(snapshot map[string]any, getenv func(string) st
 	}
 	repository, _ := payload["repository"].(map[string]any)
 	fullName, _ := repository["full_name"].(string)
-	provider, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+	provider, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"), getenv(githubServerURLEnvironment))
 	if err != nil || provider != "github" || !strings.EqualFold(fullName, owner+"/"+name) || !positiveJSONInteger(repository["id"]) {
 		return fmt.Errorf("%s webhook repository does not match BUILDKITE_REPO", event)
 	}
@@ -434,7 +440,7 @@ func validateBuildkiteReviewEvent(snapshot map[string]any, getenv func(string) s
 	if head["sha"] != snapshot["sha"] || head["ref"] != getenv("BUILDKITE_BRANCH") || base["ref"] != getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH") {
 		return fmt.Errorf("%s webhook head SHA or branches do not match the Buildkite build", event)
 	}
-	provider, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+	provider, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"), getenv(githubServerURLEnvironment))
 	if err != nil || provider != "github" {
 		return fmt.Errorf("%s webhook requires a GitHub repository", event)
 	}
@@ -545,21 +551,31 @@ func safeGitHubLogin(login string) bool {
 	return true
 }
 
-func parseBuildkiteRepository(raw string) (provider, owner, name, cloneURL string, err error) {
+func parseBuildkiteRepository(raw, serverURL string) (provider, owner, name, cloneURL string, err error) {
 	if raw == "" {
 		return "", "", "", "", fmt.Errorf("is required")
 	}
+	githubHost := "github.com"
+	if serverURL != "" {
+		if err := plan.ValidateGitHubServerURL(serverURL); err != nil {
+			return "", "", "", "", fmt.Errorf("%s: %w", githubServerURLEnvironment, err)
+		}
+		u, _ := url.Parse(serverURL)
+		githubHost = u.Host
+	} else {
+		serverURL = "https://github.com"
+	}
 	path := ""
-	if after, ok := strings.CutPrefix(raw, "git@github.com:"); ok {
+	if after, ok := strings.CutPrefix(raw, "git@"+githubHost+":"); ok {
 		path = after
 		provider = "github"
 	} else {
 		u, parseErr := url.Parse(raw)
-		if parseErr != nil || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" {
-			return "", "", "", "", fmt.Errorf("must be a github.com or Origin repository URL")
+		if parseErr != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+			return "", "", "", "", fmt.Errorf("must be a repository URL on %s or Origin", githubHost)
 		}
-		switch u.Hostname() {
-		case "github.com":
+		switch u.Host {
+		case githubHost:
 			provider = "github"
 			switch u.Scheme {
 			case "https", "git":
@@ -582,7 +598,7 @@ func parseBuildkiteRepository(raw string) (provider, owner, name, cloneURL strin
 				return "", "", "", "", fmt.Errorf("must not contain credentials")
 			}
 		default:
-			return "", "", "", "", fmt.Errorf("must be a github.com or Origin repository URL")
+			return "", "", "", "", fmt.Errorf("must be a repository URL on %s or Origin", githubHost)
 		}
 		path = strings.TrimPrefix(u.EscapedPath(), "/")
 		if decodedPath, decodeErr := url.PathUnescape(path); decodeErr == nil {
@@ -592,6 +608,9 @@ func parseBuildkiteRepository(raw string) (provider, owner, name, cloneURL strin
 		}
 	}
 	if provider == "cursor-origin" {
+		if serverURL != "https://github.com" {
+			return "", "", "", "", fmt.Errorf("repository for Origin conflicts with %s", githubServerURLEnvironment)
+		}
 		parts := strings.Split(path, "/")
 		if len(parts) != 3 || parts[0] != "git" || parts[1] == "" || !strings.HasSuffix(parts[2], ".git") {
 			return "", "", "", "", fmt.Errorf("repository URL for Origin must be https://origin.cursor.com/git/<namespace>/<repository>.git")
@@ -613,7 +632,7 @@ func parseBuildkiteRepository(raw string) (provider, owner, name, cloneURL strin
 	if name == "" || name == "." || name == ".." || !validGitHubPathPart(owner, false) || !validGitHubPathPart(name, true) {
 		return "", "", "", "", fmt.Errorf("has a malformed owner or repository name")
 	}
-	return provider, owner, name, "https://github.com/" + owner + "/" + name + ".git", nil
+	return provider, owner, name, serverURL + "/" + owner + "/" + name + ".git", nil
 }
 
 func validGitHubPathPart(value string, allowDotUnderscore bool) bool {

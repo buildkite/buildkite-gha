@@ -130,7 +130,7 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options, grap
 				evidence.ActionResolutionComplete = false
 				continue
 			}
-			compiled, err := graphs.compile(ctx, instance, plan.EventServerURL(ir.Event.Provider), []string{step.Uses}, []map[string]string{step.With})
+			compiled, err := graphs.compile(ctx, instance, plan.EventServerURL(ir.Event.Provider, ir.Event.ServerURL), []string{step.Uses}, []map[string]string{step.With})
 			evaluation := ActionEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Reference: step.Uses, Step: i + 1, Passed: err == nil, CacheSubstitutions: compiled.cacheSubstitutions}
 			evidence.Actions = append(evidence.Actions, evaluation)
 			if err == nil {
