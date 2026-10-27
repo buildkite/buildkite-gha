@@ -96,6 +96,57 @@ func TestRunEmptyIssueTypesNativeFixtures(t *testing.T) {
 	}
 }
 
+func TestRunNullActivityTypes(t *testing.T) {
+	requireImporterHost(t)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "activity-types-importer")
+	for _, event := range []struct {
+		name, action, excluded string
+		payload                map[string]any
+	}{
+		{"issues", "opened", "closed", map[string]any{"action": "opened", "issue": map[string]any{"number": 1, "title": "Null types"}}},
+		{"issue_comment", "created", "deleted", map[string]any{"action": "created", "issue": map[string]any{"number": 1}, "comment": map[string]any{"id": 2}}},
+	} {
+		for _, test := range []struct{ configuration, condition string }{
+			{"{}", "(true)"},
+			{"{types: null}", "(true)"},
+			{"{types: []}", "(true)"},
+			{"{types: [" + event.action + "]}", `(true && ("` + event.action + `" == "` + event.action + `"))`},
+			{"{types: [" + event.excluded + "]}", `(true && ("` + event.action + `" == "` + event.excluded + `"))`},
+		} {
+			t.Run(event.name+"/"+test.configuration, func(t *testing.T) {
+				dir := t.TempDir()
+				workflowPath := filepath.Join(dir, event.name+".yml")
+				source := "on: {" + event.name + ": " + test.configuration + "}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+				if err := os.WriteFile(workflowPath, []byte(source), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var stdout, stderr bytes.Buffer
+				if code := Run([]string{"validate", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+					t.Fatalf("validate code = %d, stdout = %s, stderr = %s", code, &stdout, &stderr)
+				}
+				eventPath := writeUploadEvent(t, dir, event.name, "refs/heads/main", event.payload)
+				runner := &cliCaptureRunner{}
+				if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+					t.Fatalf("upload code = %d, stderr = %s", code, &stderr)
+				}
+				var pipeline struct {
+					Steps []struct {
+						Condition string `yaml:"if"`
+						Skip      any    `yaml:"skip"`
+					} `yaml:"steps"`
+				}
+				if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+					t.Fatal(err)
+				}
+				if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != nil || pipeline.Steps[0].Condition != test.condition {
+					t.Fatalf("pipeline steps = %#v, want condition %q without skip", pipeline.Steps, test.condition)
+				}
+			})
+		}
+	}
+}
+
 func TestRunValidateAndCompile(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -120,11 +171,11 @@ func TestRunValidateAndCompile(t *testing.T) {
 			{name: "pull request tag filter", trigger: "pull_request:\n    tags: [v1]", want: "pull_request does not support the tags filter"},
 			{name: "pull request activity", trigger: "pull_request:\n    types: [auto_merge_enabled, submitted]", want: `activity type "submitted" cannot be mapped exactly`},
 			{name: "unknown release activity", trigger: "release:\n    types: [not-real]", want: `release activity type "not-real" cannot be mapped exactly`},
-			{name: "release branch filter", trigger: "release:\n    types: [published]\n    branches: [main]", want: "release does not support the branches filter"},
+			{name: "release workflow filter", trigger: "release:\n    types: [published]\n    workflows: [CI]", want: "release does not support the workflows filter"},
 			{name: "unknown issues activity", trigger: "issues:\n    types: [not-real]", want: `issues activity type "not-real" cannot be mapped exactly`},
-			{name: "issues branch filter", trigger: "issues:\n    branches: [main]", want: "issues does not support the branches filter"},
+			{name: "issues workflow filter", trigger: "issues:\n    workflows: [CI]", want: "issues does not support the workflows filter"},
 			{name: "unknown issue comment activity", trigger: "issue_comment:\n    types: [not-real]", want: `issue_comment activity type "not-real" cannot be mapped exactly`},
-			{name: "issue comment branch filter", trigger: "issue_comment:\n    branches: [main]", want: "issue_comment does not support the branches filter"},
+			{name: "issue comment workflow filter", trigger: "issue_comment:\n    workflows: [CI]", want: "issue_comment does not support the workflows filter"},
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
@@ -497,8 +548,11 @@ func TestRunValidateAndCompile(t *testing.T) {
 				messages[event] = message
 			}
 		}
-		for _, event := range []string{"repository_dispatch", "pull_request_target"} {
-			want := "on." + event + " is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: push. Move the jobs this trigger guards to one of those triggers if you need them. If you need " + event + ", log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it."
+		for event, guidance := range map[string]string{
+			"repository_dispatch": "If you need repository_dispatch, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
+			"pull_request_target": "pull_request_target is intentionally unsupported for security reasons. Use pull_request with careful checkout and ref handling instead; changing the event alone does not make untrusted code safe. See https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#workflow-names-and-triggers for details.",
+		} {
+			want := "on." + event + " is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: push. Move the jobs this trigger guards to one of those triggers if you need them. " + guidance
 			if messages[event] != want {
 				t.Fatalf("unsupported-trigger message for %s = %q, want %q; report = %#v", event, messages[event], want, report)
 			}
@@ -1200,8 +1254,137 @@ func TestProcessingReportRedactsEventDerivedMatrixKeys(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid || report.Diagnostics[0].Message != "matrix could not be expanded or validated" {
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid || report.Diagnostics[0].Message != "matrix could not be expanded or validated" || report.Diagnostics[0].Detail != "" {
 		t.Fatalf("diagnostics = %#v", report.Diagnostics)
+	}
+}
+
+func TestProcessingReportRedactsInputSubstitutedErrors(t *testing.T) {
+	const sentinel = "EVENT_SECRET_KEY_8675309"
+	const header = "on:\n  workflow_dispatch:\n    inputs:\n      key:\n        type: string\njobs:\n"
+	root := t.TempDir()
+	eventPath := filepath.Join(root, "event.json")
+	event := []byte(`{"provider":"github","event":"workflow_dispatch","repository":{"owner":"owner","name":"repo"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"actor","payload":{"inputs":{"key":"` + sentinel + `"}}}`)
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const prep = "  prep:\n    runs-on: ubuntu-latest\n    outputs:\n      value: ${{ steps.s.outputs.value }}\n    steps:\n      - id: s\n        run: true\n"
+	const callee = "on:\n  workflow_call:\n    inputs:\n      value:\n        type: string\njobs:\n  inner:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
+	for _, test := range []struct{ name, jobs string }{
+		{"matrix expression", "  test:\n    strategy:\n      matrix: ${{ github[inputs.key] }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"},
+		{"needs-derived scheduling", "  prep:\n    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.s.outputs.matrix }}\n    steps:\n      - id: s\n        run: true\n  test:\n    needs: prep\n    concurrency: ${{ needs[inputs.key].outputs.group }}\n    strategy:\n      matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"},
+		{"runs-on label", "  test:\n    runs-on: [\"${{ inputs.key }}-${{ github.run_attempt }}\"]\n    steps:\n      - run: true\n"},
+		{"needs-derived runs-on", prep + "  test:\n    needs: prep\n    runs-on: ${{ needs[inputs.key].outputs.value }}\n    steps:\n      - run: true\n"},
+		{"reusable call matrix", "  call:\n    strategy:\n      matrix: ${{ github[inputs.key] }}\n    uses: ./.github/workflows/callee.yml\n"},
+		{"reusable call input", prep + "  call:\n    needs: prep\n    uses: ./.github/workflows/callee.yml\n    with:\n      value: ${{ needs[inputs.key].outputs.value }}\n"},
+		{"step timeout", "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        timeout-minutes: ${{ github[inputs.key] }}\n"},
+		{"step continue-on-error", "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        continue-on-error: ${{ github[inputs.key] }}\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflows := filepath.Join(t.TempDir(), ".github", "workflows")
+			if err := os.MkdirAll(workflows, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workflows, "callee.yml"), []byte(callee), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			workflowPath := filepath.Join(workflows, "input.yml")
+			if err := os.WriteFile(workflowPath, []byte(header+test.jobs), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+				t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+			}
+			if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+				t.Fatalf("report leaked event input value: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			var report compatibility.ProcessingReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "error" || report.Diagnostics[0].Detail != "" || !strings.HasSuffix(report.Diagnostics[0].Message, "so the cause is not shown") {
+				t.Fatalf("diagnostics = %#v", report.Diagnostics)
+			}
+		})
+	}
+}
+
+// A substituted number input can leave a step control that no longer lexes.
+// The lexer error quotes the number, so the report must not repeat it.
+func TestProcessingReportRedactsStepControlSubstitutionErrors(t *testing.T) {
+	const sentinel = "8675309"
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, "input.yml")
+	eventPath := filepath.Join(root, "event.json")
+	workflow := []byte("on:\n  workflow_dispatch:\n    inputs:\n      pin:\n        type: number\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        timeout-minutes: ${{ inputs['pin']oops }}\n")
+	event := []byte(`{"provider":"github","event":"workflow_dispatch","repository":{"owner":"owner","name":"repo"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"actor","payload":{"inputs":{"pin":"` + sentinel + `"}}}`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+		t.Fatalf("report leaked event input value: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+
+	// The same syntax error written directly is the author's own text, so it
+	// stays visible even though the workflow declares an unrelated input.
+	authored := []byte("on:\n  workflow_dispatch:\n    inputs:\n      pin:\n        type: number\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        timeout-minutes: ${{ 42oops }}\n")
+	if err := os.WriteFile(workflowPath, authored, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "42") || strings.Contains(stdout.String(), "cause is not shown") {
+		t.Fatalf("authored step-control syntax error was hidden: %s", stdout.String())
+	}
+}
+
+func TestProcessingReportExplainsWorkflowAuthoredMatrixErrors(t *testing.T) {
+	const sentinel = "EVENT_SECRET_KEY_8675309"
+	root := t.TempDir()
+	eventPath := filepath.Join(root, "event.json")
+	event := []byte(`{"provider":"github","event":"push","repository":{"owner":"owner","name":"repo"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"actor","payload":{"matrix":{"` + sentinel + `":[]}}}`)
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ name, matrix, detail string }{
+		{"needs-derived dimension", "matrix:\n        image: ${{ fromJSON(needs.prep.outputs.images) }}", `matrix dimension "image": runtime-dependent matrix expressions are unsupported: unsupported compile-time context "needs"; a matrix from job outputs must be the whole matrix: or include: value, such as matrix: ${{ fromJSON(needs.<job>.outputs.<name>) }}`},
+		{"unavailable variable", "matrix:\n        image: ${{ fromJSON(vars.images) }}", `matrix dimension "image": matrix expression cannot be resolved at compile time: compile-time expression references unavailable value "vars.images"`},
+		{"invalid JSON", "matrix:\n        image: ${{ fromJSON('[') }}", `matrix dimension "image": matrix expression cannot be resolved at compile time: fromJSON argument is invalid JSON`},
+		{"every combination excluded", "matrix:\n        os: [linux]\n        exclude:\n          - os: linux", "matrix excludes every combination"},
+		{"event-derived empty dimension", "matrix: ${{ github.event.matrix }}", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflowPath := filepath.Join(t.TempDir(), "matrix.yml")
+			workflow := "on: push\njobs:\n  prep:\n    runs-on: ubuntu-latest\n    outputs:\n      images: ${{ steps.s.outputs.images }}\n    steps:\n      - id: s\n        run: true\n  test:\n    needs: prep\n    runs-on: ubuntu-latest\n    strategy:\n      " + test.matrix + "\n    steps:\n      - run: true\n"
+			if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+				t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+			}
+			if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+				t.Fatalf("report leaked event payload key: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			var report compatibility.ProcessingReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid || report.Diagnostics[0].Message != "matrix could not be expanded or validated" || report.Diagnostics[0].Detail != test.detail {
+				t.Fatalf("diagnostics = %#v, want detail %q", report.Diagnostics, test.detail)
+			}
+		})
 	}
 }
 
@@ -1725,7 +1908,7 @@ func TestProcessingAnnotationIsBoundedAndEscapesHTML(t *testing.T) {
 }
 
 func TestProcessingAnnotationPreservesLongerRepositoryURLs(t *testing.T) {
-	const docsURL = "https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#cache-action"
+	const docsURL = "https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#actions-cache-action"
 	diagnostic := compatibility.Diagnostic{
 		Level: "error", Code: "E_TEST", Message: "Unsupported action. Use a supported version from " + docsURL + ".",
 	}
@@ -2063,6 +2246,36 @@ func TestProcessingAnnotationRendersJobPermissionWarningGuidance(t *testing.T) {
 	}
 }
 
+func TestProcessingAnnotationLinksPullRequestTargetGuidance(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "ci.yml")
+	report := compatibility.NewProcessingReport(workflowPath, "hosted")
+	parsed, err := compiler.ParseWorkflow(workflowPath, []byte("on: [push, pull_request_target]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.ApplyWarnings(report.Workflow, parsed.Warnings)
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
+	want := `<p>See <a href="https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#workflow-names-and-triggers" target="_blank">compatibility reference</a> for details.</p>`
+	if !strings.Contains(body, want) {
+		t.Fatalf("annotation = %q, want it to contain %q", body, want)
+	}
+}
+
+func TestProcessingAnnotationLinksDeferredMatrixGuidance(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "ci.yml")
+	source := []byte("on: push\njobs:\n  plan:\n    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.plan.outputs.matrix }}\n    steps:\n      - id: plan\n        run: echo 'matrix=[]' >> \"$GITHUB_OUTPUT\"\n  build:\n    needs: plan\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include: ${{ fromJSON(needs.plan.outputs.matrix) }}\n    steps:\n      - run: true\n")
+	compiled, err := compiler.Validate(workflowPath, source)
+	if err == nil {
+		t.Fatal("Validate() succeeded, want deferred-matrix finding")
+	}
+	report := compatibility.InitialProcessingReport(workflowPath, "hosted", false, compiled, err)
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
+	want := `<a href="https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#job-syntax-matrices-from-job-outputs" target="_blank">compatibility reference</a>)</strong>`
+	if !strings.Contains(body, want) {
+		t.Fatalf("annotation = %q, want it to contain %q", body, want)
+	}
+}
+
 func TestAnnotationCodeEscapesHTML(t *testing.T) {
 	if got, want := annotationCode("action` **not bold** & <tag> ``tail"), "<code>action` **not bold** &amp; &lt;tag&gt; ``tail</code>"; got != want {
 		t.Fatalf("annotationCode() = %q, want %q", got, want)
@@ -2282,7 +2495,10 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, err := runJobArgs([]string{"--plan", "one", "--hosted-tool-cache", "--hosted-tool-cache"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("runJobArgs() error = %v, want duplicate hosted tool cache error", err)
 	}
-	if options, err := runJobArgs([]string{"--hosted-tool-cache", "--result", "result.json", "--plan", "plan.json"}); err != nil || options.planPath != "plan.json" || options.resultPath != "result.json" || !options.hostedToolCache {
+	if options, err := runJobArgs([]string{"--hosted-tool-cache", "--result", "result.json", "--plan", "plan.json"}); err != nil || options.planPath != "plan.json" || options.resultPath != "result.json" || !options.hostedToolCache || options.dockerBuildLoad {
+		t.Fatalf("unexpected run-job options: %+v %v", options, err)
+	}
+	if options, err := runJobArgs([]string{"--docker-build-load", "--plan", "plan.json"}); err != nil || !options.dockerBuildLoad || options.hostedToolCache {
 		t.Fatalf("runJobArgs() = %#v, %v", options, err)
 	}
 	if _, err := runJobArgs([]string{"--plan", "plan.json", "--plan-digest", "sha256:" + strings.Repeat("0", 64)}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {

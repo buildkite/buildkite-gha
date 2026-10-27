@@ -22,10 +22,6 @@ func ValidateSite(site Site) ([]string, error) {
 
 // EvaluateSite applies the concrete runtime semantics selected by a site.
 func EvaluateSite(site Site, context EvaluationContext) (any, error) {
-	if site.Provenance == ProvenanceAction && site.Surface == SurfaceStepTemplate {
-		context.Expression.HashFiles = nil
-		context.Expression.HashFilesContext = nil
-	}
 	return expression.NewEngine().Evaluate(site.expressionSite(), expression.Values{
 		Runtime: context.Expression, Condition: context.Condition,
 	})

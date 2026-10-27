@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/program"
@@ -59,7 +60,7 @@ func TestWorkflowProgramInventoriesEveryExecutionField(t *testing.T) {
 		"job.services.db.image|service-template|string|expression",
 		"job.services.db.credentials.username|service-credential|string|expression",
 		"job.services.db.credentials.password|service-credential|string|expression",
-		"job.services.db.env.S|service-template|string|expression",
+		"job.services.db.env.S|service-environment|string|expression",
 		"job.services.db.ports[0]|service-template|string|expression",
 		"job.services.db.volumes[0]|service-template|string|expression",
 		"job.services.db.options|service-template|string|expression",
@@ -111,6 +112,37 @@ func TestWorkflowProgramNormalizesExecutionSteps(t *testing.T) {
 	}
 	if steps[0].Env == nil || testBindingSources(steps[1].Invocation.With)["name"] != "value" || steps[0].Source.Start.Line != 3 {
 		t.Fatalf("normalized step details = %#v", steps)
+	}
+}
+
+func TestWorkflowProgramNamesStepsLikeGitHub(t *testing.T) {
+	owner, repository := strings.Repeat("o", 39), strings.Repeat("r", 100)
+	steps := []workflow.Step{
+		{Kind: "run", Run: "a"},
+		{Kind: "uses", ID: "metrics", Uses: "lowlighter/metrics@latest"},
+		{Kind: "run", Run: "b"},
+		{Kind: "uses", Uses: "Actions/Checkout@v4"},
+		{Kind: "uses", Uses: "actions/checkout/sub/path@v3"},
+		{Kind: "uses", Uses: "./.github/actions/local"},
+		{Kind: "uses", Uses: "$/.github/actions/local"},
+		{Kind: "uses", Uses: "my.org/tool@v1"},
+		{Kind: "uses", Uses: owner + "/" + repository + "@v1"},
+		{Kind: "uses", Uses: owner + "/" + repository + "/path@v2"},
+		{Kind: "run", ID: "__parallel_4_7_1", Background: true, Run: "c"},
+		{Kind: "wait", ID: "__parallel_4_7_wait", Targets: []string{"__parallel_4_7_1"}},
+		{Kind: "run", ID: "Run", Run: "d"},
+	}
+	var got []string
+	for _, step := range lowerWorkflowProgram(JobInstance{Steps: steps}).Job.Steps {
+		got = append(got, step.GitHubAction)
+	}
+	truncated := ("__" + owner + "_" + repository)[:100]
+	want := []string{
+		"__run", "metrics", "__run_2", "__Actions_Checkout", "__actions_checkout_2", "__self", "__selfRepository",
+		"__my_org_tool", truncated, truncated[:98] + "_2", "__run_3", "", "Run",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("github.action names:\n got: %q\nwant: %q", got, want)
 	}
 }
 

@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -121,6 +122,65 @@ func TestParseIssueTypes(t *testing.T) {
 	}
 }
 
+func TestParseNullActivityTypes(t *testing.T) {
+	for _, event := range []string{"issues", "issue_comment"} {
+		for _, test := range []struct {
+			types string
+			want  []string
+		}{
+			{types: "null"},
+			{types: "'null'", want: []string{"null"}},
+			{types: "[null]", want: []string{"null"}},
+			{types: "[edited]", want: []string{"edited"}},
+		} {
+			t.Run(event+"/"+test.types, func(t *testing.T) {
+				source := "on: {" + event + ": {types: " + test.types + "}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+				parsed, err := Parse("types.yml", []byte(source))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(parsed.Triggers) != 1 || !reflect.DeepEqual(parsed.Triggers[0].Types, test.want) {
+					t.Fatalf("triggers = %#v, want %s types %#v", parsed.Triggers, event, test.want)
+				}
+			})
+		}
+	}
+}
+
+func TestParseNullActivityTypesThroughTriggerAlias(t *testing.T) {
+	source := "on:\n  issues: &activities\n    types: null\n  issue_comment: *activities\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	parsed, err := Parse("types.yml", []byte(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Triggers) != 2 || parsed.Triggers[0].Types != nil || parsed.Triggers[1].Types != nil {
+		t.Fatalf("triggers = %#v, want two default-activity triggers", parsed.Triggers)
+	}
+}
+
+func TestParsePullRequestNullAndEmptyTypes(t *testing.T) {
+	for _, test := range []struct {
+		types string
+		want  []string
+	}{
+		{types: "null"},
+		{types: "[]"},
+		{types: "[null]", want: []string{"null"}},
+		{types: "[edited]", want: []string{"edited"}},
+	} {
+		t.Run(test.types, func(t *testing.T) {
+			source := "on: {pull_request: {types: " + test.types + "}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+			parsed, err := Parse("types.yml", []byte(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(parsed.Triggers) != 1 || !reflect.DeepEqual(parsed.Triggers[0].Types, test.want) {
+				t.Fatalf("triggers = %#v, want pull_request types %#v", parsed.Triggers, test.want)
+			}
+		})
+	}
+}
+
 func TestParseMergeGroupTypes(t *testing.T) {
 	for _, test := range []struct {
 		types string
@@ -129,6 +189,8 @@ func TestParseMergeGroupTypes(t *testing.T) {
 		{types: ""},
 		{types: "    types: []\n"},
 		{types: "    types: [ # empty\n    ]\n"},
+		{types: "    types: null\n"},
+		{types: "    types: [null]\n", want: []string{"null"}},
 		{types: "    types: [checks_requested]\n", want: []string{"checks_requested"}},
 	} {
 		source := "on:\n  merge_group:\n" + test.types + "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
@@ -156,6 +218,7 @@ func TestParseReleaseTypes(t *testing.T) {
 	for declaration, want := range map[string][]string{
 		"{release: {types: published}}": {"published"},
 		"{release: {types: []}}":        nil,
+		"{release: {types: null}}":      nil,
 	} {
 		parsed, err := Parse("release.yml", []byte("on: "+declaration+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 		if err != nil {
@@ -187,9 +250,10 @@ func TestParseEmptyIssueTypesTogether(t *testing.T) {
 
 func TestParseEmptyIssueTypesPreservesDiagnostics(t *testing.T) {
 	for _, test := range []struct{ on, want string }{
-		{"issues: {types: []}\n  pull_request: {types: []}", `"types" section should not be empty`},
+		{"issues: {types: []}\n  pull_request: {types: []}", `types.yml:7:12: "steps" section should not be empty`},
 		{"issue_comment: {types: []}\n  release: {types: []}", `types.yml:7:12: "steps" section should not be empty`},
-		{"issues: {types: &empty []}\n  pull_request: {types: *empty}", `"types" section should not be empty`},
+		{"issues: {types: &empty []}\n  pull_request: {types: *empty}", `types.yml:7:12: "steps" section should not be empty`},
+		{"issues: {types: &empty []}\n  push: {types: *empty}", `"types" section should not be empty`},
 		{"issues: {types: {}}", "sequence"},
 		{"issue_comment: {types: null}", "should not be empty"},
 		{"issues: {types: ''}", "should not be empty"},
@@ -617,6 +681,70 @@ jobs:
 	service := parsed.Jobs[0].Services[0].Container
 	if service.Image != "postgres:16" || service.Credentials == nil || service.Credentials.Username != "${{ secrets.REGISTRY_USER }}" || service.Credentials.Password != "${{ secrets.REGISTRY_PASSWORD }}" || service.Env["POSTGRES_PASSWORD"] != "test" || len(service.Ports) != 1 || len(service.Volumes) != 1 || service.Options == "" || service.Command != "postgres -c fsync=off" || service.Entrypoint != "docker-entrypoint.sh" {
 		t.Fatalf("service container = %#v", service)
+	}
+}
+
+func TestParseDottedContainerEnvironmentKeys(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.20
+      env: {app.mode: production}
+    services:
+      elasticsearch:
+        image: elasticsearch:8
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: false
+    steps: [{run: true}]
+`)
+	parsed, err := Parse("containers.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := parsed.Jobs[0]
+	if job.Container.Env["app.mode"] != "production" || job.Services[0].Container.Env["discovery.type"] != "single-node" || job.Services[0].Container.Env["xpack.security.enabled"] != "false" {
+		t.Fatalf("container env = %#v, service env = %#v", job.Container.Env, job.Services[0].Container.Env)
+	}
+}
+
+func TestParseServiceIDs(t *testing.T) {
+	for _, test := range []struct {
+		name, want string
+	}{
+		{name: "s3.docker.test"},
+		{name: "s3-docker-test"},
+		{name: "_cache_2"},
+		{name: strings.Repeat("a", 255)},
+		{name: "S3.docker.test", want: "character 'S' is uppercase"},
+		{name: "s3/docker.test", want: "invalid character '/'"},
+		{name: "s3 docker.test", want: "invalid character ' '"},
+		{name: "s3\ndocker.test", want: `invalid character '\n'`},
+		{name: "s3\x00docker.test", want: `invalid character '\x00'`},
+		{name: "s3.döcker.test", want: "invalid character 'ö'"},
+		{name: "3docker", want: "must start with a lowercase letter or underscore; found '3'"},
+		{name: ".docker", want: "must start with a lowercase letter or underscore; found '.'"},
+		{name: "", want: "must not be empty"},
+		{name: strings.Repeat("a", 256), want: "exceeds 255 bytes"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte(fmt.Sprintf("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      %q: {image: redis:7}\n    steps: [{run: true}]\n", test.name))
+			parsed, err := Parse("services.yml", source)
+			if test.want != "" {
+				if err == nil || !strings.Contains(err.Error(), "services.yml:6:7: invalid service ID") || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("Parse() error = %v, want located diagnostic containing %q", err, test.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := parsed.Jobs[0].Services[0].Name; got != test.name {
+				t.Fatalf("service ID = %q, want %q", got, test.name)
+			}
+		})
 	}
 }
 

@@ -102,7 +102,7 @@ func TestExperimentalRunnerUserBootstrapStartsPrivilegedSetup(t *testing.T) {
 			writeTestCommand(t, bin, "bash", `printf 'bash\n'; printf '%s\n' "$@" >> "$TEST_LOG"`)
 			writeTestCommand(t, bin, "sudo", `printf 'sudo\n' >> "$TEST_LOG"; if [ "$#" -eq 2 ] && [ "$1" = -n ] && [ "$2" = true ]; then exit 0; fi; printf '%s\n' "$@" >> "$TEST_LOG"`)
 
-			script := "bootstrap_dir='bootstrap dir'\ndistribution='distribution path'\nplan='plan path'\n" + strings.Join(experimentalRunnerUserBootstrap(false, false, nil), "\n")
+			script := "bootstrap_dir='bootstrap dir'\ndistribution='distribution path'\nplan='plan path'\n" + strings.Join(experimentalRunnerUserBootstrap("linux/amd64", false, false, nil), "\n")
 			command := exec.Command("/bin/bash", "-euo", "pipefail", "-c", script)
 			command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "TEST_UID="+test.uid, "TEST_USER="+test.user, "TEST_LOG="+logPath)
 			output, err := command.CombinedOutput()
@@ -133,7 +133,7 @@ func TestExperimentalRunnerUserBootstrapRejectsUnavailablePasswordlessSudo(t *te
 	bin := t.TempDir()
 	writeTestCommand(t, bin, "id", `case "$1" in -u) echo 1001;; -un) echo runner;; *) exit 2;; esac`)
 	writeTestCommand(t, bin, "sudo", `exit 1`)
-	command := exec.Command("/bin/bash", "-euo", "pipefail", "-c", strings.Join(experimentalRunnerUserBootstrap(false, false, nil), "\n"))
+	command := exec.Command("/bin/bash", "-euo", "pipefail", "-c", strings.Join(experimentalRunnerUserBootstrap("linux/amd64", false, false, nil), "\n"))
 	command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
 	output, err := command.CombinedOutput()
 	if err == nil || !strings.Contains(string(output), "runner user bootstrap requires passwordless sudo") {

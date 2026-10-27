@@ -117,8 +117,10 @@ func evaluateAvailableCompileTemplate(template string, context CompileContext) (
 // reduceAvailableCompileTemplate replaces statically available scalar
 // subtrees in each template expression while preserving runtime-dependent
 // subtrees. Values rendered outside an expression retain the same expression
-// injection protection as EvaluateAvailableCompileTemplate.
-func reduceAvailableCompileTemplate(template string, context CompileContext) (string, error) {
+// injection protection as EvaluateAvailableCompileTemplate. Matrix reduction
+// is enabled only by the authored service credential profile; other profiles
+// retain event-only subtree reduction.
+func reduceAvailableCompileTemplate(template string, context CompileContext, reduceMatrix bool) (string, error) {
 	const open = "${{"
 	var reduced strings.Builder
 	remaining := template
@@ -143,7 +145,7 @@ func reduceAvailableCompileTemplate(template string, context CompileContext) (st
 		if err != nil {
 			return "", err
 		}
-		if !nodeReferencesGitHubEventPayload(node) && !nodeReferencesContext(node, "event") {
+		if !nodeReferencesGitHubEventPayload(node) && !nodeReferencesContext(node, "event") && (!reduceMatrix || !nodeReferencesContext(node, "matrix")) {
 			reduced.WriteString(complete)
 			remaining = source[consumed:]
 			continue

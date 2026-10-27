@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,65 @@ import (
 	"time"
 	"unicode/utf8"
 )
+
+func TestPendingPreWarningsTrackOccurrences(t *testing.T) {
+	first := &actionPreFailure{err: fmt.Errorf("first pre hash: %w", context.DeadlineExceeded)}
+	second := &actionPreFailure{err: fmt.Errorf("second pre hash: %w", context.DeadlineExceeded)}
+	if !errors.Is(first, context.DeadlineExceeded) {
+		t.Fatal("pre failure must preserve deadline classification")
+	}
+	for _, test := range []struct {
+		name     string
+		reported error
+		want     []string
+	}{
+		{"independent deadline", fmt.Errorf("main hash: %w", context.DeadlineExceeded), []string{"first pre hash", "second pre hash"}},
+		{"wrapped partial group", fmt.Errorf("main: %w", first), []string{"second pre hash"}},
+		{"joined group", errors.Join(fmt.Errorf("main: %w", first), second), nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			processor := newCommandOutputProcessor(&logs, &logs)
+			processor.queuePreWarnings(fmt.Errorf("nested: %w", errors.Join(first, second)), "composite step pre")
+			processor.consumePreWarnings(test.reported)
+			processor.flushPreWarnings()
+			processor.flushPreWarnings()
+			warnings, truncated, commandErrors, _ := processor.workflowCommandAnnotations()
+			for _, diagnostic := range []string{"first pre hash", "second pre hash"} {
+				wantCount := 0
+				for _, want := range test.want {
+					if want == diagnostic {
+						wantCount = 1
+					}
+				}
+				if strings.Count(logs.String(), diagnostic) != wantCount || strings.Count(warnings, diagnostic) != wantCount {
+					t.Fatalf("remaining diagnostic %q: logs = %q, annotations = %q", diagnostic, logs.String(), warnings)
+				}
+			}
+			if truncated || commandErrors != "" || strings.Count(logs.String(), "continue-on-error") != len(test.want) {
+				t.Fatalf("unexpected warnings: logs = %q, annotations = %q, errors = %q", logs.String(), warnings, commandErrors)
+			}
+		})
+	}
+}
+
+func TestToleratedFailureWarningSurvivesSuppressionAndMasksQuotedSecrets(t *testing.T) {
+	var logs bytes.Buffer
+	processor := newCommandOutputProcessor(&logs, &logs)
+	secret := "private\"filename"
+	processor.addMask(secret)
+	processor.suppress()
+	execution := stepExecution{outcome: "failure", conclusion: "success", err: fmt.Errorf("hashFiles matched symlink %q; symlinks are unsupported", secret)}
+	processor.warnToleratedFailure(execution, `step "cache"`)
+	want := `warning: step "cache": hashFiles matched symlink "***"; symlinks are unsupported (continued because continue-on-error is enabled)` + "\n"
+	if logs.String() != want {
+		t.Fatalf("warning log = %q, want %q", logs.String(), want)
+	}
+	warnings, truncated, commandErrors, _ := processor.workflowCommandAnnotations()
+	if truncated || commandErrors != "" || strings.Contains(warnings, "private") || !strings.Contains(warnings, "***") || !strings.Contains(warnings, "continue-on-error") {
+		t.Fatalf("warning annotation = %q, truncated = %t, errors = %q", warnings, truncated, commandErrors)
+	}
+}
 
 func TestLiveLogMaskingPrefersLongestMatchInEitherRegistrationOrder(t *testing.T) {
 	for _, masks := range [][]string{

@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Start with the [compatibility contract](https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md). It lists what works today.
+        Start with the [compatibility reference](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility). It lists what works today.
 
   - type: textarea
     id: workflow

@@ -2,7 +2,7 @@
 
 package runtime
 
-func isolateCacheToolEnvironment(env map[string]string) error {
+func isolateCacheToolEnvironment(env map[string]string) (func(), error) {
 	env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
-	return nil
+	return func() {}, nil
 }

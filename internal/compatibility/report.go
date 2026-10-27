@@ -36,15 +36,18 @@ type Diagnostic struct {
 	Stage    workflowprocessing.Stage `json:"stage,omitempty"`
 	// Blocker attribution is forwarded to telemetry but excluded from the
 	// versioned processing-report schema.
-	Blocker       string          `json:"-"`
-	BlockerDetail string          `json:"-"`
-	Message       string          `json:"message"`
-	Detail        string          `json:"detail,omitempty"`
-	Location      *SourceLocation `json:"location,omitempty"`
-	Job           string          `json:"job,omitempty"`
-	Instance      string          `json:"instance,omitempty"`
-	Action        string          `json:"action,omitempty"`
-	Step          int             `json:"step,omitempty"`
+	Blocker       string `json:"-"`
+	BlockerDetail string `json:"-"`
+	// reportRunnerLabelDetail keeps report compaction independent of the new
+	// runner_policy telemetry attribution.
+	reportRunnerLabelDetail string
+	Message                 string          `json:"message"`
+	Detail                  string          `json:"detail,omitempty"`
+	Location                *SourceLocation `json:"location,omitempty"`
+	Job                     string          `json:"job,omitempty"`
+	Instance                string          `json:"instance,omitempty"`
+	Action                  string          `json:"action,omitempty"`
+	Step                    int             `json:"step,omitempty"`
 }
 
 // ProcessingStage is one required workflow-processing boundary.
@@ -158,6 +161,9 @@ func (r *ProcessingReport) Finalize() {
 	for i, stage := range definitions {
 		stageOrder[stage.ID] = i
 	}
+	// Rendering may finalize a copy of a report before its caller collects
+	// telemetry. Sort and compact our own slice so no diagnostic is overwritten.
+	r.Diagnostics = append([]Diagnostic{}, r.Diagnostics...)
 	sort.SliceStable(r.Diagnostics, func(i, j int) bool {
 		left, right := r.Diagnostics[i], r.Diagnostics[j]
 		if stageOrder[left.Stage] != stageOrder[right.Stage] {
@@ -211,6 +217,9 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 			message: diagnostic.Message, detail: diagnostic.Detail, job: diagnostic.Job,
 			action: diagnostic.Action, step: diagnostic.Step,
 		}
+		if diagnostic.Blocker == "runner_policy" {
+			key.blocker, key.blockerDetail = "runner_label", diagnostic.reportRunnerLabelDetail
+		}
 		if diagnostic.Location != nil {
 			key.location = fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)
 		}
@@ -233,9 +242,6 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 			continue
 		} else {
 			matrixFindings[key] = &matrixDiagnostic{index: len(out)}
-		}
-		if len(out) != 0 && sameDiagnostic(out[len(out)-1], diagnostic) {
-			continue
 		}
 		out = append(out, diagnostic)
 	}

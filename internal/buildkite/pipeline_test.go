@@ -1395,8 +1395,45 @@ func TestMiseDataDirUsesManagedRuntimeVersion(t *testing.T) {
 	if got := MiseDataDir(); got != "/cache/bkcache/buildkite-gha/mise/linux-amd64/"+MinimumMiseVersion {
 		t.Fatalf("MiseDataDir() = %q", got)
 	}
+	if got := MiseDataDir("linux/arm64"); got != "/cache/bkcache/buildkite-gha/mise/linux-arm64/"+MinimumMiseVersion {
+		t.Fatalf("MiseDataDir(linux/arm64) = %q", got)
+	}
 	if got := MiseDataDir("darwin/arm64"); got != "/tmp/bkcache/buildkite-gha/mise/darwin-arm64/"+MinimumMiseVersion {
 		t.Fatalf("MiseDataDir(darwin/arm64) = %q", got)
+	}
+}
+
+func TestEmitLinuxARM64RuntimeUsesNativePlatformCache(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep: "importer",
+		Jobs: []Job{{
+			Key:                "linux-arm64",
+			Label:              "Linux ARM64",
+			Queue:              "organization-arm",
+			Platform:           "linux/arm64",
+			DistributionDigest: testDigest("linux arm64 distribution"),
+			PlanDigest:         testDigest("linux arm64 plan"),
+			RequiresMise:       true,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Command string            `yaml:"command"`
+			Env     map[string]string `yaml:"env"`
+			Cache   CacheVolume       `yaml:"cache"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 || document.Steps[0].Cache.Name != "buildkite-gha-linux-arm64" || document.Steps[0].Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir("linux/arm64") {
+		t.Fatalf("Linux ARM64 runtime placement = %#v", document.Steps)
+	}
+	if !strings.Contains(document.Steps[0].Command, "buildkite-gha-runner-bootstrap") || strings.Contains(document.Steps[0].Command, "linux-amd64") {
+		t.Fatalf("Linux ARM64 runner bootstrap is incorrect:\n%s", document.Steps[0].Command)
 	}
 }
 

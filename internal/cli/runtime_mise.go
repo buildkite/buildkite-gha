@@ -20,18 +20,23 @@ import (
 	"time"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
+	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
-	runtimeMiseArchiveDigest             = "bd0930c0b619f51ddb60e32e5cce18a5533567b2f1ba9fc4875b9f39a2bb3ed8"
-	runtimeMiseBinaryDigest              = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
-	runtimeMiseDarwinARM64ArchiveDigest  = "5b883c868a0748dd0c595d30fd000ec5138dfabdeef2c30222866ebf34af1ae3"
-	runtimeMiseDarwinARM64BinaryDigest   = "e777070540ffe22cf8b2b9f88aed88b461d0887d940c4f1c1a97359463cde6e1"
-	runtimeMiseWindowsAMD64ArchiveDigest = "f366c72d65ca27eec6e61801b949a63b20d6a3a4cd9277521fc01623ac050164"
-	runtimeMiseWindowsAMD64BinaryDigest  = "adf1b4c9f51e7d15cff723056fcd8fd51f40ebacadcca97fd5758c44d469d5ea"
-	runtimeMiseArchiveLimit              = 64 << 20
-	runtimeMiseBinaryLimit               = 128 << 20
+	runtimeMiseArchiveDigest             = "17565e268c5542d8ce944321e17af81e0b741b65af4aa7e8e010ee77376a4aa3"
+	runtimeMiseBinaryDigest              = "fe6dd17e68e09682b31d2e7bb7bb755d22636ac1af5d94621e300f2ca9e9fe8a"
+	runtimeMiseLinuxARM64ArchiveDigest   = "cac510e51793ad45e65fe92305bdbe4309c9c60b5907badbc7eba111738ab08f"
+	runtimeMiseLinuxARM64BinaryDigest    = "e90904144ba4377c5fbe385f429830282c68f3b4f9c690bf6c5a2ae9b74a809b"
+	runtimeMiseDarwinARM64ArchiveDigest  = "d7c50c1683524a764260986ccc9c41c0de5e1fcd491714b5640b657b76781af6"
+	runtimeMiseDarwinARM64BinaryDigest   = "9e27709db5eb1e900d83149418d3067309f2a5004d4994d94246ab658ba4a3ce"
+	runtimeMiseWindowsAMD64ArchiveDigest = "32bcfda5f72bf7cb189e18ba93c2798bffcb4a678fd004e3127780363f2d8c8c"
+	runtimeMiseWindowsAMD64BinaryDigest  = "d38bd78b63ca1e913e1d55cbd1633b45e9b01f2735ac81b1915f84f75a3eb5cd"
+	// The Windows 2026.10.17 archive is ~77 MiB and its executable is ~229 MiB.
+	// Recheck these bounds against all platform assets when refreshing the pin.
+	runtimeMiseArchiveLimit = 128 << 20
+	runtimeMiseBinaryLimit  = 256 << 20
 )
 
 func resolveRuntimeMise(ctx context.Context, configured, dataDir, privateRuntime string, stderr io.Writer) (string, error) {
@@ -74,7 +79,7 @@ func validateRuntimeMise(ctx context.Context, candidate, expectedDigest string) 
 	}
 	output, err := command.Output()
 	if err != nil {
-		return "", fmt.Errorf("validate runtime mise executable: %w", err)
+		return "", fmt.Errorf("validate runtime mise executable: %w", gharuntime.MarkWorkflowProcessTimeout(ctx, err))
 	}
 	fields := strings.Fields(string(output))
 	if len(fields) == 0 {
@@ -175,6 +180,15 @@ func selectRuntimeMiseRelease(goos, goarch string) (runtimeMiseRelease, error) {
 			executable:    "mise",
 			archiveDigest: runtimeMiseArchiveDigest,
 			binaryDigest:  runtimeMiseBinaryDigest,
+		}, nil
+	case "linux/arm64":
+		return runtimeMiseRelease{
+			asset:         "linux-arm64",
+			cacheKey:      "linux-arm64",
+			archiveFormat: "tar.gz",
+			executable:    "mise",
+			archiveDigest: runtimeMiseLinuxARM64ArchiveDigest,
+			binaryDigest:  runtimeMiseLinuxARM64BinaryDigest,
 		}, nil
 	case "darwin/arm64":
 		return runtimeMiseRelease{

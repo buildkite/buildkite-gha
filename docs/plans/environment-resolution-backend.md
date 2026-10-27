@@ -1,7 +1,7 @@
 # Buildkite-managed GitHub environment resolution
 
 Importer jobs resolve
-[deployment environments](../compatibility.md#deployment-environments) through
+[deployment environments](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#job-syntax-deployment-environments) through
 Buildkite, which already holds the GitHub App installation. The chosen design
 is option 2 below: a dedicated Agent API snapshot endpoint,
 `POST /jobs/{job_id}/github-actions/environments`, implemented on the
@@ -30,22 +30,21 @@ artifacts) was broader than environment resolution needs. The snapshot
 endpoint keeps the token inside Buildkite and narrows the importer-visible
 output to exactly the fields the compiler consumes.
 
+The backend environments endpoint
+([buildkite/buildkite#33480](https://github.com/buildkite/buildkite/pull/33480)),
+its `include_variables` extension
+([#33692](https://github.com/buildkite/buildkite/pull/33692)), and the separate
+repository and organization variables endpoint,
+`POST /jobs/{job_id}/github-actions/variables`
+([#33752](https://github.com/buildkite/buildkite/pull/33752)), are merged. The
+environments endpoint carries environment-scoped variables only and will not
+grow repository or organization fields.
+
 Remaining before removing this plan:
 
-- Backend endpoint and its `include_variables` extension merged and rolled
-  out, including adding Actions: read and Environments: read to the
-  code-access GitHub App and installation administrator approvals. Environment
-  variable listing is covered by Environments: read. The environments
-  endpoint carries environment-scoped variables only and will not grow
-  repository or organization fields.
-- Repository and organization variables come from a separate job-scoped
-  endpoint, `POST /jobs/{job_id}/github-actions/variables`, which replaced a
-  withdrawn draft that extended the environments response; this client never
-  consumed those draft fields. The client side is done (see below).
-  Remaining: merge and roll out the backend endpoint, including its
-  Variables: read token scope and the 10-requests-per-job-per-hour budget.
-  Until then the endpoint returns 404 and the client leaves both scopes
-  empty, so `vars` names no scope defines keep evaluating as empty strings.
+- Roll out the code-access GitHub App permissions (Actions: read,
+  Environments: read, and Variables: read) and installation administrator
+  approvals. Installations that have not approved keep failing closed.
 - A hosted end-to-end proof of an `upload` resolving an environment and gating
   a deploy job.
 
@@ -138,5 +137,5 @@ workflows on 400, 429, and 503 with the backend message and `Retry-After`
 delay, never echoing a value. Token-authority planning ignores resolved
 values. When the backend rollout completes and the hosted proof passes, move
 lasting facts into
-[deployment environments](../compatibility.md#deployment-environments) and
+[deployment environments](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#job-syntax-deployment-environments) and
 remove this plan.

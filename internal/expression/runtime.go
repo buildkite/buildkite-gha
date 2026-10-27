@@ -5,6 +5,7 @@ package expression
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/rhysd/actionlint"
 )
+
+var errUnavailableGitHubToken = errors.New(`expression references unavailable github value "token"`)
 
 // NeedStatus contains the expression-visible state of one prerequisite.
 type NeedStatus struct {
@@ -24,6 +27,7 @@ type Context struct {
 	Inputs           map[string]string
 	WorkflowInputs   map[string]any
 	Matrix           map[string]any
+	Strategy         map[string]any
 	Steps            map[string]StepStatus
 	Needs            map[string]NeedStatus
 	Secrets          map[string]string
@@ -52,6 +56,7 @@ const (
 	runtimeReferenceGitHub
 	runtimeReferenceInput
 	runtimeReferenceMatrix
+	runtimeReferenceStrategy
 	runtimeReferenceSecret
 	runtimeReferenceVar
 	runtimeReferenceEnv
@@ -60,6 +65,7 @@ const (
 	runtimeReferenceNeedOutput
 	runtimeReferenceNeedResult
 	runtimeReferenceRunner
+	runtimeReferenceJobStatus
 )
 
 // validateRuntimeTemplate verifies that every expression in a runtime template
@@ -73,6 +79,11 @@ func validateRuntimeTemplate(template string) error {
 func validateRuntimeReferenceNode(node actionlint.ExprNode) error {
 	validator := newSemanticValidator(runtimeReferenceSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
+		// Direct runtime templates, such as job containers and run defaults,
+		// are evaluated before steps establish a job status.
+		if isRunnerDebugReference(root, path) || isJobStatusReference(root, path) {
+			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+		}
 		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
 			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
 		}
@@ -360,11 +371,6 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 		if allowedContexts != nil && !allowedContexts[strings.ToLower(root)] {
 			return fmt.Errorf("runtime context %q is unavailable in this field", root)
 		}
-		// Job controls reduce strategy values during graph expansion, before
-		// the normalized program reaches runtime.
-		if strings.EqualFold(root, "strategy") && len(path) == 1 {
-			return nil
-		}
 		if strings.EqualFold(root, "github") {
 			if len(path) == 0 {
 				return fmt.Errorf("dynamic or whole github access is unsupported")
@@ -381,7 +387,7 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 					return fmt.Errorf("github.token is unavailable in this field")
 				}
 				return nil
-			case "action_path", "action_ref", "action_repository", "actor", "base_ref", "event_name", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_owner", "run_attempt", "run_id", "run_number", "server_url", "sha", "workflow", "workflow_ref", "workflow_sha", "workspace":
+			case "action", "action_path", "action_ref", "action_repository", "actor", "base_ref", "event_name", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_owner", "run_attempt", "run_id", "run_number", "server_url", "sha", "workflow", "workflow_ref", "workflow_sha", "workspace":
 				return nil
 			default:
 				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
@@ -424,7 +430,7 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 				return nil
 			}
 			return fmt.Errorf("computed or aggregate %s access is unsupported", root)
-		case "job":
+		case "job", "strategy":
 			referenceRoot, path, err := referencePath(access)
 			if err != nil || classifyRuntimeReference(referenceRoot, path) == runtimeReferenceUnsupported {
 				return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
@@ -498,6 +504,11 @@ func resolveStepRuntimeRoot(root string, context Context) (any, error) {
 		return context.Secrets, nil
 	case "matrix":
 		return context.Matrix, nil
+	case "strategy":
+		if context.Strategy == nil {
+			return nil, fmt.Errorf("runtime context %q is unavailable", root)
+		}
+		return context.Strategy, nil
 	case "vars":
 		return context.Vars, nil
 	case "inputs":
@@ -574,7 +585,18 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 		if value, ok := findStringValue(context.Runner, path[0]); ok {
 			return value, nil
 		}
+		if isRunnerDebugReference(root, path) {
+			// GitHub adds runner.debug with value "1" only when step debug
+			// logging is enabled. Buildkite cannot enable that mode, so the
+			// optional property remains absent and evaluates to null.
+			return nil, nil
+		}
 		return "", fmt.Errorf("expression references unavailable runner value %q", path[0])
+	case runtimeReferenceJobStatus:
+		if context.JobStatus == "" {
+			return nil, fmt.Errorf("expression references unavailable job.status")
+		}
+		return context.JobStatus, nil
 	case runtimeReferenceServicePort:
 		return resolveServicePort(context.Services, path[1], path[3], "expression")
 	case runtimeReferenceServiceValue:
@@ -592,6 +614,9 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {
 			if !allowMissing || context.GitHub == nil || requiredGitHubRuntimeValue(path[0]) {
+				if len(path) == 1 && strings.EqualFold(path[0], "token") {
+					return "", errUnavailableGitHubToken
+				}
 				return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
 			}
 			return nil, nil
@@ -602,6 +627,12 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 			return findString(context.Inputs, path[0]), nil
 		}
 		value, _, err := objectValue(context.WorkflowInputs, path[0])
+		return value, err
+	case runtimeReferenceStrategy:
+		value, found, err := objectValue(context.Strategy, path[0])
+		if err == nil && !found {
+			err = fmt.Errorf("expression references unavailable strategy value %q", path[0])
+		}
 		return value, err
 	case runtimeReferenceMatrix:
 		for name, value := range context.Matrix {
@@ -668,8 +699,10 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 
 func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 	switch {
-	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") || strings.EqualFold(path[0], "temp")):
+	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") || strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "debug")):
 		return runtimeReferenceRunner
+	case isJobStatusReference(root, path):
+		return runtimeReferenceJobStatus
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return runtimeReferenceServicePort
 	case len(path) == 3 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")):
@@ -678,6 +711,8 @@ func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 		return runtimeReferenceGitHub
 	case len(path) == 1 && strings.EqualFold(root, "inputs"):
 		return runtimeReferenceInput
+	case len(path) == 1 && strings.EqualFold(root, "strategy") && strategyProperty(path[0]):
+		return runtimeReferenceStrategy
 	case len(path) >= 1 && strings.EqualFold(root, "matrix"):
 		return runtimeReferenceMatrix
 	case len(path) == 1 && strings.EqualFold(root, "secrets"):
@@ -696,6 +731,19 @@ func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 		return runtimeReferenceNeedResult
 	default:
 		return runtimeReferenceUnsupported
+	}
+}
+
+func isRunnerDebugReference(root string, path []string) bool {
+	return strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug")
+}
+
+func strategyProperty(name string) bool {
+	switch strings.ToLower(name) {
+	case "job-index", "job-total", "fail-fast", "max-parallel":
+		return true
+	default:
+		return false
 	}
 }
 

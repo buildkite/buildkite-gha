@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/buildkite/buildkite-gha/internal/expression"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 func TestCompileUsesInstanceStrategyForSchedulingAndNames(t *testing.T) {
@@ -133,5 +136,109 @@ func TestRuntimeRunsOnReceivesInstanceStrategy(t *testing.T) {
 	build := jobKeys(expanded)["gha-build"]
 	if len(expanded.Continuations) != 0 || strings.Join(build.RunsOn, ",") != "ubuntu-22.04" || build.Queue != "linux" {
 		t.Fatalf("expanded runner selection = %+v, continuations = %+v", build, expanded.Continuations)
+	}
+}
+
+func TestInstanceStrategyTokenAuthority(t *testing.T) {
+	const source = `on: push
+permissions: {contents: read}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [zeta, skipped, alpha]
+        exclude: [{target: skipped}]
+    steps:
+      - id: prepare
+        run: true
+      - if: strategy.job-index == 1 && steps.prepare.outputs.ready == 'yes'
+        run: echo '${{ github.server_url == 'https://github.com' && github.token || 'safe' }}'
+      - run: echo '${{ strategy.job-index == 9 && secrets.DEPLOY || 'safe' }}'
+`
+	bundle, err := CompileBundle("strategy.yml", []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d", len(bundle.Plans))
+	}
+	for index, artifact := range bundle.Plans {
+		job := artifact.Job
+		if (job.GitHubToken != nil) != (index == 1) || strings.Join(job.RequiredSecrets, ",") != "DEPLOY" {
+			t.Fatalf("row %d token = %+v, exhaustive secrets = %v", index, job.GitHubToken, job.RequiredSecrets)
+		}
+		for _, server := range []string{"https://github.com", "https://origin.cursor.com"} {
+			authority, err := program.InventoryAuthority(*job.Program, program.AuthorityOptions{Values: expression.AbstractValues{References: map[string]any{
+				"strategy": job.Strategy, "github.server_url": server,
+			}}})
+			if err != nil || authority.GitHubToken != (index == 1 && server == "https://github.com") {
+				t.Fatalf("row %d provider %s: authority = %+v, error = %v", index, server, authority, err)
+			}
+		}
+	}
+}
+
+func TestInstanceStrategyAdmissionRemainsScalarAndWorkflowScoped(t *testing.T) {
+	for _, field := range []string{
+		"    if: strategy.job-index == 0\n    steps: [{run: true}]",
+		"    steps:\n      - run: echo ${{ toJSON(strategy) }}",
+		"    steps:\n      - run: echo ${{ false && toJSON(strategy) }}",
+		"    steps:\n      - if: false && toJSON(strategy)\n        run: true",
+		"    steps:\n      - run: echo ${{ strategy[env.KEY] }}",
+		"    steps:\n      - run: echo ${{ strategy.job-index == 9 && secrets[env.KEY] }}",
+	} {
+		source := "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n" + field + "\n"
+		if _, err := CompileBundle("strategy.yml", []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer"); err == nil {
+			t.Errorf("accepted prohibited strategy field: %s", field)
+		}
+	}
+	for _, source := range []string{
+		"on: push\nenv: {ROW: '${{ strategy.job-index }}'}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"on: push\ndefaults:\n  run:\n    shell: ${{ strategy.job-index }}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	} {
+		if _, err := CompileBundle("strategy.yml", []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer"); err == nil {
+			t.Error("accepted workflow-level strategy")
+		}
+	}
+}
+
+func TestInstanceStrategyServiceFields(t *testing.T) {
+	const source = `on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        row: [zeta, alpha]
+    services:
+      db:
+        image: postgres:16
+        env:
+          TOTAL: ${{ strategy.job-total }}
+        credentials:
+          username: ${{ strategy.job-index == 0 && env.REGISTRY_USER || 'second' }}
+          password: ${{ env.REGISTRY_PASSWORD }}
+    steps: [{run: true}]
+`
+	bundle, err := CompileBundle("strategy.yml", []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d", len(bundle.Plans))
+	}
+	for i, artifact := range bundle.Plans {
+		job := artifact.Job
+		context := program.EvaluationContext{Expression: expression.Context{Strategy: job.Strategy, Env: map[string]string{"REGISTRY_USER": "first"}}}
+		service := job.Program.Job.Services.Static[0].Container
+		env, err := program.EvaluateBindings(service.Env, context)
+		if err != nil || env["TOTAL"] != "2" {
+			t.Fatalf("service env = %v, %v", env, err)
+		}
+		username, err := program.EvaluateSite(service.Credentials.Username, context)
+		if err != nil || username != []string{"first", "second"}[i] {
+			t.Fatalf("service username = %v, %v", username, err)
+		}
 	}
 }

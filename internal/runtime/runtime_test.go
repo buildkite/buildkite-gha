@@ -22,6 +22,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 type testSecretResolver map[string]string
@@ -371,6 +372,9 @@ func TestFailureConditionsAndCancellation(t *testing.T) {
 	result, err = (Runner{}).runTestJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "failure" || time.Since(started) > 3*time.Second {
 		t.Fatalf("timed RunJob() result = %#v, error = %v, elapsed = %s", result, err, time.Since(started))
+	}
+	if selected := UnexpectedFailure(err); selected != nil {
+		t.Fatalf("workflow step timeout selected as a defect: %v", selected)
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -1020,7 +1024,7 @@ func TestResolveActionInputsUsesContextDefaultsUnlessExplicitlySupplied(t *testi
 	for _, test := range []struct {
 		name, input, expression, supplied, defaultValue string
 	}{
-		{name: "runner debug", input: "debug", expression: "${{ runner.debug }}", supplied: "true", defaultValue: "false"},
+		{name: "runner debug", input: "debug", expression: "${{ runner.debug }}", supplied: "true"},
 		{name: "empty check run ID", input: "check-run-id", expression: "${{ job.check_run_id }}", supplied: "1234"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1035,6 +1039,27 @@ func TestResolveActionInputsUsesContextDefaultsUnlessExplicitlySupplied(t *testi
 				t.Fatalf("explicit input = %#v, %v; want %q", inputs, err, test.supplied)
 			}
 		})
+	}
+}
+
+func TestWorkflowActionInputTreatsRunnerDebugAsDisabled(t *testing.T) {
+	step := normalizeRuntimeTestStep(runtimeTestStep{
+		ID: "junit-test", Kind: "uses", Uses: "./.github/actions/run-gradle",
+		With: map[string]string{
+			"test-verbose": "${{ runner.debug == '1' }}",
+			"debug-value":  "${{ runner['debug'] }}",
+		},
+	})
+
+	inputs, err := evaluatePlanStepWith(step, expression.Context{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputs["test-verbose"] != "false" || inputs["debug-value"] != "" {
+		t.Fatalf("workflow action inputs = %#v, want disabled runner debug values", inputs)
+	}
+	if _, ok := standardEnvironment(plan.Job{}, "/workspace", "/tmp", "/tool-cache", RunIdentity{})["RUNNER_DEBUG"]; ok {
+		t.Fatal("standard environment exported RUNNER_DEBUG while step debugging is disabled")
 	}
 }
 
@@ -1087,12 +1112,12 @@ func TestGitHubContextExposesRuntimeEventIdentity(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			github := githubContext(plan.Job{Event: test.event})
-			if github["repository_owner"] != test.wantOwner || github["ref_name"] != test.wantRefName || github["ref_type"] != test.wantRefType || github["base_ref"] != test.wantBaseRef || github["action_path"] != "" || github["action_ref"] != "" || github["action_repository"] != "" {
+			if github["repository_owner"] != test.wantOwner || github["ref_name"] != test.wantRefName || github["ref_type"] != test.wantRefType || github["base_ref"] != test.wantBaseRef || github["action"] != "" || github["action_path"] != "" || github["action_ref"] != "" || github["action_repository"] != "" {
 				t.Fatalf("GitHub context = %#v", github)
 			}
 			stepContext := stepExpressionContext(expression.Context{GitHub: github, Secrets: map[string]string{"GITHUB_TOKEN": "ghs_test"}})
 			serialized, err := evaluateLegacyTemplate("${{ toJSON(github) }}", expression.ProfileStepTemplate, stepContext)
-			if err != nil || !strings.Contains(serialized, `"action_path": ""`) || !strings.Contains(serialized, `"action_ref": ""`) || !strings.Contains(serialized, `"action_repository": ""`) {
+			if err != nil || !strings.Contains(serialized, `"action": ""`) || !strings.Contains(serialized, `"action_path": ""`) || !strings.Contains(serialized, `"action_ref": ""`) || !strings.Contains(serialized, `"action_repository": ""`) {
 				t.Fatalf("serialized top-level GitHub context = %q, %v", serialized, err)
 			}
 			condition := "github.repository_owner == '" + test.wantOwner + "' && github.ref_name == '" + test.wantRefName + "' && github.ref_type == '" + test.wantRefType + "' && github.base_ref == '" + test.wantBaseRef + "'"
@@ -1506,6 +1531,9 @@ func TestJobTimeoutDuringSetupIsCancelled(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
+	if selected := UnexpectedFailure(err); selected != nil {
+		t.Fatalf("workflow job timeout selected as a defect: %v", selected)
+	}
 }
 
 func TestRunnerToolCacheIsPerJobAndReserved(t *testing.T) {
@@ -1574,6 +1602,7 @@ func TestCanonicalRunnerContext(t *testing.T) {
 		goos, goarch, os, arch string
 	}{
 		{goos: "linux", goarch: "amd64", os: "Linux", arch: "X64"},
+		{goos: "linux", goarch: "arm64", os: "Linux", arch: "ARM64"},
 		{goos: "darwin", goarch: "arm64", os: "macOS", arch: "ARM64"},
 	} {
 		got, err := canonicalRunnerContext(test.goos, test.goarch)
@@ -1581,7 +1610,7 @@ func TestCanonicalRunnerContext(t *testing.T) {
 			t.Errorf("canonicalRunnerContext(%s, %s) = %#v, %v", test.goos, test.goarch, got, err)
 		}
 	}
-	if _, err := canonicalRunnerContext("linux", "arm64"); err == nil {
+	if _, err := canonicalRunnerContext("linux", "386"); err == nil {
 		t.Fatal("canonicalRunnerContext() accepted unsupported pair")
 	}
 }
@@ -1593,6 +1622,9 @@ func TestValidateHostRejectsDockerOnDarwin(t *testing.T) {
 	}
 	if err := ValidateHost(job, "linux", "amd64"); err != nil {
 		t.Fatalf("ValidateHost() Linux Docker error = %v", err)
+	}
+	if err := ValidateHost(job, "linux", "arm64"); err != nil {
+		t.Fatalf("ValidateHost() Linux ARM64 Docker error = %v", err)
 	}
 	if err := ValidateHost(job, "darwin", "amd64"); err == nil || !strings.Contains(err.Error(), "unsupported runner platform") {
 		t.Fatalf("ValidateHost() unsupported platform error = %v", err)
@@ -1846,6 +1878,60 @@ printf '%s\n' 'derived-mask-value' >> "$GITHUB_STEP_SUMMARY"`,
 	}
 	if result.Env["DYNAMIC_VALUE"] != "***" || result.Summary != "***\n" {
 		t.Fatalf("RunJob() did not scrub dynamic mask from bounded result: %#v", result)
+	}
+}
+
+func TestCompositeMissingTokenExplainsWorkflowInputRemedy(t *testing.T) {
+	for _, test := range []struct {
+		name, action, location string
+	}{
+		{name: "step environment", location: `evaluate "DEFAULT_GITHUB_TOKEN"`, action: `name: Tokenless composite
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        DEFAULT_GITHUB_TOKEN: ${{ github.token }}
+      run: echo must-not-run
+`},
+		{name: "output", location: `composite output "token"`, action: `name: Tokenless composite
+outputs:
+  token:
+    value: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: "true"
+`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+			writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", test.action)
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+			var logs bytes.Buffer
+			_, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+			if err == nil {
+				t.Fatal("tokenless composite succeeded")
+			}
+			for _, want := range []string{
+				test.location,
+				`unavailable github value "token"`,
+				"this composite expression cannot authorize a token",
+				"with: token: ${{ github.token }}",
+				"use ${{ inputs.token }} inside the composite",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("RunJob() error = %v, want %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "settings/repository") || strings.Contains(err.Error(), "composite step metadata") || strings.Contains(logs.String(), "must-not-run") {
+				t.Fatalf("incorrect remedy or step-specific guidance or action executed: error=%v logs=%s", err, logs.String())
+			}
+			t.Logf("RunJob() diagnostic: %v", err)
+		})
 	}
 }
 
@@ -2141,6 +2227,80 @@ runs:
 	}
 }
 
+func TestCompiledCompositeServerURLCondition(t *testing.T) {
+	for _, test := range []struct {
+		name, provider, disabled, server string
+		tokenBody, wantRun               bool
+	}{
+		{"GitHub enabled", "github", "false", "https://github.com", false, true},
+		{"GitHub disabled", "github", "true", "https://github.com", false, false},
+		{"Origin enabled", "cursor-origin", "false", "https://origin.cursor.com", false, false},
+		{"Origin disabled", "cursor-origin", "true", "https://origin.cursor.com", false, false},
+		{"token body cannot authorize token", "github", "false", "https://github.com", true, true},
+		{"disabled token body", "github", "true", "https://github.com", true, false},
+		{"Origin token body", "cursor-origin", "false", "https://origin.cursor.com", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			workflow := fmt.Sprintf(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/conditional
+        with:
+          disable-nix-access-token: '%s'
+`, test.disabled)
+			writeFixtureFile(t, workspace, workflowPath, workflow)
+			command := "touch conditional-ran"
+			if test.tokenBody {
+				command = "echo '${{ github.token }}' > conditional-ran"
+			}
+			// Guard from jetify-com/devbox-install-action@8c6a66ed6273138b1915457069de78cb52fe3bd7/action.yml#L132.
+			// Replace installation and token configuration with bounded local effects.
+			writeFixtureFile(t, workspace, ".github/actions/conditional/action.yml", fmt.Sprintf(`inputs:
+  disable-nix-access-token:
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - if: inputs.disable-nix-access-token == 'false' && github.server_url == 'https://github.com'
+      shell: bash
+      run: %s
+    - shell: bash
+      run: echo '${{ github.server_url }}' > provider-url
+`, command))
+			event := []byte(fmt.Sprintf(`{"provider":%q,"event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat"}`, test.provider))
+			jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+			if err != nil || len(jobs) != 1 {
+				t.Fatalf("compile composite condition = %#v, %v", jobs, err)
+			}
+			if jobs[0].GitHubToken != nil {
+				t.Fatal("composite condition or body granted token authority")
+			}
+			result, err := (Runner{}).RunJob(t.Context(), jobs[0], workspace)
+			if test.tokenBody && test.wantRun {
+				if err == nil || !strings.Contains(err.Error(), "github.token") || result.Conclusion != "failure" {
+					t.Fatalf("RunJob() = %#v, %v; want missing composite token failure", result, err)
+				}
+				return
+			}
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("RunJob() = %#v, %v", result, err)
+			}
+			_, statErr := os.Stat(filepath.Join(workspace, "conditional-ran"))
+			if test.wantRun && statErr != nil || !test.wantRun && !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("conditional marker stat = %v, want run=%v", statErr, test.wantRun)
+			}
+			server, err := os.ReadFile(filepath.Join(workspace, "provider-url"))
+			if err != nil || strings.TrimSpace(string(server)) != test.server {
+				t.Fatalf("provider URL = %q, %v; want %q", server, err, test.server)
+			}
+		})
+	}
+}
+
 func TestCompositeStepSupportsCompoundInputExpression(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -2238,6 +2398,27 @@ func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
 	}
 	if len(result.Outputs) != 0 {
 		t.Fatalf("RunJob() partial outputs = %#v, want none before first sorted error", result.Outputs)
+	}
+}
+
+func TestRuntimeJobOutputSizeLimits(t *testing.T) {
+	workspace := fixturePath(t, "smoke")
+	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []runtimeTestStep{{ID: "shell", Kind: "run", Shell: "sh", Command: "true"}})
+	large := strings.Repeat("x", transport.MaxResultOutputBytes)
+	job.Outputs = map[string]string{"large": large}
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Outputs["large"] != large {
+		t.Fatalf("RunJob() error = %v, output bytes = %d; want a %d-byte output", err, len(result.Outputs["large"]), len(large))
+	}
+
+	job.Outputs = map[string]string{"large": large + "x"}
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || ClassifyFailure(err) != FailureClassUnsupportedFeature || !strings.Contains(err.Error(), `job output "large"`) {
+		t.Fatalf("RunJob() error = %v, want unsupported oversized output", err)
+	}
+
+	job.Outputs = map[string]string{"a": large, "b": large, "c": large, "d": large, "e": "x"}
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || ClassifyFailure(err) != FailureClassUnsupportedFeature || !strings.Contains(err.Error(), "job outputs total") {
+		t.Fatalf("RunJob() error = %v, want unsupported total output size", err)
 	}
 }
 

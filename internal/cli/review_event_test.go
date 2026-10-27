@@ -97,7 +97,7 @@ func TestReviewTriggerActivities(t *testing.T) {
 		"pull_request_review":         {"submitted", "edited", "dismissed"},
 		"pull_request_review_comment": {"created", "edited", "deleted"},
 	} {
-		for _, declaration := range []string{event, "[push, " + event + "]", "{" + event + ": null}", "{" + event + ": {}}", "{" + event + ": {types: []}}", "{" + event + ": {types: [edited]}}", "{" + event + ": {types: edited}}"} {
+		for _, declaration := range []string{event, "[push, " + event + "]", "{" + event + ": null}", "{" + event + ": {}}", "{" + event + ": {types: null}}", "{" + event + ": {types: []}}", "{" + event + ": {types: [edited]}}", "{" + event + ": {types: edited}}"} {
 			t.Run(declaration, func(t *testing.T) {
 				parsed, err := workflow.Parse("review.yml", []byte("on: "+declaration+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 				if err != nil {
@@ -156,9 +156,7 @@ func TestReviewWebhookIdentity(t *testing.T) {
 func TestReviewFiltersFailClosed(t *testing.T) {
 	for _, event := range []string{"pull_request_review", "pull_request_review_comment"} {
 		for name, trigger := range map[string]workflow.Trigger{
-			"branch":       {Event: event, Branches: []string{"release"}},
-			"path":         {Event: event, Paths: []string{"src/**"}},
-			"tag":          {Event: event, TagsIgnore: []string{"v*"}},
+			"workflow":     {Event: event, Workflows: []string{"CI"}},
 			"unknown type": {Event: event, Types: []string{"approved"}},
 		} {
 			if _, err := buildkitepipeline.TranslateTriggerCondition([]workflow.Trigger{trigger}); err == nil {

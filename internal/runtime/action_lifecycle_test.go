@@ -286,7 +286,7 @@ func TestConditionInspectionFailureAfterMainFailureStillRunsPostPhase(t *testing
 		Program: &executionprogram.Program{Version: executionprogram.Version, Job: executionprogram.Job{Steps: []executionprogram.Step{{ID: "inspect", Kind: "run", Condition: invalidStepCondition}}}},
 	}
 	run.processor = newCommandOutputProcessor(io.Discard, io.Discard)
-	run.eval = expression.Context{Env: map[string]string{}, Steps: map[string]expression.StepStatus{}}
+	run.eval = expression.Context{GitHub: githubContext(run.job), Env: map[string]string{}, Steps: map[string]expression.StepStatus{}}
 	run.result = JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}}
 	run.runtimeEnv = map[string]string{}
 	run.posts = &postRegistry{}
@@ -851,6 +851,109 @@ runs:
 	}
 }
 
+func TestGitHubActionNamesTheRunningWorkflowStep(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: step names\n")
+	writeFixtureFile(t, workspace, ".github/actions/outer/action.yml", `name: Outer
+outputs:
+  name:
+    value: ${{ github.action }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        METRICS_ACTION: ${{ github.action }}
+      run: test "$METRICS_ACTION" = metrics && test "${{ github.action }}" = metrics
+    - uses: ./.github/actions/inner
+      with:
+        caller: ${{ github.action }}
+`)
+	writeFixtureFile(t, workspace, ".github/actions/inner/action.yml", `name: Inner
+inputs:
+  caller:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: test "${{ github.action }}" = metrics && test "${{ inputs.caller }}" = metrics
+`)
+	writeFixtureFile(t, remote, "js/action.yml", "name: JavaScript\ninputs:\n  name:\n    required: true\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	for _, phase := range []string{"pre", "main", "post"} {
+		writeFixtureFile(t, remote, "js/"+phase+".js", "")
+	}
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+printf '%s:%s\n' "$(basename "$1" .js)" "$INPUT_NAME" >> "$PHASES"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	jsID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "step-1", GitHubAction: "__run", Kind: "run", Env: map[string]string{"STEP_ACTION": "${{ github.action }}"},
+			Command: `test "${{ github.action }}" = __run && test "$STEP_ACTION" = __run && test -z "$JOB_ACTION"`},
+		{ID: "metrics", GitHubAction: "metrics", Kind: "uses", Uses: "./.github/actions/outer"},
+		{ID: "step-3", GitHubAction: "__owner_repo", Kind: "uses", Uses: remoteLifecycleUses("js"), Action: &plan.ActionSelector{Lock: jsID},
+			With: map[string]string{"name": "${{ github.action }}"}},
+		{ID: "step-4", GitHubAction: "__run_2", Kind: "run", Command: `test "${{ github.action }}" = __run_2 && test "${{ steps.metrics.outputs.name }}" = metrics`},
+	})
+	phases := filepath.Join(workspace, "phases")
+	job.Env = map[string]string{"JOB_ACTION": "${{ github.action }}", "PHASES": phases}
+	job.Outputs = map[string]string{"action": "${{ github.action }}"}
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(jsID, "js", digest, nil)}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	var logs bytes.Buffer
+	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v\nlogs: %s", result, err, logs.String())
+	}
+	if got := result.Outputs["action"]; got != "__owner_repo" {
+		t.Fatalf("job output action = %q, want last post action __owner_repo", got)
+	}
+	if got, err := os.ReadFile(phases); err != nil || string(got) != "pre:__owner_repo\nmain:__owner_repo\npost:__owner_repo\n" {
+		t.Fatalf("phases = %q, %v; want the invoking step name in pre, main, and post", got, err)
+	}
+}
+
+func TestCompiledGitHubActionRetainsSkippedStepNameForOutputs(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github/workflows/test.yml")
+	workflow := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      action: ${{ github.action }}
+    steps:
+      - run: test '${{ github.action }}' = __run
+      - id: named
+        run: test '${{ github.action }}' = named
+      - if: false
+        run: exit 1
+`)
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil || len(plans) != 1 {
+		t.Fatalf("compiled plans = %d, error = %v; want 1", len(plans), err)
+	}
+	result, err := (Runner{}).RunJob(t.Context(), plans[0], workspace)
+	if err != nil || result.Conclusion != "success" || result.Outputs["action"] != "__run_2" {
+		t.Fatalf("RunJob() result = %#v, error = %v; want skipped step name __run_2", result, err)
+	}
+}
+
 func TestRemoteCompositeGitHubActionIdentityExpressionsAreInvocationScoped(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -1152,6 +1255,176 @@ func TestCompileKnownFalseRootActionDoesNotPrepareRemoteLifecycle(t *testing.T) 
 	}
 	if materializer.calls != 0 {
 		t.Fatalf("known-false root materializations = %d, want 0", materializer.calls)
+	}
+}
+
+func TestCompiledJobStatusFollowsJobAndCompositeScopes(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "test.yml")
+	workflow := []byte(`on: push
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ job.status }}
+    steps:
+      - name: Before ${{ job.status }}
+        run: echo "before=${{ job.status }}" >> status.log
+      - uses: ./.github/actions/observe
+      - if: always() && job.status == 'failure'
+        env:
+          STATUS: ${{ job.status }}
+        run: echo "after=$STATUS" >> status.log
+      - if: job.status == 'failure'
+        run: echo "implicit=${{ job.status }}" >> status.log
+`)
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
+	// GitHub tracks a composite's own failure separately: failure() is true
+	// inside the composite while job.status stays success until it returns.
+	writeFixtureFile(t, workspace, ".github/actions/observe/action.yml", `name: observe
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: echo "composite-before=${{ job.status }}" >> status.log; exit 5
+    - if: failure() && job.status == 'success'
+      shell: sh
+      run: echo "composite-after=${{ job.status }}" >> status.log
+`)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("compiled plans = %d, want 1", len(plans))
+	}
+
+	result, runErr := (Runner{}).runTestJob(t.Context(), plans[0], workspace)
+	if runErr == nil || result.Conclusion != "failure" || result.Outputs["status"] != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v; want failure with job.status output", result, runErr)
+	}
+	log, err := os.ReadFile(filepath.Join(workspace, "status.log"))
+	if want := "before=success\ncomposite-before=success\ncomposite-after=success\nafter=failure\n"; err != nil || string(log) != want {
+		t.Fatalf("status log = %q, %v; want %q", log, err, want)
+	}
+}
+
+func TestCompiledJobStatusReportsCancellation(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "test.yml")
+	workflow := []byte(`on: push
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ job.status }}
+    steps:
+      - uses: ./.github/actions/cleanup
+      - run: sleep 5
+`)
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
+	writeFixtureFile(t, workspace, ".github/actions/cleanup/action.yml", "name: cleanup\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n  post-if: job.status == 'cancelled'\n")
+	writeFixtureFile(t, workspace, ".github/actions/cleanup/main.js", "")
+	writeFixtureFile(t, workspace, ".github/actions/cleanup/post.js", "")
+	postMarker := filepath.Join(workspace, "post-ran")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+if [ "${1##*/}" = post.js ]; then touch '`+postMarker+`'; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("compiled plans = %d, want 1", len(plans))
+	}
+	job := plans[0]
+	job.TimeoutMinutes = 0.001
+	program := *job.Program
+	program.Job.TimeoutMinutes = 0.001
+	job.Program = &program
+
+	result, runErr := (Runner{Node24: fakeNode}).runTestJob(t.Context(), job, workspace)
+	if !errors.Is(runErr, context.DeadlineExceeded) || result.Conclusion != "cancelled" || result.Outputs["status"] != "cancelled" {
+		t.Fatalf("RunJob() result = %#v, error = %v; want cancelled job.status output", result, runErr)
+	}
+	if _, err := os.Stat(postMarker); err != nil {
+		t.Fatalf("post-if job.status == 'cancelled' did not run post: %v", err)
+	}
+}
+
+func TestCompiledCompositeJobStatusDistinguishesStepAndJobTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		jobTimeout bool
+		wantStatus string
+	}{
+		{name: "step timeout", wantStatus: "success"},
+		{name: "job timeout", jobTimeout: true, wantStatus: "cancelled"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := filepath.Join(workspace, ".github", "workflows", "test.yml")
+			workflow := []byte(`on: push
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    outputs:
+      composite-status: ${{ steps.observe.outputs.status }}
+    steps:
+      - id: observe
+        uses: ./.github/actions/observe
+`)
+			writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
+			action := `name: observe
+outputs:
+  status:
+    value: ${{ job.status }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: sleep 5
+`
+			if !test.jobTimeout {
+				// A subsequent child must not confuse the step's expired context
+				// with cancellation of the whole job.
+				action += "    - if: always()\n      shell: sh\n      run: echo cleanup\n"
+			}
+			writeFixtureFile(t, workspace, ".github/actions/observe/action.yml", action)
+			event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			plans, err := compileUntrustedPlans(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+			if err != nil || len(plans) != 1 {
+				t.Fatalf("compiled plans = %d, error = %v; want 1", len(plans), err)
+			}
+			job := plans[0]
+			if test.jobTimeout {
+				job.TimeoutMinutes = 0.005
+				job.Program.Job.TimeoutMinutes = 0.005
+			} else {
+				job.Program.Job.Steps[0].TimeoutMinutes.Literal = 0.005
+			}
+			result, runErr := (Runner{}).runTestJob(t.Context(), job, workspace)
+			if !errors.Is(runErr, context.DeadlineExceeded) || result.Outputs["composite-status"] != test.wantStatus {
+				t.Fatalf("RunJob() result = %#v, error = %v; want composite job.status = %q", result, runErr, test.wantStatus)
+			}
+		})
 	}
 }
 
@@ -1659,6 +1932,64 @@ fi
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("later pre did not observe failed pre environment: %v", err)
+	}
+}
+
+func TestRemoteCompositePreKeepsRootJobStatus(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: composite pre status\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: owner/repo/fails@v1\n    - uses: owner/repo/observe@v1\n")
+	for _, action := range []struct{ name, preIf string }{
+		{"fails", "always()"},
+		{"observe", "job.status == 'success'"},
+		{"after", "job.status == 'failure'"},
+	} {
+		writeFixtureFile(t, remote, action.name+"/action.yml", "name: "+action.name+"\ninputs:\n  status:\n    default: ${{ job.status }}\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: "+action.preIf+"\n  main: main.js\n")
+		writeFixtureFile(t, remote, action.name+"/pre.js", "")
+		writeFixtureFile(t, remote, action.name+"/main.js", "")
+	}
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+if [ "${1##*/}" = pre.js ]; then
+  printf '%s:%s\n' "$action" "$INPUT_STATUS" >> "$STATUS_LOG"
+  if [ "$action" = fails ] || [ "$action" = after ]; then exit 7; fi
+fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parentID, failsID, observeID, afterID := remoteLifecycleLockID(1), remoteLifecycleLockID(2), remoteLifecycleLockID(3), remoteLifecycleLockID(4)
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "parent", Kind: "uses", Uses: remoteLifecycleUses("parent"), Action: &plan.ActionSelector{Lock: parentID}},
+		{ID: "after", Kind: "uses", Uses: remoteLifecycleUses("after"), Action: &plan.ActionSelector{Lock: afterID}, ContinueOnErrorExpression: "${{ job.status == 'failure' }}"},
+	})
+	logPath := filepath.Join(workspace, "status.log")
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"STATUS_LOG": logPath}
+	job.Outputs = map[string]string{"after": "${{ steps.after.outcome }}-${{ steps.after.conclusion }}"}
+	digest := digestTree(t, remote)
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(parentID, "parent", digest, map[string]plan.ActionSelector{remoteLifecycleUses("fails"): {Lock: failsID}, remoteLifecycleUses("observe"): {Lock: observeID}}),
+		remoteLifecycleLock(failsID, "fails", digest, nil),
+		remoteLifecycleLock(observeID, "observe", digest, nil),
+		remoteLifecycleLock(afterID, "after", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, runErr := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
+	if runErr == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v; want pre failure", result, runErr)
+	}
+	log, err := os.ReadFile(logPath)
+	if want := "fails:success\nobserve:success\nafter:failure\n"; err != nil || string(log) != want {
+		t.Fatalf("pre status log = %q, %v; want %q", log, err, want)
+	}
+	if got := result.Outputs["after"]; got != "failure-success" {
+		t.Fatalf("later pre outcome-conclusion = %q, want failure-success", got)
 	}
 }
 

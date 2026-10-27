@@ -55,8 +55,10 @@ func TestBackgroundSummariesAreBoundedInCommitOrder(t *testing.T) {
 
 	jobResult := JobResult{Env: map[string]string{}, State: map[string]string{}}
 	eval := expression.Context{Steps: map[string]expression.StepStatus{}}
+	var logs bytes.Buffer
+	processor := newCommandOutputProcessor(&logs, &logs)
 	for _, execution := range supervisor.waitAll() {
-		if err := commitStepExecution(execution, &jobResult, &eval); err != nil {
+		if err := commitStepExecution(execution, processor, &jobResult, &eval); err != nil {
 			t.Fatal(err)
 		}
 	}
