@@ -43,7 +43,7 @@ func TestBranchProtectionRuleDeclarations(t *testing.T) {
 			}
 		}
 	}
-	for _, config := range []string{"types: 'null'", "types: [opened]", "branches-ignore: [main]", "paths: [src/**]"} {
+	for _, config := range []string{"types: 'null'", "types: [opened]", "workflows: [CI]", "unknown: [CI]"} {
 		parsed, err := workflow.Parse("rule.yml", []byte("on: {branch_protection_rule: {"+config+"}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 		if err == nil && buildkite.ValidateTriggerConditions(parsed.Triggers) == nil {
 			t.Fatalf("accepted %s", config)

@@ -20,9 +20,11 @@ type ConditionContext struct {
 	Env          map[string]string
 	Vars         map[string]string
 	Matrix       map[string]any
+	Strategy     map[string]any
 	GitHub       map[string]any
 	Runner       map[string]string
 	Services     map[string]ServiceContext
+	JobStatus    string
 	Failure      bool
 	Cancelled    bool
 	Unsuccessful bool
@@ -44,6 +46,8 @@ const (
 	// actionLifecycleCondition is evaluated for action pre-if and post-if
 	// metadata. It has its own context policy and no implicit success guard.
 	actionLifecycleCondition
+	// actionStepCondition retains step semantics with composite-only references.
+	actionStepCondition
 )
 
 // validateCallCondition verifies the caller-only runtime surface of a local
@@ -145,7 +149,7 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error
 			}
 			return nil
 		case "hashfiles":
-			if scope != StepCondition && scope != actionLifecycleCondition {
+			if scope != StepCondition && scope != actionStepCondition && scope != actionLifecycleCondition {
 				return fmt.Errorf("condition function %q is unavailable in job conditions", node.Callee)
 			}
 			if len(node.Args) == 0 || len(node.Args) > 255 {
@@ -251,14 +255,14 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			if strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") {
 				return nil
 			}
-			if strings.EqualFold(path[0], "temp") && scope != JobCondition && scope != CallCondition {
+			if (strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "debug")) && scope != JobCondition && scope != CallCondition {
 				return nil
 			}
 		}
 		if scope == JobCondition {
 			return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, or runner.environment", reference)
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, runner.environment, or runner.temp", reference)
+		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, runner.environment, runner.temp, or runner.debug", reference)
 	case "github":
 		if len(path) >= 1 && strings.EqualFold(path[0], "event") {
 			return nil
@@ -267,9 +271,17 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			switch strings.ToLower(path[0]) {
 			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow_ref", "workflow_sha":
 				return nil
+			case "server_url":
+				if scope == actionStepCondition {
+					return nil
+				}
 			}
 		}
-		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are actor, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, sha, workflow_ref, and workflow_sha", reference)
+		supported := "actor, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, sha, workflow_ref, and workflow_sha"
+		if scope == actionStepCondition {
+			supported += ", plus server_url in composite step conditions"
+		}
+		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are %s", reference, supported)
 	case "needs":
 		if len(path) == 2 && strings.EqualFold(path[1], "result") || len(path) == 3 && strings.EqualFold(path[1], "outputs") {
 			return nil
@@ -285,6 +297,11 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			return nil
 		}
 		return fmt.Errorf("condition reference %q is unsupported; expected inputs.<name>", reference)
+	case "strategy":
+		if scope == StepCondition && len(path) == 1 && strategyProperty(path[0]) {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported in this field", reference)
 	case "matrix":
 		// Matrix values may be objects or arrays, so nested references such
 		// as matrix.config.os are valid.
@@ -312,10 +329,10 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 		if scope == JobCondition {
 			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
 		}
-		if len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports") || len(path) == 3 && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")) {
+		if isJobStatusReference(root, path) || len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports") || len(path) == 3 && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")) {
 			return nil
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected job.services.<service>.id, job.services.<service>.network, or job.services.<service>.ports[<port>]", reference)
+		return fmt.Errorf("condition reference %q is unsupported; expected job.status, job.services.<service>.id, job.services.<service>.network, or job.services.<service>.ports[<port>]", reference)
 	default:
 		return fmt.Errorf("condition context %q is unsupported", root)
 	}
@@ -364,6 +381,12 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 			return validator.validate(node.Index)
 		}
 		return fmt.Errorf("unsupported condition access expression")
+	case "strategy":
+		staticRoot, path, err := referencePath(node)
+		if err != nil {
+			return fmt.Errorf("dynamic strategy access is unsupported")
+		}
+		return validateConditionReference(staticRoot, path, scope)
 	case "matrix", "needs":
 	case "vars":
 		if _, whole := node.(*actionlint.VariableNode); whole {
@@ -523,6 +546,8 @@ func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (
 
 func resolveConditionRoot(root string, context ConditionContext) (any, error) {
 	switch strings.ToLower(root) {
+	case "strategy":
+		return resolveStepRuntimeRoot(root, Context{Strategy: context.Strategy})
 	case "matrix":
 		if context.Matrix == nil {
 			return nil, fmt.Errorf("condition context %q is unavailable", root)
@@ -603,6 +628,14 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		if value, ok := findStringValue(context.Runner, path[0]); ok {
 			return value, nil
 		}
+		if isRunnerDebugReference(root, path) {
+			return nil, nil
+		}
+	case isJobStatusReference(root, path):
+		if context.JobStatus == "" {
+			return nil, fmt.Errorf("condition references unavailable job.status")
+		}
+		return context.JobStatus, nil
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return resolveServicePort(context.Services, path[1], path[3], "condition")
 	case len(path) == 3 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")):
@@ -634,6 +667,8 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		return findString(context.Env, path[0]), nil
 	case len(path) == 1 && strings.EqualFold(root, "vars"):
 		return findString(context.Vars, path[0]), nil
+	case len(path) == 1 && strings.EqualFold(root, "strategy"):
+		return resolveRuntimeReference(root, path, Context{Strategy: context.Strategy})
 	case len(path) >= 1 && strings.EqualFold(root, "matrix"):
 		for name, value := range context.Matrix {
 			if strings.EqualFold(name, path[0]) {

@@ -154,8 +154,13 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		parsed, parseErr := workflow.Parse(workflows[i].Path, workflows[i].Source)
 		if parseErr != nil {
-			_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false, compiler.DefaultOptions())
-			return 1
+			if len(workflows) == 1 || uploadArguments.serverSelectedWorkflow != nil {
+				_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false, compiler.DefaultOptions())
+				return 1
+			}
+			workflows[i].ParseError = parseErr
+			runnableWorkflowCount++
+			continue
 		}
 		if uploadArguments.serverSelectedWorkflow != nil && uploadArguments.serverSelectedWorkflow.Name != "" {
 			actualName := parsed.Name
@@ -183,7 +188,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	if privateSourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "private repository source could not be configured"), privateSourceErr)
+				return out.fail(ctx, repositorySourceSetupReport(input.Path, "private repository source could not be configured", privateSourceErr), privateSourceErr)
 			}
 		}
 		return 1
@@ -192,7 +197,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	if sourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "repository source could not be configured"), sourceErr)
+				return out.fail(ctx, repositorySourceSetupReport(input.Path, "repository source could not be configured", sourceErr), sourceErr)
 			}
 		}
 		return 1
@@ -201,7 +206,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	sourceSwitch := &repositorySourceSwitch{source: initialSource}
 	repositorySource := compiler.MemoizeRepositorySource(sourceSwitch)
 	for i, input := range workflows {
-		if input.ReusableOnly {
+		if input.ReusableOnly || input.ParseError != nil {
 			continue
 		}
 		// This event-independent pass only scans the workflow graph, including
@@ -241,7 +246,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	if sourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "repository source could not be configured"), sourceErr)
+				return out.fail(ctx, repositorySourceSetupReport(input.Path, "repository source could not be configured", sourceErr), sourceErr)
 			}
 		}
 		return 1
@@ -252,6 +257,13 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
 		if workflows[i].ReusableOnly {
+			continue
+		}
+		if workflows[i].ParseError != nil {
+			parsed, err := compiler.ParseWorkflow(workflows[i].Path, workflows[i].Source)
+			processingReports[i] = compatibility.InitialProcessingReport(workflows[i].Path, hostedProfile, false, parsed, err)
+			processingReports[i].Result = "incompatible"
+			workflows[i].Applicable = true
 			continue
 		}
 		workflowEvent := effectiveEvent
@@ -273,9 +285,22 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			workflows[i].SkipReason = selection.SkipReason
 			workflows[i].AnnotationReason = selection.AnnotationReason
 		}
-		runName, runNameErr := compiler.ResolveWorkflowRunName(workflows[i].Path, workflows[i].Parsed, effectiveEvent.Event, workflows[i].Applicable)
+		if workflows[i].Applicable && !processingReportHasErrors(processingReports[i]) {
+			if err := compiler.ValidateWorkflowRunName(workflows[i].Path, workflows[i].Parsed); err != nil {
+				processingReports[i] = triggerProcessingReport(workflows[i].Path, workflows[i].Source)
+				processingReports[i].AddFailure(workflows[i].Path, workflowprocessing.StageExpressions, workflowprocessing.CodeExpressionInvalid, "compatibility", err)
+				processingReports[i].Result = "incompatible"
+			}
+		}
+	}
+	vars := resolveUploadVariables(ctx, uploadArguments.variableSource, workflows, processingReports, effectiveEvent.Event)
+	for i := range workflows {
+		if workflows[i].ReusableOnly || workflows[i].ParseError != nil {
+			continue
+		}
+		runName, runNameErr := compiler.ResolveWorkflowRunName(workflows[i].Path, workflows[i].Parsed, effectiveEvent.Event, vars, workflows[i].Applicable)
 		if runNameErr != nil {
-			if workflows[i].Applicable {
+			if workflows[i].Applicable && !processingReportHasErrors(processingReports[i]) {
 				if len(processingReports[i].Stages) == 0 {
 					processingReports[i] = triggerProcessingReport(workflows[i].Path, workflows[i].Source)
 				}
@@ -286,7 +311,6 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		workflows[i].RunName = runName
 	}
-	vars := resolveUploadVariables(ctx, uploadArguments.variableSource, workflows, processingReports, effectiveEvent.Event)
 	// Every workflow that reaches compilation is validated, preflighted, and
 	// compiled from one request, so those passes cannot disagree about the
 	// event, runner policy, variables, or repository source. A nil entry is
@@ -300,6 +324,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			WorkflowPath:      input.Path,
 			WorkflowSource:    input.Source,
 			EventSource:       effectiveEvent.Source,
+			BuildID:           os.Getenv("BUILDKITE_BUILD_ID"),
 			EventFile:         effectiveEvent.Origin != effectiveEventFromBuild,
 			Version:           version,
 			StepKeyNamespace:  input.StepKeyNamespace,
@@ -380,7 +405,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		return 1
 	}
 	runtimeDistributions := make(map[compiler.Platform]runtimeDistribution, len(requiredPlatforms))
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformLinuxARM64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		if !requiredPlatforms[platform] {
 			continue
 		}
@@ -467,7 +492,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		if err == nil || len(preflight.Bundle.Plans) != 0 {
 			actionVars, again, varsErr := resolveActionVariables(ctx, uploadArguments.variableSource, effectiveEvent.Event, input.ReferencesVars, preflight.Bundle)
 			if varsErr != nil {
-				processingReports[i].AddEnvironmentFailure(varsErr.Error())
+				processingReports[i].AddVariableResolutionFailure(varsErr.Error())
 				processingReports[i].Result = "indeterminate"
 				preflight.Bundle = failedPartialBundle(preflight.Bundle)
 				if !partialUploadPreservesGraph(preflight.Bundle) {
@@ -645,7 +670,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		artifactPaths[artifact.Path] = struct{}{}
 		artifacts = append(artifacts, artifact)
 	}
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformLinuxARM64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		runtimeDistribution, ok := runtimeDistributions[platform]
 		if !ok {
 			continue
@@ -675,6 +700,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			if uploadArguments.telemetry != nil {
 				uploadArguments.telemetry.setFailurePhase(telemetry.FailurePhasePipelineUpload)
 			}
+			telemetry.ReportError(ctx, telemetry.CommandPluginImport, uploadArguments.clientVersion, telemetry.Details{FailurePhase: telemetry.FailurePhasePipelineUpload}, err)
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: upload pipeline: %v\n", err)
 			return 1
 		}
@@ -690,13 +716,14 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	defer func() { _ = os.RemoveAll(root) }()
 
 	if err := transport.UploadArtifacts(ctx, agent, root, artifacts, aggregatePipeline); err != nil {
+		phase := telemetry.FailurePhaseArtifactUpload
+		if errors.Is(err, transport.ErrPipelineUpload) {
+			phase = telemetry.FailurePhasePipelineUpload
+		}
 		if uploadArguments.telemetry != nil {
-			phase := telemetry.FailurePhaseArtifactUpload
-			if errors.Is(err, transport.ErrPipelineUpload) {
-				phase = telemetry.FailurePhasePipelineUpload
-			}
 			uploadArguments.telemetry.setFailurePhase(phase)
 		}
+		telemetry.ReportError(ctx, telemetry.CommandPluginImport, uploadArguments.clientVersion, telemetry.Details{FailurePhase: phase}, err)
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
@@ -913,6 +940,7 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest) (map[compiler.Platform]bool, bool, error, error) {
 	request.RuntimeDistributions = map[compiler.Platform]string{
 		compiler.PlatformLinuxAMD64:   request.DistributionDigest,
+		compiler.PlatformLinuxARM64:   request.DistributionDigest,
 		compiler.PlatformDarwinARM64:  request.DistributionDigest,
 		compiler.PlatformWindowsAMD64: request.DistributionDigest,
 	}
@@ -945,7 +973,7 @@ func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bo
 // is not in this set.
 func deferredRuntimePlatforms(uploadArguments parsedUploadArgs) map[compiler.Platform]bool {
 	platforms := map[compiler.Platform]bool{uploadArguments.importerPlatform: true}
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformLinuxARM64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		if _, configured := uploadArguments.runtimeDistributionPaths[platform]; configured {
 			platforms[platform] = true
 		}
@@ -961,6 +989,7 @@ type workflowInput struct {
 	Name, RunName                                   string
 	Source                                          []byte
 	Parsed                                          *workflow.Workflow
+	ParseError                                      error
 	Triggers                                        []workflow.Trigger
 	TriggerCondition, SkipReason, AnnotationReason  string
 	PathFiltersError                                string

@@ -43,6 +43,7 @@ type Platform struct {
 
 var (
 	PlatformLinuxAMD64   = Platform{OS: OperatingSystemLinux, Arch: ArchitectureAMD64}
+	PlatformLinuxARM64   = Platform{OS: OperatingSystemLinux, Arch: ArchitectureARM64}
 	PlatformDarwinARM64  = Platform{OS: OperatingSystemDarwin, Arch: ArchitectureARM64}
 	PlatformWindowsAMD64 = Platform{OS: OperatingSystemWindows, Arch: ArchitectureAMD64}
 )
@@ -56,6 +57,8 @@ func ParsePlatform(value string) (Platform, error) {
 	switch value {
 	case PlatformLinuxAMD64.String():
 		return PlatformLinuxAMD64, nil
+	case PlatformLinuxARM64.String():
+		return PlatformLinuxARM64, nil
 	case PlatformDarwinARM64.String():
 		return PlatformDarwinARM64, nil
 	case PlatformWindowsAMD64.String():
@@ -178,6 +181,9 @@ type Options struct {
 	Runners    RunnerPolicy
 	EventTrust EventTrust
 	OIDC       *plan.OIDCConfiguration
+	// BuildID supplies github.run_id to workflow concurrency only. Offline
+	// callers leave it empty; an event payload cannot supply run identity.
+	BuildID string
 	// EventFile exposes the supplied payload through GITHUB_EVENT_PATH in every
 	// generated job. Set only for webhook or explicit snapshot input, not an
 	// event synthesized from the Buildkite environment. This grants no authority.
@@ -473,14 +479,7 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 		if err != nil || key != selectorKey {
 			continue
 		}
-		// Preserve local Windows guidance unless this policy explicitly opts in.
-		unmappedWindows := slices.ContainsFunc(normalizedLabels, func(label string) bool {
-			_, mapped := policy.mappedTarget(label)
-			return unsupportedOS(label) && !mapped
-		})
-		if !unmappedWindows {
-			return RunnerTarget{}, rejectRunnerByServer(rejection)
-		}
+		return RunnerTarget{}, rejectRunnerByServer(rejection)
 	}
 	var target RunnerTarget
 	resolved := false
@@ -568,7 +567,7 @@ func runnerSelectorKey(labels []string) (string, error) {
 func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []string) (message, detail string) {
 	var rejection *runnerPolicyRejection
 	if !errors.As(err, &rejection) {
-		return "Runner target is unsupported. Use a configured Linux or macOS runner target.", ""
+		return "Runner target is unsupported. Use a configured runner target compatible with this job.", ""
 	}
 	label := ""
 	if len(labels) == 1 {
@@ -579,22 +578,26 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 	}
 	switch rejection.reason {
 	case reasonNoLabels:
-		return "runs-on resolves to no runner labels. Set runs-on to a mapped Linux or macOS runner label.", detail
+		return "runs-on resolves to no runner labels. Set runs-on to a mapped runner label compatible with this job.", detail
 	case reasonDuplicateLabel:
 		return "runs-on contains a duplicate runner label. Remove duplicate labels from runs-on.", ""
 	case reasonUnsupportedOS:
-		linuxGuidance := `If this job can run on Linux, change runs-on to "ubuntu-latest".`
-		if label != "" {
-			linuxGuidance = fmt.Sprintf(`If this job can run on Linux, change%s to "ubuntu-latest".`, label)
+		switch strings.ToLower(strings.TrimSpace(rejection.label)) {
+		case "windows-latest", "windows-2022":
+			return "No Windows runner target is configured. " + windowsRunnerSetupGuidance, ""
+		default:
+			return "This Windows runner variant has no local mapping. " + windowsRunnerVariantGuidance, ""
 		}
-		return "Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. " + linuxGuidance + " If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.", ""
 	case reasonUnmappedLabel:
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rejection.label)), "depot-windows-") {
+			return "This Windows runner variant has no local mapping. " + windowsRunnerVariantGuidance, ""
+		}
 		return fmt.Sprintf("Runner label%s has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.", label), detail
 	case reasonServerRejected:
 		if rejection.server != nil {
 			return serverRunnerRejectionDiagnostic(*rejection.server, label, detail)
 		}
-		return "Runner target is unsupported. Use a configured Linux or macOS runner target.", detail
+		return "Runner target is unsupported. Use a configured runner target compatible with this job.", detail
 	case reasonConflictingQueues, reasonConflictingTarget:
 		return "runs-on labels map to conflicting runner targets. Use labels that map to one runner target.", detail
 	case reasonUntrustedDefault:
@@ -607,12 +610,16 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 		}
 		return "This untrusted event uses a runner that is not allowed for untrusted events. Use an allowed runner label, or ask an administrator to allow its queue.", detail
 	default:
-		return "Runner target is unsupported. Use a configured Linux or macOS runner target.", detail
+		return "Runner target is unsupported. Use a configured runner target compatible with this job.", detail
 	}
 }
 
+const windowsRunnerDocs = "https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#windows-jobs"
+const windowsRunnerSetupGuidance = "Windows jobs require a Windows Server 2022 x86-64 queue. Ask a pipeline administrator to map windows-latest or windows-2022 to that queue, or contact Buildkite support to check hosted Windows access and automatic routing. See " + windowsRunnerDocs
+const windowsRunnerVariantGuidance = "Explicit Windows mappings support only windows-latest and windows-2022 on Windows Server 2022 x86-64. Use one only if this job is compatible. Windows 2025 aliases require Agent API resolution and do not provide Server 2025; native Windows arm64 is unsupported. If a documented Windows 2025 alias is rejected, contact Buildkite support to check hosted Windows access and automatic routing. See " + windowsRunnerDocs
+
 // serverRunnerRejectionDiagnostic renders an Agent API rejection. The server
-// message is rendered verbatim because it names the cause the workflow author
+// message is preserved because it names the cause the workflow author
 // cannot see locally, such as the cluster and the missing hosted queue. Codes
 // whose message already carries a remedy add no local guidance; unknown codes
 // keep the generic mapping guidance so newer servers degrade gracefully.
@@ -627,7 +634,24 @@ func serverRunnerRejectionDiagnostic(rejection RunnerRejection, label, supported
 		// The server message may end with a documentation URL; leave it intact.
 		return message + strings.Join(strings.Fields(rejection.Message), " "), ""
 	case RunnerRejectionIncompatibleLabels:
-		return message + sentence(rejection.Message) + " Change runs-on to a Linux or macOS runner label that Buildkite hosted agents support.", supportedDetail
+		if slices.ContainsFunc(rejection.Labels, func(label string) bool {
+			label = strings.ToLower(strings.TrimSpace(label))
+			return unsupportedOS(label) || strings.HasPrefix(label, "depot-windows-")
+		}) {
+			// This code can mean missing Windows eligibility, not just an
+			// unsupported variant. Do not infer the organization's access.
+			guidance := windowsRunnerVariantGuidance
+			if len(rejection.Labels) == 1 {
+				switch strings.ToLower(strings.TrimSpace(rejection.Labels[0])) {
+				case "windows-latest", "windows-2022":
+					guidance = windowsRunnerSetupGuidance
+				}
+			}
+			// Keep the remedy visible, not in collapsed diagnostic detail.
+			// A space also preserves any URL at the end of the server prose.
+			return message + strings.Join(strings.Fields(rejection.Message), " ") + " " + guidance, ""
+		}
+		return message + sentence(rejection.Message) + " Use a runner label compatible with this job and its Buildkite queue.", supportedDetail
 	default:
 		return message + sentence(rejection.Message) + " Configure a mapping for this selector or use a mapped runner label.", supportedDetail
 	}
@@ -642,15 +666,42 @@ func sentence(text string) string {
 	return text + "."
 }
 
-func runnerRejectionBlockerDetail(err error, reportableLabels []string) string {
+func runnerRejectionBlocker(err error, reportableLabels []string) (string, string) {
 	var rejection *runnerPolicyRejection
-	if errors.As(err, &rejection) && rejection.label != "" && slices.Contains(reportableLabels, rejection.label) {
-		return rejection.label
+	if !errors.As(err, &rejection) {
+		return "runner_policy", "rejected"
 	}
-	if len(reportableLabels) == 1 {
-		return reportableLabels[0]
+	if rejection.label != "" && slices.Contains(reportableLabels, rejection.label) {
+		return "runner_label", rejection.label
 	}
-	return ""
+	switch rejection.reason {
+	case reasonNoLabels:
+		return "runner_policy", "no_labels"
+	case reasonDuplicateLabel:
+		return "runner_policy", "duplicate_label"
+	case reasonUnsupportedOS:
+		return "runner_policy", "unsupported_os"
+	case reasonUnmappedLabel:
+		return "runner_policy", "unmapped_label"
+	case reasonConflictingQueues:
+		return "runner_policy", "conflicting_queues"
+	case reasonConflictingTarget:
+		return "runner_policy", "conflicting_targets"
+	case reasonUntrustedDefault:
+		return "runner_policy", "untrusted_default"
+	case reasonUntrustedQueue:
+		return "runner_policy", "untrusted_queue"
+	case reasonServerRejected:
+		if rejection.server != nil {
+			switch rejection.server.Code {
+			case RunnerRejectionMissingQueue, RunnerRejectionNoCluster, RunnerRejectionIncompatibleLabels, RunnerRejectionUnmappedLabels:
+				return "runner_policy", "server_" + rejection.server.Code
+			}
+		}
+		return "runner_policy", "server_rejected"
+	default:
+		return "runner_policy", "rejected"
+	}
 }
 
 func (policy RunnerPolicy) supportedLabels() []string {

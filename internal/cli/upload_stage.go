@@ -297,6 +297,13 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	preflight, report, err := r.compile(rows, skipped, runnerOutputs)
 	if err != nil {
 		_ = r.out.write(r.ctx, report)
+		// The report above carries the redacted diagnostics. A processing
+		// finding's raw error can quote values derived from producer outputs or
+		// workflow inputs, so name the failure without repeating it.
+		var finding *compiler.ProcessingFinding
+		if errors.As(err, &finding) {
+			return fail("compile deferred jobs: see the diagnostics above")
+		}
 		return fail("compile deferred jobs: %v", err)
 	}
 	bundle := preflight.Bundle
@@ -367,10 +374,11 @@ func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]b
 	record := r.record
 	repositorySource, cleanupSource, err := hostedRepositorySource(r.ctx, r.clientVersion, r.eventSource, importerJobActionSourceAuthentication(r.stderr, r.clientVersion), record.PrivateReusableWorkflows)
 	if err != nil {
-		return hostedCompilation{}, compatibility.EnvironmentProcessingReport(record.Workflow.Path, hostedProfile, "repository source could not be configured"), err
+		return hostedCompilation{}, repositorySourceSetupReport(record.Workflow.Path, "repository source could not be configured", err), err
 	}
 	defer cleanupSource()
 	request := record.compileRequest(r.workflowPath, r.workflowSource, r.eventSource, rows, skipped, runnerOutputs, repositorySource)
+	request.BuildID = r.buildID
 	if record.Continuation.Scheduling {
 		request.RuntimeSchedulingOutputs = map[string]map[string]string{record.Continuation.Descriptor.Job: r.producerOutputs}
 		request.RuntimeSchedulingBuildID = r.buildID

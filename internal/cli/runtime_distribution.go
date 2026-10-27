@@ -22,10 +22,12 @@ func importerPlatform(goos, goarch string) (compiler.Platform, error) {
 	switch {
 	case goos == "linux" && goarch == "amd64":
 		return compiler.PlatformLinuxAMD64, nil
+	case goos == "linux" && goarch == "arm64":
+		return compiler.PlatformLinuxARM64, nil
 	case goos == "darwin" && goarch == "arm64":
 		return compiler.PlatformDarwinARM64, nil
 	default:
-		return compiler.Platform{}, fmt.Errorf("importer requires linux/amd64 or darwin/arm64, running on %s/%s", goos, goarch)
+		return compiler.Platform{}, fmt.Errorf("importer requires linux/amd64, linux/arm64, or darwin/arm64, running on %s/%s", goos, goarch)
 	}
 }
 
@@ -98,6 +100,15 @@ func validateRuntimeDistributionBinary(platform compiler.Platform, contents []by
 		defer func() { _ = binary.Close() }()
 		if binary.Class != elf.ELFCLASS64 || binary.Machine != elf.EM_X86_64 || binary.Type != elf.ET_EXEC {
 			return fmt.Errorf("want a thin 64-bit linux/amd64 executable")
+		}
+	case compiler.PlatformLinuxARM64:
+		binary, err := elf.NewFile(bytes.NewReader(contents))
+		if err != nil {
+			return fmt.Errorf("open ELF executable: %w", err)
+		}
+		defer func() { _ = binary.Close() }()
+		if binary.Class != elf.ELFCLASS64 || binary.Machine != elf.EM_AARCH64 || binary.Type != elf.ET_EXEC {
+			return fmt.Errorf("want a thin 64-bit linux/arm64 executable")
 		}
 	case compiler.PlatformDarwinARM64:
 		binary, err := macho.NewFile(bytes.NewReader(contents))

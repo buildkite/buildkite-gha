@@ -32,6 +32,8 @@ type hostedCompileRequest struct {
 	// EventFile records that the event came from a file instead of the
 	// build, so compiled jobs read the payload from an uploaded artifact.
 	EventFile bool
+	// BuildID is the build owning the importer and every later stage.
+	BuildID string
 
 	// Version is the compiler version stamped into plans; DistributionDigest
 	// is the importer's own runtime distribution digest.
@@ -81,6 +83,7 @@ type hostedCompileRequest struct {
 // inputs that never affect admission.
 func (r hostedCompileRequest) validationOptions() compiler.Options {
 	options := hostedOptions("", r.RunnerTargets, nil)
+	options.BuildID = r.BuildID
 	options.WorkflowSource = candidateWorkflowSource(r.EventSource)
 	applyRunnerResolution(&options, r.RunnerResolution)
 	options.StepKeyNamespace = r.StepKeyNamespace
@@ -97,6 +100,7 @@ func (r hostedCompileRequest) validationOptions() compiler.Options {
 // repository source is attached.
 func (r hostedCompileRequest) options() compiler.Options {
 	options := hostedOptions(r.GroupLabel, r.RunnerTargets, r.RuntimeDistributions)
+	options.BuildID = r.BuildID
 	options.WorkflowSource = candidateWorkflowSource(r.EventSource)
 	options.EventFile = r.EventFile
 	applyRunnerResolution(&options, r.RunnerResolution)
@@ -145,7 +149,8 @@ func hostedRepositorySource(ctx context.Context, clientVersion string, eventSour
 // validated again with the verdict attached, so the compile that follows
 // sees the same runner targets. When resolution is unavailable the built-in
 // presets stand in and out records the degradation. The requests share one
-// configured runner mapping. The call fails only when ctx is done.
+// configured runner mapping. Imports with configured mappings fail closed
+// when the Agent API cannot validate them.
 func validateHostedRequests(ctx context.Context, out processingOutput, requests []*hostedCompileRequest, clientVersion string) ([]compiler.Report, []compatibility.ProcessingReport, error) {
 	validations := make([]compiler.Report, len(requests))
 	validationErrs := make([]error, len(requests))
@@ -161,6 +166,9 @@ func validateHostedRequests(ctx context.Context, out processingOutput, requests 
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
+		}
+		if resolution.validationRequired {
+			return nil, nil, fmt.Errorf("cannot validate explicit runner mappings: %w", err)
 		}
 		// The built-in presets keep the upload moving, but they may target a
 		// queue this cluster lacks, so the degradation must be visible.
@@ -325,7 +333,7 @@ func privateRepositorySourceOptions(privateReusableWorkflows bool) ([]actionsour
 		git, err = filepath.Abs(git)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("resolve Git executable: %w", err)
+		return nil, &repositorySourceSetupError{operation: "resolve Git executable", err: err}
 	}
 	return []actionsource.Option{actionsource.WithGitRepositorySource(git)}, nil
 }

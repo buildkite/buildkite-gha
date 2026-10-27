@@ -139,7 +139,7 @@ func TestAgentCacheCredentialsRejectsRedirectsAndUntrustedResponses(t *testing.T
 		{"rate limited", http.StatusTooManyRequests, secret, "rate limited"},
 		{"unexpected status", http.StatusBadGateway, secret, "HTTP 502"},
 		{"malformed JSON", http.StatusOK, `{"token":`, "decode"},
-		{"unknown field", http.StatusOK, `{"token":"a.b.c","other":true}`, "unknown field"},
+		{"unknown field", http.StatusOK, `{"token":"a.b.c","` + secret + `":true}`, "decode cache credential response"},
 		{"trailing JSON", http.StatusOK, `{"token":"a.b.c"}{}`, "trailing data"},
 		{"invalid token", http.StatusOK, `{"token":"not-a-jwt"}`, "invalid token"},
 		{"oversized", http.StatusOK, `{"token":"a.b.c"}` + strings.Repeat(" ", cacheCredentialResponseLimit), "exceeds"},
@@ -159,6 +159,17 @@ func TestAgentCacheCredentialsRejectsRedirectsAndUntrustedResponses(t *testing.T
 			_, err = provider.Credentials(t.Context())
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), secret) {
 				t.Fatalf("Credentials() error = %v, want %q without response body", err, test.want)
+			}
+			if ClassifyFailure(err) != FailureClassCacheCredential {
+				t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassCacheCredential)
+			}
+			status, ok := AgentAPIHTTPStatus(err)
+			if test.status >= 200 && test.status < 300 {
+				if ok || status != 0 {
+					t.Fatalf("AgentAPIHTTPStatus() = %d, %t for HTTP %d", status, ok, test.status)
+				}
+			} else if !ok || status != test.status {
+				t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want %d, true", status, ok, test.status)
 			}
 		})
 	}
@@ -196,6 +207,10 @@ func TestAgentCacheCredentialsHonorsCancellation(t *testing.T) {
 	}
 	if _, err := provider.Credentials(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Credentials() error = %v, want cancellation", err)
+	} else if ClassifyFailure(err) != FailureClassUnknown {
+		t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassUnknown)
+	} else if status, ok := AgentAPIHTTPStatus(err); ok || status != 0 {
+		t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want 0, false", status, ok)
 	}
 }
 
@@ -242,11 +257,16 @@ func testCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T, using, 
 		wantMode = "workflow-env-preserved"
 	}
 	node := requireNode24(t)
-	toolEnv, err := isolateCacheActionEnvironment(nil)
+	toolEnv, cleanupTools, err := isolateCacheActionEnvironment(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(cleanupTools)
 	cacheActionToolPath := toolEnv["PATH"]
+	if paths := filepath.SplitList(cacheActionToolPath); runtime.GOOS == "windows" && len(paths) == 4 {
+		paths[2] = "<verified-zstd>"
+		cacheActionToolPath = strings.Join(paths, ";")
+	}
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/cache.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: cache lifecycle\n")
@@ -256,6 +276,7 @@ func testCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T, using, 
 	for _, phase := range []string{"pre", "main", "post"} {
 		program := fmt.Sprintf(`import fs from "node:fs";
 import {spawnSync} from "node:child_process";
+import {createHash} from "node:crypto";
 if (process.versions.node.split(".")[0] !== "24") throw new Error("actions/cache did not use managed Node 24");
 const required = ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_URL"];
 for (const name of required) if (!process.env[name]) throw new Error("missing " + name);
@@ -272,7 +293,18 @@ for (const name of [
 ]) if (process.env[name]) throw new Error(name + " leaked");
 const tar = spawnSync("tar", ["--version"], {encoding: "utf8"});
 if (tar.status !== 0) throw new Error("trusted tar failed: " + tar.stderr);
-if (process.env.PATH !== %q) throw new Error("unsafe PATH: " + process.env.PATH);
+const delimiter = process.platform === "win32" ? ";" : ":";
+const paths = process.env.PATH.split(delimiter);
+if (process.platform === "win32" && paths.length === 4) {
+  const directory = paths[2];
+  if (!directory.match(/[/\\]buildkite-gha-cache-tools-[0-9]+$/)) throw new Error("unsafe extra tool directory");
+  if (fs.readdirSync(directory).join() !== "zstd.exe") throw new Error("unexpected staged tools");
+  const digest = createHash("sha256").update(fs.readFileSync(directory + "/zstd.exe")).digest("hex");
+  if (digest !== "8076aae03feac7c66b319579e82172eed168deed2a3f25e5e2d3c60f55e84111") throw new Error("untrusted staged zstd");
+  fs.appendFileSync(process.env.LIFECYCLE_LOG + ".tools", directory + "\n");
+  paths[2] = "<verified-zstd>";
+}
+if (paths.join(delimiter) !== %q) throw new Error("unsafe PATH: " + process.env.PATH);
 fs.appendFileSync(process.env.LIFECYCLE_LOG, "%s|" + process.env.ACTIONS_RUNTIME_TOKEN + "|" + process.env.ACTIONS_RESULTS_URL + "|" + process.env.ACTIONS_CACHE_SERVICE_V2 + "\n");
 console.log("credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 `, wantMode, cacheURLCompatibility, githubServerURLOverride, cacheActionToolPath, phase)
@@ -286,10 +318,10 @@ for (const name of ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_
 for (const name of ["ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL", "BUILDKITE_AGENT_ACCESS_TOKEN"])
   if (process.env[name]) throw new Error(name + " leaked");
 if (process.env.GITHUB_SERVER_URL !== "https://origin.cursor.com") throw new Error("ordinary action server URL changed");
-if (process.env.PATH === %q) throw new Error("ordinary action PATH was isolated");
+if (process.env.PATH.replace(/;[^;]*[/\\]buildkite-gha-cache-tools-[0-9]+(?=;)/, "") === %q) throw new Error("ordinary action PATH was isolated");
 fs.appendFileSync(process.env.LIFECYCLE_LOG, "ordinary-%s|" + process.env.ACTIONS_RUNTIME_TOKEN + "|" + process.env.ACTIONS_RESULTS_URL + "|" + process.env.ACTIONS_CACHE_SERVICE_V2 + "\n");
 console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
-`, cacheActionToolPath, phase))
+`, strings.ReplaceAll(cacheActionToolPath, ";<verified-zstd>", ""), phase))
 	}
 	digest, err := source.DigestTree(remote)
 	if err != nil {
@@ -365,6 +397,17 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+	if strings.Contains(cacheActionToolPath, "<verified-zstd>") {
+		directories, err := os.ReadFile(lifecycle + ".tools")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for directory := range strings.SplitSeq(strings.TrimSpace(string(directories)), "\n") {
+			if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("cache phase left staged tools behind: %q, %v", directory, err)
+			}
+		}
 	}
 	contents, err := os.ReadFile(lifecycle)
 	if err != nil {
@@ -457,10 +500,11 @@ func TestIsolateCacheActionEnvironmentLeavesGitHubServerURLForSharedOverride(t *
 		"BUILDKITE_AGENT_ACCESS_TOKEN": "secret",
 		"BUILDKITE_JOB_ID":             "job-id",
 	}
-	isolated, err := isolateCacheActionEnvironment(env)
+	isolated, cleanup, err := isolateCacheActionEnvironment(env)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(cleanup)
 	if got := isolated["GITHUB_SERVER_URL"]; got != "https://origin.cursor.com" {
 		t.Fatalf("GITHUB_SERVER_URL = %q, want unchanged https://origin.cursor.com", got)
 	}
@@ -478,10 +522,11 @@ func TestIsolateCacheActionEnvironmentLeavesRealGitHubServerURLUnchanged(t *test
 	env := map[string]string{
 		"GITHUB_SERVER_URL": "https://github.com",
 	}
-	isolated, err := isolateCacheActionEnvironment(env)
+	isolated, cleanup, err := isolateCacheActionEnvironment(env)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(cleanup)
 	if got := isolated["GITHUB_SERVER_URL"]; got != "https://github.com" {
 		t.Fatalf("GITHUB_SERVER_URL = %q, want unchanged https://github.com", got)
 	}
@@ -718,6 +763,26 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("strict cache action executed or marker stat failed: %v", err)
+	}
+}
+
+func TestCacheActionPreservesCredentialFailure(t *testing.T) {
+	provider := cacheCredentialProviderFunc(func(context.Context) (CacheCredentials, error) {
+		return CacheCredentials{}, markJobSetupFailure(FailureClassCacheCredential, cacheCredentialStatusError(http.StatusUnprocessableEntity))
+	})
+	result := newResult()
+	err := newJobRun(Runner{Cache: provider, Redactor: &testRedactor{}}).runJavaScriptPhase(
+		t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), "node",
+		javaScriptAction{Name: "cache", Main: "main.js", Cache: true}, "main.js", nil, nil, &result,
+	)
+	if err == nil || !strings.Contains(err.Error(), "current build provenance") {
+		t.Fatalf("runJavaScriptPhase() error = %v", err)
+	}
+	if ClassifyFailure(err) != FailureClassCacheCredential {
+		t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassCacheCredential)
+	}
+	if status, ok := AgentAPIHTTPStatus(err); !ok || status != http.StatusUnprocessableEntity {
+		t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want %d, true", status, ok, http.StatusUnprocessableEntity)
 	}
 }
 

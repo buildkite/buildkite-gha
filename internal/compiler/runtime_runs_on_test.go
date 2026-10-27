@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -99,6 +100,17 @@ func TestRuntimeRunsOnRejectsUnsupportedScheduling(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("want %q, got %v", test.want, err)
 		}
+	}
+}
+
+func TestRuntimeRunsOnWorkflowConcurrencyExplainsWorkarounds(t *testing.T) {
+	_, err := CompileIRWithOptionsContext(t.Context(), "runner.yml", []byte("concurrency: deploy\n"+runtimeRunsOnWorkflow), pushEvent(t), defaultOptions())
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) || finding.Code != CodeGraphInvalid || finding.Job != "build" {
+		t.Fatalf("err = %v, want %s for job build", err, CodeGraphInvalid)
+	}
+	if want := "move concurrency to the job level, where it holds one job rather than the whole run, or use a static runs-on"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("err = %v, want %q", err, want)
 	}
 }
 

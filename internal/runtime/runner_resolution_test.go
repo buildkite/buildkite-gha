@@ -18,8 +18,9 @@ func TestAgentRunnerResolverBatchesRequirementsIgnoresUnknownFieldsAndReturnsSug
 			t.Errorf("request = %s %s, headers %#v", r.Method, r.URL.Path, r.Header)
 		}
 		var body struct {
-			SupportsAgentTags bool `json:"supports_agent_tags"`
-			Requirements      []struct {
+			SupportsAgentTags      bool `json:"supports_agent_tags"`
+			SupportsMacOSAgentTags bool `json:"supports_macos_agent_tags"`
+			Requirements           []struct {
 				ID       string `json:"id"`
 				Selector struct {
 					Labels []string `json:"labels"`
@@ -31,6 +32,9 @@ func TestAgentRunnerResolverBatchesRequirementsIgnoresUnknownFieldsAndReturnsSug
 		}
 		if !body.SupportsAgentTags {
 			t.Error("runner request did not opt into agent-tag targets")
+		}
+		if !body.SupportsMacOSAgentTags {
+			t.Error("runner request did not opt into macOS agent-tag targets")
 		}
 		resolutions := make([]map[string]any, len(body.Requirements))
 		for i, requirement := range body.Requirements {
@@ -67,6 +71,42 @@ func TestAgentRunnerResolverBatchesRequirementsIgnoresUnknownFieldsAndReturnsSug
 	}
 	if len(rejections) != 100 || rejections[0] != (RunnerRejection{ID: "r0", Code: "unmapped_labels", Message: "No compatible runner is configured."}) || rejections[99].ID != "r99" {
 		t.Fatalf("rejections = %d / %#v", len(rejections), rejections[:min(2, len(rejections))])
+	}
+}
+
+func TestAgentRunnerResolverSendsConfiguredTargetAndRetainsValidation(t *testing.T) {
+	const jobID = "11111111-1111-4111-8111-111111111111"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Requirements []struct {
+				ID               string                  `json:"id"`
+				ConfiguredTarget *ConfiguredRunnerTarget `json:"configured_target"`
+			} `json:"requirements"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		want := ConfiguredRunnerTarget{Queue: "self-hosted-arm", Platform: "linux/arm64"}
+		if len(body.Requirements) != 1 || body.Requirements[0].ConfiguredTarget == nil || *body.Requirements[0].ConfiguredTarget != want {
+			t.Fatalf("configured target = %#v, want %#v", body.Requirements, want)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": []map[string]any{{
+			"id": body.Requirements[0].ID, "validated": true,
+			"target": map[string]string{"queue": want.Queue, "platform": want.Platform},
+		}}})
+	}))
+	defer server.Close()
+
+	resolver, err := NewAgentRunnerResolver(AgentRunnerResolverConfig{Endpoint: server.URL + "/v3", JobID: jobID, JobToken: "job-token", ClientVersion: "1.2.3", Client: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	suggestions, rejections, err := resolver.Resolve(t.Context(), []RunnerRequirement{{
+		ID: "r1", Labels: []string{"ubuntu-24.04-arm"},
+		ConfiguredTarget: &ConfiguredRunnerTarget{Queue: "self-hosted-arm", Platform: "linux/arm64"},
+	}})
+	if err != nil || len(rejections) != 0 || len(suggestions) != 1 || !suggestions[0].Validated || suggestions[0].Queue != "self-hosted-arm" || suggestions[0].Platform != "linux/arm64" {
+		t.Fatalf("Resolve() = %#v, %#v, %v", suggestions, rejections, err)
 	}
 }
 

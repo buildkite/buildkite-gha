@@ -259,7 +259,7 @@ func compileWorkflowActionInvocations(ctx context.Context, workspace string, act
 	if err != nil {
 		return actionCompilation{}, err
 	}
-	return graph.analyzeInvocations(serverURL, refs, suppliedInputs)
+	return graph.analyzeInvocations(program.ActionAuthorityOptions{ServerURL: serverURL}, refs, suppliedInputs)
 }
 
 func buildActionGraph(ctx context.Context, workspace string, actionSource ActionSource, refs []string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)) (actionGraph, error) {
@@ -311,7 +311,7 @@ func buildActionGraph(ctx context.Context, workspace string, actionSource Action
 	}, nil
 }
 
-func (graph actionGraph) analyzeInvocations(serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
+func (graph actionGraph) analyzeInvocations(options program.ActionAuthorityOptions, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
 	selectors := make([]plan.ActionSelector, 0, len(graph.roots))
 	for _, root := range graph.roots {
 		selectors = append(selectors, plan.ActionSelector{Lock: root.lock.ID})
@@ -327,7 +327,7 @@ func (graph actionGraph) analyzeInvocations(serverURL string, refs []string, sup
 			if err := validateActionAdapterInputs(root); err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
-			authority, err := program.InventoryActionAuthority(graph.planningPrograms, root.lock.ID, workflowActionBindings(suppliedInputs[i]), program.ActionAuthorityOptions{ServerURL: serverURL})
+			authority, err := program.InventoryActionAuthority(graph.planningPrograms, root.lock.ID, workflowActionBindings(suppliedInputs[i]), options)
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}

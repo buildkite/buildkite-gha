@@ -131,6 +131,12 @@ func TestWindowsProcessHelper(t *testing.T) {
 	if err := os.WriteFile(os.Getenv("GHA_WINDOWS_CHILD_PID"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
 		os.Exit(4)
 	}
+	if _, err := fmt.Fprint(os.Stdout, "::error::literal tool output\r\n"); err != nil {
+		os.Exit(5)
+	}
+	if _, err := fmt.Fprint(os.Stderr, "tool diagnostic\r\n"); err != nil {
+		os.Exit(6)
+	}
 	if mode == "parent-wait" {
 		time.Sleep(time.Minute)
 	}
@@ -141,13 +147,15 @@ func TestWindowsProcessTree(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows job objects")
 	}
-	for _, mode := range []string{"parent-exit", "parent-wait", "batch-parent-exit", "batch-parent-wait"} {
+	for _, mode := range []string{"parent-exit", "parent-wait", "batch-parent-exit", "batch-parent-wait", "captured-parent-exit", "captured-parent-wait"} {
 		t.Run(mode, func(t *testing.T) {
 			pidFile := filepath.Join(t.TempDir(), "pid")
 			executable, err := os.Executable()
 			if err != nil {
 				t.Fatal(err)
 			}
+			captured := strings.HasPrefix(mode, "captured-")
+			mode = strings.TrimPrefix(mode, "captured-")
 			args := []string{"-test.run=^TestWindowsProcessHelper$"}
 			if strings.HasPrefix(mode, "batch-") {
 				wrapper := filepath.Join(t.TempDir(), "process.cmd")
@@ -162,7 +170,18 @@ func TestWindowsProcessTree(t *testing.T) {
 			done := make(chan error, 1)
 			processor := newCommandOutputProcessor(io.Discard, io.Discard)
 			go func() {
-				done <- (Runner{}).runStreaming(ctx, processor, "", map[string]string{"GHA_WINDOWS_PROCESS_HELPER": mode, "GHA_WINDOWS_CHILD_PID": pidFile}, executable, args...)
+				env := map[string]string{"GHA_WINDOWS_PROCESS_HELPER": mode, "GHA_WINDOWS_CHILD_PID": pidFile}
+				if captured {
+					cmd := exec.Command(executable, args...)
+					cmd.Env = processEnv(env)
+					stdout, stderr, err := (Runner{}).runCapturedCommand(ctx, cmd)
+					if mode == "parent-exit" && (stdout != "::error::literal tool output\r\n" || stderr != "tool diagnostic\r\n") {
+						err = fmt.Errorf("captured output changed: stdout=%q stderr=%q: %w", stdout, stderr, err)
+					}
+					done <- err
+					return
+				}
+				done <- (Runner{}).runStreaming(ctx, processor, "", env, executable, args...)
 			}()
 			var pid []byte
 			deadline := time.After(5 * time.Second)

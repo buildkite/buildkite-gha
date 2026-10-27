@@ -135,10 +135,11 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		}
 		for _, want := range []string{
 			`<h2 class="h4 mb2">Workflow could not be run</h2>`,
-			`<p><strong>Windows runners aren&#39;t currently supported.</strong></p>`,
-			`Imported jobs run on Linux or macOS Buildkite hosted agents.`,
-			`If this job can run on Linux, change <code>windows-latest</code> to <code>ubuntu-latest</code>.`,
-			`If it requires Windows, open an issue in <a href="https://github.com/buildkite/buildkite-gha" target="_blank">buildkite/buildkite-gha</a> to help us prioritize Windows support.`,
+			`<p><strong>No Windows runner target is configured.</strong></p>`,
+			`Windows jobs require a Windows Server 2022 x86-64 queue.`,
+			`Ask a pipeline administrator to map windows-latest or windows-2022 to that queue`,
+			`contact Buildkite support to check hosted Windows access and automatic routing.`,
+			`href="https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#windows-jobs"`,
 			"Job <code>test</code>",
 		} {
 			if !strings.Contains(string(annotation.stdin), want) {
@@ -193,13 +194,13 @@ func TestValidatePublishesActionableTriggerDiagnostics(t *testing.T) {
 		{
 			name: "unsupported merge group type",
 			line: 3, column: 5,
-			workflow: "on:\n  merge_group:\n    types: [destroyed]\n" +
+			workflow: "on:\n  merge_group:\n    types: [not-real]\n" +
 				"jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
-			wantMessage: `merge_group type "destroyed" is unsupported. checks_requested is the only merge queue activity currently mapped. Set types: [checks_requested]. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
+			wantMessage: `merge_group type "not-real" is unsupported. Supported types are checks_requested and destroyed. Set types to the activities this workflow handles. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
 			wantAnnotation: []string{
-				`<p><strong>merge_group type &#34;destroyed&#34; is unsupported.</strong></p>`,
-				`checks_requested is the only merge queue activity currently mapped.`,
-				`Set types: [checks_requested].`,
+				`<p><strong>merge_group type &#34;not-real&#34; is unsupported.</strong></p>`,
+				`Supported types are checks_requested and destroyed.`,
+				`Set types to the activities this workflow handles.`,
 			},
 		},
 	}

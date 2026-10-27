@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 func TestFileCommandParsing(t *testing.T) {
@@ -40,6 +43,9 @@ func TestFileCommandParsing(t *testing.T) {
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					t.Fatalf("parseCommandReader() error = %v, want %q", err, test.wantErr)
+				}
+				if ClassifyFailure(err) != FailureClassWorkflowValidation {
+					t.Fatalf("malformed authored input classified as %s", ClassifyFailure(err))
 				}
 				return
 			}
@@ -73,6 +79,17 @@ func TestFileCommandParsing(t *testing.T) {
 	result = newResult()
 	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "NODE_OPTIONS") {
 		t.Fatalf("commandFiles.apply() error = %v, want NODE_OPTIONS rejection", err)
+	}
+}
+
+func TestFileCommandReadFailuresAreNotWorkflowValidation(t *testing.T) {
+	failure := errors.New("underlying read failure")
+	for _, prefix := range []string{"name=value\n", "name<<END\nvalue\n", "name", "name<<", "name<<END\nvalue"} {
+		reader := io.MultiReader(strings.NewReader(prefix), iotest.ErrReader(failure))
+		_, err := parseCommandReader("output", reader, false)
+		if !errors.Is(err, failure) || ClassifyFailure(err) != FailureClassUnknown {
+			t.Fatalf("read failure was lost or treated as authored: %v (%s)", err, ClassifyFailure(err))
+		}
 	}
 }
 

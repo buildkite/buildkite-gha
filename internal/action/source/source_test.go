@@ -30,15 +30,29 @@ import (
 const testSHA = "0123456789abcdef0123456789abcdef01234567"
 
 func TestParse(t *testing.T) {
-	for _, good := range []string{"owner/repo@v1", "owner/repo/sub/action@feature/slash", "o/r@deadbeef"} {
+	for _, good := range []string{"owner/repo@v1", "owner/repo/sub/action@feature/slash", "o/r@deadbeef", "owner/mon-projet-complet-sant-@v1", "owner/-repo@v1", "owner/_repo_@v1", "owner/repo.@v1"} {
 		r, err := Parse(good)
 		if err != nil || r.Raw != good {
 			t.Errorf("Parse(%q) = %#v, %v", good, r, err)
 		}
 	}
-	for _, bad := range []string{"", "./local@v1", "owner@v1", "owner/repo", "owner/repo@", "owner//repo@v1", "owner/./x@v1", "owner/../x@v1", "owner/..github/x@v1", "owner/.github/../x@v1", `owner/repo\x@v1`, "owner/repo@a?b", "owner/repo@${{ x }}", "-owner/repo@v1", "owner/repo.git@v1", "owner/repo@a//b"} {
+	for _, bad := range []string{"", "./local@v1", "owner@v1", "owner/repo", "owner/repo@", "owner//repo@v1", "owner/./x@v1", "owner/../x@v1", "owner/..github/x@v1", "owner/.github/../x@v1", `owner/repo\x@v1`, "owner/repo@a?b", "owner/repo@${{ x }}", "-owner/repo@v1", "owner/repo.git@v1", "owner/repo@a//b", "owner/" + strings.Repeat("r", 101) + "@v1"} {
 		if _, err := Parse(bad); err == nil {
 			t.Errorf("Parse(%q) succeeded", bad)
+		}
+	}
+}
+
+func TestGitHubActionSourceTokenProviderAcceptsGitHubRepositoryNames(t *testing.T) {
+	provider := func(context.Context) (string, error) { return "", nil }
+	for _, repository := range []string{"owner/mon-projet-complet-sant-", "owner/-repo", "owner/_repo_"} {
+		if _, err := makeConfig([]Option{WithGitHubActionSourceTokenProvider(repository, provider)}); err != nil {
+			t.Errorf("token provider for %q: %v", repository, err)
+		}
+	}
+	for _, repository := range []string{"owner/.", "owner/..", "owner/repo.git", "owner/repo/extra"} {
+		if _, err := makeConfig([]Option{WithGitHubActionSourceTokenProvider(repository, provider)}); err == nil {
+			t.Errorf("token provider for %q succeeded", repository)
 		}
 	}
 }
@@ -366,7 +380,11 @@ func TestExtractRejectsUnsafeArchives(t *testing.T) {
 		{"link", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
 		{"absolute link", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "/root/y"}}},
 		{"escaping link", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "../../y"}}},
-		{"directory link", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
+		{"directory link chain", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/z", Typeflag: tar.TypeSymlink, Linkname: "x"}}},
+		{"link cycle", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/y", Typeflag: tar.TypeSymlink, Linkname: "x"}}},
+		{"directory link collision", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/X/", Typeflag: tar.TypeDir}}},
+		{"directory link ancestor first", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/X/child", Typeflag: tar.TypeReg}}},
+		{"directory link ancestor last", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/X/child", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
 		{"link ancestor first", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/x/child", Typeflag: tar.TypeReg}}},
 		{"link ancestor last", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y", Typeflag: tar.TypeReg}, {Name: "root/x/child", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
 		{"hardlink", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeLink, Linkname: "root/y"}}},
@@ -376,6 +394,7 @@ func TestExtractRejectsUnsafeArchives(t *testing.T) {
 		{"mixed roots", []tar.Header{{Name: "one/", Typeflag: tar.TypeDir}, {Name: "two/", Typeflag: tar.TypeDir}}},
 		{"file size", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeReg, Size: 4}}},
 		{"count", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/a", Typeflag: tar.TypeDir}, {Name: "root/b", Typeflag: tar.TypeDir}, {Name: "root/c", Typeflag: tar.TypeDir}, {Name: "root/d", Typeflag: tar.TypeDir}}},
+		{"omitted links count", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/a", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/b", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/c", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -421,6 +440,59 @@ func TestExtractOmitsSafeRepositorySymlinks(t *testing.T) {
 	}
 	if digests[0] != digests[1] {
 		t.Fatalf("omitted symlink changed digest by archive order: %q != %q", digests[0], digests[1])
+	}
+}
+
+func TestExtractOmitsSafeDirectorySymlinks(t *testing.T) {
+	// TruffleHog e28360875917c9c730f9c64aae29fb93aa6c359e has these two
+	// directory aliases; its action does not use either path.
+	files := []tar.Header{
+		{Name: "root/.cursor/skills/dep-updates/", Typeflag: tar.TypeDir},
+		{Name: "root/.cursor/skills/dep-updates/SKILL.md", Typeflag: tar.TypeReg, Size: 7},
+	}
+	links := []tar.Header{
+		{Name: "root/.claude/skills/dep-updates", Typeflag: tar.TypeSymlink, Linkname: "../../.cursor/skills/dep-updates"},
+		{Name: "root/.codex/skills/dep-updates", Typeflag: tar.TypeSymlink, Linkname: "../../.cursor/skills/dep-updates"},
+	}
+	baseline := filepath.Join(t.TempDir(), "baseline")
+	if err := extractTar(bytes.NewReader(tarBytes(t, files)), baseline, defaults()); err != nil {
+		t.Fatal(err)
+	}
+	wantDigest, err := DigestTree(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, order := range []string{"aliases first", "aliases last"} {
+		t.Run(order, func(t *testing.T) {
+			entries := []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}}
+			if order == "aliases first" {
+				entries = append(entries, links...)
+			}
+			entries = append(entries, files...)
+			if order == "aliases last" {
+				entries = append(entries, links...)
+			}
+			out := filepath.Join(t.TempDir(), "out")
+			if err := extractTar(bytes.NewReader(tarBytes(t, entries)), out, defaults()); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(out, ".cursor", "skills", "dep-updates", "SKILL.md"))
+			if err != nil || !bytes.Equal(data, make([]byte, 7)) {
+				t.Fatalf("target contents = %q, %v", data, err)
+			}
+			for _, parent := range []string{".claude", ".codex"} {
+				if _, err := os.Lstat(filepath.Join(out, parent, "skills", "dep-updates")); !os.IsNotExist(err) {
+					t.Fatalf("omitted directory alias exists: %s: %v", parent, err)
+				}
+			}
+			digest, err := DigestTree(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if digest != wantDigest {
+				t.Fatalf("omitted aliases changed digest: %q != %q", digest, wantDigest)
+			}
+		})
 	}
 }
 

@@ -136,7 +136,9 @@ func validateDeferredInputGraphReferences(node actionlint.ExprNode, context Comp
 			validationErr = err
 			return
 		}
-		if !available {
+		if !available && strings.EqualFold(root, "github") && len(path) != 0 {
+			validationErr = unavailableGitHubValueError(referenceName(root, path), path[0])
+		} else if !available {
 			validationErr = fmt.Errorf("compile-time expression references unavailable value %q", referenceName(root, path))
 		}
 	})

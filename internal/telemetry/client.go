@@ -83,11 +83,16 @@ const (
 	FailureCodePlanConstruction   FailureCode = "E_PLAN_CONSTRUCTION"
 	FailureCodePipelineGeneration FailureCode = "E_PIPELINE_GENERATION"
 	FailureCodeEnvironment        FailureCode = "E_ENVIRONMENT"
+	FailureCodeVariableResolution FailureCode = "E_VARIABLE_RESOLUTION"
 	FailureCodeProfile            FailureCode = "E_PROFILE"
 	FailureCodeStepProcessExit    FailureCode = "E_STEP_PROCESS_EXIT"
 	FailureCodeUnsupportedFeature FailureCode = "E_UNSUPPORTED_FEATURE"
 	FailureCodeRuntimeIntegrity   FailureCode = "E_RUNTIME_INTEGRITY"
 	FailureCodeSecretUnavailable  FailureCode = "E_SECRET_UNAVAILABLE"
+	FailureCodeWorkflowToken      FailureCode = "E_WORKFLOW_TOKEN_UNAVAILABLE"
+	FailureCodeOIDCToken          FailureCode = "E_OIDC_TOKEN_UNAVAILABLE"
+	FailureCodeCacheCredential    FailureCode = "E_CACHE_CREDENTIAL_UNAVAILABLE"
+	FailureCodeServiceReadiness   FailureCode = "E_SERVICE_READINESS"
 )
 
 type Severity string
@@ -115,6 +120,7 @@ type Details struct {
 	Diagnostics           []Diagnostic
 	Blocker               string
 	BlockerDetail         string
+	AgentAPIHTTPStatus    int
 }
 
 type Properties struct {
@@ -129,6 +135,7 @@ type Properties struct {
 	Diagnostics           []Diagnostic `json:"diagnostics,omitempty"`
 	Blocker               string       `json:"blocker,omitempty"`
 	BlockerDetail         string       `json:"blocker_detail,omitempty"`
+	AgentAPIHTTPStatus    int          `json:"agent_api_http_status,omitempty"`
 }
 
 type Config struct {
@@ -209,6 +216,9 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	if details.FailureCode != "" && !validFailureCode(details.FailureCode) {
 		return fmt.Errorf("invalid telemetry failure code")
 	}
+	if details.AgentAPIHTTPStatus != 0 && (details.AgentAPIHTTPStatus < 100 || details.AgentAPIHTTPStatus > 599) {
+		return fmt.Errorf("invalid telemetry Agent API HTTP status")
+	}
 	diagnostics, err := BoundedDiagnostics(details.Diagnostics)
 	if err != nil {
 		return err
@@ -234,7 +244,7 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 			Command: command, Outcome: outcome, ClientVersion: c.clientVersion, DurationMS: durationMS,
 			FailurePhase: details.FailurePhase, FailureCode: details.FailureCode,
 			ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated, Diagnostics: diagnostics,
-			Blocker: blocker, BlockerDetail: blockerDetail,
+			Blocker: blocker, BlockerDetail: blockerDetail, AgentAPIHTTPStatus: details.AgentAPIHTTPStatus,
 		},
 	})
 	if err != nil {
@@ -277,8 +287,9 @@ func validFailureCode(code FailureCode) bool {
 	case FailureCodeUnknown, FailureCodeWorkflowSyntax, FailureCodeEventInvalid, FailureCodeGraphInvalid,
 		FailureCodeMatrixInvalid, FailureCodeExpressionInvalid, FailureCodeActionDiscovery,
 		FailureCodeActionResolution, FailureCodePlanConstruction, FailureCodePipelineGeneration,
-		FailureCodeEnvironment, FailureCodeProfile, FailureCodeStepProcessExit,
-		FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable:
+		FailureCodeEnvironment, FailureCodeVariableResolution, FailureCodeProfile, FailureCodeStepProcessExit,
+		FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable,
+		FailureCodeWorkflowToken, FailureCodeOIDCToken, FailureCodeCacheCredential, FailureCodeServiceReadiness:
 		return true
 	default:
 		return false
@@ -338,7 +349,7 @@ func boundedBlocker(blocker, detail string) (string, string, error) {
 			return "", "", fmt.Errorf("telemetry blocker detail requires a blocker")
 		}
 		return "", "", nil
-	case "runner_label", "environment", "shell", "action_ref", "expression", "trigger":
+	case "runner_label", "runner_policy", "environment", "shell", "working_directory", "action_ref", "expression", "trigger", "path_filter":
 	default:
 		return "", "", fmt.Errorf("invalid telemetry blocker")
 	}
@@ -360,7 +371,7 @@ func diagnosticSeverity(code string) (Severity, bool) {
 	case string(FailureCodeWorkflowSyntax), string(FailureCodeEventInvalid), string(FailureCodeGraphInvalid),
 		string(FailureCodeMatrixInvalid), string(FailureCodeExpressionInvalid), string(FailureCodeActionDiscovery),
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
-		string(FailureCodeEnvironment), string(FailureCodeProfile):
+		string(FailureCodeEnvironment), string(FailureCodeVariableResolution), string(FailureCodeProfile):
 		return SeverityError, true
 	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED", "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED":
 		return SeverityWarning, true

@@ -94,6 +94,9 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 		if err := validateEnvironmentNames(service.Env); err != nil {
 			return nil, fmt.Errorf("service %q environment: %w", serviceID, err)
 		}
+		if service.Credentials != nil {
+			processor.addMask(service.Credentials.Password)
+		}
 	}
 	docker, config, env, err := privateDocker(r)
 	if err != nil {
@@ -582,7 +585,12 @@ func appendPublishedPorts(args, ports []string) []string {
 	return args
 }
 
-func (b *jobContainerBackend) waitForService(ctx context.Context, processor *commandOutputProcessor, serviceID, name string) error {
+func (b *jobContainerBackend) waitForService(ctx context.Context, processor *commandOutputProcessor, serviceID, name string) (returnErr error) {
+	defer func() {
+		if returnErr != nil {
+			returnErr = b.serviceReadinessFailure(ctx, processor, serviceID, name, returnErr)
+		}
+	}()
 	const format = `{{if .State.Health}}{{.State.Health.Status}}{{end}}`
 	delay := 2 * time.Second
 	for {
@@ -591,7 +599,6 @@ func (b *jobContainerBackend) waitForService(ctx context.Context, processor *com
 			if ctx.Err() != nil {
 				return fmt.Errorf("wait for service %q readiness: %w", serviceID, ctx.Err())
 			}
-			b.serviceDiagnostics(ctx, processor, name)
 			return fmt.Errorf("inspect service %q readiness: %w", serviceID, err)
 		}
 		switch strings.TrimSpace(status) {
@@ -599,14 +606,12 @@ func (b *jobContainerBackend) waitForService(ctx context.Context, processor *com
 			return nil
 		case "starting":
 		default:
-			b.serviceDiagnostics(ctx, processor, name)
 			return fmt.Errorf("service %q failed readiness with status %q", serviceID, strings.TrimSpace(status))
 		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			b.serviceDiagnostics(ctx, processor, name)
 			return fmt.Errorf("wait for service %q readiness: %w", serviceID, ctx.Err())
 		case <-timer.C:
 		}
@@ -617,6 +622,34 @@ func (b *jobContainerBackend) waitForService(ctx context.Context, processor *com
 			}
 		}
 	}
+}
+
+func (b *jobContainerBackend) serviceReadinessFailure(parent context.Context, processor *commandOutputProcessor, serviceID, name string, err error) error {
+	readinessFailed := parent.Err() == nil
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), serviceDiagnosticTimeout)
+	defer cancel()
+	// Select state and the latest health result only. Full inspect output and
+	// health commands can contain environment values and registry credentials.
+	const format = `container status={{printf "%q" .State.Status}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}}{{if .State.Error}} error={{printf "%q" .State.Error}}{{end}}{{with .State.Health}}; health status={{printf "%q" .Status}} failing_streak={{.FailingStreak}}{{if .Log}}{{$last := index .Log 0}}{{range .Log}}{{$last = .}}{{end}}; last health check exit_code={{$last.ExitCode}} output={{printf "%q" $last.Output}}{{end}}{{end}}`
+	evidence, inspectErr := boundedDockerOutput(ctx, b.env, b.docker, "inspect", "--format", format, name)
+	// Discard incomplete evidence and logs: truncation may split a secret,
+	// preventing the processor from matching and masking its full value.
+	if inspectErr != nil {
+		err = fmt.Errorf("%w; container health evidence unavailable or truncated: %v", err, inspectErr)
+	} else if evidence = strings.TrimSpace(evidence); evidence != "" {
+		err = fmt.Errorf("%w; %s", err, evidence)
+	}
+	processor.writeLiteral(processor.stderr, fmt.Sprintf("Service %q container logs (last %s lines, up to 4096 bytes):", serviceID, serviceLogTail))
+	logs, logErr := boundedDockerCombinedOutput(ctx, b.env, b.docker, "logs", "--tail", serviceLogTail, name)
+	if logErr != nil {
+		processor.writeLiteral(processor.stderr, fmt.Sprintf("Service %q container logs unavailable or truncated: %v", serviceID, logErr))
+	} else {
+		b.emitServiceLogOutput(processor, logs)
+	}
+	if readinessFailed {
+		err = &serviceReadinessError{err: err}
+	}
+	return processor.scrubError(err)
 }
 
 func (b *jobContainerBackend) serviceDiagnostics(parent context.Context, processor *commandOutputProcessor, name string) {
@@ -739,6 +772,9 @@ func (b *jobContainerBackend) exec(ctx context.Context, r Runner, processor *com
 		}
 		_ = os.Remove(pidfile)
 		_ = os.Remove(pidfile + containerCancellationMarkerSuffix)
+		if terminateErr != nil {
+			terminateErr = &containerTerminationError{err: terminateErr}
+		}
 		return errors.Join(ctx.Err(), terminateErr)
 	}
 }

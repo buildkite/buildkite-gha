@@ -9,15 +9,68 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 )
 
+func TestMiseCancellationTerminatesDescendants(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("shell fixture requires Unix")
+	}
+	for _, phase := range []string{"install", "where"} {
+		t.Run(phase, func(t *testing.T) {
+			root := t.TempDir()
+			pidFile := filepath.Join(root, "child.pid")
+			mise := filepath.Join(root, "mise")
+			// The child ignores graceful signals and retains both output pipes.
+			// Killing only mise makes Run wait for the child's five-second sleep.
+			script := fmt.Sprintf("#!/bin/sh\n(trap '' INT TERM; sleep 5) &\necho $! > %q\nwait\n", pidFile)
+			if err := os.WriteFile(mise, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+			defer cancel()
+			runner := Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}
+			started := time.Now()
+			var err error
+			if phase == "install" {
+				err = runner.installMiseNode(ctx, mise, nodeTool(24))
+			} else {
+				_, _, err = runner.miseNodeInstallation(ctx, 24, mise)
+			}
+			if err == nil || ctx.Err() != context.DeadlineExceeded {
+				t.Fatalf("mise %s did not time out: %v", phase, err)
+			}
+			if elapsed := time.Since(started); elapsed > 3*time.Second {
+				t.Fatalf("mise %s retained descendant output pipes for %s", phase, elapsed)
+			}
+			data, err := os.ReadFile(pidFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for testProcessExists(pid) && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if testProcessExists(pid) {
+				t.Fatalf("mise %s child %d survived cancellation", phase, pid)
+			}
+		})
+	}
+}
+
 func TestManagedNodeDigestsCoverSupportedPlatforms(t *testing.T) {
-	for _, platform := range [][2]string{{"linux", "amd64"}, {"darwin", "arm64"}} {
+	for _, platform := range [][2]string{{"linux", "amd64"}, {"linux", "arm64"}, {"darwin", "arm64"}} {
 		for _, major := range []int{16, 20, 24} {
 			got := nodeDigest(platform[0], platform[1], major)
 			decoded, err := hex.DecodeString(got)
@@ -261,6 +314,57 @@ esac
 	}
 	if !bytes.Equal(got, replacement) || verification.paths[24] != node {
 		t.Fatalf("replacement node = %q, verified = %#v", got, verification.paths)
+	}
+}
+
+func TestManagedMiseCacheIsNotRepairedAfterWorkflowTimeout(t *testing.T) {
+	for _, phase := range []string{"lookup", "verification"} {
+		t.Run(phase, func(t *testing.T) {
+			root := canonicalTempDir(t)
+			dataDir := filepath.Join(root, "data")
+			installation := filepath.Join(dataDir, "installs", "node", Node24Version)
+			node := filepath.Join(installation, "bin", "node")
+			if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			marker, log := filepath.Join(root, "started"), filepath.Join(root, "installs")
+			blocked := fmt.Sprintf("printf ready > %q\nexec /bin/sleep 30\n", marker)
+			nodeBytes := []byte("#!/bin/sh\nprintf 'v" + Node24Version + "\\n'\n")
+			where := fmt.Sprintf("printf '%%s\\n' %q\n", installation)
+			if phase == "lookup" {
+				where = blocked
+			} else {
+				nodeBytes = []byte("#!/bin/sh\n" + blocked)
+			}
+			if err := os.WriteFile(node, nodeBytes, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			mise := filepath.Join(root, "mise")
+			script := fmt.Sprintf("#!/bin/sh\ncase \"$2\" in\ninstall) printf 'install\\n' >> %q;;\nwhere) %s;;\n*) exit 9;;\nesac\n", log, where)
+			if err := os.WriteFile(mise, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			digest := sha256.Sum256(nodeBytes)
+			runner := newJobRun(Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}})
+			ctx, cancel := stepContext(t.Context(), 0.003)
+			defer cancel()
+			_, err := runner.discoverNode(ctx, 24, "")
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || ClassifyFailure(err) != FailureClassUnknown || UnexpectedFailure(err) != nil {
+				t.Fatalf("workflow %s timeout was replaced or selected as a defect: %v", phase, err)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("blocking %s command did not start: %v", phase, err)
+			}
+			got, err := os.ReadFile(node)
+			if err != nil || !bytes.Equal(got, nodeBytes) {
+				t.Fatalf("cached Node was removed or changed after cancellation: %v", err)
+			}
+			calls, err := os.ReadFile(log)
+			if err != nil || string(calls) != "install\n" {
+				t.Fatalf("cache repair was attempted: %q, %v", calls, err)
+			}
+		})
 	}
 }
 

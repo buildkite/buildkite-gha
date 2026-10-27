@@ -3,6 +3,8 @@ package cli
 import (
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -34,6 +36,12 @@ jobs:
 `
 
 func TestContinueRunsOnUsesMappingAndPreservesReplayChecks(t *testing.T) {
+	server, _ := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+		"ubuntu-latest": {"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}},
+		"ubuntu-22.04":  {"validated": true, "target": map[string]string{"queue": "selected-queue", "platform": "linux/amd64"}},
+	})
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
 	initial := runContinueInitialUploads(t, continueRunsOnWorkflow, "--runner-queue", "ubuntu-22.04=selected-queue")[0]
 	continuation := initial.artifact.Continuation
 	if !slices.Equal(continuation.Jobs, []string{"build", "publish"}) || !strings.HasSuffix(continuation.StepKey, "-build-runs-on") || !strings.Contains(initial.pipeline, ":github: runs-on · build") || !strings.Contains(initial.pipeline, "build (runs-on)") {
@@ -98,6 +106,51 @@ func TestContinueRunsOnUsesMappingAndPreservesReplayChecks(t *testing.T) {
 	}
 }
 
+func TestContinueRunsOnRequiresValidationForExplicitARM64Mapping(t *testing.T) {
+	armRuntime := filepath.Join(t.TempDir(), "buildkite-gha-linux-arm64")
+	if err := os.WriteFile(armRuntime, pluginTestLinuxExecutable(183), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		arm       map[string]any
+		wantCode  int
+		wantError string
+	}{
+		{name: "validated", arm: map[string]any{"validated": true, "target": map[string]string{"queue": "self-hosted-arm", "platform": "linux/arm64"}}},
+		{name: "missing validation acknowledgment", arm: map[string]any{"target": map[string]string{"queue": "self-hosted-arm", "platform": "linux/arm64"}}, wantCode: 1, wantError: "cannot validate explicit runner mappings"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, requests := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+				"ubuntu-latest":    {"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}},
+				"ubuntu-24.04-arm": test.arm,
+			})
+			t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+			t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+			initial := runContinueInitialUploads(t, continueRunsOnWorkflow,
+				"--runner-queue", "ubuntu-24.04-arm=self-hosted-arm",
+				"--runtime-distribution", "linux/arm64="+armRuntime,
+			)[0]
+			initialRequests := *requests
+			runner := initial.continueRunner(initial.producerManifest(t, "success", `["ubuntu-24.04-arm"]`))
+			code, _, stderr := runContinue(t, runner, initial.digest)
+			if *requests != initialRequests+1 || code != test.wantCode || !strings.Contains(stderr, test.wantError) {
+				t.Fatalf("continue=%d requests=%d stderr=%s", code, *requests, stderr)
+			}
+			if test.wantCode != 0 {
+				if pipelineUploads(runner) != 0 {
+					t.Fatal("unvalidated deferred job was uploaded")
+				}
+				return
+			}
+			plans := uploadedPlans(t, runner)
+			if len(plans["build"]) != 1 || plans["build"][0].Target.Queue != "self-hosted-arm" {
+				t.Fatalf("ARM64 plans = %#v", plans["build"])
+			}
+		})
+	}
+}
+
 func TestContinueRunsOnRejectsInvalidValuesAndTargets(t *testing.T) {
 	initial := runContinueInitialUploads(t, continueRunsOnWorkflow)[0]
 	for _, test := range []struct{ output, want string }{
@@ -115,6 +168,88 @@ func TestContinueRunsOnRejectsInvalidValuesAndTargets(t *testing.T) {
 		if code != 1 || pipelineUploads(runner) != 0 || !strings.Contains(stderr, test.want) {
 			t.Errorf("output %q: code=%d stderr=%s", test.output, code, stderr)
 		}
+	}
+}
+
+// A producer output is data from a running job, so a deferred compile failure
+// must report it through the redacted diagnostics only, not a raw error line.
+func TestContinueRunsOnDoesNotEchoRejectedOutputLabels(t *testing.T) {
+	const sentinel = "OUTPUT_SECRET_LABEL_8675309"
+	initial := runContinueInitialUploads(t, continueRunsOnWorkflow)[0]
+	runner := initial.continueRunner(initial.producerManifest(t, "success", `["`+sentinel+`"]`))
+	code, _, stderr := runContinue(t, runner, initial.digest)
+	if code != 1 || pipelineUploads(runner) != 0 || !strings.Contains(stderr, "compile deferred jobs") {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if strings.Contains(stderr, sentinel) {
+		t.Fatalf("stderr repeated the producer output: %s", stderr)
+	}
+}
+
+// A reusable-workflow input built from a dispatch input and a job output is
+// evaluated only when the deferred jobs compile. Its error must not quote the
+// dispatch input.
+func TestContinueRunsOnDoesNotEchoSubstitutedInputs(t *testing.T) {
+	const sentinel = "EVENT_SECRET_KEY_8675309"
+	sources := map[string]string{
+		"build.yml": `on:
+  workflow_dispatch:
+    inputs:
+      fmt:
+        type: string
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.select.outputs.runner }}
+    steps:
+      - id: select
+        run: echo 'runner=ubuntu-latest' >> "$GITHUB_OUTPUT"
+  call:
+    needs: plan
+    uses: ./.github/workflows/callee.yml
+    with:
+      target: ${{ format(inputs.fmt, needs.plan.outputs.runner) }}
+`,
+		"callee.yml": `on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+jobs:
+  build:
+    runs-on: ${{ inputs.target }}
+    steps: [{run: echo ready}]
+`,
+	}
+	repository := writeUploadWorkflowRepository(t, sources)
+	commitUploadWorkflows(t, repository)
+	workflows := enterUploadWorkflows(t, repository, map[string]string{"build.yml": sources["build.yml"]})
+	eventPath := writeUploadEvent(t, repository, "workflow_dispatch", "refs/heads/main", map[string]any{"inputs": map[string]any{"fmt": "{" + sentinel + "}"}})
+	initial := runContinueInitialUploadsInCheckout(t, workflows, eventPath)[0]
+	runner := initial.continueRunner(initial.producerManifest(t, "success", "ubuntu-latest"))
+	code, stdout, stderr := runContinue(t, runner, initial.digest)
+	if code != 1 || pipelineUploads(runner) != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if strings.Contains(stdout, sentinel) || strings.Contains(stderr, sentinel) {
+		t.Fatalf("deferred compile repeated the dispatch input: stdout=%s stderr=%s", stdout, stderr)
+	}
+}
+
+// A runs-on expression that reads a producer output is evaluated only when the
+// deferred jobs compile. Its error must not quote the output.
+func TestContinueRunsOnDoesNotEchoOutputInEvaluationErrors(t *testing.T) {
+	const sentinel = "OUTPUT_SECRET_8675309"
+	workflow := strings.Replace(continueRunsOnWorkflow, "runs-on: ${{ fromJSON(needs.plan.outputs.runner) }}", "runs-on: ${{ format(needs.plan.outputs.runner, 'x') }}", 1)
+	initial := runContinueInitialUploads(t, workflow)[0]
+	runner := initial.continueRunner(initial.producerManifest(t, "success", "{"+sentinel+"}"))
+	code, stdout, stderr := runContinue(t, runner, initial.digest)
+	if code != 1 || pipelineUploads(runner) != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if strings.Contains(stdout, sentinel) || strings.Contains(stderr, sentinel) {
+		t.Fatalf("deferred compile repeated the producer output: stdout=%s stderr=%s", stdout, stderr)
 	}
 }
 
@@ -211,7 +346,7 @@ func TestContinueRunsOnPreservesNativeAgentEnvironments(t *testing.T) {
 		if strings.HasSuffix(step.Key, "-build") {
 			want = "ubuntu-22.04"
 		}
-		if step.Image != "" || step.Agents["nsc-gha-image"] != want || step.Agents["queue"] != "native" || strings.Contains(step.Command, "--hosted-tool-cache") {
+		if step.Image != "" || step.Agents["nsc-gha-image"] != want || step.Agents["queue"] != "native" || strings.Contains(step.Command, "--hosted-tool-cache") || !strings.Contains(step.Command, "--docker-build-load") {
 			t.Fatalf("expanded host = %#v, want %s", step, want)
 		}
 	}

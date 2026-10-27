@@ -18,6 +18,7 @@ type ActionAuthority struct {
 
 type ActionAuthorityOptions struct {
 	ServerURL string
+	Strategy  map[string]any
 }
 
 // InventoryActionAuthority interprets action input resolution and nested
@@ -74,6 +75,9 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 			"github.server_url": options.ServerURL,
 			"job.check_run_id":  "",
 		}
+		if workflowAuthored {
+			known["strategy"] = options.Strategy
+		}
 		for _, binding := range supplied {
 			name := strings.ToLower(binding.Name)
 			input, declared := definitions[name]
@@ -91,7 +95,7 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 				return fmt.Errorf("action input %q: composite action metadata cannot grant secret authority", binding.Name)
 			}
 			if !workflowAuthored && grants {
-				return fmt.Errorf("action input %q: composite action metadata cannot grant github.token authority", binding.Name)
+				return fmt.Errorf("action input %q: composite action metadata cannot grant github.token authority. Declare a token input on the composite action, pass it from the workflow step with: token: ${{ github.token }}, and forward ${{ inputs.token }} to the child action", binding.Name)
 			}
 			if workflowAuthored {
 				authority.GitHubToken = authority.GitHubToken || grants

@@ -16,19 +16,20 @@ var stepIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 type Surface string
 
 const (
-	SurfaceJobCondition      Surface = "job-condition"
-	SurfaceJobControl        Surface = "job-control"
-	SurfaceCallCondition     Surface = "call-condition"
-	SurfaceStepCondition     Surface = "step-condition"
-	SurfaceJobEnvironment    Surface = "job-environment"
-	SurfaceJobDefault        Surface = "job-default"
-	SurfaceJobOutput         Surface = "job-output"
-	SurfaceStepTemplate      Surface = "step-template"
-	SurfaceStepControl       Surface = "step-control"
-	SurfaceRuntimeTemplate   Surface = "runtime-template"
-	SurfaceServiceTemplate   Surface = "service-template"
-	SurfaceServiceCredential Surface = "service-credential"
-	SurfaceServiceMap        Surface = "service-map"
+	SurfaceJobCondition       Surface = "job-condition"
+	SurfaceJobControl         Surface = "job-control"
+	SurfaceCallCondition      Surface = "call-condition"
+	SurfaceStepCondition      Surface = "step-condition"
+	SurfaceJobEnvironment     Surface = "job-environment"
+	SurfaceJobDefault         Surface = "job-default"
+	SurfaceJobOutput          Surface = "job-output"
+	SurfaceStepTemplate       Surface = "step-template"
+	SurfaceStepControl        Surface = "step-control"
+	SurfaceRuntimeTemplate    Surface = "runtime-template"
+	SurfaceServiceTemplate    Surface = "service-template"
+	SurfaceServiceEnvironment Surface = "service-environment"
+	SurfaceServiceCredential  Surface = "service-credential"
+	SurfaceServiceMap         Surface = "service-map"
 )
 
 // ResultType records the value shape required by an expression site.
@@ -91,9 +92,18 @@ func (site Site) expressionSite() expression.Site {
 	case site.Purpose == PurposeCompositeActionInput || site.Provenance == ProvenanceAction:
 		purpose = expression.PurposeCompositeActionInput
 	}
+	profile := expression.ProfileID(site.Surface)
+	if site.Provenance == ProvenanceAction {
+		switch site.Surface {
+		case SurfaceStepTemplate:
+			profile = expression.ProfileActionStepTemplate
+		case SurfaceStepCondition:
+			profile = expression.ProfileActionStepCondition
+		}
+	}
 	return expression.Site{
 		Source:  site.Source,
-		Profile: expression.ProfileID(site.Surface),
+		Profile: profile,
 		Result:  expression.ResultType(site.Result),
 		Purpose: purpose,
 		Location: expression.Location{
@@ -191,6 +201,9 @@ type Step struct {
 	Name            Site          `json:"name"`
 	Run             *Run          `json:"run,omitempty"`
 	Invocation      *Invocation   `json:"invocation,omitempty"`
+	// GitHubAction is the value of github.action while this run or uses step
+	// and any action it invokes run: GitHub's authored or generated step ID.
+	GitHubAction string `json:"github_action,omitempty"`
 }
 
 type Guard struct {
