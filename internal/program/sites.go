@@ -147,7 +147,7 @@ func (p *Program) walkWorkflowSites(visit func(*Site) error) error {
 				return err
 			}
 		}
-		if err := bindings(container.Env, SurfaceServiceTemplate, PurposeExpression); err != nil {
+		if err := bindings(container.Env, SurfaceServiceEnvironment, PurposeExpression); err != nil {
 			return err
 		}
 		if err := walkSlice(container.Ports, workflowSemantics(SurfaceServiceTemplate, ResultString, PurposeExpression), visit); err != nil {

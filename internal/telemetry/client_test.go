@@ -50,6 +50,7 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 	if err := client.Emit(CommandRunJob, OutcomeFailure, duration, Details{
 		FailurePhase:          FailurePhaseParsing,
 		FailureCode:           FailureCodeWorkflowSyntax,
+		AgentAPIHTTPStatus:    http.StatusUnprocessableEntity,
 		ErrorMessage:          "  buildkite-gha: run-job:\ninvalid workflow\tvalue  ",
 		ErrorMessageTruncated: true,
 		Blocker:               "shell",
@@ -67,7 +68,8 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 	want := Properties{
 		Command: CommandRunJob, Outcome: OutcomeFailure, ClientVersion: "1.2.3", DurationMS: 1234,
 		FailurePhase: FailurePhaseParsing, FailureCode: FailureCodeWorkflowSyntax,
-		ErrorMessage: "buildkite-gha: run-job: invalid workflow value", ErrorMessageTruncated: true,
+		AgentAPIHTTPStatus: http.StatusUnprocessableEntity,
+		ErrorMessage:       "buildkite-gha: run-job: invalid workflow value", ErrorMessageTruncated: true,
 		Blocker: "shell", BlockerDetail: "pwsh",
 		Diagnostics: []Diagnostic{{
 			Code: string(FailureCodeExpressionInvalid), Severity: SeverityError,
@@ -224,6 +226,11 @@ func TestPropertiesAreBounded(t *testing.T) {
 	if err := client.Emit(CommandRunJob, OutcomeFailure, 0, Details{FailurePhase: FailurePhaseUnknown, FailureCode: FailureCode("arbitrary")}); err == nil {
 		t.Fatal("Emit() accepted an unknown failure code")
 	}
+	for _, status := range []int{-1, 99, 600} {
+		if err := client.Emit(CommandRunJob, OutcomeFailure, 0, Details{AgentAPIHTTPStatus: status}); err == nil {
+			t.Errorf("Emit() accepted Agent API HTTP status %d", status)
+		}
+	}
 }
 
 func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
@@ -247,7 +254,10 @@ func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
 }
 
 func TestRuntimeClassificationCodesAreFailureCodesOnly(t *testing.T) {
-	for _, code := range []FailureCode{FailureCodeStepProcessExit, FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable} {
+	for _, code := range []FailureCode{
+		FailureCodeStepProcessExit, FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable,
+		FailureCodeWorkflowToken, FailureCodeOIDCToken, FailureCodeCacheCredential,
+	} {
 		if !validFailureCode(code) {
 			t.Errorf("validFailureCode(%q) = false", code)
 		}
@@ -262,7 +272,7 @@ func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 		string(FailureCodeWorkflowSyntax), string(FailureCodeEventInvalid), string(FailureCodeGraphInvalid),
 		string(FailureCodeMatrixInvalid), string(FailureCodeExpressionInvalid), string(FailureCodeActionDiscovery),
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
-		string(FailureCodeEnvironment), string(FailureCodeProfile),
+		string(FailureCodeEnvironment), string(FailureCodeVariableResolution), string(FailureCodeProfile),
 	}
 	warningCodes := []string{"W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED"}
 	input := make([]Diagnostic, 0, len(errorCodes)+len(warningCodes)+2)
@@ -309,6 +319,14 @@ func TestBlockerDetailsAreNormalizedAndBounded(t *testing.T) {
 	blocker, detail, err := boundedBlocker("shell", "  pwsh\n"+strings.Repeat("界", maxBlockerDetailBytes))
 	if err != nil || blocker != "shell" || len(detail) > maxBlockerDetailBytes || !utf8.ValidString(detail) || !strings.HasPrefix(detail, "pwsh ") {
 		t.Fatalf("boundedBlocker() = %q, %q, %v", blocker, detail, err)
+	}
+	for _, test := range []struct{ blocker, detail string }{
+		{"path_filter", "push"},
+		{"runner_policy", "untrusted_default"},
+	} {
+		if gotBlocker, gotDetail, err := boundedBlocker(test.blocker, test.detail); err != nil || gotBlocker != test.blocker || gotDetail != test.detail {
+			t.Fatalf("boundedBlocker(%q, %q) = %q, %q, %v", test.blocker, test.detail, gotBlocker, gotDetail, err)
+		}
 	}
 	if _, _, err := boundedBlocker("customer-value", "detail"); err == nil {
 		t.Fatal("boundedBlocker() accepted an unknown blocker")

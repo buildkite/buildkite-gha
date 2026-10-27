@@ -455,8 +455,8 @@ func validateDeploymentEvent(provider, event string, repository Repository, ref,
 }
 
 func validateMergeGroupEvent(ref, sha string, payload map[string]any) error {
-	if action, _ := payload["action"].(string); action != "checks_requested" {
-		return fmt.Errorf("merge_group event snapshot requires payload.action to be checks_requested")
+	if action, _ := payload["action"].(string); !buildkitepipeline.SupportedMergeGroupAction(action) {
+		return fmt.Errorf("merge_group event snapshot requires payload.action to be checks_requested or destroyed")
 	}
 	mergeGroup, ok := payload["merge_group"].(map[string]any)
 	if !ok {
@@ -611,12 +611,10 @@ func eventBaseRef(event Event) string {
 }
 
 func canonicalWorkflowName(path string) string {
-	if isRepositoryWorkflowPath(path) {
-		root, canonicalPath, err := workflowRepository(path)
-		if err == nil {
-			if relative, err := repositoryWorkflowPath(root, canonicalPath); err == nil {
-				return strings.TrimPrefix(relative, "./")
-			}
+	root, canonicalPath, err := workflowRepository(path)
+	if err == nil && root != "" {
+		if relative, err := repositoryWorkflowPath(root, canonicalPath); err == nil {
+			return strings.TrimPrefix(relative, "./")
 		}
 	}
 	return filepath.ToSlash(filepath.Clean(path))

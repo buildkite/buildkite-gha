@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -680,6 +681,70 @@ jobs:
 	service := parsed.Jobs[0].Services[0].Container
 	if service.Image != "postgres:16" || service.Credentials == nil || service.Credentials.Username != "${{ secrets.REGISTRY_USER }}" || service.Credentials.Password != "${{ secrets.REGISTRY_PASSWORD }}" || service.Env["POSTGRES_PASSWORD"] != "test" || len(service.Ports) != 1 || len(service.Volumes) != 1 || service.Options == "" || service.Command != "postgres -c fsync=off" || service.Entrypoint != "docker-entrypoint.sh" {
 		t.Fatalf("service container = %#v", service)
+	}
+}
+
+func TestParseDottedContainerEnvironmentKeys(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.20
+      env: {app.mode: production}
+    services:
+      elasticsearch:
+        image: elasticsearch:8
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: false
+    steps: [{run: true}]
+`)
+	parsed, err := Parse("containers.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := parsed.Jobs[0]
+	if job.Container.Env["app.mode"] != "production" || job.Services[0].Container.Env["discovery.type"] != "single-node" || job.Services[0].Container.Env["xpack.security.enabled"] != "false" {
+		t.Fatalf("container env = %#v, service env = %#v", job.Container.Env, job.Services[0].Container.Env)
+	}
+}
+
+func TestParseServiceIDs(t *testing.T) {
+	for _, test := range []struct {
+		name, want string
+	}{
+		{name: "s3.docker.test"},
+		{name: "s3-docker-test"},
+		{name: "_cache_2"},
+		{name: strings.Repeat("a", 255)},
+		{name: "S3.docker.test", want: "character 'S' is uppercase"},
+		{name: "s3/docker.test", want: "invalid character '/'"},
+		{name: "s3 docker.test", want: "invalid character ' '"},
+		{name: "s3\ndocker.test", want: `invalid character '\n'`},
+		{name: "s3\x00docker.test", want: `invalid character '\x00'`},
+		{name: "s3.döcker.test", want: "invalid character 'ö'"},
+		{name: "3docker", want: "must start with a lowercase letter or underscore; found '3'"},
+		{name: ".docker", want: "must start with a lowercase letter or underscore; found '.'"},
+		{name: "", want: "must not be empty"},
+		{name: strings.Repeat("a", 256), want: "exceeds 255 bytes"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte(fmt.Sprintf("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      %q: {image: redis:7}\n    steps: [{run: true}]\n", test.name))
+			parsed, err := Parse("services.yml", source)
+			if test.want != "" {
+				if err == nil || !strings.Contains(err.Error(), "services.yml:6:7: invalid service ID") || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("Parse() error = %v, want located diagnostic containing %q", err, test.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := parsed.Jobs[0].Services[0].Name; got != test.name {
+				t.Fatalf("service ID = %q, want %q", got, test.name)
+			}
+		})
 	}
 }
 

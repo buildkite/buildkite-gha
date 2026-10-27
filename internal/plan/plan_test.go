@@ -53,6 +53,41 @@ func TestCacheModePlanBoundary(t *testing.T) {
 	}
 }
 
+func TestStrategyPlanBoundary(t *testing.T) {
+	job := validJob()
+	old, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(old)
+	if err != nil || decoded.Strategy != nil {
+		t.Fatalf("plan without strategy: %+v, %v", decoded.Strategy, err)
+	}
+	job.Strategy = map[string]any{"job-index": 2, "job-total": 5, "fail-fast": false, "max-parallel": 3}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+	decoded, err = Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reencoded, err := Encode(decoded)
+	if err != nil || !bytes.Equal(encoded, reencoded) {
+		t.Fatalf("strategy did not survive encoding: %+v, %v", decoded.Strategy, err)
+	}
+	for field, value := range map[string]any{"job-index": 1, "job-total": 6, "fail-fast": true, "max-parallel": 4} {
+		changed := job
+		changed.Strategy = maps.Clone(job.Strategy)
+		changed.Strategy[field] = value
+		data, err := Encode(changed)
+		if err != nil || sha256.Sum256(data) == sha256.Sum256(encoded) {
+			t.Fatalf("strategy.%s not digest-bound: %v", field, err)
+		}
+	}
+}
+
 func TestDecodePreservesPlanContract(t *testing.T) {
 	fixture := validJob()
 	fixture.Event.HeadRef = "feature/head-ref"
@@ -1552,6 +1587,59 @@ func TestContainerContract(t *testing.T) {
 	want := `{"container":{"image":"node:24","env":{"NODE_ENV":"test"},"ports":["8080"],"volumes":["cache:/cache:ro"],"options":"--cpus 2"},"services":{"database":{"image":"postgres:16","credentials":{"username":"user","password":"password"},"env":{"POSTGRES_DB":"app"},"ports":["5432:5432"],"volumes":["database:/data"],"options":"--health-retries 5","command":"postgres -c fsync=off","entrypoint":"docker-entrypoint.sh"}}}`
 	if string(wire) != want {
 		t.Fatalf("encoded containers = %s, want %s", wire, want)
+	}
+}
+
+func TestContainerPlanAcceptsDottedEnvironmentKeys(t *testing.T) {
+	job := validJob()
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &Container{Image: "alpine:3.20", Env: map[string]string{"app.mode": "production"}}
+	job.Services = map[string]ServiceContainer{"elasticsearch": {
+		Image: "elasticsearch:8", Env: map[string]string{"discovery.type": "single-node", "xpack.security.enabled": "false"},
+	}}
+	job.ServiceOrder = []string{"elasticsearch"}
+	synchronizeExecutionProgram(&job)
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Container.Env["app.mode"] != "production" || decoded.Services["elasticsearch"].Env["discovery.type"] != "single-node" || decoded.Services["elasticsearch"].Env["xpack.security.enabled"] != "false" {
+		t.Fatalf("decoded container env = %#v, service env = %#v", decoded.Container.Env, decoded.Services["elasticsearch"].Env)
+	}
+	validateJobPlanSchema(t, encoded)
+}
+
+func TestServiceIDPlanBoundary(t *testing.T) {
+	schema := compileJobPlanSchema(t)
+	for _, name := range []string{"s3.docker.test", "s3-docker-test", "_cache_2", strings.Repeat("a", 255), "", "UPPER", "s3/docker.test", "s3\ndocker.test", ".docker", strings.Repeat("a", 256)} {
+		t.Run(name, func(t *testing.T) {
+			job := validJob()
+			job.RequiredCapabilities = []string{"docker", "network"}
+			job.Services = map[string]ServiceContainer{name: {Image: "redis:7"}}
+			job.ServiceOrder = []string{name}
+			synchronizeExecutionProgram(&job)
+			// Marshal directly to exercise admission of an untrusted wire plan.
+			encoded, err := json.Marshal(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document any
+			if err := json.Unmarshal(encoded, &document); err != nil {
+				t.Fatal(err)
+			}
+			wantValid := name == "s3.docker.test" || name == "s3-docker-test" || name == "_cache_2" || name == strings.Repeat("a", 255)
+			decoded, decodeErr := Decode(encoded)
+			if (decodeErr == nil) != wantValid || (schema.Validate(document) == nil) != wantValid {
+				t.Fatalf("service %q: Decode error = %v, schema error = %v, want valid = %v", name, decodeErr, schema.Validate(document), wantValid)
+			}
+			if wantValid && (decoded.Services[name].Image != "redis:7" || !slices.Equal(decoded.ServiceOrder, []string{name})) {
+				t.Fatalf("decoded services = %#v, order = %#v", decoded.Services, decoded.ServiceOrder)
+			}
+		})
 	}
 }
 

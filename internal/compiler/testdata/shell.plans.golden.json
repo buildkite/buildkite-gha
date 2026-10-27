@@ -27,6 +27,12 @@
       "step_key": "gha-producer"
     },
     "required_capabilities": [],
+    "strategy": {
+      "fail-fast": true,
+      "job-index": 0,
+      "job-total": 1,
+      "max-parallel": 1
+    },
     "program": {
       "version": 2,
       "job": {
@@ -173,7 +179,8 @@
                   }
                 }
               }
-            }
+            },
+            "github_action": "produce"
           },
           {
             "id": "step-2",
@@ -288,7 +295,8 @@
                   }
                 }
               }
-            }
+            },
+            "github_action": "__run"
           }
         ],
         "outputs": [
@@ -346,6 +354,12 @@
     "matrix": {
       "variant": "one"
     },
+    "strategy": {
+      "fail-fast": false,
+      "job-index": 0,
+      "job-total": 2,
+      "max-parallel": 2
+    },
     "dependencies": [
       "gha-producer"
     ],
@@ -353,7 +367,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:07e67555df452a299e387007926e71979b99283830ad52b4d262ca30fe0a0bfa"
+          "plan_digest": "sha256:2bd6c163a5df9d68a6260b7fbc78a4a841d5431b5022e9641c72a662a1875a13"
         }
       ]
     },
@@ -541,7 +555,8 @@
                   }
                 }
               }
-            }
+            },
+            "github_action": "__run"
           }
         ]
       }
@@ -579,6 +594,12 @@
     "matrix": {
       "variant": "two"
     },
+    "strategy": {
+      "fail-fast": false,
+      "job-index": 1,
+      "job-total": 2,
+      "max-parallel": 2
+    },
     "dependencies": [
       "gha-producer"
     ],
@@ -586,7 +607,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:07e67555df452a299e387007926e71979b99283830ad52b4d262ca30fe0a0bfa"
+          "plan_digest": "sha256:2bd6c163a5df9d68a6260b7fbc78a4a841d5431b5022e9641c72a662a1875a13"
         }
       ]
     },
@@ -774,7 +795,8 @@
                   }
                 }
               }
-            }
+            },
+            "github_action": "__run"
           }
         ]
       }

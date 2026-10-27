@@ -107,6 +107,9 @@ func localReusableWorkflowSource(workflowPath string) (reusableWorkflowSource, e
 	if err != nil {
 		return reusableWorkflowSource{}, err
 	}
+	if root == "" {
+		return reusableWorkflowSource{}, fmt.Errorf("%s: local reusable workflows require a Git checkout or the caller under .github/workflows", workflowPath)
+	}
 	relativePath, err := filepath.Rel(root, canonicalPath)
 	if err != nil {
 		return reusableWorkflowSource{}, fmt.Errorf("locate workflow %q in repository: %w", canonicalPath, err)

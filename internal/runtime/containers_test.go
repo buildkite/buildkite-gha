@@ -26,6 +26,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"text/template"
 	"time"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
@@ -35,6 +36,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 // startJobContainer is a test convenience that starts services in sorted-key
@@ -247,6 +249,9 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		if scenario == "fail-network-create" {
 			os.Exit(42)
 		}
+		if scenario == "block-network-create" {
+			time.Sleep(30 * time.Second)
+		}
 		os.Exit(0)
 	case "create":
 		name := ""
@@ -332,6 +337,9 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	case "port":
+		if scenario == "block-port" {
+			time.Sleep(30 * time.Second)
+		}
 		if scenario == "malformed-port" {
 			fmt.Print("not Docker port output\n")
 			os.Exit(0)
@@ -369,9 +377,31 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 			fmt.Print(string(data))
 			os.Exit(0)
 		}
+		if strings.Contains(args[2], ".State.Status") {
+			if scenario == "service-evidence-unavailable" {
+				os.Exit(42)
+			}
+			if scenario == "service-evidence-truncated" {
+				fmt.Print(strings.Repeat("x", 4090) + "sibling-secret")
+				os.Exit(0)
+			}
+			state := map[string]any{"Status": "exited", "ExitCode": 23, "OOMKilled": true, "Error": "container sibling-secret", "Health": map[string]any{
+				"Status": "unhealthy", "FailingStreak": 3, "Log": []map[string]any{
+					{"ExitCode": 0, "Output": "earlier success"},
+					{"ExitCode": 7, "Output": "connection refused sibling-secret health\"secret\n::error::not-an-annotation"},
+				},
+			}}
+			format, err := template.New("inspect").Parse(args[2])
+			if err != nil || format.Execute(os.Stdout, map[string]any{"State": state}) != nil {
+				os.Exit(43)
+			}
+			os.Exit(0)
+		}
 		switch scenario {
-		case "service-unhealthy":
+		case "service-unhealthy", "service-evidence-unavailable", "service-evidence-truncated", "service-logs-truncated":
 			fmt.Print("unhealthy\n")
+		case "service-inspect-failed":
+			os.Exit(42)
 		case "service-starting":
 			counter := filepath.Join(root, "inspect-count")
 			data, _ := os.ReadFile(counter)
@@ -387,6 +417,10 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	case "logs":
+		if scenario == "service-logs-truncated" {
+			fmt.Print(strings.Repeat("x", 4090) + "sibling-secret")
+			os.Exit(0)
+		}
 		if scenario == "service-log-command" {
 			fmt.Print("::warning::not-an-annotation\n::add-mask::not-a-mask\nnot-a-mask\n")
 			os.Exit(0)
@@ -684,6 +718,17 @@ func fakeJobDockerExec(root, scenario string, args []string) {
 	}
 	if len(helper) > 1 {
 		helper[1] = translate(helper[1])
+	}
+	if helper[0] == "terminate" && (scenario == "fail-terminate" || scenario == "block-terminate") {
+		// Simulate an ambiguous failure after termination takes effect, without
+		// leaving a host payload alive after the fake container is removed.
+		if code := RunContainerProcessHelper(helper); code != 0 {
+			os.Exit(code)
+		}
+		if scenario == "fail-terminate" {
+			os.Exit(42)
+		}
+		time.Sleep(30 * time.Second)
 	}
 	if helper[0] == "run" {
 		// The fake container executes on the host, so resolve image PATH commands
@@ -1435,7 +1480,10 @@ func TestEvaluateServiceMapExpressionRejectsUnsafeShapes(t *testing.T) {
 		{name: "null environment", value: `{"db":{"image":"postgres:16","env":null}}`, want: "want an object"},
 		{name: "null ports", value: `{"db":{"image":"postgres:16","ports":null}}`, want: "want an array"},
 		{name: "null volumes", value: `{"db":{"image":"postgres:16","volumes":null}}`, want: "want an array"},
-		{name: "invalid service name", value: `{"UPPER":"postgres:16"}`, want: "service name"},
+		{name: "uppercase service ID", value: `{"UPPER":"postgres:16"}`, want: "character 'U' is uppercase"},
+		{name: "invalid service ID character", value: `{"s3/docker.test":"redis:7"}`, want: "invalid character '/'"},
+		{name: "invalid skipped service ID", value: `{"s3 docker.test":""}`, want: "invalid character ' '"},
+		{name: "overlong service ID", value: `{"` + strings.Repeat("a", 256) + `":"redis:7"}`, want: "exceeds 255 bytes"},
 		{name: "invalid image", value: `{"db":"BAD IMAGE"}`, want: "invalid image"},
 		{name: "credentials", value: `{"db":{"image":"postgres:16","credentials":{"username":"user","password":"secret"}}}`, want: "cannot introduce registry credentials"},
 		{name: "null credentials", value: `{"db":{"image":"postgres:16","credentials":null}}`, want: "cannot introduce registry credentials"},
@@ -1474,6 +1522,191 @@ func TestEvaluateProgramServicesResolvesCredentialVarsWithEnvironment(t *testing
 	}
 	if credentials := services["private"].Credentials; credentials == nil || credentials.Username != "environment-user" || credentials.Password != "registry-password" {
 		t.Fatalf("credentials = %#v, want the environment value over the repository value", credentials)
+	}
+}
+
+func TestRunCompiledServiceEnvironment(t *testing.T) {
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, containerized := range []bool{false, true} {
+		for _, passwordOutput := range []string{"", "output-password"} {
+			t.Run(fmt.Sprintf("container=%t/output=%s", containerized, passwordOutput), func(t *testing.T) {
+				f := newJobDocker(t, "")
+				workspace := t.TempDir()
+				const path = ".github/workflows/services.yml"
+				container := ""
+				if containerized {
+					container = "    container: alpine:3.20\n"
+				}
+				source := []byte(`on: push
+env:
+  DATABASE: workflow-db
+  WORKFLOW_ONLY: inherited
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    if: vars.VALUE == 'repository'
+` + container + `    env:
+      DATABASE: job-db
+      SUFFIX: ${{ format('job-{0}', needs.build.outputs.suffix) }}
+    services:
+      database:
+        image: postgres:16
+        env:
+          DATABASE: service-db
+          FROM_JOB: ${{ env.DATABASE }}
+          FROM_WORKFLOW: ${{ env.WORKFLOW_ONLY }}
+          RUNTIME: ${{ format('{0}-{1}', env.SUFFIX, needs.build.outputs.suffix) }}
+          PASSWORD: ${{ secrets.DB_PASSWORD }}
+          FALLBACK: ${{ needs.build.outputs.password || secrets.DB_PASSWORD }}
+          SNAPSHOT: ${{ env.GITHUB_WORKSPACE || 'not-yet-set' }}
+          VAR_DIRECT: ${{ vars.VALUE }}
+          VAR_SEPARATE: ${{ env.DATABASE }}-${{ vars.VALUE }}
+          VAR_MIXED: ${{ format('{0}-{1}-{2}', env.DATABASE, needs.build.outputs.suffix, vars.VALUE) }}
+          VAR_SECRET: ${{ vars.VALUE || secrets.DB_PASSWORD }}
+          VAR_MISSING: ${{ vars.MISSING }}
+    steps: [{run: true}]
+`)
+				writeFixtureFile(t, workspace, path, string(source))
+				jobs, err := compilePlansForTest(t.Context(), path, source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
+					EventTrust: compiler.EventUntrusted,
+					Runners: compiler.RunnerPolicy{
+						Labels: map[string]string{"ubuntu-latest": "gha-untrusted"}, UntrustedQueues: []string{"gha-untrusted"},
+					},
+					Vars: compiler.VariableSources{
+						Organization: map[string]string{"VALUE": "organization"}, Repository: map[string]string{"VALUE": "repository"},
+					},
+					EnvironmentSource: serviceEnvironmentSource{"production": {Variables: map[string]string{"value": "environment"}}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				job := jobs[1]
+				job.Needs = map[string]plan.Need{"build": {Result: "success", Outputs: map[string]string{"suffix": "runtime-tail", "password": passwordOutput}}}
+				// The fake Docker logs contain this canary. Resolving it from the
+				// service env inventory must register both agent and local masking.
+				var logs bytes.Buffer
+				redactor := &testRedactor{}
+				result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Stdout: &logs, Stderr: &logs,
+					Secrets: testSecretResolver{"DB_PASSWORD": "sibling-secret"}, Redactor: redactor,
+				}).RunJob(t.Context(), job, workspace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantFallback := passwordOutput
+				if wantFallback == "" {
+					wantFallback = "sibling-secret"
+				}
+				wantEnv := []string{"DATABASE=service-db", "FALLBACK=" + wantFallback, "FROM_JOB=job-db", "FROM_WORKFLOW=inherited", "PASSWORD=sibling-secret", "RUNTIME=job-runtime-tail-runtime-tail", "SNAPSHOT=not-yet-set",
+					"VAR_DIRECT=environment", "VAR_MISSING=", "VAR_MIXED=job-db-runtime-tail-environment", "VAR_SECRET=environment", "VAR_SEPARATE=job-db-environment"}
+				creates, serviceCreates := 0, 0
+				for _, call := range f.calls(t) {
+					if call.Args[0] != "create" {
+						continue
+					}
+					creates++
+					if !slices.Contains(call.Args, "--network-alias") {
+						continue
+					}
+					serviceCreates++
+					var gotEnv []string
+					for i, arg := range call.Args {
+						if arg == "--env" {
+							gotEnv = append(gotEnv, call.Args[i+1])
+						}
+					}
+					if !slices.Equal(gotEnv, wantEnv) {
+						t.Fatalf("service startup env = %q, want %q", gotEnv, wantEnv)
+					}
+				}
+				wantCreates := 1
+				if containerized {
+					wantCreates++
+				}
+				if creates != wantCreates || serviceCreates != 1 || result.Env["DATABASE"] != "job-db" || result.Env["SUFFIX"] != "job-runtime-tail" || result.Env["GITHUB_WORKSPACE"] == "" {
+					t.Fatalf("job setup changed: creates=%d serviceCreates=%d env=%v", creates, serviceCreates, result.Env)
+				}
+				if !slices.Equal(redactor.values, []string{"sibling-secret"}) || strings.Contains(logs.String(), "sibling-secret") || !strings.Contains(logs.String(), "diagnostic ***") {
+					t.Fatalf("service secret redaction: registered=%q logs=%q", redactor.values, logs.String())
+				}
+			})
+		}
+	}
+}
+
+type serviceEnvironmentSource map[string]compiler.EnvironmentProtection
+
+func (s serviceEnvironmentSource) ResolveEnvironment(_ context.Context, _, _, name string) (compiler.EnvironmentProtection, error) {
+	value, ok := s[name]
+	if !ok {
+		return compiler.EnvironmentProtection{}, fmt.Errorf("unknown environment %q", name)
+	}
+	return value, nil
+}
+
+func TestRunCompiledDottedContainerEnvironment(t *testing.T) {
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	const path = ".github/workflows/containers.yml"
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.20
+      env: {app.mode: production}
+    services:
+      elasticsearch:
+        image: elasticsearch:8
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: false
+    steps: [{run: true}]
+`)
+	writeFixtureFile(t, workspace, path, string(source))
+	jobs, err := compilePlansForTest(t.Context(), path, source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
+		EventTrust: compiler.EventUntrusted,
+		Runners: compiler.RunnerPolicy{
+			Labels: map[string]string{"ubuntu-latest": "gha-untrusted"}, UntrustedQueues: []string{"gha-untrusted"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("compiled jobs = %d, want 1", len(jobs))
+	}
+	f := newJobDocker(t, "")
+	if _, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(t.Context(), jobs[0], workspace); err != nil {
+		t.Fatal(err)
+	}
+	var jobEnv, serviceEnv []string
+	for _, call := range f.calls(t) {
+		if len(call.Args) == 0 || call.Args[0] != "create" {
+			continue
+		}
+		env := &jobEnv
+		if slices.Contains(call.Args, "--network-alias") {
+			env = &serviceEnv
+		}
+		for i, arg := range call.Args {
+			if arg == "--env" {
+				*env = append(*env, call.Args[i+1])
+			}
+		}
+	}
+	if !slices.Contains(jobEnv, "app.mode=production") || !slices.Contains(serviceEnv, "discovery.type=single-node") || !slices.Contains(serviceEnv, "xpack.security.enabled=false") {
+		t.Fatalf("docker environment: job=%q service=%q", jobEnv, serviceEnv)
 	}
 }
 
@@ -1546,13 +1779,103 @@ jobs:
 	}
 }
 
+func TestCompiledServiceCredentialDeferredInputEnvironment(t *testing.T) {
+	const (
+		buildID = "11111111-1111-4111-8111-111111111111"
+		jobID   = "22222222-2222-4222-8222-222222222222"
+	)
+	workspace := t.TempDir()
+	caller := `on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs: {password: '${{ steps.auth.outputs.password }}'}
+    steps: [{id: auth, run: true}]
+  call:
+    needs: producer
+    uses: ./.github/workflows/callee.yml
+    secrets: inherit
+    with: {password: '${{ needs.producer.outputs.password }}'}
+`
+	callee := `on:
+  workflow_call:
+    inputs:
+      user: {type: string, default: registry-user}
+      password: {type: string}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env: {PASSWORD: '${{ inputs.password }}'}
+    services:
+      database:
+        image: registry.example.test/team/postgres:16
+        credentials:
+          username: ${{ inputs.user }}
+          password: ${{ env.PASSWORD || secrets.REGISTRY_PASSWORD }}
+    steps: [{run: true}]
+`
+	writeFixtureFile(t, workspace, ".github/workflows/caller.yml", caller)
+	writeFixtureFile(t, workspace, ".github/workflows/callee.yml", callee)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(filepath.Join(workspace, ".github/workflows/caller.yml"), []byte(caller), event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil || len(plans) != 2 {
+		t.Fatalf("compile plans: %d, %v", len(plans), err)
+	}
+	producer, job := plans[0], plans[1]
+	encoded, err := plan.Encode(producer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := transport.Digest(encoded)
+	input := job.DeferredInputs["password"]
+	if got := input.NeedSources["producer"]; len(got) != 1 || got[0].StepKey != producer.Target.StepKey || got[0].PlanDigest != digest {
+		t.Fatalf("deferred input producer binding = %#v", got)
+	}
+	wantOutputs := []plan.NeedOutput{{Name: "password", StepKey: producer.Target.StepKey, Output: "password"}}
+	if !slices.Equal(input.NeedOutputs["producer"], wantOutputs) || len(job.NeedSources) != 0 || !slices.Equal(job.RequiredSecrets, []string{"REGISTRY_PASSWORD"}) || job.GitHubToken != nil {
+		t.Fatalf("deferred input changed scope or authority: input=%#v needs=%v secrets=%v token=%v", input, job.NeedSources, job.RequiredSecrets, job.GitHubToken)
+	}
+	manifest, err := transport.MarshalResultManifest(transport.ResultManifest{
+		PlanDigest: digest, Producer: transport.Producer{BuildID: buildID, JobID: jobID, StepKey: producer.Target.StepKey},
+		Result: "success", Outputs: []transport.Output{{Name: "password", Value: "registry-password"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := transport.Agent{Runner: deferredInputRunner{jobID: jobID, path: transport.ResultPath(producer.Target.StepKey, digest), data: manifest}}
+	job.DeferredInputValues, err = ResolveDeferredInputs(t.Context(), agent, t.TempDir(), buildID, job.DeferredInputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.CallGuards, _, err = ResolveCallGuards(t.Context(), agent, t.TempDir(), buildID, job.CallGuards)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newJobDocker(t, "")
+	result, err := (Runner{Docker: f.path, Secrets: testSecretResolver{"REGISTRY_PASSWORD": "unused-fallback"}, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("run result=%v, err=%v", result.Conclusion, err)
+	}
+	if jobDockerCallIndex(f.calls(t), "login", "registry.example.test", "--username", "registry-user", "--password-stdin") < 0 {
+		t.Fatalf("missing service login: %#v", f.calls(t))
+	}
+	// The Docker fixture accepts only registry-password on standard input.
+	status, err := os.ReadFile(filepath.Join(f.root, "login-stdin"))
+	if err != nil || string(status) != "ok" {
+		t.Fatalf("deferred password did not reach service startup: %q, %v", status, err)
+	}
+}
+
 func testProgramServices(services map[string]plan.ServiceContainer) executionprogram.Services {
 	result := executionprogram.Services{Static: make([]executionprogram.Service, 0, len(services))}
 	for _, name := range sortedKeys(services) {
 		service := services[name]
 		container := executionprogram.ServiceContainer{
 			Image:      testProgramSite(service.Image, executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),
-			Env:        testProgramBindings(service.Env, executionprogram.SurfaceServiceTemplate),
+			Env:        testProgramBindings(service.Env, executionprogram.SurfaceServiceEnvironment),
 			Ports:      testProgramSites(service.Ports, executionprogram.SurfaceServiceTemplate),
 			Volumes:    testProgramSites(service.Volumes, executionprogram.SurfaceServiceTemplate),
 			Options:    testProgramSite(service.Options, executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),
@@ -1643,17 +1966,61 @@ func TestRunServiceContainerOptionNameUsesCreatedReference(t *testing.T) {
 }
 
 func TestRunJobContainerServiceFailureDiagnosticsAreMasked(t *testing.T) {
-	f := newJobDocker(t, "service-unhealthy")
-	w, tmp := t.TempDir(), t.TempDir()
-	var output bytes.Buffer
-	p := newCommandOutputProcessor(&output, &output)
-	p.addMask("sibling-secret")
-	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(t.Context(), p, w, tmp, &plan.Container{Image: "alpine"}, map[string]plan.ServiceContainer{"db": {Image: "postgres"}})
-	if err == nil || !strings.Contains(err.Error(), `service "db"`) || !strings.Contains(err.Error(), `status "unhealthy"`) {
-		t.Fatalf("error=%v", err)
-	}
-	if strings.Contains(output.String(), "sibling-secret") || !strings.Contains(output.String(), "***") || jobDockerCallIndex(f.calls(t), "logs", "--tail", "200") < 0 {
-		t.Fatalf("unmasked or missing diagnostics: %q", output.String())
+	for _, test := range []struct {
+		name, scenario string
+		host           bool
+	}{
+		{name: "container", scenario: "service-unhealthy"},
+		{name: "host", scenario: "service-unhealthy", host: true},
+		{name: "inspect failure", scenario: "service-inspect-failed", host: true},
+		{name: "unavailable evidence", scenario: "service-evidence-unavailable", host: true},
+		{name: "truncated evidence", scenario: "service-evidence-truncated", host: true},
+		{name: "truncated logs", scenario: "service-logs-truncated", host: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newJobDocker(t, test.scenario)
+			w := t.TempDir()
+			job := jobContainerPlan(t, w, nil)
+			if test.host {
+				job.Container = nil
+			}
+			job.Services = map[string]plan.ServiceContainer{"db": {Image: "postgres", Credentials: &plan.ContainerCredentials{Username: "registry-user", Password: "health\"secret"}}}
+			job.ServiceOrder = []string{"db"}
+			job.RequiredSecrets = []string{"DB_PASSWORD"}
+			job.RequiredCapabilities = append(job.RequiredCapabilities, "secrets")
+			var output bytes.Buffer
+			result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Stdout: &output, Stderr: &output,
+				Secrets: testSecretResolver{"DB_PASSWORD": "sibling-secret"}, Redactor: &testRedactor{},
+			}).runTestJob(t.Context(), job, w)
+			if err == nil || result.Conclusion != "failure" || ClassifyFailure(err) != FailureClassServiceReadiness {
+				t.Fatalf("result=%#v, error=%v, class=%s", result, err, ClassifyFailure(err))
+			}
+			for _, secret := range []string{"sibling-secret", "health\"secret", `health\"secret`} {
+				if strings.Contains(err.Error()+output.String(), secret) {
+					t.Fatalf("unmasked diagnostics: error=%v output=%q", err, output.String())
+				}
+			}
+			if !strings.Contains(err.Error(), `service "db"`) || !strings.Contains(output.String(), `Service "db" container logs`) || !strings.Contains(err.Error()+output.String(), "***") {
+				t.Fatalf("missing attributed diagnostics: error=%v output=%q", err, output.String())
+			}
+			if test.scenario == "service-logs-truncated" && (!strings.Contains(output.String(), "container logs unavailable or truncated") || strings.Contains(output.String(), strings.Repeat("x", 100))) {
+				t.Fatalf("incomplete logs were not discarded: %q", output.String())
+			}
+			if strings.Contains(test.scenario, "evidence-") {
+				if !strings.Contains(err.Error(), "container health evidence unavailable or truncated") || strings.Contains(err.Error(), strings.Repeat("x", 100)) {
+					t.Fatalf("incomplete evidence was not discarded: %v", err)
+				}
+			} else {
+				for _, want := range []string{`container status="exited" exit_code=23 oom_killed=true`, `last health check exit_code=7`, `connection refused ***`, `health status="unhealthy" failing_streak=3`} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("missing %q in %v", want, err)
+					}
+				}
+				if strings.Contains(err.Error(), "earlier success") || result.ErrorAnnotations != "" {
+					t.Fatalf("included old check or interpreted a command: result=%#v error=%v", result, err)
+				}
+			}
+		})
 	}
 }
 
@@ -1668,6 +2035,9 @@ func TestRunJobContinueOnErrorToleratesServiceStartupFailure(t *testing.T) {
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), job, w)
 	if err == nil || !IsToleratedJobFailure(err) || result.Conclusion != "success" || !strings.Contains(err.Error(), `service "db"`) {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if ClassifyFailure(err) != FailureClassServiceReadiness {
+		t.Fatalf("tolerated readiness class = %s", ClassifyFailure(err))
 	}
 }
 
@@ -1684,6 +2054,9 @@ func TestRunJobContinueOnErrorDoesNotTolerateServiceStartupTimeout(t *testing.T)
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), job, w)
 	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if ClassifyFailure(err) == FailureClassServiceReadiness {
+		t.Fatal("workflow timeout classified as service readiness failure")
 	}
 }
 
@@ -1975,6 +2348,9 @@ jobs:
       db:
         image: postgres
         ports: ['6379', '6543:6380']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 3s
+          --health-timeout 2s --health-retries 5 --health-start-period 10s
     outputs:
       dynamic: ${{ job.services.db.ports[6379] }}
       fixed: ${{ job.services.db.ports[6380] }}
@@ -1999,6 +2375,16 @@ jobs:
 	}
 	if !maps.Equal(result.Outputs, map[string]string{"dynamic": "49152", "fixed": "6543"}) {
 		t.Fatalf("service outputs = %v", result.Outputs)
+	}
+	create := jobDockerCallIndex(f.calls(t), "create")
+	if create < 0 {
+		t.Fatal("service container was not created")
+	}
+	args := f.calls(t)[create].Args
+	for option, want := range map[string]string{"--health-cmd": "pg_isready -U postgres", "--health-interval": "3s", "--health-timeout": "2s", "--health-retries": "5", "--health-start-period": "10s"} {
+		if got := argumentAfter(t, args, option); got != want {
+			t.Errorf("Docker option %s = %q, want %q", option, got, want)
+		}
 	}
 	for _, call := range f.calls(t) {
 		if call.Args[0] == "exec" {
@@ -2056,6 +2442,39 @@ func TestRunJobHostServicePortProtocolCollisionIsDeterministic(t *testing.T) {
 	j.Program.Job.Steps = normalizeRuntimeTestSteps([]runtimeTestStep{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 41002`}})
 	if _, err := (Runner{Docker: f.path}).runTestJob(t.Context(), j, w); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunJobContainerSetupTimeoutIsNotUnexpected(t *testing.T) {
+	for _, stage := range []string{"network-create", "port"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newJobDocker(t, "block-"+stage)
+			w := t.TempDir()
+			j := jobContainerPlan(t, w, nil)
+			if stage == "port" {
+				j.Container = nil
+				j.Services = map[string]plan.ServiceContainer{"db": {Image: "postgres", Ports: []string{"6379"}}}
+				j.ServiceOrder = []string{"db"}
+			}
+			j.TimeoutMinutes = 0.02
+			result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), j, w)
+			var exit *exec.ExitError
+			if result.Conclusion != "cancelled" || !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &exit) {
+				t.Fatalf("RunJob() result = %#v, error = %v, want killed setup command", result, err)
+			}
+			if selected := UnexpectedFailure(err); selected != nil {
+				t.Fatalf("workflow Docker setup timeout selected as a defect: %v", selected)
+			}
+			calls := f.calls(t)
+			blocked := jobDockerCallIndex(calls, strings.Split(stage, "-")...) >= 0
+			removed := jobDockerCallIndex(calls, "network", "rm") >= 0
+			if !blocked || !removed {
+				t.Fatalf("blocking setup command and detached cleanup were not reached: %#v", calls)
+			}
+			if _, err := os.Stat(filepath.Join(f.root, "network")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("owned network was not removed: %v", err)
+			}
+		})
 	}
 }
 
@@ -2140,6 +2559,39 @@ func TestRunJobContainerToleratesWorkflowFailureAfterSuccessfulCleanup(t *testin
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), j, w)
 	if err == nil || !IsToleratedJobFailure(err) || result.Conclusion != "success" {
 		t.Fatalf("result=%#v, error=%v", result, err)
+	}
+}
+
+func TestRunJobContainerTerminationFailuresRemainUnexpected(t *testing.T) {
+	for _, scenario := range []string{"fail-terminate", "block-terminate"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newJobDocker(t, scenario)
+			w := t.TempDir()
+			j := jobContainerPlan(t, w, []runtimeTestStep{{
+				ID: "timed", Kind: "run", Shell: "sh", Command: "echo ready > step-ready; sleep 30", TimeoutMinutes: 0.01,
+			}})
+			j.ContinueOnError = true
+			result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}).runTestJob(t.Context(), j, w)
+			if result.Conclusion != "success" || !IsToleratedJobFailure(err) || ClassifyFailure(err) != FailureClassStepProcessExit {
+				t.Fatalf("completion attribution changed: result=%#v error=%v class=%s", result, err, ClassifyFailure(err))
+			}
+			if _, err := os.Stat(filepath.Join(w, "step-ready")); err != nil {
+				t.Fatalf("workflow process did not start before its deadline: %v", err)
+			}
+			selected := UnexpectedFailure(err)
+			var exit *exec.ExitError
+			if selected == nil || !errors.As(selected, &exit) || errors.Is(selected, context.DeadlineExceeded) || ClassifyFailure(selected) != FailureClassUnknown {
+				t.Fatalf("termination failure was hidden by the payload timeout: %v", selected)
+			}
+			if scenario == "fail-terminate" && exit.ExitCode() != 42 {
+				t.Fatalf("wrong command exit selected: %v", selected)
+			}
+			for _, resource := range []string{"network", "container"} {
+				if _, err := os.Stat(filepath.Join(f.root, resource)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("final %s cleanup did not succeed: %v", resource, err)
+				}
+			}
+		})
 	}
 }
 
@@ -2733,6 +3185,88 @@ runs:
 	}
 }
 
+func TestRunJobContainerRemoteCompositeWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, directory  string
+		reject, workflow bool
+	}{
+		{name: "action path", directory: "${{ github.action_path }}"},
+		{name: "traversal outside source", directory: "${{ github.action_path }}/../..", reject: true},
+		{name: "workflow cannot inherit source root", directory: "${{ github.action_path }}", reject: true, workflow: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newJobDocker(t, "")
+			workspace, remote := t.TempDir(), t.TempDir()
+			workflow := ".github/workflows/container.yml"
+			writeFixtureFile(t, workspace, workflow, "name: remote composite working directory\n")
+			writeFixtureFile(t, remote, "selected/value", "verified-action")
+			writeFixtureFile(t, remote, "selected/action.yml", `name: remote working directory
+outputs:
+  value:
+    value: ${{ steps.read.outputs.value }}
+runs:
+  using: composite
+  steps:
+    - id: read
+      shell: sh
+      working-directory: `+test.directory+`
+      run: |
+        touch "$COMPOSITE_MARKER"
+        echo "value=$(cat value)" >> "$GITHUB_OUTPUT"
+`)
+			id := remoteLifecycleLockID(1)
+			steps := []runtimeTestStep{{ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: id}}}
+			target := remoteMountTarget("owner/repo", strings.Repeat("a", 40)) + "/selected"
+			if test.workflow {
+				steps = append(steps, runtimeTestStep{ID: "outside", Kind: "run", Shell: "sh", WorkingDirectory: target, Command: `touch "$WORKFLOW_MARKER"`})
+			}
+			job := runtimePlan(t, workspace, workflow, steps)
+			digest := digestTree(t, remote)
+			job.RequiredCapabilities = []string{"docker", "network"}
+			job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+			job.Actions = []plan.ActionLock{remoteLifecycleLock(id, "selected", digest, nil)}
+			job.Outputs = map[string]string{"value": "${{ steps.remote.outputs.value }}"}
+			job.Env = map[string]string{"COMPOSITE_MARKER": filepath.Join(workspace, "composite-ran"), "WORKFLOW_MARKER": filepath.Join(workspace, "workflow-ran")}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+			result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).runTestJob(t.Context(), job, workspace)
+			if test.reject {
+				blocker, _, classified := UnsupportedFeature(err)
+				if err == nil || result.Conclusion != "failure" || !classified || blocker != "working_directory" {
+					t.Fatalf("outside container directory: result=%#v error=%v blocker=%s", result, err, blocker)
+				}
+				marker := job.Env["COMPOSITE_MARKER"]
+				if test.workflow {
+					marker = job.Env["WORKFLOW_MARKER"]
+				}
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("rejected payload executed: marker=%q error=%v", marker, err)
+				}
+			} else if err != nil || result.Conclusion != "success" || result.Outputs["value"] != "verified-action" {
+				t.Fatalf("remote container working directory: result=%#v error=%v", result, err)
+			}
+			payloads := 0
+			for _, call := range f.calls(t) {
+				if len(call.Args) == 0 || call.Args[0] != "exec" || !strings.Contains(strings.Join(call.Args, "\x00"), "value=$(cat value)") {
+					continue
+				}
+				payloads++
+				index := slices.Index(call.Args, "--workdir")
+				if index < 0 || index+1 >= len(call.Args) || call.Args[index+1] != target {
+					t.Fatalf("payload must use container action directory %q: %#v", target, call.Args)
+				}
+			}
+			wantPayloads := 1
+			if test.reject && !test.workflow {
+				wantPayloads = 0
+			}
+			if payloads != wantPayloads {
+				t.Fatalf("composite payloads=%d, want %d", payloads, wantPayloads)
+			}
+		})
+	}
+}
+
 func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
 	t.Parallel()
 
@@ -2782,39 +3316,49 @@ func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
 	}
 }
 
-func TestRunJobContainerRemoteActionPreparationTimeoutIsCancelled(t *testing.T) {
-	f := newJobDocker(t, "")
-	workspace := t.TempDir()
-	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: remote container action timeout\n")
-	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{{
-		ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID},
-	}})
-	job.Schema = plan.Schema
-	job.RequiredCapabilities = []string{"docker", "network"}
-	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
-	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", "sha256:"+strings.Repeat("0", 64), nil)}
-	job.ContinueOnError = true
-	job.TimeoutMinutes = 0.001
-	attachTestProgram(&job)
-	job.Program.Actions = map[string]executionprogram.Action{
-		lockID: {
-			Name: "remote", Runtime: "node24", Main: "index.js",
-			PreIf:  testProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean),
-			PostIf: testProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean),
-		},
-	}
-	materializer := &fakeActionMaterializer{materialize: func(ctx context.Context, _ source.Resolved) (source.Materialized, error) {
-		<-ctx.Done()
-		return source.Materialized{}, ctx.Err()
-	}}
+func TestRunJobRemoteActionPreparationTimeoutIsCancelled(t *testing.T) {
+	for _, mode := range []string{"host", "container"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newJobDocker(t, "")
+			workspace := t.TempDir()
+			writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: remote action timeout\n")
+			lockID := remoteLifecycleLockID(1)
+			job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{{
+				ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID},
+			}})
+			job.Schema = plan.Schema
+			job.RequiredCapabilities = []string{"network"}
+			if mode == "container" {
+				job.RequiredCapabilities = []string{"docker", "network"}
+				job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+			}
+			job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", "sha256:"+strings.Repeat("0", 64), nil)}
+			job.ContinueOnError = true
+			job.TimeoutMinutes = 0.001
+			attachTestProgram(&job)
+			job.Program.Actions = map[string]executionprogram.Action{
+				lockID: {
+					Name: "remote", Runtime: "node24", Main: "index.js",
+					PreIf:  testProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean),
+					PostIf: testProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean),
+				},
+			}
+			materializer := &fakeActionMaterializer{materialize: func(ctx context.Context, _ source.Resolved) (source.Materialized, error) {
+				<-ctx.Done()
+				return source.Materialized{}, ctx.Err()
+			}}
 
-	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).runTestJob(t.Context(), job, workspace)
-	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
-		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
-	}
-	if len(f.calls(t)) != 0 {
-		t.Fatalf("Docker called after action preparation timeout: %#v", f.calls(t))
+			result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).runTestJob(t.Context(), job, workspace)
+			if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
+				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+			}
+			if selected := UnexpectedFailure(err); selected != nil {
+				t.Fatalf("workflow materialization timeout selected as a defect: %v", selected)
+			}
+			if len(f.calls(t)) != 0 {
+				t.Fatalf("Docker called after action preparation timeout: %#v", f.calls(t))
+			}
+		})
 	}
 }
 
@@ -3133,9 +3677,11 @@ func liveContainerJob(t *testing.T, docker string, steps []runtimeTestStep) JobR
 	t.Helper()
 	w := t.TempDir()
 	j := jobContainerPlan(t, w, steps)
+	// Build before starting the deadline: a cold build can take most of it on a busy agent.
+	runtimeExecutable := buildLiveContainerRuntime(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
-	r, e := (Runner{Docker: docker, RuntimeExecutable: buildLiveContainerRuntime(t), InterruptGrace: 100 * time.Millisecond, TerminateGrace: 100 * time.Millisecond}).runTestJob(ctx, j, w)
+	r, e := (Runner{Docker: docker, RuntimeExecutable: runtimeExecutable, InterruptGrace: 100 * time.Millisecond, TerminateGrace: 100 * time.Millisecond}).runTestJob(ctx, j, w)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -3169,9 +3715,10 @@ func TestLiveJobContainerDefaultNonRootUser(t *testing.T) {
 	w := t.TempDir()
 	j := jobContainerPlan(t, w, []runtimeTestStep{{ID: "u", Kind: "run", Shell: "sh", Command: `test "$(id -u)" != 0`}})
 	j.Container.Image = "nginxinc/nginx-unprivileged:stable-alpine"
+	runtimeExecutable := buildLiveContainerRuntime(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	if _, err := (Runner{Docker: d, RuntimeExecutable: buildLiveContainerRuntime(t)}).runTestJob(ctx, j, w); err != nil {
+	if _, err := (Runner{Docker: d, RuntimeExecutable: runtimeExecutable}).runTestJob(ctx, j, w); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -3213,9 +3760,10 @@ runs:
 		{ID: compositeID, Source: "workspace", Path: ".github/actions/composite", SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/composite"))},
 	}
 	job.Outputs = map[string]string{"value": "${{ steps.js.outputs.value }}"}
+	runner := Runner{Docker: docker, RuntimeExecutable: buildLiveContainerRuntime(t), Node24: requireNode24(t)}
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	result, err := (Runner{Docker: docker, RuntimeExecutable: buildLiveContainerRuntime(t), Node24: requireNode24(t)}).runTestJob(ctx, job, workspace)
+	result, err := runner.runTestJob(ctx, job, workspace)
 	if err != nil || result.Outputs["value"] != "live" || result.Env["COMPOSITE_LIVE"] != "yes" {
 		t.Fatalf("live container actions result = %#v, error = %v", result, err)
 	}
@@ -3431,7 +3979,8 @@ func TestLiveManifestContainerFixtures(t *testing.T) {
 
 func TestLiveServiceDifferentialFixture(t *testing.T) {
 	docker := requireDocker(t)
-	sourcePath := fixturePath(t, "..", ".github", "workflows", "service-container-oracle.yml")
+	// Keep the runtime fixture independent of native-only GitHub probes.
+	sourcePath := fixturePath(t, "service-container-oracle.yml")
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
 		t.Fatal(err)
@@ -3459,6 +4008,116 @@ func TestLiveServiceDifferentialFixture(t *testing.T) {
 	}
 	if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
 		t.Fatalf("differential service fixture leaked owned Docker resources: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestLiveCompiledDottedServiceIDs(t *testing.T) {
+	docker := requireDocker(t)
+	runtimeExecutable := buildLiveContainerRuntime(t)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const image = "redis@sha256:c9d92d840fd011c908f040592857c724ae6d877f2aba5c40ad963276507386b2"
+	for _, containerized := range []bool{false, true} {
+		for _, dynamic := range []bool{false, true} {
+			t.Run(fmt.Sprintf("container=%t/dynamic=%t", containerized, dynamic), func(t *testing.T) {
+				services := `
+      s3.docker.test:
+        image: ` + image + `
+        ports: [6379]
+        options: --health-cmd "redis-cli ping" --health-interval 1s --health-timeout 2s --health-retries 10
+      s3-docker-test:
+        image: ` + image + `
+        ports: [6379]
+        options: --health-cmd "redis-cli ping" --health-interval 1s --health-timeout 2s --health-retries 10
+`
+				if dynamic {
+					service := `{"image":"` + image + `","ports":[6379],"options":"--health-cmd \"redis-cli ping\" --health-interval 1s --health-timeout 2s --health-retries 10"}`
+					services = ` ${{ fromJSON('{"s3.docker.test":` + service + `,"s3-docker-test":` + service + `}') }}` + "\n"
+				}
+				container := ""
+				shell := "bash"
+				command := `for port in "$DOTTED_PORT" "$HYPHENATED_PORT"; do
+            exec 3<>"/dev/tcp/127.0.0.1/$port"
+            printf 'PING\r\n' >&3
+            IFS= read -r -t 2 reply <&3
+            test "$reply" = $'+PONG\r'
+            exec 3<&- 3>&-
+          done`
+				if containerized {
+					container = "    container: " + image + "\n"
+					shell = "sh"
+					command = `test "$(redis-cli -h s3.docker.test SET marker dotted)" = OK
+          test "$(redis-cli -h s3-docker-test SET marker hyphenated)" = OK
+          test "$(redis-cli -h s3.docker.test GET marker)" = dotted
+          test "$(redis-cli -h s3-docker-test GET marker)" = hyphenated`
+				}
+				source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+` + container + `    services:` + services + `    outputs:
+      verified: ${{ steps.verify.outputs.verified }}
+    steps:
+      - id: verify
+        if: job.services['s3.docker.test'].id != job.services['s3-docker-test'].id
+        shell: ` + shell + `
+        env:
+          DOTTED_ID: ${{ job.services['s3.docker.test'].id }}
+          HYPHENATED_ID: ${{ job.services['s3-docker-test'].id }}
+          DOTTED_NETWORK: ${{ job.services['s3.docker.test'].network }}
+          HYPHENATED_NETWORK: ${{ job.services['s3-docker-test'].network }}
+          DOTTED_PORT: ${{ job.services['s3.docker.test'].ports[6379] }}
+          HYPHENATED_PORT: ${{ job.services['s3-docker-test'].ports[6379] }}
+        run: |
+          set -x
+          test -n "$DOTTED_ID"
+          test -n "$HYPHENATED_ID"
+          test "$DOTTED_ID" != "$HYPHENATED_ID"
+          test -n "$DOTTED_NETWORK"
+          test "$DOTTED_NETWORK" = "$HYPHENATED_NETWORK"
+          test -n "$DOTTED_PORT"
+          test -n "$HYPHENATED_PORT"
+          test "$DOTTED_PORT" != "$HYPHENATED_PORT"
+          ` + command + `
+          echo verified=yes >> "$GITHUB_OUTPUT"
+`)
+				workspace := t.TempDir()
+				const path = ".github/workflows/dotted.yml"
+				writeFixtureFile(t, workspace, path, string(source))
+				bundle, err := compiler.CompileBundle(path, source, event, "dotted-live", "sha256:"+strings.Repeat("3", 64), "dotted-importer")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(bundle.Plans) != 1 {
+					t.Fatalf("compiled plans = %d, want 1", len(bundle.Plans))
+				}
+				job := bundle.Plans[0].Job
+				if (job.Program.Job.Services.Dynamic != nil) != dynamic || !dynamic && !slices.Equal(job.ServiceOrder, []string{"s3.docker.test", "s3-docker-test"}) {
+					t.Fatalf("compiled services = %#v, order = %#v", job.Program.Job.Services, job.ServiceOrder)
+				}
+				encoded, err := plan.Encode(job)
+				if err != nil {
+					t.Fatal(err)
+				}
+				job, err = plan.Decode(encoded)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before := liveDockerOwnedResources(t, docker)
+				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+				defer cancel()
+				var logs bytes.Buffer
+				result, err := (Runner{Docker: docker, RuntimeExecutable: runtimeExecutable, Stdout: &logs, Stderr: &logs}).RunJob(ctx, job, workspace)
+				if err != nil || result.Conclusion != "success" || result.Outputs["verified"] != "yes" {
+					t.Fatalf("dotted service result = %#v, error = %v\n%s", result, err, logs.String())
+				}
+				if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
+					t.Fatalf("dotted services leaked Docker resources: before=%#v after=%#v", before, after)
+				}
+			})
+		}
 	}
 }
 

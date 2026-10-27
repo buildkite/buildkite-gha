@@ -39,7 +39,7 @@ const (
 // runtimeMatrixDeferredMessage is the report text for a matrix whose values
 // come from a job output but which buildkite-gha cannot hand to a deferred
 // pipeline upload. Detail names the requirement the workflow misses.
-const runtimeMatrixDeferredMessage = "matrix values come from a job output that exists only after that job runs; buildkite-gha expands such a matrix with a deferred pipeline upload, and this workflow does not meet its requirements (https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#matrices-from-job-outputs)"
+const runtimeMatrixDeferredMessage = "matrix values come from a job output that exists only after that job runs; buildkite-gha expands such a matrix with a deferred pipeline upload, and this workflow does not meet its requirements (https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#job-syntax-matrices-from-job-outputs)"
 
 // RuntimeContinuation is one deferred pipeline upload recorded by the
 // initial compilation: the consumer whose scheduling value comes from a producer job

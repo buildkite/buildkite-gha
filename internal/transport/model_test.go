@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -65,6 +67,25 @@ func TestResultManifestEnforcesOutputLimits(t *testing.T) {
 	}
 	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "oversized output") {
 		t.Fatalf("MarshalResultManifest() error = %v, want output size rejection", err)
+	}
+	// Control characters escape to six bytes each, so the largest permitted
+	// outputs must still fit the manifest and verify after download.
+	escaped := strings.Repeat("\x01", MaxResultOutputBytes)
+	manifest.Outputs = []Output{{Name: "a", Value: escaped}, {Name: "b", Value: escaped}, {Name: "c", Value: escaped}, {Name: "d", Value: escaped}}
+	encoded, err := MarshalResultManifest(manifest)
+	if err != nil {
+		t.Fatalf("MarshalResultManifest() error = %v, want largest outputs accepted", err)
+	}
+	if _, err := VerifyResultManifest(encoded, manifest.PlanDigest, manifest.Producer); err != nil {
+		t.Fatalf("VerifyResultManifest() error = %v", err)
+	}
+	metadata, err := ResultMetadata("ci", "producer", manifest, encoded)
+	if err != nil || len(metadata) != 2 {
+		t.Fatalf("ResultMetadata() = %d keys, %v; want outputs over 1 KiB left out of metadata", len(metadata), err)
+	}
+	manifest.Outputs = append(manifest.Outputs, Output{Name: "e", Value: "x"})
+	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "outputs exceed") {
+		t.Fatalf("MarshalResultManifest() error = %v, want total output size rejection", err)
 	}
 	manifest.Outputs = make([]Output, MaxResultOutputs+1)
 	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "maximum") {
@@ -416,6 +437,40 @@ func TestCommandRunnerBoundsOutputWhileReading(t *testing.T) {
 	stdout, _, err := (CommandRunner{}).RunBounded(t.Context(), "", "sh", []string{"-c", "printf 123456789"}, nil, 8)
 	if err == nil || !strings.Contains(err.Error(), "exceeds 8 bytes") || len(stdout) != 0 {
 		t.Fatalf("runBounded() stdout = %q, error = %v", stdout, err)
+	}
+}
+
+func TestAgentUploadCancellationPreservesProcessExit(t *testing.T) {
+	root := t.TempDir()
+	marker := filepath.Join(root, "started")
+	executable := filepath.Join(root, "buildkite-agent")
+	if err := os.WriteFile(executable, fmt.Appendf(nil, "#!/bin/sh\nprintf ready > %q\nexec sleep 30\n", marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- (Agent{Runner: CommandRunner{}}).UploadPipeline(ctx, []byte("steps: []")) }()
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	waiting := true
+	for waiting {
+		select {
+		case <-deadline:
+			t.Fatal("Agent upload did not start")
+		case <-ticker.C:
+			if _, err := os.Stat(marker); err == nil {
+				waiting = false
+			}
+		}
+	}
+	cancel()
+	err := <-result
+	var exit *exec.ExitError
+	if !errors.Is(err, context.Canceled) || !errors.As(err, &exit) {
+		t.Fatalf("Agent upload lost cancellation or original exit: %v", err)
 	}
 }
 

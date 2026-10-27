@@ -8,7 +8,7 @@ import "strings"
 const experimentalRunnerHome = "/home/runner"
 const experimentalRunnerTemp = "/tmp/buildkite-gha-runner"
 
-func experimentalRunnerUserBootstrap(requiresMise, hostedToolCache bool, cache *CacheVolume) []string {
+func experimentalRunnerUserBootstrap(platform string, requiresMise, hostedToolCache bool, cache *CacheVolume) []string {
 	commands := []string{
 		`bootstrap_dir="$1"`,
 		`distribution="$2"`,
@@ -32,9 +32,9 @@ func experimentalRunnerUserBootstrap(requiresMise, hostedToolCache bool, cache *
 		`sudo -n --user runner -- test -r "$plan" && ! sudo -n --user runner -- test -w "$plan" || { echo 'buildkite-gha: runner plan permissions are unsafe' >&2; exit 1; }`,
 	}
 	if cache != nil {
-		cacheAnchor := platformCacheValidationPath("linux/amd64")
+		cacheAnchor := platformCacheValidationPath(platform)
 		if requiresMise {
-			cacheAnchor = platformMiseCachePath("linux/amd64")
+			cacheAnchor = platformMiseCachePath(platform)
 		}
 		commands = append(commands, experimentalRunnerCacheOwnershipCommands("/cache/bkcache", cacheAnchor, cache.Paths)...)
 	}

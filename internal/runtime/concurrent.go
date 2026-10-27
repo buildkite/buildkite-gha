@@ -177,7 +177,7 @@ func (s *backgroundSupervisor) commitCompleted(tasks []*backgroundTask) []stepEx
 
 func stepContext(parent context.Context, timeoutMinutes float64) (context.Context, context.CancelFunc) {
 	if timeoutMinutes > 0 {
-		return context.WithTimeout(parent, durationMinutes(timeoutMinutes))
+		return context.WithTimeoutCause(parent, durationMinutes(timeoutMinutes), errWorkflowDeadline)
 	}
 	return context.WithCancel(parent)
 }
@@ -191,11 +191,12 @@ func bindHashFilesContext(ctx context.Context, eval *expression.Context) {
 }
 
 func (r *jobRun) executePlanStep(jobCtx, runCtx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step executionprogram.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
-	result, err := r.runJobStep(runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
+	result, err := r.runJobStep(jobCtx, runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
 	return classifyStepExecutionWithControls(jobCtx, runCtx, step, result, err, eval)
 }
 
 func classifyStepExecution(jobCtx, runCtx context.Context, id string, continueOnError bool, result Result, err error) stepExecution {
+	err = markWorkflowTimeout(runCtx, err)
 	execution := stepExecution{id: id, result: result, err: err, outcome: "success", conclusion: "success"}
 	if err == nil {
 		return execution
@@ -231,7 +232,7 @@ func cancelledStepExecution(jobCtx, runCtx context.Context, step executionprogra
 	return classifyStepExecution(jobCtx, runCtx, step.ID, step.ContinueOnError.Literal, newResult(), err)
 }
 
-func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *expression.Context) error {
+func commitStepExecution(execution stepExecution, processor *commandOutputProcessor, jobResult *JobResult, eval *expression.Context) error {
 	id := strings.ToLower(execution.id)
 	eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
 	commitResultEnvironment(jobResult.Env, execution.result)
@@ -239,6 +240,7 @@ func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *ex
 	maps.Copy(jobResult.State, execution.result.State)
 	appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, execution.result.Summary, execution.result.summaryTruncated)
 	jobResult.Artifacts = append(jobResult.Artifacts, execution.result.Artifacts...)
+	processor.warnToleratedFailure(execution, fmt.Sprintf("step %q", execution.id))
 	if execution.conclusion != "success" {
 		return fmt.Errorf("step %q: %w", execution.id, execution.err)
 	}
@@ -268,6 +270,7 @@ func cloneExpressionContext(in expression.Context) expression.Context {
 		Inputs:           inputs,
 		WorkflowInputs:   cloneAnyMap(in.WorkflowInputs),
 		Matrix:           cloneAnyMap(in.Matrix),
+		Strategy:         cloneAnyMap(in.Strategy),
 		Steps:            cloneStepStatuses(in.Steps),
 		Needs:            cloneNeedStatuses(in.Needs),
 		Secrets:          cloneStrings(in.Secrets),

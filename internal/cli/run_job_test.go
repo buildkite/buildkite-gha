@@ -8,16 +8,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -26,6 +30,47 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
+
+func TestRunJobLogsHashFilesFailureEvenWhenTolerated(t *testing.T) {
+	for _, tolerate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("continue-on-error=%t", tolerate), func(t *testing.T) {
+			job := cliRunJobPlan()
+			step := &job.Program.Job.Steps[0]
+			step.Env = cliProgramBindings(map[string]string{"CACHE_KEY": "${{ hashFiles('../package-lock.json') }}"})
+			step.ContinueOnError.Literal = tolerate
+			planPath, planDigest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, planDigest)
+			var stdout, stderr bytes.Buffer
+			runner := &cliCaptureRunner{}
+			wantCode, wantResult := 1, "failure"
+			if tolerate {
+				wantCode, wantResult = 0, "success"
+			}
+			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != wantCode {
+				t.Fatalf("exit = %d, want %d; stderr = %s", code, wantCode, stderr.String())
+			}
+			want := `step "step-1": environment: evaluate "CACHE_KEY": hashFiles pattern 1 may not contain ".."`
+			if !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+			}
+			if result := publishedCLIManifest(t, runner, job, planDigest); result.Result != wantResult {
+				t.Fatalf("published result = %q, want %q", result.Result, wantResult)
+			}
+			if tolerate && !strings.Contains(stderr.String(), "continue-on-error") {
+				t.Fatalf("tolerated failure lacks explanation: %s", stderr.String())
+			}
+			warningPublished := false
+			for _, command := range runner.commands {
+				if len(command.args) > 0 && command.args[0] == "annotate" && slices.Contains(command.args, "buildkite-gha-workflow-warnings") && strings.Contains(string(command.stdin), "hashFiles pattern 1") {
+					warningPublished = true
+				}
+			}
+			if warningPublished != tolerate {
+				t.Fatalf("warning annotation published = %t, want %t", warningPublished, tolerate)
+			}
+		})
+	}
+}
 
 func TestRunJobPublishesFailureWhenExplicitRuntimeMiseIsInvalid(t *testing.T) {
 	job := cliRunJobPlan()
@@ -446,6 +491,158 @@ func TestRunJobDisabledWorkflowTokenLinksPipelineSettings(t *testing.T) {
 	}
 }
 
+func TestRunJobRejectedWorkflowTokenGuidanceAndTelemetry(t *testing.T) {
+	const (
+		jobToken     = "job-token-must-not-leak"
+		responseData = "provider-response-must-not-leak"
+		buildURL     = "https://buildkite.com/acme-inc/my-pipeline/builds/42"
+	)
+	events := make(chan telemetry.Properties, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Token "+jobToken {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/github_workflow_access_token"):
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, responseData)
+		case strings.HasSuffix(r.URL.Path, "/posthog/events"):
+			var received struct {
+				Properties telemetry.Properties `json:"properties"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+				t.Errorf("decode telemetry event: %v", err)
+			}
+			events <- received.Properties
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	job := cliRunJobPlan()
+	job.Workflow.Path = ".github/workflows/ci.yml"
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "ci.yml", Permissions: map[string]string{"contents": "read"}}
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", jobToken)
+	t.Setenv("BUILDKITE_GHA_AGENT", truePath)
+	t.Setenv("BUILDKITE_BUILD_URL", buildURL)
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+
+	var stdout, stderr bytes.Buffer
+	runner := &cliCaptureRunner{}
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var annotations []cliCommand
+	for _, command := range runner.commands {
+		if len(command.args) > 0 && command.args[0] == "annotate" {
+			annotations = append(annotations, command)
+		}
+	}
+	if len(annotations) != 1 {
+		t.Fatalf("annotations = %#v, want one workflow-token annotation", annotations)
+	}
+	annotation := string(annotations[0].stdin)
+	for _, want := range []string{"GitHub workflow token unavailable", "top-level permissions", "contact Buildkite support", buildURL} {
+		if !strings.Contains(annotation, want) {
+			t.Errorf("annotation %q lacks %q", annotation, want)
+		}
+	}
+	for _, secret := range []string{jobToken, responseData} {
+		if strings.Contains(annotation, secret) {
+			t.Errorf("annotation leaked %q", secret)
+		}
+	}
+	for _, want := range []string{"top-level permissions", "Buildkite GitHub App", "contact Buildkite support", buildURL} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+	for _, secret := range []string{jobToken, responseData} {
+		if strings.Contains(stderr.String(), secret) {
+			t.Errorf("stderr contains secret %q", secret)
+		}
+	}
+	event := <-events
+	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeWorkflowToken || event.AgentAPIHTTPStatus != http.StatusBadRequest {
+		t.Fatalf("telemetry = %#v", event)
+	}
+	if !strings.Contains(event.ErrorMessage, "top-level permissions") || !strings.Contains(event.ErrorMessage, buildURL) {
+		t.Errorf("telemetry error message = %q", event.ErrorMessage)
+	}
+	for _, secret := range []string{jobToken, responseData} {
+		if strings.Contains(event.ErrorMessage, secret) {
+			t.Errorf("telemetry error message contains secret %q", secret)
+		}
+	}
+}
+
+func TestRunJobAnnotatesWorkflowPermissionDenial(t *testing.T) {
+	for _, failAnnotation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("annotation failure %t", failAnnotation), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"code":"permissions_unavailable","message":"<script>provider-secret</script>"}`)
+			}))
+			defer server.Close()
+			job := cliRunJobPlan()
+			job.Workflow.Path = ".github/workflows/ci.yml"
+			job.Event.Repository = "acme/widgets"
+			job.RequiredCapabilities = []string{"provider-token-write"}
+			job.GitHubToken = &plan.GitHubToken{Workflow: "ci.yml", Permissions: map[string]string{"contents": "read", "issues": "write"}}
+			planPath, digest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, digest)
+			truePath, err := exec.LookPath("true")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+			t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-secret")
+			t.Setenv("BUILDKITE_GHA_AGENT", truePath)
+			t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "1")
+			runner := &cliCaptureRunner{failAnnotation: failAnnotation}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 {
+				t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+			}
+			var annotations []cliCommand
+			for _, command := range runner.commands {
+				if len(command.args) > 0 && command.args[0] == "annotate" {
+					annotations = append(annotations, command)
+				}
+			}
+			if len(annotations) != 1 || !slices.Equal(annotations[0].args, []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", "github-workflow-token", "--style", "error"}) {
+				t.Fatalf("annotations = %#v", annotations)
+			}
+			for _, output := range []string{stderr.String(), string(annotations[0].stdin)} {
+				for _, want := range []string{"App registration", "only if the App already requests", "Workflow requested contents:read, issues:write for acme/widgets"} {
+					if !strings.Contains(output, want) {
+						t.Errorf("output %q lacks %q", output, want)
+					}
+				}
+				for _, secret := range []string{"provider-secret", "job-secret", "<script>"} {
+					if strings.Contains(output, secret) {
+						t.Errorf("output leaked %q", secret)
+					}
+				}
+			}
+			if got := strings.Contains(stderr.String(), "warning: workflow token annotation"); got != failAnnotation {
+				t.Errorf("annotation warning = %t, want %t", got, failAnnotation)
+			}
+		})
+	}
+}
+
 func TestRunJobAnnotatesUnavailableBuildkiteSecretWithMigrationGuidance(t *testing.T) {
 	job := cliRunJobPlan()
 	job.RequiredCapabilities = []string{"secrets"}
@@ -791,6 +988,154 @@ func TestRunJobPublishesHydrationFailureAndRejectsMissingIdentity(t *testing.T) 
 	})
 }
 
+func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		command         string
+		output          string
+		wantError       string
+		jobTimeout      float64
+		stepTimeout     float64
+		miseProbe       bool
+		cancel          bool
+		failPublication bool
+		wantReports     int
+	}{
+		{name: "ordinary process failure", command: "exit 7"},
+		{name: "malformed file command", command: `printf 'invalid\n' >> "$GITHUB_OUTPUT"`, wantError: "invalid file command"},
+		{name: "invalid job output expression", command: "true", output: "${{ fromJSON('invalid') }}", wantError: "job output"},
+		{name: "workflow job timeout", command: "sleep 30", jobTimeout: 0.001, wantError: "context deadline exceeded"},
+		{name: "workflow step timeout", command: "sleep 30", stepTimeout: 0.001, wantError: "context deadline exceeded"},
+		{name: "workflow timeout during mise probe", command: "true", jobTimeout: 0.003, miseProbe: true, wantError: "context deadline exceeded"},
+		{name: "publication failure", command: "true", failPublication: true, wantReports: 1},
+		{name: "publication failure after cancellation", command: "true", cancel: true, failPublication: true, wantReports: 1},
+		{name: "cancellation without publication failure", command: "true", cancel: true},
+		{name: "cancellation during mise probe", command: "true", cancel: true, miseProbe: true},
+		{name: "publication failure after cancelled mise probe", command: "true", cancel: true, miseProbe: true, failPublication: true, wantReports: 1},
+		{name: "publication failure after process failure", command: "exit 7", failPublication: true, wantReports: 1},
+		{name: "publication failure after validation failure", command: `printf 'invalid\n' >> "$GITHUB_OUTPUT"`, wantError: "invalid file command", failPublication: true, wantReports: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := cliRunJobPlan()
+			job.Program.Job.Steps[0].Run.Command.Source = test.command
+			job.TimeoutMinutes = test.jobTimeout
+			job.Program.Job.Steps[0].TimeoutMinutes.Literal = test.stepTimeout
+			var probeMarker string
+			if test.miseProbe {
+				requiresMise := true
+				job.RequiresMise = &requiresMise
+				job.Actions = []plan.ActionLock{{
+					ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
+					SourceDigest: "sha256:" + strings.Repeat("a", 64),
+				}}
+				job.Program.Job.Steps = []executionprogram.Step{cliActionStep("local", "./actions/build", "a-0000000000000001")}
+				root := canonicalTempDir(t)
+				probeMarker = filepath.Join(root, "started")
+				mise := filepath.Join(root, "mise")
+				if err := os.WriteFile(mise, fmt.Appendf(nil, "#!/bin/sh\nprintf ready > %q\nexec /bin/sleep 30\n", probeMarker), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("BUILDKITE_GHA_MISE", mise)
+			}
+			if test.output != "" {
+				job.Outputs = map[string]string{"result": test.output}
+			}
+			planPath, planDigest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, planDigest)
+			t.Setenv("BUGSNAG_API_KEY", strings.Repeat("a", 32))
+			t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+			t.Setenv("BUILDKITE_AGENT_ENDPOINT", "")
+			originalTransport := http.DefaultTransport
+			t.Cleanup(func() { http.DefaultTransport = originalTransport })
+			reports := 0
+			http.DefaultTransport = bugsnagTestTransport(func(request *http.Request) (*http.Response, error) {
+				reports++
+				if request.Context().Err() != nil {
+					t.Fatal("error report inherited cancelled context")
+				}
+				var payload struct {
+					Events []struct {
+						Context    string
+						Exceptions []struct{ Stacktrace []struct{ Method string } }
+					}
+				}
+				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				if request.URL.Host != "notify.bugsnag.com" || len(payload.Events) != 1 || payload.Events[0].Context != "run_job:result_publication" {
+					t.Fatal("publication error was not attributed correctly")
+				}
+				stack := payload.Events[0].Exceptions[0].Stacktrace
+				if len(stack) == 0 || !strings.Contains(stack[0].Method, "runJobContext") {
+					t.Fatalf("report lost its CLI boundary: %#v", stack)
+				}
+				// A reporting outage must not replace the job's own error.
+				return nil, errors.New("Bugsnag unavailable")
+			})
+			runner := &cliCaptureRunner{}
+			if test.failPublication {
+				runner.failAt = 1
+			}
+			var stdout, stderr bytes.Buffer
+			var code int
+			if test.cancel {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				if test.miseProbe {
+					go func() {
+						ticker := time.NewTicker(time.Millisecond)
+						defer ticker.Stop()
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							case <-ticker.C:
+								if _, err := os.Stat(probeMarker); err == nil {
+									cancel()
+									return
+								}
+							}
+						}
+					}()
+				} else {
+					cancel()
+				}
+				code = runJobContext(ctx, []string{"--plan", planPath}, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner})
+				for _, contextErr := range runner.contextErrors {
+					if contextErr != nil {
+						t.Fatalf("publication inherited cancelled context: %v", contextErr)
+					}
+				}
+			} else {
+				code = run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner)
+			}
+			if code != 1 {
+				t.Fatalf("job exit code = %d, want 1", code)
+			}
+			if test.wantError != "" && !strings.Contains(stderr.String(), test.wantError) {
+				t.Fatalf("wrong failure: %s", stderr.String())
+			}
+			if test.miseProbe {
+				if _, err := os.Stat(probeMarker); err != nil {
+					t.Fatalf("mise probe did not start before the deadline: %v", err)
+				}
+			}
+			if test.jobTimeout > 0 && publishedCLIManifest(t, runner, job, planDigest).Result != "cancelled" {
+				t.Fatal("job timeout did not publish its cancelled conclusion")
+			}
+			if reports != test.wantReports || strings.Contains(stderr.String(), "Bugsnag unavailable") {
+				t.Fatalf("reports = %d, want %d; stderr = %s", reports, test.wantReports, stderr.String())
+			}
+		})
+	}
+}
+
+type bugsnagTestTransport func(*http.Request) (*http.Response, error)
+
+func (f bugsnagTestTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
 func TestRunJobFailsWhenAuthoritativePublicationFails(t *testing.T) {
 	job := cliRunJobPlan()
 	planPath, planDigest := writeCLIJobPlan(t, job)
@@ -832,6 +1177,68 @@ func TestRunJobTelemetryClassifiesExecutionFailure(t *testing.T) {
 	}
 }
 
+func TestRunJobTelemetryClassifiesServiceReadiness(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("service containers require Linux amd64")
+	}
+	for _, padding := range []int{0, 900, 1500} {
+		t.Run(fmt.Sprintf("output-padding=%d", padding), func(t *testing.T) {
+			secret := "health\"secret-" + strings.Repeat("boundary-secret-", 40)
+			healthOutput := "connection refused " + strings.Repeat("x", padding/2) + secret + strings.Repeat("y", padding-padding/2) + " end of health output"
+			docker := filepath.Join(t.TempDir(), "docker")
+			if err := os.WriteFile(docker, []byte(fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  create) echo service-container ;;
+  inspect)
+    case "$3" in
+      *State.Status*) echo 'container status="running" exit_code=0 oom_killed=false; health status="unhealthy" failing_streak=3; last health check exit_code=7 output=%s' ;;
+      *) echo unhealthy ;;
+    esac ;;
+  logs) echo 'connection refused %s' ;;
+esac
+`, strconv.Quote(healthOutput), secret)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("BUILDKITE_GHA_DOCKER", docker)
+			job := cliRunJobPlan()
+			job.RequiredCapabilities = []string{"docker", "network"}
+			job.Program.Job.Services = executionprogram.Services{Static: []executionprogram.Service{
+				{Name: "nats", Container: executionprogram.ServiceContainer{
+					Image:       cliProgramSite("nats:2"),
+					Credentials: &executionprogram.ContainerCredentials{Username: cliProgramSite("registry-user"), Password: cliProgramSite(secret)},
+				}},
+			}}
+			planPath, planDigest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, planDigest)
+			events := captureCommandTelemetry(t)
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
+				t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+			}
+			event := <-events
+			if event.Command != telemetry.CommandRunJob || event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != "E_SERVICE_READINESS" {
+				t.Fatalf("telemetry = %#v", event)
+			}
+			for _, want := range []string{`service "nats" failed readiness`, `container status="running"`, `health status="unhealthy"`, `last health check exit_code=7`, `connection refused`, "***"} {
+				if !strings.Contains(event.ErrorMessage, want) || !strings.Contains(stderr.String(), want) {
+					t.Errorf("missing %q: telemetry=%q stderr=%q", want, event.ErrorMessage, stderr.String())
+				}
+			}
+			if len(event.ErrorMessage) > telemetry.MaxErrorMessageBytes || event.ErrorMessageTruncated != (padding != 0) {
+				t.Errorf("telemetry length=%d truncated=%t", len(event.ErrorMessage), event.ErrorMessageTruncated)
+			}
+			for _, fragment := range []string{"boundary-secret", "health\"secret", `health\"secret`} {
+				if strings.Contains(event.ErrorMessage+stderr.String(), fragment) {
+					t.Errorf("unmasked secret fragment %q", fragment)
+				}
+			}
+			if !strings.Contains(stderr.String(), "end of health output") {
+				t.Error("job stderr lost the complete bounded health evidence")
+			}
+		})
+	}
+}
+
 func TestRunJobTelemetryClassifiesUnsupportedShell(t *testing.T) {
 	job := cliRunJobPlan()
 	job.Program.Job.Steps[0].Run.Shell.Source = "cmd"
@@ -855,6 +1262,30 @@ func TestRunJobTelemetryClassifiesUnsupportedShell(t *testing.T) {
 	}
 }
 
+func TestRunJobTelemetryClassifiesOutsideWorkingDirectory(t *testing.T) {
+	job := cliRunJobPlan()
+	job.Program.Job.Steps[0].Run.WorkingDirectory.Source = t.TempDir()
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	events := captureCommandTelemetry(t)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var event telemetry.Properties
+	select {
+	case event = <-events:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no completion telemetry; stderr = %q", stderr.String())
+	}
+	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeUnsupportedFeature || event.Blocker != "working_directory" {
+		t.Fatalf("telemetry = %#v", event)
+	}
+	if !strings.Contains(event.ErrorMessage, "outside the permitted execution roots") {
+		t.Fatalf("telemetry error message = %q", event.ErrorMessage)
+	}
+}
+
 func TestRunJobValidateHostErrorsClassifyAsUnsupported(t *testing.T) {
 	job := plan.Job{RequiredCapabilities: []string{"docker"}}
 	err := gharuntime.ValidateHost(job, "darwin", "arm64")
@@ -866,6 +1297,55 @@ func TestRunJobValidateHostErrorsClassifyAsUnsupported(t *testing.T) {
 	}
 	if got := runtimeFailureCode(errors.Join(err, context.Canceled)); got != telemetry.FailureCodeUnsupportedFeature {
 		t.Fatalf("runtimeFailureCode() = %q, want %q when cancellation is joined with an unrelated failure", got, telemetry.FailureCodeUnsupportedFeature)
+	}
+}
+
+func TestRuntimeFailureCodeClassifiesTokenAndCacheServices(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, "response data must not escape")
+	}))
+	defer server.Close()
+
+	githubTokens, err := gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
+		Endpoint: server.URL, JobID: cliTestJobID, JobToken: "job-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, workflowErr := githubTokens.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
+	oidcTokens, err := gharuntime.NewAgentOIDCTokens(gharuntime.AgentOIDCTokenConfig{
+		Endpoint: server.URL, JobID: cliTestJobID, JobToken: "job-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, oidcErr := oidcTokens.OIDCToken(t.Context(), "audience")
+	cacheCredentials, err := gharuntime.NewAgentCacheCredentials(gharuntime.AgentCacheConfig{
+		Endpoint: server.URL, JobID: cliTestJobID, JobToken: "job-token", ResultsURL: server.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cacheErr := cacheCredentials.Credentials(t.Context())
+
+	for _, test := range []struct {
+		name string
+		err  error
+		want telemetry.FailureCode
+	}{
+		{name: "workflow token", err: workflowErr, want: telemetry.FailureCodeWorkflowToken},
+		{name: "OIDC token", err: oidcErr, want: telemetry.FailureCodeOIDCToken},
+		{name: "cache credential", err: cacheErr, want: telemetry.FailureCodeCacheCredential},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.err == nil {
+				t.Fatal("service request succeeded")
+			}
+			if got := runtimeFailureCode(test.err); got != test.want {
+				t.Fatalf("runtimeFailureCode() = %q, want %q for %v", got, test.want, test.err)
+			}
+		})
 	}
 }
 
@@ -1074,6 +1554,9 @@ func attachCLIExecutionProgram(job *plan.Job) {
 		normalized.Job.Guards[i].Condition = cliProgramSite(guard.Condition)
 	}
 	normalized.Job.Steps = steps
+	if job.Program != nil {
+		normalized.Job.Services = job.Program.Job.Services
+	}
 	if job.Container != nil {
 		normalized.Job.Container = &executionprogram.Container{Image: cliProgramSite(job.Container.Image), Env: cliProgramBindings(job.Container.Env), Ports: cliProgramSites(job.Container.Ports)}
 	}

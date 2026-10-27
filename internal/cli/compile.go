@@ -61,7 +61,10 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 		workflowReferencesVars = staticValidation.ReferencesVars
 		vars, varsErr := resolveVariableSources(ctx, variables, parsedEvent, workflowReferencesVars)
 		if varsErr != nil {
-			return out.fail(ctx, compatibility.EnvironmentProcessingReport(workflowPath, "", varsErr.Error()), varsErr)
+			report := compatibility.NewProcessingReport(workflowPath, "")
+			report.Result = "indeterminate"
+			report.AddVariableResolutionFailure(varsErr.Error())
+			return out.fail(ctx, report, varsErr)
 		}
 		options.Vars = vars
 	}
@@ -93,7 +96,7 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 		if compileErr == nil && parsedEventErr == nil {
 			actionVars, again, varsErr := resolveActionVariables(ctx, variables, parsedEvent, workflowReferencesVars, bundle)
 			if varsErr != nil {
-				processingReport.AddEnvironmentFailure(varsErr.Error())
+				processingReport.AddVariableResolutionFailure(varsErr.Error())
 				processingReport.Result = "indeterminate"
 				return out.fail(ctx, processingReport, varsErr)
 			}

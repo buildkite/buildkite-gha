@@ -40,4 +40,79 @@ if output="$(TEST_HEAD=same TEST_TAG=same require_release_changes v0.13.15 2>&1)
 fi
 [[ "$output" == *'no changes since v0.13.15'* ]] || die "unexpected failure: $output"
 
+ci_calls="$(mktemp)"
+trap 'rm -f "$ci_calls"' EXIT
+export TEST_CI_CALLS="$ci_calls"
+export TEST_TAG=1111111111111111111111111111111111111111
+export TEST_HEAD="$TEST_TAG"
+export BUILDKITE_COMMIT="$TEST_TAG"
+export TEST_BUGSNAG_KEY=0123456789abcdef0123456789abcdef
+unset GITHUB_TOKEN BUGSNAG_API_KEY
+
+# Run the real CI release script, replacing every external side effect.
+git() {
+  case "$1" in
+    fetch) ;;
+    ls-remote) printf '%s\trefs/tags/v0.100.0\n' "$TEST_TAG" ;;
+    rev-list) printf '%s\n' "$TEST_TAG" ;;
+    rev-parse) printf '%s\n' "$TEST_HEAD" ;;
+    *) return 1 ;;
+  esac
+}
+buildkite-agent() {
+  [[ "$1 $2" == 'secret get' ]] || return 1
+  printf '%s\n' "$3" >> "$TEST_CI_CALLS"
+  case "$3" in
+    GHA_GITHUB_RELEASE_TOKEN) printf '%s\n' 'fake-github-token' ;;
+    GHA_BUGSNAG_API_KEY)
+      printf '%s\n' "$TEST_BUGSNAG_KEY"
+      [[ "${TEST_SECRET_FAILURE:-}" != true ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+goreleaser() {
+  [[ "$*" == 'release --clean' ]] || return 1
+  bash -c '[[ "${GITHUB_TOKEN:-}" == "fake-github-token" && "${BUGSNAG_API_KEY:-}" == "$TEST_BUGSNAG_KEY" ]]' || return 1
+  printf '%s\n' goreleaser >> "$TEST_CI_CALLS"
+}
+export -f git buildkite-agent goreleaser
+
+for tag in '' main v1.0.0 v0.01.0; do
+  : > "$ci_calls"
+  if output="$(BUILDKITE_TAG="$tag" bash "$root/scripts/ci-buildkite-release" 2>&1)"; then
+    die "CI release accepted non-release tag: $tag"
+  fi
+  [[ ! -s "$ci_calls" ]] || die 'invalid tag retrieved secrets or published a release'
+done
+
+: > "$ci_calls"
+if output="$(BUILDKITE_TAG=v0.100.0 TEST_HEAD=2222222222222222222222222222222222222222 bash "$root/scripts/ci-buildkite-release" 2>&1)"; then
+  die 'CI release accepted a mismatched checkout'
+fi
+[[ "$output" == *'checked-out HEAD does not match'* && ! -s "$ci_calls" ]] \
+  || die 'mismatched checkout reached secret retrieval'
+
+: > "$ci_calls"
+if output="$(BUILDKITE_TAG=v0.100.0 TEST_BUGSNAG_KEY='' bash "$root/scripts/ci-buildkite-release" 2>&1)"; then
+  die 'CI release accepted an empty Bugsnag key'
+fi
+[[ "$output" == *'GHA_BUGSNAG_API_KEY is empty'* ]] || die "unexpected failure: $output"
+[[ "$(cat "$ci_calls")" == $'GHA_GITHUB_RELEASE_TOKEN\nGHA_BUGSNAG_API_KEY' ]] \
+  || die 'CI release published without a Bugsnag key'
+
+: > "$ci_calls"
+if output="$(BUILDKITE_TAG=v0.100.0 TEST_SECRET_FAILURE=true bash "$root/scripts/ci-buildkite-release" 2>&1)"; then
+  die 'CI release ignored a failed secret retrieval'
+fi
+[[ "$(cat "$ci_calls")" == $'GHA_GITHUB_RELEASE_TOKEN\nGHA_BUGSNAG_API_KEY' ]] \
+  || die 'CI release published after a failed secret retrieval'
+
+: > "$ci_calls"
+output="$(BUILDKITE_TAG=v0.100.0 bash -x "$root/scripts/ci-buildkite-release" 2>&1)"
+[[ "$(cat "$ci_calls")" == $'GHA_GITHUB_RELEASE_TOKEN\nGHA_BUGSNAG_API_KEY\ngoreleaser' ]] \
+  || die 'CI release did not retrieve both secrets before building'
+[[ "$output" != *"$TEST_BUGSNAG_KEY"* && "$output" != *'fake-github-token'* ]] \
+  || die 'CI release exposed a secret through shell tracing'
+
 printf '%s\n' 'release tests passed'

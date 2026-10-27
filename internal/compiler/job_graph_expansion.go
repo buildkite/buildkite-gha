@@ -234,7 +234,8 @@ func (e *jobGraphExpansion) expandMatrices() {
 				err = errors.New("job-output-derived runs-on cannot depend on a deferred upload")
 			}
 			if err == nil && (e.workflowConcurrency || len(sourced.concurrencyGates) != 0) {
-				err = errors.New("workflow concurrency cannot be combined with job-output-derived runs-on")
+				e.rejectRuntimeRunsOnConcurrency(sourced)
+				continue
 			}
 			if err != nil {
 				e.rejectRuntimeRunsOn(sourced, err)
@@ -261,9 +262,9 @@ func (e *jobGraphExpansion) expandMatrices() {
 			switch {
 			case err != nil:
 			case len(sourced.concurrencyGates) != 0:
-				err = errors.New("reusable-workflow concurrency cannot be combined with a needs-derived matrix")
+				err = deferredConcurrencyError("reusable-workflow", "a needs-derived matrix", "matrix")
 			case e.workflowConcurrency:
-				err = errors.New("workflow concurrency cannot be combined with a needs-derived matrix")
+				err = deferredConcurrencyError("workflow", "a needs-derived matrix", "matrix")
 			}
 			if err != nil {
 				e.rejectRuntimeMatrix(sourced, err)
@@ -337,10 +338,16 @@ func (e *jobGraphExpansion) expandMatrices() {
 		}
 		if err != nil {
 			line, column := matrixErrorPosition(job, err)
+			message, detail := "matrix could not be expanded or validated", ""
+			if sourced.matrixDetailUnsafe {
+				message += inputValueHiddenNote
+			} else {
+				detail = matrixErrorDetail(err)
+			}
 			e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 				Path: sourced.path, Line: line, Column: column, Job: job.ID,
-				Message: "matrix could not be expanded or validated", Err: err,
+				Message: message, Detail: detail, Err: err,
 			})
 			e.failedMatrices[id] = true
 			e.failedJobs[id] = true
@@ -539,16 +546,21 @@ func (e *jobGraphExpansion) mergeContinuations() {
 }
 
 // rejectRuntimeMatrix records why a needs-derived matrix, or a job that
-// depends on one, cannot be compiled. The reason quotes only job and output
-// identifiers from the workflow, never event data, so it can travel in Detail.
+// depends on one, cannot be compiled. The reason quotes job and output
+// identifiers from the workflow source, so it travels in Detail unless static
+// input substitution rewrote that source.
 func (e *jobGraphExpansion) rejectRuntimeMatrix(sourced sourcedJob, err error) {
 	job := sourced.Job
 	line, column := matrixErrorPosition(job, err)
+	message, detail := runtimeMatrixDeferredMessage, err.Error()
+	if sourced.matrixDetailUnsafe {
+		message, detail = runtimeMatrixDeferredMessage+inputValueHiddenNote, ""
+	}
 	e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 		Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 		Blocker: "expression",
 		Path:    sourced.path, Line: line, Column: column, Job: job.ID,
-		Message: runtimeMatrixDeferredMessage, Detail: err.Error(),
+		Message: message, Detail: detail,
 		Err: locatedJobError(sourced.path, job, line, column, err.Error()),
 	})
 	e.failedMatrices[job.ID] = true
@@ -791,6 +803,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		resolvedContinueOnError, continueOnErrorErr := resolveJobContinueOnError(instanceJob, controlContext)
 		instanceJob = resolvedContinueOnError
 		candidate := newJobCandidate(sourced, instanceJob, matrix, key, resolvedServices)
+		candidate.Strategy = strategy
 
 		valid := true
 		if containerErr != nil {
@@ -814,13 +827,19 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			valid = false
 		}
 		runnerContext := instanceContext
-		if supplied, ok := e.runsOnContexts[id]; ok {
-			runnerContext = supplied
+		_, outputBacked := e.runsOnContexts[id]
+		if outputBacked {
+			runnerContext = e.runsOnContexts[id]
 			runnerContext.Strategy = strategy
 		}
 		labels, runsOnErr := resolveRunsOn(job, runnerContext, matrix)
 		if runsOnErr != nil {
-			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, key, "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, runsOnErr.Error())))
+			unsafe := sourced
+			unsafe.Job, unsafe.path = job, jobPath
+			// An evaluation error can quote the producer output the runs-on
+			// expression read, as well as substituted input values.
+			unsafe.runsOnDetailUnsafe = unsafe.runsOnDetailUnsafe || outputBacked
+			e.diagnostics = append(e.diagnostics, runsOnFinding(unsafe, key, runsOnErr))
 			valid = false
 		}
 		candidate.RunsOn = labels
@@ -834,10 +853,16 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 					reportableLabels = nil
 				}
 				message, detail := runnerRejectionDiagnostic(err, reportableLabels, e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
+				blocker, blockerDetail := runnerRejectionBlocker(err, reportableLabels)
+				reportRunnerLabelDetail := ""
+				if len(reportableLabels) == 1 {
+					reportRunnerLabelDetail = reportableLabels[0]
+				}
 				e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 					Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
-					Blocker: "runner_label", BlockerDetail: runnerRejectionBlockerDetail(err, reportableLabels),
-					Path: jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
+					Blocker: blocker, BlockerDetail: blockerDetail,
+					ReportRunnerLabelDetail: reportRunnerLabelDetail,
+					Path:                    jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
 					Job: job.ID, Instance: key, Message: message, Detail: detail,
 					Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
 				})

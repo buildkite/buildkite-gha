@@ -125,6 +125,7 @@ type JobInstance struct {
 	ToolCache                 *bool                     `json:"tool_cache,omitempty"`
 	Cache                     *CacheVolume              `json:"-"`
 	Matrix                    map[string]any            `json:"matrix,omitempty"`
+	Strategy                  map[string]any            `json:"strategy,omitempty"`
 	Inputs                    map[string]any            `json:"inputs,omitempty"`
 	DeferredInputs            map[string]DeferredInput  `json:"deferred_inputs,omitempty"`
 	FailFast                  *bool                     `json:"fail_fast,omitempty"`
@@ -264,9 +265,10 @@ func ValidateWithOptionsContext(ctx context.Context, path string, source []byte,
 		Payload: map[string]any{},
 	}
 	context := compileContext(event, nil, path, parsed.Name)
+	context.WorkflowRunID = options.BuildID
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	context.GitHub["head_ref"] = "validation"
-	runNameErr := validateWorkflowRunName(path, parsed)
+	runNameErr := ValidateWorkflowRunName(path, parsed)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
@@ -319,6 +321,7 @@ func ValidateEventWithOptionsContext(ctx context.Context, path string, source, e
 	}
 	event.Trust = options.EventTrust
 	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
+	context.WorkflowRunID = options.BuildID
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	_, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
@@ -389,6 +392,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	event.Trust = options.EventTrust
 	organizationVars, repositoryVars := cloneMap(options.Vars.Organization), cloneMap(options.Vars.Repository)
 	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
+	context.WorkflowRunID = options.BuildID
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	runName, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
@@ -421,10 +425,10 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 }
 
 // ResolveWorkflowRunName evaluates one parsed workflow's explicit run-name
-// against the event snapshot used for compilation. Dispatch inputs are only
-// available when the workflow applies to the event.
-func ResolveWorkflowRunName(path string, parsed *workflow.Workflow, event Event, applicable bool) (string, error) {
-	context := compileContext(event, nil, path, parsed.Name)
+// against the event and pre-environment variable snapshots used for compilation.
+// Dispatch inputs are only available when the workflow applies to the event.
+func ResolveWorkflowRunName(path string, parsed *workflow.Workflow, event Event, vars VariableSources, applicable bool) (string, error) {
+	context := compileContext(event, vars.CompileTimeVars(), path, parsed.Name)
 	if applicable {
 		context.Inputs = workflowDispatchInputs(parsed, event)
 	}
@@ -448,7 +452,9 @@ func resolveWorkflowRunName(path string, parsed *workflow.Workflow, context expr
 		fmt.Errorf("%s:%d:%d: workflow run-name: %w", path, position.Line, position.Column, err))
 }
 
-func validateWorkflowRunName(path string, parsed *workflow.Workflow) error {
+// ValidateWorkflowRunName validates the authored run-name's expression surface
+// without evaluating event inputs or variable values.
+func ValidateWorkflowRunName(path string, parsed *workflow.Workflow) error {
 	if strings.TrimSpace(parsed.RunName) == "" {
 		return nil
 	}
@@ -517,7 +523,11 @@ func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warnin
 			message += " The supported triggers declared in this workflow still run: " + strings.Join(supportedNames, ", ") + "."
 			message += " Move the jobs this trigger guards to one of those triggers if you need them."
 		}
-		message += fmt.Sprintf(" If you need %s, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.", trigger.Event)
+		if trigger.Event == "pull_request_target" {
+			message += " pull_request_target is intentionally unsupported for security reasons. Use pull_request with careful checkout and ref handling instead; changing the event alone does not make untrusted code safe. See https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#workflow-names-and-triggers for details."
+		} else {
+			message += fmt.Sprintf(" If you need %s, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.", trigger.Event)
+		}
 		warnings = append(warnings, Warning{
 			Code:          "W_TRIGGER_EVENT_UNSUPPORTED",
 			Blocker:       "trigger",
@@ -704,12 +714,11 @@ func resolveCompileContainer(container *workflow.Container, context expression.C
 }
 
 func resolveCompileServices(services []workflow.Service, context expression.CompileContext) ([]workflow.Service, error) {
-	// Credentials are runner-evaluated after the job's environment applies, so
-	// their vars context is not known here. Keep vars residual so the runtime
-	// evaluates them with environment variables laid over the pre-environment
-	// scopes. Every other service field is compile-time and keeps the context.
-	credentialContext := context
-	credentialContext.Vars = nil
+	// Credentials and env are runner-evaluated after the job's environment
+	// applies. Keep vars residual so both read the environment-overlaid scopes.
+	// Other service fields retain their compile-time vars snapshot.
+	runtimeContext := context
+	runtimeContext.Vars = nil
 	resolved := make([]workflow.Service, 0, len(services))
 	for _, service := range services {
 		container := service.Container
@@ -720,10 +729,7 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 			credentials := *container.Credentials
 			container.Credentials = &credentials
 			for _, field := range []*string{&container.Credentials.Username, &container.Credentials.Password} {
-				if err := validateCompileSite(*field, expression.ProfileServiceCredential, expression.ResultString); err != nil {
-					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
-				}
-				value, err := reducePartialTemplateString(*field, expression.ProfileServiceCredential, credentialContext)
+				value, err := reduceTemplateString(*field, expression.ProfileCompileServiceCredential, runtimeContext)
 				if err != nil {
 					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
 				}
@@ -739,7 +745,10 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 			*field = value
 		}
 		for key, value := range container.Env {
-			resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceTemplate, context)
+			if err := validateCompileSite(value, expression.ProfileServiceEnvironment, expression.ResultString); err != nil {
+				return nil, fmt.Errorf("service %q environment %q: %w", service.Name, key, err)
+			}
+			resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceEnvironment, runtimeContext)
 			if err != nil {
 				return nil, fmt.Errorf("service %q environment %q: %w", service.Name, key, err)
 			}
@@ -754,7 +763,7 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 				values[j] = resolvedValue
 			}
 		}
-		for _, value := range append(append(append([]string{container.Image, container.Options, container.Command, container.Entrypoint}, container.Ports...), container.Volumes...), mapValues(container.Env)...) {
+		for _, value := range append(append([]string{container.Image, container.Options, container.Command, container.Entrypoint}, container.Ports...), container.Volumes...) {
 			if strings.Contains(value, "${{") {
 				if err := validateCompileSite(value, expression.ProfileServiceTemplate, expression.ResultString); err != nil {
 					return nil, fmt.Errorf("service %q: %w", service.Name, err)
@@ -770,20 +779,16 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 	return resolved, nil
 }
 
-func mapValues(values map[string]string) []string {
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		result = append(result, value)
-	}
-	return result
-}
-
 func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, context expression.CompileContext, matrix map[string]any) (string, error) {
 	if concurrency == nil {
 		return "", nil
 	}
 	context.Matrix = matrix
-	value, err := evaluateCompileSite(concurrency.Group, expression.ProfileCompileTemplate, expression.ResultString, context)
+	profile := expression.ProfileCompileTemplate
+	if jobID == "" {
+		profile = expression.ProfileWorkflowConcurrency
+	}
+	value, err := evaluateCompileSite(concurrency.Group, profile, expression.ResultString, context)
 	group, _ := value.(string)
 	if err != nil {
 		message := fmt.Sprintf("concurrency group cannot be resolved at compile time: %v", err)

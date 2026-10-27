@@ -1,6 +1,7 @@
 dist/
 .release/
 .idea/
+.runtime-benchmark/
 
 # This repository intentionally tracks its reviewed DeepSec configuration.
 !/.deepsec/

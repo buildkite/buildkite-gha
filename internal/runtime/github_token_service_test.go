@@ -173,6 +173,8 @@ func TestAgentGitHubTokensRejectsUnsafeConfigurationAndRepository(t *testing.T) 
 	for _, repository := range []string{"", "other", "../other/repo", "owner/..", "owner/repo/extra", "owner/repo?permission=write"} {
 		if _, err := provider.WorkflowToken(t.Context(), repository, "ci.yml", map[string]string{"contents": "read"}); err == nil {
 			t.Fatalf("WorkflowToken(%q) succeeded", repository)
+		} else if ClassifyFailure(err) != FailureClassUnknown {
+			t.Fatalf("WorkflowToken(%q) validation classified as %q", repository, ClassifyFailure(err))
 		}
 		if _, err := provider.ActionSourceToken(t.Context(), repository); err == nil {
 			t.Fatalf("ActionSourceToken(%q) succeeded", repository)
@@ -197,7 +199,7 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 		{"unsafe retry header", http.StatusServiceUnavailable, secret, secret, "temporarily unavailable"},
 		{"unexpected status", http.StatusBadGateway, secret, "", "HTTP 502"},
 		{"malformed JSON", http.StatusOK, `{"token":`, "", "decode"},
-		{"unknown field", http.StatusOK, `{"token":"ghs_valid","other":true}`, "", "unknown field"},
+		{"unknown field", http.StatusOK, `{"token":"ghs_valid","` + secret + `":true}`, "", "decode GitHub workflow token response"},
 		{"trailing JSON", http.StatusOK, `{"token":"ghs_valid"}{}`, "", "trailing data"},
 		{"empty token", http.StatusOK, `{"token":""}`, "", "invalid token"},
 		{"invalid token", http.StatusOK, `{"token":"secret with spaces"}`, "", "invalid token"},
@@ -220,6 +222,17 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), secret) {
 				t.Fatalf("WorkflowToken() error = %v, want %q without response data", err, test.want)
 			}
+			if ClassifyFailure(err) != FailureClassWorkflowToken {
+				t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassWorkflowToken)
+			}
+			status, ok := AgentAPIHTTPStatus(err)
+			if test.status >= 200 && test.status < 300 {
+				if ok || status != 0 {
+					t.Fatalf("AgentAPIHTTPStatus() = %d, %t for HTTP %d", status, ok, test.status)
+				}
+			} else if !ok || status != test.status {
+				t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want %d, true", status, ok, test.status)
+			}
 		})
 	}
 
@@ -239,6 +252,134 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 	}
 	if _, err := provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"}); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
 		t.Fatalf("redirect WorkflowToken() error/redirected = %v / %v", err, redirected)
+	}
+}
+
+func TestAgentGitHubTokensRejectedWorkflowTokenGuidance(t *testing.T) {
+	const responseData = "provider response must not escape"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, responseData)
+	}))
+	defer server.Close()
+
+	for _, test := range []struct {
+		name     string
+		buildURL string
+		wantURL  bool
+	}{
+		{name: "safe build URL", buildURL: "https://buildkite.com/acme-inc/my-pipeline/builds/42", wantURL: true},
+		{name: "missing build URL"},
+		{name: "unsafe build URL", buildURL: "https://attacker.invalid/builds/job-token"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{
+				Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-token", BuildURL: test.buildURL,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
+			if err == nil {
+				t.Fatal("WorkflowToken() succeeded")
+			}
+			message := err.Error()
+			for _, want := range []string{"top-level permissions", "Buildkite GitHub App", "event repository", "contact Buildkite support", "this build's URL"} {
+				if !strings.Contains(message, want) {
+					t.Errorf("WorkflowToken() error = %q, want %q", message, want)
+				}
+			}
+			if strings.Contains(message, "enable") || strings.Contains(message, "pipeline's repository settings") || strings.Contains(message, responseData) {
+				t.Errorf("WorkflowToken() error contains unsafe or incorrect guidance: %q", message)
+			}
+			if got := strings.Contains(message, test.buildURL) && test.buildURL != ""; got != test.wantURL {
+				t.Errorf("WorkflowToken() error contains build URL = %t, want %t: %q", got, test.wantURL, message)
+			}
+		})
+	}
+}
+
+func TestAgentGitHubTokensWorkflowDenialCodes(t *testing.T) {
+	for _, test := range []struct {
+		name, body, want string
+		status           int
+	}{
+		{"permissions", `{"code":"permissions_unavailable","message":"secret-provider-text"}`, "App registration", 400},
+		{"repository", `{"code":"repository_unavailable","message":"secret-provider-text"}`, "repository exists", 400},
+		{"connection", `{"code":"code_access_connection_unavailable"}`, "Buildkite organization admin", 400},
+		{"pull request", `{"code":"pr_permission_ceiling"}`, "does not execute untrusted PR code", 400},
+		{"workflow policy", `{"code":"workflow_policy_exceeded"}`, "top-level permissions at this build's commit", 400},
+		{"invalid policy", `{"code":"workflow_policy_invalid"}`, "explicit permission map", 400},
+		{"provenance", `{"code":"workflow_provenance_invalid"}`, "validate this build's source and ancestry", 400},
+		{"merge queue", `{"code":"merge_queue_not_supported"}`, "not supported for merge-queue builds", 400},
+		{"pipeline disabled", `{"code":"pipeline_disabled"}`, "Ask a pipeline administrator", 404},
+		{"disabled wrong status", `{"code":"pipeline_disabled"}`, "top-level permissions", 400},
+		{"permissions wrong status", `{"code":"permissions_unavailable"}`, "not enabled for this organization or pipeline", 404},
+		{"unknown code", `{"code":"secret-provider-text"}`, "top-level permissions", 400},
+		{"missing code", `{"message":"secret-provider-text"}`, "top-level permissions", 400},
+		{"malformed", `{"code":"permissions_unavailable"`, "top-level permissions", 400},
+		{"trailing JSON", `{"code":"permissions_unavailable"}{}`, "top-level permissions", 400},
+		{"oversized", `{"code":"permissions_unavailable","message":"` + strings.Repeat("x", githubTokenResponseLimit) + `"}`, "top-level permissions", 400},
+		{"wrong status", `{"code":"permissions_unavailable"}`, "request was denied", 403},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer server.Close()
+			provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{
+				Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret",
+				OrganizationSlug: "acme", PipelineSlug: "widgets",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = provider.WorkflowToken(t.Context(), "acme/widgets", "ci.yml", map[string]string{"issues": "write", "contents": "read"})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("WorkflowToken() = %v, want %q", err, test.want)
+			}
+			for _, secret := range []string{"secret-provider-text", "job-secret"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("error leaked %q: %v", secret, err)
+				}
+			}
+			if test.name == "permissions" {
+				for _, want := range []string{"acme/widgets", "contents:read, issues:write", "GitHub installation admin", "only if the App already requests", "https://buildkite.com/acme/widgets/settings/repository"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q lacks %q", err, want)
+					}
+				}
+				if strings.Contains(err.Error(), "pending approval") {
+					t.Fatal("inferred pending approval")
+				}
+			}
+			if test.name == "connection" && !strings.Contains(err.Error(), "https://buildkite.com/organizations/acme/repository-providers") {
+				t.Errorf("connection error lacks admin settings link: %v", err)
+			}
+			if test.name == "pull request" && (!strings.Contains(err.Error(), "triggered or rebuilt") || !strings.Contains(err.Error(), "will not change this restriction")) {
+				t.Errorf("PR error lacks ancestor scope and distinct remedy: %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentGitHubTokensKeepsActionSourceFailureUnclassified(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"code":"permissions_unavailable","message":"secret-provider-text"}`)
+	}))
+	defer server.Close()
+	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.ActionSourceToken(t.Context(), "actions/checkout")
+	if err == nil || err.Error() != "GitHub action source token request was rejected" {
+		t.Fatalf("ActionSourceToken() error = %v", err)
+	}
+	if ClassifyFailure(err) != FailureClassUnknown {
+		t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassUnknown)
 	}
 }
 
@@ -303,6 +444,10 @@ func TestAgentGitHubTokensHonorsCancellation(t *testing.T) {
 	}
 	if _, err := provider.WorkflowToken(ctx, "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("WorkflowToken() error = %v, want cancellation", err)
+	} else if ClassifyFailure(err) != FailureClassUnknown {
+		t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassUnknown)
+	} else if status, ok := AgentAPIHTTPStatus(err); ok || status != 0 {
+		t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want 0, false", status, ok)
 	}
 }
 

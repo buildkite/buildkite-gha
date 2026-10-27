@@ -9,6 +9,7 @@ import (
 	"maps"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -45,8 +46,15 @@ type sourcedJob struct {
 	jobPermissionsIgnored bool
 	reusableCall          workflow.Position
 	blockerDetailUnsafe   bool
-	callGuards            []sourcedCallGuard
-	concurrencyGates      []WorkflowConcurrencyGate
+	// matrixDetailUnsafe reports that static input substitution changed the
+	// matrix or its scheduling values, so their expression source can quote
+	// input values and matrix errors must not be shown as detail.
+	matrixDetailUnsafe bool
+	// runsOnDetailUnsafe reports that static input substitution changed
+	// runs-on, so runs-on errors must not quote its expression source.
+	runsOnDetailUnsafe bool
+	callGuards         []sourcedCallGuard
+	concurrencyGates   []WorkflowConcurrencyGate
 }
 
 type secretAuthority struct {
@@ -151,14 +159,12 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 	scan := workflowScan{runtimeMatrixBoundary: hasRuntimeMatrixBoundary(parsed), referencesVars: workflowReferencesVars(parsed)}
 	if !hasReusableCall(parsed) {
 		sourcePath := path
-		root := ""
-		if isRepositoryWorkflowPath(path) {
-			repositoryRoot, canonicalPath, err := workflowRepository(path)
-			if err != nil {
-				return nil, nil, scan, err
-			}
-			root = repositoryRoot
-			sourcePath, err = repositoryWorkflowPath(repositoryRoot, canonicalPath)
+		root, canonicalPath, err := workflowRepository(path)
+		if err != nil {
+			return nil, nil, scan, err
+		}
+		if root != "" {
+			sourcePath, err = repositoryWorkflowPath(root, canonicalPath)
 			if err != nil {
 				return nil, nil, scan, err
 			}
@@ -179,7 +185,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix)}
+			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix), matrixDetailUnsafe: matrixInputsApplied(originalJob, job), runsOnDetailUnsafe: runsOnInputsApplied(originalJob, job)}
 			workflowJobs[job.ID] = job
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
@@ -326,6 +332,8 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				secretAuthority: cloneSecretAuthority(secrets), needBindings: needBindings,
 				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
 				blockerDetailUnsafe: blockerDetailUnsafe,
+				matrixDetailUnsafe:  matrixInputsApplied(originalJob, job),
+				runsOnDetailUnsafe:  runsOnInputsApplied(originalJob, job),
 				callGuards:          cloneSourcedCallGuards(callGuards),
 				concurrencyGates:    append([]WorkflowConcurrencyGate(nil), concurrencyGates...),
 			})
@@ -438,6 +446,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		matrixContext.Strategy = nil
 		matrices, err := expandMatrix(path, job, matrixContext)
 		if err != nil {
+			if matrixInputsApplied(originalJob, job) {
+				return reusableResolution{}, inputSubstitutedFinding(path, job, StageMatrix, CodeMatrixInvalid, job.Matrix.Span.Start, "matrix could not be expanded or validated"+inputValueHiddenNote)
+			}
 			return reusableResolution{}, err
 		}
 		if job.MaxParallelExpression != nil {
@@ -900,6 +911,9 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 			} else {
 				resolved, err = evaluateStaticCallValue(text, parentInputs.values, matrix, context)
 			}
+			if err != nil && replaceStaticInputs(text, parentInputs.values) != text {
+				return reusableInputs{}, inputSubstitutedFinding(path, job, StageGraph, CodeGraphInvalid, value.Span.Start, fmt.Sprintf("Reusable workflow input %q cannot be resolved", name)+inputValueHiddenNote)
+			}
 			if err != nil {
 				detail := fmt.Sprintf("Reusable-workflow input %q is not statically resolvable: %v", name, err)
 				message := fmt.Sprintf("Reusable workflow input %q uses a value that is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.", name)
@@ -1180,12 +1194,8 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 	for i := range job.Services {
 		container := job.Services[i].Container
 		container.Image = replaceStaticInputs(container.Image, inputs)
-		if container.Credentials != nil {
-			credentials := *container.Credentials
-			credentials.Username = replaceStaticInputs(credentials.Username, inputs)
-			credentials.Password = replaceStaticInputs(credentials.Password, inputs)
-			container.Credentials = &credentials
-		}
+		// Credentials retain authored source until their profile validates and
+		// substitutes inputs in resolveCompileServices.
 		container.Env = replaceMapInputs(container.Env, inputs)
 		container.Options = replaceStaticInputs(container.Options, inputs)
 		container.Command = replaceStaticInputs(container.Command, inputs)
@@ -1223,14 +1233,18 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 		if step.ContinueOnErrorExpression != "" {
 			resolved, err := expression.SubstituteCompileInputs(step.ContinueOnErrorExpression, inputs)
 			if err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("resolve continue-on-error expression: %v", err))
+				// A failure the authored source already has is safe to quote.
+				// Otherwise substitution caused it and it can quote input values.
+				_, sourceErr := expression.SubstituteCompileInputs(step.ContinueOnErrorExpression, nil)
+				return job, stepControlError(path, job, *step, "continue-on-error", "resolve", sourceErr == nil, err)
 			}
+			substituted := resolved != step.ContinueOnErrorExpression
 			if err := validateCompileSite(resolved, expression.ProfileStepControl, expression.ResultBoolean); err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("validate continue-on-error expression: %v", err))
+				return job, stepControlError(path, job, *step, "continue-on-error", "validate", substituted, err)
 			}
 			reduced, err := reduceCompileSite(resolved, expression.ProfileReusableStepControl, expression.ResultAny, expression.CompileContext{})
 			if err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("evaluate continue-on-error expression: %v", err))
+				return job, stepControlError(path, job, *step, "continue-on-error", "evaluate", substituted, err)
 			}
 			if !reduced.Known {
 				step.ContinueOnErrorExpression = resolved
@@ -1243,14 +1257,18 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 		if step.TimeoutMinutesExpression != "" {
 			resolved, err := expression.SubstituteCompileInputs(step.TimeoutMinutesExpression, inputs)
 			if err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("resolve timeout-minutes expression: %v", err))
+				// A failure the authored source already has is safe to quote.
+				// Otherwise substitution caused it and it can quote input values.
+				_, sourceErr := expression.SubstituteCompileInputs(step.TimeoutMinutesExpression, nil)
+				return job, stepControlError(path, job, *step, "timeout-minutes", "resolve", sourceErr == nil, err)
 			}
+			substituted := resolved != step.TimeoutMinutesExpression
 			if err := validateCompileSite(resolved, expression.ProfileStepControl, expression.ResultNumber); err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("validate timeout-minutes expression: %v", err))
+				return job, stepControlError(path, job, *step, "timeout-minutes", "validate", substituted, err)
 			}
 			reduced, err := reduceCompileSite(resolved, expression.ProfileReusableStepControl, expression.ResultAny, expression.CompileContext{})
 			if err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("evaluate timeout-minutes expression: %v", err))
+				return job, stepControlError(path, job, *step, "timeout-minutes", "evaluate", substituted, err)
 			}
 			if !reduced.Known {
 				step.TimeoutMinutesExpression = resolved
@@ -1265,9 +1283,19 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 		}
 		step.If = replaceStaticInputCondition(step.If, inputs)
 		step.Env = replaceMapInputs(step.Env, inputs)
-		step.With = replaceMapInputs(step.With, inputs)
+		step.With = replaceRuntimeMapInputs(step.With, inputs)
 	}
 	return job, nil
+}
+
+// stepControlError reports a step-control expression that failed validation or
+// evaluation. When input substitution rewrote the expression, the error can
+// quote input values, so a fixed message replaces it.
+func stepControlError(path string, job workflow.Job, step workflow.Step, control, action string, substituted bool, err error) error {
+	if substituted {
+		return inputSubstitutedFinding(path, job, StageGraph, CodeGraphInvalid, step.Span.Start, fmt.Sprintf("step %s expression cannot be resolved", control)+inputValueHiddenNote)
+	}
+	return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("%s %s expression: %v", action, control, err))
 }
 
 func blockerFieldsChanged(before, after workflow.Job) bool {
@@ -1351,9 +1379,8 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 		jobValues = append(jobValues, container.Ports...)
 		jobValues = append(jobValues, container.Volumes...)
 		jobValues = appendMapValues(jobValues, container.Env)
-		if container.Credentials != nil {
-			jobValues = append(jobValues, container.Credentials.Username, container.Credentials.Password)
-		}
+		// The credential profile owns known-input substitution and rejects
+		// residual inputs before reduction, including deferred inputs.
 	}
 	if job.Matrix != nil {
 		if job.Matrix.Expression != nil {
@@ -1473,6 +1500,88 @@ func deferredInputPlaceholders(inputs map[string]deferredInput) map[string]any {
 	return placeholders
 }
 
+// inputValueHiddenNote ends a diagnostic whose cause is withheld because the
+// failing expression was rewritten with workflow input values or read a job
+// output, so the cause can quote event data or job results.
+const inputValueHiddenNote = "; it uses a workflow input or job output value, so the cause is not shown"
+
+// inputSubstitutedFinding reports a failure in expression source that static
+// input substitution rewrote. The underlying error can quote input values,
+// which can carry event data, so only the fixed message is reported.
+func inputSubstitutedFinding(path string, job workflow.Job, stage ProcessingStage, code string, position workflow.Position, message string) error {
+	return &ProcessingFinding{
+		Stage: stage, Code: code, Category: "compatibility",
+		Path: path, Line: position.Line, Column: position.Column, Job: job.ID,
+		Message: message,
+		Err:     locatedJobError(path, job, position.Line, position.Column, message),
+	}
+}
+
+// runsOnInputsApplied reports whether static input substitution changed the
+// job's runs-on labels or expression.
+func runsOnInputsApplied(before, after workflow.Job) bool {
+	return !slices.Equal(before.RunsOn, after.RunsOn) || expressionText(before.RunsOnExpr) != expressionText(after.RunsOnExpr)
+}
+
+// matrixInputsApplied reports whether static input substitution changed the
+// job's matrix or the scheduling values that matrix errors can quote.
+func matrixInputsApplied(before, after workflow.Job) bool {
+	if (before.Concurrency == nil) != (after.Concurrency == nil) ||
+		before.Concurrency != nil && before.Concurrency.Group != after.Concurrency.Group ||
+		expressionText(before.MaxParallelExpression) != expressionText(after.MaxParallelExpression) {
+		return true
+	}
+	return matrixChanged(before.Matrix, after.Matrix)
+}
+
+// matrixChanged compares matrix content rather than the whole struct, because
+// cloning turns nil include and exclude lists into empty ones.
+func matrixChanged(before, after *workflow.Matrix) bool {
+	if before == nil || after == nil {
+		return before != after
+	}
+	if expressionText(before.Expression) != expressionText(after.Expression) ||
+		expressionText(before.IncludeExpression) != expressionText(after.IncludeExpression) ||
+		expressionText(before.ExcludeExpression) != expressionText(after.ExcludeExpression) ||
+		len(before.Rows) != len(after.Rows) || len(before.Include) != len(after.Include) || len(before.Exclude) != len(after.Exclude) {
+		return true
+	}
+	for i := range before.Rows {
+		if expressionText(before.Rows[i].Expression) != expressionText(after.Rows[i].Expression) || len(before.Rows[i].Values) != len(after.Rows[i].Values) {
+			return true
+		}
+		for j := range before.Rows[i].Values {
+			if !reflect.DeepEqual(before.Rows[i].Values[j].Data, after.Rows[i].Values[j].Data) {
+				return true
+			}
+		}
+	}
+	for i := range before.Include {
+		if !matrixCombinationValuesEqual(before.Include[i], after.Include[i]) {
+			return true
+		}
+	}
+	for i := range before.Exclude {
+		if !matrixCombinationValuesEqual(before.Exclude[i], after.Exclude[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+func matrixCombinationValuesEqual(before, after workflow.MatrixCombination) bool {
+	if len(before.Values) != len(after.Values) {
+		return false
+	}
+	for name, value := range before.Values {
+		other, ok := after.Values[name]
+		if !ok || !reflect.DeepEqual(value.Data, other.Data) {
+			return false
+		}
+	}
+	return true
+}
+
 func cloneMatrixWithInputs(matrix *workflow.Matrix, inputs map[string]any) *workflow.Matrix {
 	out := *matrix
 	out.Expression = cloneMatrixExpressionWithInputs(matrix.Expression, inputs)
@@ -1565,6 +1674,17 @@ func replaceMapInputs(values map[string]string, inputs map[string]any) map[strin
 	return out
 }
 
+func replaceRuntimeMapInputs(values map[string]string, inputs map[string]any) map[string]string {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for name, value := range values {
+		out[name] = replaceRuntimeInputs(value, inputs)
+	}
+	return out
+}
+
 func replaceStaticInputCondition(value string, inputs map[string]any) string {
 	match := staticInputCondition.FindStringSubmatch(value)
 	if match == nil {
@@ -1605,6 +1725,14 @@ func replaceStaticInputCondition(value string, inputs map[string]any) string {
 }
 
 func replaceStaticInputs(value string, inputs map[string]any) string {
+	return replaceInputs(value, inputs, false)
+}
+
+func replaceRuntimeInputs(value string, inputs map[string]any) string {
+	return replaceInputs(value, inputs, true)
+}
+
+func replaceInputs(value string, inputs map[string]any, preserveRuntime bool) string {
 	resolved, err := expression.SubstituteCompileInputs(value, inputs)
 	if err != nil || resolved == value {
 		return value
@@ -1614,6 +1742,9 @@ func replaceStaticInputs(value string, inputs map[string]any) string {
 			return reduced.Value.(string)
 		}
 		return reduced.Source
+	}
+	if preserveRuntime {
+		return resolved
 	}
 	return value
 }
@@ -1629,10 +1760,32 @@ func workflowRepository(path string) (string, string, error) {
 		return "", "", fmt.Errorf("resolve workflow path: %w", err)
 	}
 	workflowDir := filepath.Dir(absPath)
-	if filepath.Base(workflowDir) != "workflows" || filepath.Base(filepath.Dir(workflowDir)) != ".github" {
-		return "", "", fmt.Errorf("%s: local reusable workflows require the caller under .github/workflows", path)
-	}
 	repositoryDir := filepath.Dir(filepath.Dir(workflowDir))
+	if !isRepositoryWorkflowPath(absPath) {
+		// Mirrored top-level workflows may live anywhere in a checkout. Git
+		// locates their workspace; it does not establish remote source identity.
+		repositoryDir = ""
+		for directory := workflowDir; directory != filepath.Dir(directory); directory = filepath.Dir(directory) {
+			info, err := os.Lstat(directory)
+			if err != nil || info.Mode()&os.ModeSymlink == 0 {
+				continue
+			}
+			// A directory link inside a checkout cannot redefine its boundary.
+			// Walk outward so nested links retain the original lexical checkout.
+			output, err := exec.Command("git", "-C", filepath.Dir(directory), "rev-parse", "--show-toplevel").Output()
+			if err == nil {
+				repositoryDir = strings.TrimSpace(string(output))
+			}
+		}
+		if repositoryDir == "" {
+			// A link to the checkout itself has no enclosing checkout boundary.
+			output, err := exec.Command("git", "-C", workflowDir, "rev-parse", "--show-toplevel").Output()
+			if err != nil {
+				return "", absPath, nil
+			}
+			repositoryDir = strings.TrimSpace(string(output))
+		}
+	}
 	root, err := filepath.EvalSymlinks(repositoryDir)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve repository root for %q: %w", path, err)

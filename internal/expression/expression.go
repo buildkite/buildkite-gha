@@ -366,10 +366,10 @@ func decodeJSONValue(source string) (any, error) {
 	decoder.UseNumber()
 	value, err := decodeJSONToken(decoder)
 	if err != nil {
-		return nil, fmt.Errorf("fromJSON argument is invalid JSON")
+		return nil, authoredErrorf("fromJSON argument is invalid JSON")
 	}
 	if _, err := decoder.Token(); err != io.EOF {
-		return nil, fmt.Errorf("fromJSON argument contains multiple JSON values")
+		return nil, authoredErrorf("fromJSON argument contains multiple JSON values")
 	}
 	return normalizeJSONNumbers(value)
 }
@@ -400,7 +400,7 @@ func decodeJSONToken(decoder *json.Decoder) (any, error) {
 			}
 			key, ok := keyToken.(string)
 			if !ok {
-				return nil, fmt.Errorf("fromJSON argument is invalid JSON")
+				return nil, authoredErrorf("fromJSON argument is invalid JSON")
 			}
 			value, err := decodeJSONToken(decoder)
 			if err != nil {
@@ -428,7 +428,7 @@ func decodeJSONToken(decoder *json.Decoder) (any, error) {
 		_, err = decoder.Token()
 		return values, err
 	default:
-		return nil, fmt.Errorf("fromJSON argument is invalid JSON")
+		return nil, authoredErrorf("fromJSON argument is invalid JSON")
 	}
 }
 

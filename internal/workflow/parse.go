@@ -123,7 +123,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	}
 	sort.Strings(envNames)
 	for _, name := range envNames {
-		if err := validateExpressionSite(owned.Env[name], expression.ProfileJobEnvironment, expression.ResultString); err != nil {
+		if err := validateExpressionSite(owned.Env[name], expression.ProfileWorkflowEnvironment, expression.ResultString); err != nil {
 			return nil, fmt.Errorf("%s: workflow env %q: %w", path, name, err)
 		}
 	}
@@ -418,7 +418,7 @@ func adaptTriggers(events []actionlint.Event) []Trigger {
 	return out
 }
 
-var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
 
 // validateRawContainers deliberately walks only the owned container locations.
@@ -454,8 +454,8 @@ func validateRawContainers(path string, document *yaml.Node) (map[string]rawServ
 		}
 		for j := 0; j+1 < len(services.Content); j += 2 {
 			name, container := services.Content[j], services.Content[j+1]
-			if name.Value != strings.ToLower(name.Value) || !serviceIDPattern.MatchString(name.Value) {
-				return nil, nil, rawError(path, name, fmt.Sprintf("invalid service ID %q; service IDs must be lowercase", name.Value))
+			if err := plan.ValidateServiceName(name.Value); err != nil {
+				return nil, nil, rawError(path, name, err.Error())
 			}
 			extra, expected, err := validateRawContainer(path, container, true)
 			if err != nil {
@@ -708,8 +708,11 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			})
 			for _, name := range names {
 				service := in.Services.Value[name]
-				if service == nil || service.Name == nil || service.Container == nil || !serviceIDPattern.MatchString(service.Name.Value) {
+				if service == nil || service.Name == nil || service.Container == nil {
 					return Job{}, locatedError(path, in.Services.Pos, in.ID.Value, fmt.Sprintf("invalid service ID %q", name))
+				}
+				if err := plan.ValidateServiceName(service.Name.Value); err != nil {
+					return Job{}, locatedError(path, in.Services.Pos, in.ID.Value, err.Error())
 				}
 				container, err := adaptServiceContainer(path, in.ID.Value, service.Container, rawContainers[strings.ToLower(in.ID.Value)+"\x00"+service.Name.Value])
 				if err != nil {
@@ -1032,8 +1035,6 @@ func adaptEnv(in *actionlint.Env) map[string]string {
 	}
 	return out
 }
-
-var serviceIDPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
 
 func adaptContainer(path, jobID string, in *actionlint.Container, raw rawServiceContainer) (Container, error) {
 	if in.Image == nil || strings.TrimSpace(in.Image.Value) == "" {

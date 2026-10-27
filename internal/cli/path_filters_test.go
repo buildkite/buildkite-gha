@@ -95,6 +95,26 @@ func TestPushChangedPathsBindsWebhookAndLocalDiff(t *testing.T) {
 		t.Fatalf("push paths outside checkout = %#v, %v", paths, err)
 	}
 	t.Chdir(repository)
+	// A later push can advance origin/main before this pinned webhook is imported.
+	advanced := runGit("commit-tree", after+"^{tree}", "-p", after, "-m", "later push")
+	runGit("update-ref", "refs/remotes/origin/main", advanced)
+	if paths, _, err := pushChangedPaths(event, []workflowInput{input}, ""); err != nil || !reflect.DeepEqual(paths, want) {
+		t.Fatalf("advanced origin paths = %#v, %v", paths, err)
+	}
+	runGit("update-ref", "-d", "refs/remotes/origin/main")
+	if paths, _, err := pushChangedPaths(event, []workflowInput{input}, ""); err != nil || !reflect.DeepEqual(paths, want) {
+		t.Fatalf("missing origin ref paths = %#v, %v", paths, err)
+	}
+	runGit("checkout", "-q", "--detach", base)
+	if _, _, err := pushChangedPaths(event, []workflowInput{input}, ""); err == nil || !strings.Contains(err.Error(), "local checkout") {
+		t.Fatalf("mismatched checkout error = %v", err)
+	}
+	runGit("checkout", "-q", "--detach", after)
+	event.SHA = base
+	if _, _, err := pushChangedPaths(event, []workflowInput{input}, ""); err == nil || !strings.Contains(err.Error(), "Buildkite build") {
+		t.Fatalf("mismatched build SHA error = %v", err)
+	}
+	event.SHA = after
 
 	runGit("checkout", "-q", "-B", "force", base)
 	if err := os.WriteFile(filepath.Join(repository, "src/main.go"), []byte("package forced\n"), 0o600); err != nil {
@@ -430,10 +450,14 @@ func TestParseChangedPathsFailsClosed(t *testing.T) {
 		t.Fatalf("undetected rename error = %v", err)
 	}
 	var output bytes.Buffer
-	for i := 0; i <= maxLocallyEvaluatedPathFilterFiles; i++ {
-		_, _ = fmt.Fprintf(&output, "M\x00file-%03d\x00", i)
+	for i := range maxLocallyEvaluatedPathFilterFiles {
+		_, _ = fmt.Fprintf(&output, "M\x00file-%04d\x00", i)
 	}
-	if _, err := parseChangedPaths(output.Bytes()); err == nil || !strings.Contains(err.Error(), "300-file local evaluation bound") {
+	if paths, err := parseChangedPaths(output.Bytes()); err != nil || len(paths) != maxLocallyEvaluatedPathFilterFiles || paths[300] != "file-0300" {
+		t.Fatalf("file limit admitted paths = %d, %v", len(paths), err)
+	}
+	_, _ = fmt.Fprintf(&output, "M\x00file-%04d\x00", maxLocallyEvaluatedPathFilterFiles)
+	if _, err := parseChangedPaths(output.Bytes()); err == nil || !strings.Contains(err.Error(), "3000-file local evaluation bound") {
 		t.Fatalf("file limit error = %v", err)
 	}
 }
