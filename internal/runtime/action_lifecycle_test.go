@@ -1244,17 +1244,24 @@ func TestCompileKnownFalseRootActionDoesNotPrepareRemoteLifecycle(t *testing.T) 
 	rootID := remoteLifecycleLockID(1)
 	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}, Condition: "false",
+		With: map[string]string{"token": "${{ github.token }}"},
 	}})
 	job.Schema = plan.Schema
+	job.Inputs = map[string]any{"enabled": false}
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(rootID, "root", digest, nil)}
-	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace)
-	if err != nil || result.Conclusion != "success" {
-		t.Fatalf("RunJob() skipped root result = %#v, error = %v", result, err)
-	}
-	if materializer.calls != 0 {
-		t.Fatalf("known-false root materializations = %d, want 0", materializer.calls)
+	for _, condition := range []string{"false", "inputs.enabled", "inputs['enabled']"} {
+		t.Run(condition, func(t *testing.T) {
+			job.Program.Job.Steps[0].Condition.Source = condition
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+			result, err := (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace)
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("RunJob() skipped root result = %#v, error = %v", result, err)
+			}
+			if materializer.calls != 0 {
+				t.Fatalf("known-false root materializations = %d, want 0", materializer.calls)
+			}
+		})
 	}
 }
 

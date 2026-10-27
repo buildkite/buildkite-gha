@@ -215,12 +215,14 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	}
 	// Reachability never resolves vars: jobs.<id>.if and step conditions see
 	// different vars scopes, so unknown vars keep every step reachable.
-	reachability, err := executionprogram.WorkflowReachability(*job.Program, expression.AbstractValues{References: map[string]any{
-		"github.server_url": plan.EventServerURL(job.Event.Provider, job.Event.ServerURL),
-		"inputs":            planningInputs,
-		"matrix":            job.Matrix,
-		"strategy":          job.Strategy,
-	}})
+	reachability, err := executionprogram.WorkflowReachability(*job.Program, expression.AbstractValues{
+		Inputs: expression.InputScope{Values: planningInputs, Complete: len(job.DeferredInputs) == 0},
+		References: map[string]any{
+			"github.server_url": plan.EventServerURL(job.Event.Provider, job.Event.ServerURL),
+			"matrix":            job.Matrix,
+			"strategy":          job.Strategy,
+		},
+	})
 	if err != nil {
 		return jobResult, fmt.Errorf("analyze workflow reachability: %w", err)
 	}

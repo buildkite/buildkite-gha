@@ -125,8 +125,7 @@ func TestWorkflowReachabilityKeepsCallerScopedGuardValuesUnknown(t *testing.T) {
 			{Condition: condition("env.RUNTIME == 'yes'", SurfaceStepCondition)},
 		},
 	}}
-	values := expression.AbstractValues{References: map[string]any{
-		"inputs": map[string]any{"guard": false},
+	values := expression.AbstractValues{Inputs: expression.InputScope{Values: map[string]any{"guard": false}, Complete: true}, References: map[string]any{
 		"matrix": map[string]any{"job": true},
 		"vars":   map[string]string{"STEP": "skip"},
 	}}

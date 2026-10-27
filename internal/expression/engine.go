@@ -226,6 +226,14 @@ type Values struct {
 // Reference keys are canonical names such as github.server_url.
 type AbstractValues struct {
 	References map[string]any
+	Inputs     InputScope
+}
+
+// InputScope distinguishes known properties from a complete input object.
+// Deferred properties are absent from Values until runtime hydrates them.
+type InputScope struct {
+	Values   map[string]any
+	Complete bool
 }
 
 type Reduced struct {
@@ -665,8 +673,9 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 	if err != nil {
 		if site.Profile == ProfileActionStepTemplate && errors.Is(err, errUnavailableGitHubToken) {
 			err = fmt.Errorf("%w: this job has no available workflow token; this composite expression cannot authorize a token. Declare a token input on the action, pass it from the workflow step with: token: ${{ github.token }}, and use ${{ inputs.token }} inside the composite", err)
+			return nil, siteError(site, err)
 		}
-		return nil, siteError(site, err)
+		return nil, siteError(site, inputEvaluationError(site, err))
 	}
 	if !matchesEngineResult(value, site.Result) {
 		return nil, siteError(site, fmt.Errorf("expression produced %T, want %s", value, site.Result))
@@ -895,7 +904,7 @@ func (engine Engine) Analyze(site Site, values AbstractValues) (Analysis, error)
 		return Analysis{}, siteError(site, staticErr)
 	}
 
-	knownReferences := canonicalAbstractReferences(values.References)
+	knownReferences := canonicalAbstractReferences(values.References, values.Inputs)
 	analyzeNode := func(node actionlint.ExprNode) (Analysis, error) {
 		if profile.semantics == semanticsActionInputDefault {
 			return analyzeActionInputDefault(node, knownReferences)
@@ -920,7 +929,7 @@ func (engine Engine) Analyze(site Site, values AbstractValues) (Analysis, error)
 		analysis, err = analyzeTemplate(site.Source, analyzeNode)
 	}
 	if err != nil {
-		return Analysis{}, siteError(site, err)
+		return Analysis{}, siteError(site, inputEvaluationError(site, err))
 	}
 	return analysis, nil
 }
@@ -936,10 +945,19 @@ func (Engine) Truthy(value any) bool {
 // RunnerEnvironment is the runner.environment value for Buildkite agents.
 const RunnerEnvironment = "self-hosted"
 
-func canonicalAbstractReferences(source map[string]any) map[string]any {
+func canonicalAbstractReferences(source map[string]any, inputs InputScope) map[string]any {
 	result := make(map[string]any, len(source))
 	for name, value := range source {
 		result[strings.ToLower(name)] = value
+	}
+	// A partial scope exposes known named reads, not a concrete root object:
+	// computed reads and serialization could observe its deferred properties.
+	delete(result, "inputs")
+	for name, value := range inputs.Values {
+		result["inputs."+strings.ToLower(name)] = value
+	}
+	if inputs.Complete {
+		result["inputs"] = inputs.Values
 	}
 	return result
 }

@@ -87,16 +87,55 @@ func TestRunJobEvaluatesIndexedWorkflowInputs(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/inputs.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: inputs\n")
-	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
-		ID: "check", Kind: "run", Command: `test "$VALUE" = dispatched`,
-		Env: map[string]string{"VALUE": "${{ inputs[env.KEY] }}"},
-	}})
-	job.Inputs = map[string]any{"label": "dispatched"}
-	job.Env = map[string]string{"KEY": "label"}
+	tests := []struct {
+		label   string
+		enabled bool
+		count   int
+	}{
+		{label: "alpha", enabled: true, count: 7},
+		{label: "beta", enabled: false, count: 12},
+	}
+	jobs := make([]plan.Job, len(tests))
+	for i, test := range tests {
+		job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+			{ID: "check", Kind: "run", Command: `test "$VALUE" = "$EXPECTED_LABEL"
+test "$JOB_LABEL" = "$EXPECTED_LABEL"
+test '${{ toJSON(inputs.enabled) }}' = "$EXPECTED_ENABLED"
+test '${{ toJSON(inputs.count) }}' = "$EXPECTED_COUNT"
+printf 'value=%s\n' "$VALUE" >> "$GITHUB_OUTPUT"`,
+				Env: map[string]string{"VALUE": "${{ inputs[env.KEY] }}"}},
+			{ID: "enabled", Kind: "run", Condition: "inputs.enabled", Command: `echo 'value=enabled' >> "$GITHUB_OUTPUT"`},
+			{ID: "disabled", Kind: "run", Condition: "!inputs.enabled", Command: `echo 'value=disabled' >> "$GITHUB_OUTPUT"`},
+		})
+		job.Workflow.LogicalJobID = test.label
+		job.Target.StepKey = "gha-" + test.label
+		job.Inputs = map[string]any{"label": test.label, "enabled": test.enabled, "count": test.count}
+		job.Env = map[string]string{
+			"KEY": "label", "JOB_LABEL": "${{ inputs.label }}",
+			"EXPECTED_LABEL": test.label, "EXPECTED_ENABLED": strconv.FormatBool(test.enabled), "EXPECTED_COUNT": strconv.Itoa(test.count),
+		}
+		job.Outputs = map[string]string{
+			"label": "${{ steps.check.outputs.value }}", "count": "${{ toJSON(inputs.count) }}",
+			"enabled": "${{ steps.enabled.outputs.value }}", "disabled": "${{ steps.disabled.outputs.value }}",
+		}
+		jobs[i] = job
+	}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
-	if err != nil || result.Conclusion != "success" {
-		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	runner := Runner{Stdout: &logs, Stderr: &logs}
+	for i, job := range jobs {
+		t.Run(tests[i].label, func(t *testing.T) {
+			result, err := runner.runTestJob(t.Context(), job, workspace)
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+			}
+			want := map[string]string{"label": tests[i].label, "count": strconv.Itoa(tests[i].count), "enabled": "", "disabled": "disabled"}
+			if tests[i].enabled {
+				want["enabled"], want["disabled"] = "enabled", ""
+			}
+			if !reflect.DeepEqual(result.Outputs, want) {
+				t.Fatalf("RunJob() outputs = %#v, want %#v", result.Outputs, want)
+			}
+		})
 	}
 }
 
@@ -2202,16 +2241,30 @@ func TestCompositeChildConditionUsesActionInputs(t *testing.T) {
 inputs:
   enabled:
     required: true
+  label:
+    required: true
 runs:
   using: composite
   steps:
+    - shell: sh
+      run: |
+        test '${{ inputs.label }}' = action-workflow-label
+        test "$WORKFLOW_LABEL" = workflow-label
     - if: inputs.enabled == 'true'
       shell: sh
       run: touch "$CONDITIONAL_RAN"
 `)
 			marker := filepath.Join(workspace, "conditional-ran")
-			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "composite", Kind: "uses", Uses: "./.github/actions/conditional", With: map[string]string{"enabled": enabled}}})
-			job.Env = map[string]string{"CONDITIONAL_RAN": marker}
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+				{ID: "composite", Kind: "uses", Uses: "./.github/actions/conditional",
+					With: map[string]string{"enabled": enabled, "label": "action-${{ inputs.label }}"},
+					Env:  map[string]string{"WORKFLOW_LABEL": "${{ inputs.label }}"}},
+				{ID: "after", Kind: "run", Command: `test '${{ inputs.label }}' = workflow-label
+test '${{ inputs.enabled }}' = "$WORKFLOW_ENABLED"`},
+			})
+			workflowEnabled := strconv.FormatBool(enabled != "true")
+			job.Inputs = map[string]any{"enabled": workflowEnabled, "label": "workflow-label"}
+			job.Env = map[string]string{"CONDITIONAL_RAN": marker, "WORKFLOW_ENABLED": workflowEnabled}
 			result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 			if err != nil || result.Conclusion != "success" {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)

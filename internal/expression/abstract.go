@@ -183,8 +183,8 @@ func analyzeRuntimeNode(node actionlint.ExprNode, knownReferences map[string]any
 		}
 		if value, ok := knownReferences[name]; ok {
 			analysis.Value = AbstractValue{Known: true, Value: value}
-		} else if strings.EqualFold(root, "strategy") {
-			if value, found := lookupRuntimeValue(knownReferences["strategy"], path); found {
+		} else if strings.EqualFold(root, "strategy") || strings.EqualFold(root, "inputs") || strings.EqualFold(root, "matrix") {
+			if value, found := lookupRuntimeValue(knownReferences[strings.ToLower(root)], path); found {
 				analysis.Value = AbstractValue{Known: true, Value: value}
 			}
 		}
@@ -277,6 +277,7 @@ func analyzeTemplate(template string, analyze func(actionlint.ExprNode) (Analysi
 
 func analyzeConditionNode(node actionlint.ExprNode, known map[string]any) (Analysis, error) {
 	evaluator := newAbstractEvaluator(conditionSurface)
+	evaluator.policy.resolveStaticIndexedReference = true
 	evaluator.resolve = func(root string, path []string) (Analysis, error) {
 		analysis := Analysis{Effects: abstractReferenceEffects(root, path)}
 		if isRunnerDebugReference(root, path) {

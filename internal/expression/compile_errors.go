@@ -37,6 +37,22 @@ func AuthoredErrorText(err error) (string, bool) {
 	return err.Error(), true
 }
 
+// inputEvaluationError keeps evaluated input values out of diagnostics. An
+// authored error is already value-safe; other evaluator errors may quote data.
+func inputEvaluationError(site Site, err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, safe := AuthoredErrorText(err); safe {
+		return err
+	}
+	names, dynamic, _ := NewEngine().InputReferences(site)
+	if len(names) != 0 || dynamic {
+		return fmt.Errorf("expression cannot be evaluated using workflow inputs")
+	}
+	return err
+}
+
 // unavailableGitHubValueError explains a github reference that has no value
 // when a workflow is imported.
 func unavailableGitHubValueError(reference, property string) error {

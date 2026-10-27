@@ -34,6 +34,132 @@ func TestEngineLiteralPreservesExpressionTypes(t *testing.T) {
 	}
 }
 
+func TestEngineInputReferences(t *testing.T) {
+	for _, test := range []struct {
+		source  string
+		names   []string
+		dynamic bool
+	}{
+		{"${{ inputs.Label }}-${{ inputs['enabled'] }}", []string{"enabled", "label"}, false},
+		{"${{ inputs[inputs.key] }}", []string{"key"}, true},
+		{"${{ inputs[env.KEY] }}", []string{}, true},
+		{"${{ toJSON(inputs) }}", []string{}, true},
+		{"${{ github.event.inputs.name }}-${{ 'inputs.fake' }}", []string{}, false},
+		{"${{ false && inputs.unselected || github.token }}", []string{"unselected"}, false},
+	} {
+		names, dynamic, err := NewEngine().InputReferences(Site{Source: test.source, Profile: ProfileStepTemplate})
+		if err != nil || !reflect.DeepEqual(names, test.names) || dynamic != test.dynamic {
+			t.Errorf("InputReferences(%q) = %v, %v, %v", test.source, names, dynamic, err)
+		}
+	}
+}
+
+func TestEnginePreservesInputScopeDuringEventReduction(t *testing.T) {
+	inputs := map[string]any{"label": "synthetic-input-sentinel", "enabled": false}
+	compile := CompileContext{GitHub: map[string]any{"ref": "refs/heads/main", "event": map[string]any{"branch": "event-branch"}}}
+	for _, test := range []struct {
+		source string
+		want   string
+	}{
+		{"${{ inputs.label }}", "synthetic-input-sentinel"},
+		{"${{ format('{0}-{1}', github.ref, inputs.label) }}", "refs/heads/main-synthetic-input-sentinel"},
+		{"${{ format('{0}-{1}', github.event.branch, inputs.label) }}", "event-branch-synthetic-input-sentinel"},
+		{"${{ github.ref == inputs.label }}", "false"},
+		{"${{ inputs.enabled && github.token || '' }}", ""},
+	} {
+		site := Site{Source: test.source, Profile: ProfileStepTemplate, Result: ResultString}
+		reduced, err := NewEngine().Reduce(site, Values{Compile: compile})
+		if err != nil || reduced.Known || strings.Contains(reduced.Source, "synthetic-input-sentinel") || !strings.Contains(reduced.Source, "inputs.") {
+			t.Fatalf("Reduce(%q) = %#v, %v", test.source, reduced, err)
+		}
+		site.Source = reduced.Source
+		got, err := NewEngine().Evaluate(site, Values{Runtime: Context{WorkflowInputs: inputs, GitHub: compile.GitHub}})
+		if err != nil || got != test.want {
+			t.Errorf("Evaluate(reduced %q) = %#v, %v; want %q", test.source, got, err, test.want)
+		}
+		analysis, err := NewEngine().Analyze(site, AbstractValues{Inputs: InputScope{Values: inputs, Complete: true}})
+		if err != nil || analysis.Effects.GitHubToken != 0 {
+			t.Errorf("input-scoped authority = %#v, %v", analysis, err)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileCompileJobCondition, ProfileJobCondition, ProfileStepCondition} {
+		site := Site{Source: "inputs.enabled && github.event.branch == 'event-branch'", Profile: profile, Result: ResultBoolean}
+		reduced, err := NewEngine().Reduce(site, Values{Compile: compile})
+		if err != nil || reduced.Known || !strings.Contains(reduced.Source, "inputs.enabled") || strings.Contains(reduced.Source, "github.event.branch") {
+			t.Errorf("Reduce(%s condition) = %#v, %v", profile, reduced, err)
+		}
+	}
+}
+
+func TestEnginePartialInputAuthorityMatchesHydratedEvaluation(t *testing.T) {
+	partial := InputScope{Values: map[string]any{"key": "value", "enabled": false}}
+	hydrated := map[string]any{"key": "value", "enabled": false, "value": "yes"}
+	for _, test := range []struct {
+		source string
+		token  bool
+	}{
+		{"inputs[inputs.key] && github.token || ''", true},
+		{"contains(toJSON(inputs), 'yes') && github.token || ''", true},
+		{"fromJSON(toJSON(inputs)).value && github.token || ''", true},
+		{"inputs.enabled && github.token || ''", false},
+		{"inputs['enabled'] && github.token || ''", false},
+	} {
+		t.Run(test.source, func(t *testing.T) {
+			site := Site{Source: "${{ " + test.source + " }}", Profile: ProfileStepTemplate, Result: ResultString}
+			analysis, err := NewEngine().Analyze(site, AbstractValues{Inputs: partial})
+			if err != nil || (analysis.Effects.GitHubToken != 0) != test.token {
+				t.Fatalf("partial Analyze() = %#v, %v; want token %t", analysis, err, test.token)
+			}
+			got, err := NewEngine().Evaluate(site, Values{Runtime: Context{WorkflowInputs: hydrated, GitHub: map[string]any{"token": "synthetic-token"}}})
+			want := ""
+			if test.token {
+				want = "synthetic-token"
+			}
+			if err != nil || got != want {
+				t.Fatalf("hydrated Evaluate() = %#v, %v; want %q", got, err, want)
+			}
+			// Once the object is complete, computed and aggregate reads can
+			// prove these same token branches false without over-authorizing.
+			analysis, err = NewEngine().Analyze(site, AbstractValues{Inputs: InputScope{Values: partial.Values, Complete: true}})
+			if err != nil || analysis.Effects.GitHubToken != 0 || !analysis.Value.Known || analysis.Value.Value != "" {
+				t.Fatalf("complete Analyze() = %#v, %v; want known empty value without token", analysis, err)
+			}
+		})
+	}
+	for _, profile := range []ProfileID{ProfileJobCondition, ProfileStepCondition} {
+		analysis, err := NewEngine().Analyze(Site{Source: "inputs['enabled']", Profile: profile, Result: ResultBoolean}, AbstractValues{Inputs: partial})
+		if err != nil || !analysis.Value.Known || analysis.Value.Value != false {
+			t.Errorf("indexed known-false %s condition = %#v, %v", profile, analysis, err)
+		}
+	}
+	for _, test := range []struct {
+		source string
+		known  bool
+	}{
+		{"${{ inputs[inputs.key] || 'fallback' }}", false},
+		{"${{ toJSON(inputs) }}", false},
+		{"${{ inputs.enabled }}", true},
+		{"${{ inputs['enabled'] }}", true},
+	} {
+		reduced, err := NewEngine().Reduce(Site{Source: test.source, Profile: ProfileReusableStepControl, Result: ResultAny}, Values{Compile: CompileContext{Inputs: partial.Values}})
+		if err != nil || reduced.Known != test.known || (test.known && reduced.Value != false) || (!test.known && reduced.Source != test.source) {
+			t.Errorf("partial Reduce(%s) = %#v, %v", test.source, reduced, err)
+		}
+	}
+}
+
+func TestEngineInputErrorsHideValues(t *testing.T) {
+	inputs := map[string]any{"pattern": "synthetic-input-sentinel-{bad}"}
+	site := Site{Source: "${{ format(inputs.pattern, 'value') }}", Profile: ProfileStepTemplate, Result: ResultString}
+	_, concreteErr := NewEngine().Evaluate(site, Values{Runtime: Context{WorkflowInputs: inputs}})
+	_, abstractErr := NewEngine().Analyze(site, AbstractValues{Inputs: InputScope{Values: inputs, Complete: true}})
+	for _, err := range []error{concreteErr, abstractErr} {
+		if err == nil || strings.Contains(err.Error(), "synthetic-input-sentinel") {
+			t.Errorf("expected a value-safe format error, got %v", err)
+		}
+	}
+}
+
 func TestNeedsJSONUsesRuntimeValuesWithoutGrantingAuthority(t *testing.T) {
 	engine := NewEngine()
 	const want = "{\n  \"build\": {\n    \"outputs\": {},\n    \"result\": \"failure\"\n  }\n}"

@@ -773,6 +773,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		// Conditions keep vars residual; see resolveCompileTimeConditions.
 		conditionContext := jobContext
 		conditionContext.Vars = nil
+		conditionContext.Inputs, conditionContext.InputsComplete = nil, false
 		compileConditionErr := supportedCompileTimeConditions(jobPath, job, conditionContext)
 		if sourced.blockerDetailUnsafe {
 			compileConditionErr = suppressBlockerDetail(compileConditionErr)
