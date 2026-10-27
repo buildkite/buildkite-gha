@@ -844,7 +844,7 @@ func TestRuntimeMatrixRejectsWorkflowConcurrency(t *testing.T) {
 	source := strings.Replace(runtimeMatrixWorkflow, "on: push\n", "on: push\nconcurrency:\n  group: release\n  cancel-in-progress: false\n", 1)
 	ir, err := compileRuntimeMatrix(t, source, nil)
 	var finding *ProcessingFinding
-	if !errors.As(err, &finding) || finding.Code != CodeMatrixInvalid || finding.Job != "build" || !strings.Contains(err.Error(), "workflow concurrency cannot be combined with a needs-derived matrix") {
+	if !errors.As(err, &finding) || finding.Code != CodeMatrixInvalid || finding.Job != "build" || !strings.Contains(finding.Detail, "workflow concurrency cannot be combined with a needs-derived matrix") || !strings.Contains(finding.Detail, "move concurrency to the job level, where it holds one job rather than the whole run, or use a static matrix") {
 		t.Fatalf("err = %v, want %s for job build", err, CodeMatrixInvalid)
 	}
 	if len(ir.Continuations) != 0 {

@@ -281,6 +281,7 @@ func TestLongLineChildProcess(t *testing.T) {
 
 func TestProcessEnvironmentIsExplicitAndUsable(t *testing.T) {
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "must-not-leak")
+	t.Setenv("JAVA_TOOL_OPTIONS", "-javaagent:must-not-run.jar")
 	for _, name := range agentProxyEnvironmentNames {
 		t.Setenv(name, "http://must-not-leak.invalid")
 	}
@@ -290,11 +291,12 @@ func TestProcessEnvironmentIsExplicitAndUsable(t *testing.T) {
 test -n "$PATH" && test -n "$HOME" && test -n "$TMPDIR"
 test "$DECLARED" = visible
 test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}"
+test -z "${JAVA_TOOL_OPTIONS+x}"
 test -z "${HTTP_PROXY+x}" && test -z "${HTTPS_PROXY+x}" && test -z "${ALL_PROXY+x}" && test -z "${NO_PROXY+x}"
 test -z "${http_proxy+x}" && test -z "${https_proxy+x}" && test -z "${all_proxy+x}" && test -z "${no_proxy+x}"
 printf '%s\n' environment-ok
 `
-	if err := (Runner{}).runStreaming(t.Context(), processor, "", map[string]string{"DECLARED": "visible"}, "sh", "-c", command); err != nil {
+	if err := (Runner{}).runStreaming(t.Context(), processor, "", map[string]string{"DECLARED": "visible"}, "sh", "-e", "-c", command); err != nil {
 		t.Fatalf("runStreaming() error = %v", err)
 	}
 	if logs.String() != "environment-ok\n" {

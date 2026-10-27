@@ -104,15 +104,15 @@ instances:
 }
 
 func canonicalWorkflowRunPath(workflowPath string) (string, error) {
-	if !isRepositoryWorkflowPath(workflowPath) {
+	repositoryRoot, canonicalPath, err := workflowRepository(workflowPath)
+	if err != nil {
+		return "", err
+	}
+	if repositoryRoot == "" {
 		if filepath.IsAbs(workflowPath) {
 			return "", nil
 		}
 		return filepath.ToSlash(filepath.Clean(workflowPath)), nil
-	}
-	repositoryRoot, canonicalPath, err := workflowRepository(workflowPath)
-	if err != nil {
-		return "", err
 	}
 	return repositoryWorkflowPath(repositoryRoot, canonicalPath)
 }
@@ -180,7 +180,7 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	}
 	sort.Strings(actions.capabilities)
 	actions.capabilities = slices.Compact(actions.capabilities)
-	if instance.Platform != PlatformLinuxAMD64 && slices.Contains(actions.capabilities, "docker") {
+	if instance.Platform.OS != OperatingSystemLinux && slices.Contains(actions.capabilities, "docker") {
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on %s", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, instance.Platform)
 	}
 	// Runtime discovery omits failed jobs. Preserve their compatibility error
@@ -355,6 +355,8 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceServiceTemplate:
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
+		case program.SurfaceServiceEnvironment:
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceServiceCredential:
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceServiceMap:
@@ -372,19 +374,20 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 // compileReductionProfile is the single admission policy for event reduction.
 // Program.Validate applies the destination runtime profile to every residual.
 var compileReductionProfiles = map[program.Surface]expression.ProfileID{
-	program.SurfaceJobCondition:      expression.ProfileCompileJobCondition,
-	program.SurfaceJobControl:        expression.ProfileJobControl,
-	program.SurfaceCallCondition:     expression.ProfileCompileCallCondition,
-	program.SurfaceStepCondition:     expression.ProfileCompileStepCondition,
-	program.SurfaceStepControl:       expression.ProfileStepControl,
-	program.SurfaceJobEnvironment:    expression.ProfileJobEnvironment,
-	program.SurfaceJobDefault:        expression.ProfileJobDefault,
-	program.SurfaceJobOutput:         expression.ProfileJobOutput,
-	program.SurfaceStepTemplate:      expression.ProfileStepTemplate,
-	program.SurfaceRuntimeTemplate:   expression.ProfileRuntimeTemplate,
-	program.SurfaceServiceTemplate:   expression.ProfileServiceTemplate,
-	program.SurfaceServiceCredential: expression.ProfileServiceCredential,
-	program.SurfaceServiceMap:        expression.ProfileStepTemplate,
+	program.SurfaceJobCondition:       expression.ProfileCompileJobCondition,
+	program.SurfaceJobControl:         expression.ProfileJobControl,
+	program.SurfaceCallCondition:      expression.ProfileCompileCallCondition,
+	program.SurfaceStepCondition:      expression.ProfileCompileStepCondition,
+	program.SurfaceStepControl:        expression.ProfileStepControl,
+	program.SurfaceJobEnvironment:     expression.ProfileJobEnvironment,
+	program.SurfaceJobDefault:         expression.ProfileJobDefault,
+	program.SurfaceJobOutput:          expression.ProfileJobOutput,
+	program.SurfaceStepTemplate:       expression.ProfileStepTemplate,
+	program.SurfaceRuntimeTemplate:    expression.ProfileRuntimeTemplate,
+	program.SurfaceServiceTemplate:    expression.ProfileServiceTemplate,
+	program.SurfaceServiceEnvironment: expression.ProfileServiceEnvironment,
+	program.SurfaceServiceCredential:  expression.ProfileServiceCredential,
+	program.SurfaceServiceMap:         expression.ProfileStepTemplate,
 }
 
 func compileReductionProfile(surface program.Surface) (expression.ProfileID, error) {
@@ -546,7 +549,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 		if !ok {
 			return built, fmt.Errorf("build plan for job %q: action lock %q is missing", instance.LogicalJobID, selector.Lock)
 		}
-		if err := b.validateActionAdapter(instance, stepIndex, lock, reachability.Steps[stepIndex], &built); err != nil {
+		if err := b.validateActionAdapter(instance, stepIndex, lock, reachability.Job, reachability.Steps[stepIndex], &built); err != nil {
 			return built, err
 		}
 	}
@@ -575,13 +578,17 @@ func (b planBuilder) authorityReferences(instance JobInstance) map[string]any {
 		"github.server_url": plan.EventServerURL(b.ir.Event.Provider),
 		"inputs":            instance.Inputs,
 		"matrix":            instance.Matrix,
+		"strategy":          instance.Strategy,
 	}
 }
 
-func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, reachable bool, built *builtPlanActions) error {
+func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, jobReachable, stepReachable bool, built *builtPlanActions) error {
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
 	switch descriptor.Adapter {
 	case actionintegration.AdapterCheckoutExactEventSHA:
+		if !jobReachable {
+			return nil
+		}
 		checkoutInputs := cloneMap(instance.Steps[stepIndex].With)
 		for name, value := range checkoutInputs {
 			if !strings.EqualFold(name, "ref") {
@@ -597,7 +604,7 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 			span := instance.Steps[stepIndex].Span.Start
 			return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 		}
-		if reachable {
+		if stepReachable {
 			built.capabilities = append(built.capabilities, "provider-token-read")
 			built.authorization.ProviderTokenReadCapabilitySources = append(built.authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
 		}
@@ -711,6 +718,7 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		OIDC:                 cloneOIDCConfiguration(b.options.OIDC),
 		CacheMode:            instance.CacheMode,
 		Matrix:               instance.Matrix,
+		Strategy:             cloneAnyMap(instance.Strategy),
 		Inputs:               cloneAnyMap(instance.Inputs),
 		DeferredInputs:       deferredInputs,
 		OrganizationVars:     cloneMap(b.ir.OrganizationVars),

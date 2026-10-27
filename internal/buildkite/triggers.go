@@ -110,6 +110,11 @@ var supportedIssueCommentAction = map[string]bool{
 
 var supportedReleaseActions = []string{"published", "unpublished", "created", "edited", "deleted", "prereleased", "released"}
 
+// SupportedMergeGroupAction reports whether action is a merge queue lifecycle activity.
+func SupportedMergeGroupAction(action string) bool {
+	return action == "checks_requested" || action == "destroyed"
+}
+
 // SupportedMilestoneAction reports whether action is a milestone lifecycle activity.
 func SupportedMilestoneAction(action string) bool {
 	return slices.Contains([]string{"created", "closed", "opened", "edited", "deleted"}, action)
@@ -207,13 +212,13 @@ type UnsupportedPathFiltersError struct {
 
 func (e *UnsupportedPathFiltersError) Error() string {
 	if e.Reason != "" {
-		return fmt.Sprintf("%s path filters are unsupported: %s", e.Event, e.Reason)
+		return fmt.Sprintf("%s path filters could not be evaluated: %s", e.Event, e.Reason)
 	}
 	return fmt.Sprintf("%s path filters are unsupported: Buildkite if_changed is not equivalent", e.Event)
 }
 
 func (e *UnsupportedPathFiltersError) CompatibilityBlocker() (string, string) {
-	return "trigger", e.Event
+	return "path_filter", e.Event
 }
 
 // LiveTriggerConditionExpressions uses fields from the Buildkite build that
@@ -426,8 +431,14 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 					return fmt.Sprintf("Base branch %q does not match this workflow's merge_group branch filters.", *snapshot.MergeGroupBaseBranch), nil
 				}
 			}
-			if snapshot.MergeGroupAction != nil && *snapshot.MergeGroupAction != "checks_requested" {
-				return fmt.Sprintf("Merge group activity %q does not match this workflow's merge_group activity filters.", *snapshot.MergeGroupAction), nil
+			if snapshot.MergeGroupAction != nil {
+				types := trigger.Types
+				if len(types) == 0 {
+					types = []string{"checks_requested"}
+				}
+				if !slices.Contains(types, *snapshot.MergeGroupAction) {
+					return fmt.Sprintf("Merge group activity %q does not match this workflow's merge_group activity filters.", *snapshot.MergeGroupAction), nil
+				}
 			}
 		case "release":
 			if snapshot.ReleaseAction != nil {
@@ -537,28 +548,32 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		return "", false, &UnsupportedTriggerEventError{Event: t.Event}
 	}
 	pathFilters := t.Paths != nil || t.PathsIgnore != nil
-	if pathFilters && t.Event != "merge_group" {
-		if t.Event != "push" && t.Event != "pull_request" {
+	if pathFilters {
+		switch t.Event {
+		case "merge_group", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment",
+			"issues", "issue_comment", "label", "release", "create", "delete", "deployment", "deployment_status", "pull_request_review", "pull_request_review_comment":
+		case "push", "pull_request":
+			if _, err := pathFiltersMatch(nil, t.Paths, t.PathsIgnore); err != nil {
+				return "", false, triggerFilterError(t, fmt.Errorf("%s paths: %w", t.Event, err), "paths", "paths-ignore")
+			}
+		default:
 			return "", false, triggerFilterError(t, &UnsupportedPathFiltersError{Event: t.Event}, "paths", "paths-ignore")
-		}
-		if _, err := pathFiltersMatch(nil, t.Paths, t.PathsIgnore); err != nil {
-			return "", false, triggerFilterError(t, fmt.Errorf("%s paths: %w", t.Event, err), "paths", "paths-ignore")
 		}
 	}
 	switch t.Event {
 	case "workflow_call":
 		return "", false, nil
 	case "fork", "public", "gollum", "page_build":
-		if len(t.Types) > 0 || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t, "types", "branches-ignore", "tags", "tags-ignore", "workflows")
+		if len(t.Types) > 0 || t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "types", "workflows")
 		}
 		if expressions.EventPredicate == "" {
 			return "", false, fmt.Errorf("%s requires an effective event predicate", t.Event)
 		}
 		return expressions.EventPredicate, true, nil
 	case "deployment", "deployment_status", "create", "delete":
-		if hasWebhookFilters(t) {
-			return "", false, unsupportedEventFilter(t, "types", "branches", "branches-ignore", "tags", "tags-ignore", "paths", "paths-ignore", "workflows")
+		if t.Types != nil || t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "types", "workflows")
 		}
 		if expressions.EventPredicate == "" {
 			return "", false, fmt.Errorf("%s requires an effective event predicate", t.Event)
@@ -712,10 +727,24 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		if expressions.MergeGroupAction == "null" {
 			return "", false, fmt.Errorf("merge_group event snapshot requires payload.action")
 		}
-		if snapshot.MergeGroupAction != nil && *snapshot.MergeGroupAction != "checks_requested" {
-			return "", false, fmt.Errorf("merge_group activity must be checks_requested")
+		if snapshot.MergeGroupAction != nil && !SupportedMergeGroupAction(*snapshot.MergeGroupAction) {
+			return "", false, fmt.Errorf("merge_group activity must be checks_requested or destroyed")
 		}
-		parts := []string{expressions.EventPredicate, expressions.MergeGroupAction + ` == "checks_requested"`}
+		if len(t.Types) == 0 {
+			t.Types = []string{"checks_requested"}
+		}
+		actions := make([]string, 0, len(t.Types))
+		for _, activity := range t.Types {
+			if !SupportedMergeGroupAction(activity) {
+				return "", false, triggerFilterError(t, fmt.Errorf("merge_group type %q is unsupported. Supported types are checks_requested and destroyed. Set types to the activities this workflow handles. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it", activity), "types")
+			}
+			actions = append(actions, expressions.MergeGroupAction+` == `+yamlScalar(activity))
+		}
+		actionCondition := strings.Join(actions, " || ")
+		if len(actions) > 1 {
+			actionCondition = "(" + actionCondition + ")"
+		}
+		parts := []string{expressions.EventPredicate, actionCondition}
 		hasBranchFilter := t.Branches != nil || t.BranchesIgnore != nil
 		if hasBranchFilter && (expressions.MergeGroupBaseBranch == "" || expressions.MergeGroupBaseBranch == "null") {
 			return "", false, triggerFilterError(t, fmt.Errorf("merge_group branch filters require payload.merge_group.base_ref"), "branches", "branches-ignore")
@@ -727,17 +756,10 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		if hasBranchFilter {
 			parts = append(parts, branch)
 		}
-		if t.Types != nil {
-			for _, activity := range t.Types {
-				if activity != "checks_requested" {
-					return "", false, triggerFilterError(t, fmt.Errorf("merge_group type %q is unsupported. checks_requested is the only merge queue activity currently mapped. Set types: [checks_requested]. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it", activity), "types")
-				}
-			}
-		}
 		return strings.Join(parts, " && "), true, nil
 	case "release":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Paths != nil || t.PathsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.ReleaseAction == "" {
 			return "", false, fmt.Errorf("release requires effective event and action expressions")
@@ -757,8 +779,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "watch":
-		if t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		for _, action := range t.Types {
 			if action != "started" {
@@ -770,8 +792,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate, true, nil
 	case "milestone":
-		if t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.MilestoneAction == "" || expressions.MilestoneAction == "null" {
 			return "", false, fmt.Errorf("milestone requires effective event and action expressions")
@@ -788,8 +810,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "branch_protection_rule":
-		if t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.RuleAction == "" || expressions.RuleAction == "null" {
 			return "", false, fmt.Errorf("branch_protection_rule requires effective event and action expressions")
@@ -806,8 +828,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "discussion", "discussion_comment":
-		if t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.DiscussionAction == "" || expressions.DiscussionAction == "null" {
 			return "", false, fmt.Errorf("%s requires effective event and action expressions", t.Event)
@@ -824,8 +846,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "label":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.LabelAction == "" || expressions.LabelAction == "null" {
 			return "", false, fmt.Errorf("label requires effective event and action expressions")
@@ -842,8 +864,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "issues":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.IssuesAction == "" {
 			return "", false, fmt.Errorf("issues requires effective event and action expressions")
@@ -863,8 +885,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "pull_request_review", "pull_request_review_comment":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.PullRequestReviewAction == "" || expressions.PullRequestReviewAction == "null" {
 			return "", false, fmt.Errorf("%s requires effective event and action expressions", t.Event)
@@ -884,8 +906,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "issue_comment":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t)
+		if t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.IssueCommentAction == "" {
 			return "", false, fmt.Errorf("issue_comment requires effective event and action expressions")

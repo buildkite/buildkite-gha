@@ -34,6 +34,15 @@ type preparedInvocation struct {
 
 type remotePreparations map[string]*preparedInvocation
 
+// actionPreFailure identifies one failed preparation occurrence, even when
+// independent failures wrap the same cancellation or deadline sentinel.
+type actionPreFailure struct {
+	err error
+}
+
+func (e *actionPreFailure) Error() string { return e.err.Error() }
+func (e *actionPreFailure) Unwrap() error { return e.err }
+
 func bindCompositeInvocationSteps(invocation *preparedInvocation, steps map[string]expression.StepStatus) {
 	if invocation != nil && invocation.isolated {
 		invocation.eval.Steps = steps

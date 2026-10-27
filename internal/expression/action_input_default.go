@@ -30,18 +30,12 @@ func validateActionInputDefaultTemplate(template string) error {
 
 func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 	validator := newSemanticValidator(actionInputDefaultSurface)
-	validator.validateReference = func(node actionlint.ExprNode, root string, path []string) error {
-		if isJobStatusReference(root, path) {
-			return nil
-		}
+	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if isJobCheckRunIDReference(root, path) {
 			return nil
 		}
 		if isRunnerTempReference(root, path) {
 			return fmt.Errorf("action input defaults cannot reference runner.temp")
-		}
-		if isDirectRunnerDebug(node, root, path) {
-			return nil
 		}
 		kind := classifyRuntimeReference(root, path)
 		if kind == runtimeReferenceSecret {
@@ -103,11 +97,6 @@ func evaluateActionInputDefault(template string, context Context) (string, error
 	return evaluateRuntimeTemplate(template, context, evaluateActionInputDefaultNode)
 }
 
-func isDirectRunnerDebug(node actionlint.ExprNode, root string, path []string) bool {
-	_, direct := node.(*actionlint.ObjectDerefNode)
-	return direct && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug")
-}
-
 func isJobCheckRunIDReference(root string, path []string) bool {
 	return strings.EqualFold(root, "job") && len(path) == 1 && strings.EqualFold(path[0], "check_run_id")
 }
@@ -148,18 +137,8 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 	if err := validateActionInputDefaultNode(node); err != nil {
 		return nil, err
 	}
-	root, path, err := referencePath(node)
-	if err == nil && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug") && !isDirectRunnerDebug(node, root, path) {
-		return nil, fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
-	}
 	evaluator := newSemanticEvaluator(actionInputDefaultSurface)
 	evaluator.resolve = func(root string, path []string) (any, error) {
-		if isJobStatusReference(root, path) {
-			if context.JobStatus == "" {
-				return nil, fmt.Errorf("expression references unavailable job.status")
-			}
-			return context.JobStatus, nil
-		}
 		if isJobCheckRunIDReference(root, path) {
 			// Buildkite creates no GitHub check run. GitHub documents this
 			// property as unavailable on GitHub Enterprise Server; unavailable
@@ -168,9 +147,6 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 		}
 		if isRunnerTempReference(root, path) {
 			return nil, fmt.Errorf("action input defaults cannot reference runner.temp")
-		}
-		if strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug") {
-			return "false", nil
 		}
 		return resolveRuntimeReferenceWithMissingMembers(root, path, context)
 	}

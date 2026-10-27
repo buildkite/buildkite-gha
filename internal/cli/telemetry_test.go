@@ -24,6 +24,51 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
+func TestCommandTelemetryOmitsInvalidOrUnrelatedAgentStatus(t *testing.T) {
+	events := make(chan telemetry.Properties, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var event struct {
+			Properties telemetry.Properties `json:"properties"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			t.Error(err)
+		}
+		events <- event.Properties
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	client, err := telemetry.New(telemetry.Config{Endpoint: server.URL, JobID: cliTestJobID, JobToken: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		code       telemetry.FailureCode
+		status     int
+		wantStatus int
+	}{
+		{telemetry.FailureCodeWorkflowToken, -1, 0},
+		{telemetry.FailureCodeWorkflowToken, 99, 0},
+		{telemetry.FailureCodeWorkflowToken, 100, 100},
+		{telemetry.FailureCodeWorkflowToken, 599, 599},
+		{telemetry.FailureCodeWorkflowToken, 600, 0},
+		{telemetry.FailureCodeOIDCToken, 403, 403},
+		{telemetry.FailureCodeCacheCredential, 422, 422},
+		{telemetry.FailureCodeRuntimeIntegrity, 403, 0},
+		{telemetry.FailureCodeSecretUnavailable, 404, 0},
+	} {
+		details := &commandTelemetryDetails{}
+		details.setFailureCode(test.code)
+		details.setAgentAPIHTTPStatus(test.status)
+		if err := client.Emit(telemetry.CommandRunJob, telemetry.OutcomeFailure, 0, details.forOutcome(telemetry.OutcomeFailure)); err != nil {
+			t.Fatalf("status %d dropped the event: %v", test.status, err)
+		}
+		event := <-events
+		if event.FailureCode != test.code || event.AgentAPIHTTPStatus != test.wantStatus {
+			t.Fatalf("code %s, status %d: event = %#v", test.code, test.status, event)
+		}
+	}
+}
+
 func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
 	type event struct {
 		Event      string `json:"event"`
@@ -242,16 +287,46 @@ func TestCommandTelemetryDiagnosticLimitUsesWireIdentity(t *testing.T) {
 }
 
 func TestTriggerFailureTelemetryIncludesTrigger(t *testing.T) {
-	for _, triggerErr := range []error{
-		&buildkitepipeline.UnsupportedTriggerEventError{Event: "workflow_run"},
-		&buildkitepipeline.UnsupportedPathFiltersError{Event: "push", Reason: "history unavailable"},
+	for _, test := range []struct {
+		err             error
+		blocker, detail string
+	}{
+		{&buildkitepipeline.UnsupportedTriggerEventError{Event: "workflow_run"}, "trigger", "workflow_run"},
+		{&buildkitepipeline.UnsupportedPathFiltersError{Event: "push", Reason: "history unavailable"}, "path_filter", "push"},
+		{&buildkitepipeline.UnsupportedPathFiltersError{Event: "pull_request", Reason: "history unavailable"}, "path_filter", "pull_request"},
 	} {
 		details := &commandTelemetryDetails{}
-		details.observe(triggerFailureProcessingReport(workflowInput{Path: "workflow.yml", Source: []byte("on: push\n")}, triggerErr))
+		details.observe(triggerFailureProcessingReport(workflowInput{Path: "workflow.yml", Source: []byte("on: push\n")}, test.err))
 		got := details.telemetryDetails()
-		if got.Blocker != "trigger" || got.BlockerDetail == "" || len(got.Diagnostics) != 1 || got.Diagnostics[0].Blocker != "trigger" || got.Diagnostics[0].BlockerDetail != got.BlockerDetail {
+		if got.Blocker != test.blocker || got.BlockerDetail != test.detail || len(got.Diagnostics) != 1 || got.Diagnostics[0].Blocker != test.blocker || got.Diagnostics[0].BlockerDetail != test.detail {
 			t.Fatalf("trigger telemetry = %#v", got)
 		}
+	}
+}
+
+func TestGeneratedFailureAnnotationsDoNotDiscardRunnerTelemetry(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci.yml", "hosted")
+	for _, test := range []struct {
+		line                           int
+		job, instance, blocker, detail string
+	}{
+		{10, "test", "a", "runner_policy", "conflicting_queues"},
+		{10, "test", "b", "runner_policy", "conflicting_targets"},
+		{20, "later", "c", "runner_label", "windows-latest"},
+	} {
+		report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+			Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions,
+			Blocker: test.blocker, BlockerDetail: test.detail, Message: "runner target rejected",
+			Job: test.job, Instance: test.instance,
+			Location: &compatibility.SourceLocation{Path: "ci.yml", Line: test.line, Column: 5},
+		})
+	}
+	_, _ = generatedFailure(t.Context(), report, sourceLinkContext{})
+	details := &commandTelemetryDetails{}
+	details.addReportDiagnostics(report)
+	got := details.telemetryDetails().Diagnostics
+	if len(got) != 3 || got[0].BlockerDetail != "conflicting_queues" || got[1].BlockerDetail != "conflicting_targets" || got[2].BlockerDetail != "windows-latest" {
+		t.Fatalf("telemetry lost a runner rejection after annotation: %#v", got)
 	}
 }
 
@@ -418,6 +493,28 @@ func TestObservedFailureMessageIncludesDetail(t *testing.T) {
 	}})
 	if got := details.forOutcome(telemetry.OutcomeFailure); got.ErrorMessage != "expression is unsupported github.workspace" {
 		t.Fatalf("failure message = %q, want message with detail", got.ErrorMessage)
+	}
+}
+
+func TestVariableResolutionTelemetryStaysDistinctFromEnvironmentFailures(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		add  func(*compatibility.ProcessingReport)
+		code telemetry.FailureCode
+	}{
+		{"variables", func(r *compatibility.ProcessingReport) { r.AddVariableResolutionFailure("variable lookup failed") }, telemetry.FailureCodeVariableResolution},
+		{"environment", func(r *compatibility.ProcessingReport) { r.AddEnvironmentFailure("repository source failed") }, telemetry.FailureCodeEnvironment},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			report := compatibility.NewProcessingReport("workflow.yml", "")
+			test.add(&report)
+			details := &commandTelemetryDetails{}
+			details.observe(report)
+			got := details.forOutcome(telemetry.OutcomeFailure)
+			if got.FailureCode != test.code || len(got.Diagnostics) != 1 || got.Diagnostics[0].Code != string(test.code) {
+				t.Fatalf("failure code/diagnostics = %q/%#v; want %q", got.FailureCode, got.Diagnostics, test.code)
+			}
+		})
 	}
 }
 

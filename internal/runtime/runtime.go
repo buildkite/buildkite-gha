@@ -47,6 +47,7 @@ type Runner struct {
 	MiseDataDir           string
 	ToolCache             string
 	Docker                string
+	DockerBuildLoad       bool // see enableDockerBuildLoad
 	RuntimeExecutable     string
 	Git                   string
 	GitLFS                string
@@ -619,7 +620,7 @@ func boundedDockerOutputLimit(ctx context.Context, env map[string]string, docker
 	if w.exceeded {
 		return output.String(), fmt.Errorf("docker output exceeds limit")
 	}
-	return output.String(), err
+	return output.String(), MarkWorkflowProcessTimeout(ctx, err)
 }
 
 func boundedDockerCombinedOutput(ctx context.Context, env map[string]string, docker string, args ...string) (string, error) {
@@ -632,7 +633,7 @@ func boundedDockerCombinedOutput(ctx context.Context, env map[string]string, doc
 	if w.exceeded {
 		return output.String(), fmt.Errorf("docker output exceeds limit")
 	}
-	return output.String(), err
+	return output.String(), MarkWorkflowProcessTimeout(ctx, err)
 }
 
 type limitedWriter struct {
@@ -654,7 +655,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandOutputProcessor, workspace, node string, action javaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
+func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandOutputProcessor, workspace, node string, action javaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) (runErr error) {
 	env := mergeStringMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
 	if path, ok := lookupEnvironment(result.Env, "PATH"); ok {
 		mergeEnvironmentInto(env, map[string]string{"PATH": path})
@@ -667,10 +668,12 @@ func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandOutpu
 	env = removeCacheServiceEnvironment(env)
 	if action.Cache {
 		var err error
-		env, err = isolateCacheActionEnvironment(env)
+		var cleanup func()
+		env, cleanup, err = isolateCacheActionEnvironment(env)
 		if err != nil {
 			return fmt.Errorf("configure actions/cache tools: %w", err)
 		}
+		defer cleanup()
 	}
 	if action.Cache || action.CacheClientCompatibility {
 		applyGitHubServerURLOverride(env)
@@ -696,11 +699,16 @@ func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandOutpu
 		cacheToken = cacheEnv["ACTIONS_RUNTIME_TOKEN"]
 	}
 	if r.idTokenService != nil && r.jobContainer == nil {
-		idTokenEnv, revoke, err := r.idTokenService.actionEnvironment(ctx, env)
+		idTokenEnv, finish, err := r.idTokenService.actionEnvironment(ctx, env)
 		if err != nil {
 			return fmt.Errorf("configure actions ID-token service: %w", err)
 		}
-		defer revoke()
+		defer func() {
+			failure := finish()
+			if runErr != nil && failure != nil {
+				runErr = errors.Join(runErr, failure)
+			}
+		}()
 		env = mergeStringMaps(env, idTokenEnv)
 	}
 	entrypoint := filepath.Join(action.Path, entry)

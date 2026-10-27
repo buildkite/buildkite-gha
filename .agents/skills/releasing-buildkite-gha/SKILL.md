@@ -150,9 +150,18 @@ Do not report success until all checks below pass.
 3. **CI and release build:** verify all required GitHub checks and the Buildkite tag build passed, including the `publish-release` job. Use `bk build list --pipeline buildkite/buildkite-gha --commit "$commit" --json` and `bk build view <number> --pipeline buildkite/buildkite-gha --json` when Buildkite CLI authentication is available. Soft-fail reporting jobs do not block the release, but identify them accurately.
 4. **Assets:** download the release into a new temporary directory and require exactly these published assets:
    - `buildkite-gha_Linux_x86_64.tar.gz`
+   - `buildkite-gha_Linux_arm64.tar.gz`
    - `buildkite-gha_Darwin_arm64.tar.gz`
+   - `buildkite-gha_Windows_x86_64.tar.gz`
    - `checksums.txt`
-5. **Checksums and binaries:** verify `checksums.txt` with `sha256sum` or `shasum`, inspect both archive listings, extract the Linux archive, and confirm its binary reports the released version. On macOS arm64, also execute the Darwin binary when that environment is available; otherwise report that only its checksum and archive contents were verified.
+5. **Checksums and binaries:** verify `checksums.txt` with `sha256sum` or `shasum`, inspect every archive listing, extract the Linux x86_64 archive, and confirm its binary reports the released version. On Linux arm64, macOS arm64, or Windows x86_64, also execute that platform's binary when the environment is available; otherwise report that only its checksum and archive contents were verified.
+6. **Pull request comments:** identify every pull request newly included between the previous stable tag and the release commit. After all other publication checks pass, inspect each pull request for this exact comment and post it only when absent:
+
+   ```markdown
+   Released in [v1.2.3](https://github.com/buildkite/buildkite-gha/releases/tag/v1.2.3)
+   ```
+
+   Replace `v1.2.3` with the released tag. Do not comment on pull requests outside the release delta, and do not duplicate an existing release comment.
 
 Useful commands:
 
@@ -174,7 +183,9 @@ assets_dir=$(mktemp -d)
 gh release download "$next" --repo buildkite/buildkite-gha --dir "$assets_dir"
 expected_assets=$(printf '%s\n' \
   buildkite-gha_Darwin_arm64.tar.gz \
+  buildkite-gha_Linux_arm64.tar.gz \
   buildkite-gha_Linux_x86_64.tar.gz \
+  buildkite-gha_Windows_x86_64.tar.gz \
   checksums.txt | sort)
 actual_assets=$(for asset in "$assets_dir"/*; do basename "$asset"; done | sort)
 test "$actual_assets" = "$expected_assets"
@@ -184,7 +195,9 @@ else
   (cd "$assets_dir" && shasum -a 256 --check checksums.txt)
 fi
 tar -tzf "$assets_dir/buildkite-gha_Linux_x86_64.tar.gz"
+tar -tzf "$assets_dir/buildkite-gha_Linux_arm64.tar.gz"
 tar -tzf "$assets_dir/buildkite-gha_Darwin_arm64.tar.gz"
+tar -tzf "$assets_dir/buildkite-gha_Windows_x86_64.tar.gz"
 tar -xzf "$assets_dir/buildkite-gha_Linux_x86_64.tar.gz" \
   -C "$assets_dir" buildkite-gha
 test "$("$assets_dir/buildkite-gha" --version)" = \

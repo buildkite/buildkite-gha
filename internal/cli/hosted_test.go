@@ -86,6 +86,14 @@ func TestHostedRunnerTargetsContainOnlyHostedGuarantees(t *testing.T) {
 	if err != nil || canonical != "macos-15" || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "organization-macos", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("organization macOS target = %q, %#v, %v", canonical, target, err)
 	}
+	canonical, target, err = configuredRunnerTarget("ubuntu-24.04-arm", "organization-arm", "")
+	if err != nil || canonical != "ubuntu-24.04-arm" || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "organization-arm", Platform: compiler.PlatformLinuxARM64}) {
+		t.Fatalf("organization Linux ARM64 target = %q, %#v, %v", canonical, target, err)
+	}
+	canonical, target, err = configuredRunnerTarget("benchmark-aarch64", "benchmark-arm", "")
+	if err != nil || canonical != "benchmark-aarch64" || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "benchmark-arm", Platform: compiler.PlatformLinuxARM64}) {
+		t.Fatalf("custom Linux ARM64 target = %q, %#v, %v", canonical, target, err)
+	}
 }
 
 func TestHostedPreflightCompilesPublicReusableWorkflowWithSharedSource(t *testing.T) {
@@ -600,11 +608,13 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 	originEventSource = bytes.Replace(originEventSource, []byte(`"owner": "buildkite"`), []byte(`"owner": "acme_team"`), 1)
 	originEventSource = bytes.Replace(originEventSource, []byte(`"name": "buildkite-gha"`), []byte(`"name": "widgets"`), 1)
 	originEventSource = bytes.Replace(originEventSource, []byte(`"clone_url": "https://github.com/buildkite/buildkite-gha.git"`), []byte(`"clone_url": "https://origin.cursor.com/git/acme_team/widgets.git"`), 1)
+	trailingHyphenEventSource := bytes.Replace(eventSource, []byte(`"name": "buildkite-gha"`), []byte(`"name": "mon-projet-complet-sant-"`), 1)
 	for _, test := range []struct {
 		name  string
 		event []byte
 	}{
 		{name: "GitHub", event: eventSource},
+		{name: "GitHub repository name ending in a hyphen", event: trailingHyphenEventSource},
 		{name: "Origin repository with GitHub-incompatible namespace", event: originEventSource},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -755,7 +765,7 @@ jobs:
 		}{Image: step.Image, Agents: step.Agents, Command: step.Command}
 	}
 	selected, defaulted := steps["gha-selected"], steps["gha-default"]
-	if selected.Image != image || selected.Agents["queue"] != "hosted" || !strings.Contains(selected.Command, "--hosted-tool-cache") {
+	if selected.Image != image || selected.Agents["queue"] != "hosted" || !strings.Contains(selected.Command, "--hosted-tool-cache") || strings.Contains(selected.Command, "--docker-build-load") {
 		t.Fatalf("selected profile step = %#v", selected)
 	}
 	if defaulted.Image != defaultJammyRunnerImage || len(defaulted.Agents) != 0 || !strings.Contains(defaulted.Command, "--hosted-tool-cache") {
@@ -1017,7 +1027,7 @@ func TestUnprivilegedUploadAllowsOnlyAuditedCacheCommits(t *testing.T) {
 		t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", action, err)
 	}
 	var finding *compiler.ProcessingFinding
-	if !errors.As(err, &finding) || finding.Message != "actions/cache v6.0.2 is unsupported. Use a supported version from https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#cache-action." || !strings.Contains(finding.Detail, "Buildkite cache-v2 service") || !strings.Contains(finding.Detail, action.Commit) || strings.Contains(finding.Message, action.Commit) {
+	if !errors.As(err, &finding) || finding.Message != "actions/cache v6.0.2 is unsupported. Use a supported version from https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#actions-cache-action." || !strings.Contains(finding.Detail, "Buildkite cache-v2 service") || !strings.Contains(finding.Detail, action.Commit) || strings.Contains(finding.Message, action.Commit) {
 		t.Fatalf("hosted cache diagnostic = %#v", finding)
 	}
 }

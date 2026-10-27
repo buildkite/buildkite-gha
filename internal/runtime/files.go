@@ -139,7 +139,7 @@ func (files commandFiles) apply(result *Result, state map[string]string) (fileCo
 		// Match GitHub Runner's file-command behavior: NODE_OPTIONS is blocked,
 		// while actions may deliberately propagate GITHUB_* and RUNNER_* values.
 		if strings.EqualFold(name, "NODE_OPTIONS") {
-			return effects, errors.New("GITHUB_ENV may not set NODE_OPTIONS")
+			return effects, errWorkflowValidationf("GITHUB_ENV may not set NODE_OPTIONS")
 		}
 	}
 	effects.paths = paths
@@ -182,12 +182,12 @@ func (files commandFiles) checkSizeBudget() (int64, error) {
 			}
 		}
 		if info.Size() > maxCommandFileBytes {
-			return 0, fmt.Errorf("file command %s exceeds the %d-byte limit", filepath.Base(path), maxCommandFileBytes)
+			return 0, errWorkflowValidationf("file command %s exceeds the %d-byte limit", filepath.Base(path), maxCommandFileBytes)
 		}
 		total += info.Size()
 	}
 	if total > maxCommandFilesBytes {
-		return 0, fmt.Errorf("file commands exceed the %d-byte aggregate limit", maxCommandFilesBytes)
+		return 0, errWorkflowValidationf("file commands exceed the %d-byte aggregate limit", maxCommandFilesBytes)
 	}
 	return summaryBytes, nil
 }
@@ -230,7 +230,7 @@ func parsePathContents(contents []byte, err error) ([]string, error) {
 		}
 		paths = append(paths, line)
 		if len(paths) > maxCommandEntries {
-			return nil, fmt.Errorf("file command path exceeds the %d-entry limit", maxCommandEntries)
+			return nil, errWorkflowValidationf("file command path exceeds the %d-entry limit", maxCommandEntries)
 		}
 	}
 	return paths, nil
@@ -242,7 +242,7 @@ func readBoundedReader(path string, reader io.Reader, limit int64) ([]byte, erro
 		return nil, err
 	}
 	if int64(len(contents)) > limit {
-		return nil, fmt.Errorf("file command %s exceeds the %d-byte limit", filepath.Base(path), limit)
+		return nil, errWorkflowValidationf("file command %s exceeds the %d-byte limit", filepath.Base(path), limit)
 	}
 	return contents, nil
 }
@@ -258,6 +258,9 @@ func parseCommandReader(path string, reader io.Reader, foldNames bool) (map[stri
 	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
 	entries := 0
 	for scanner.Scan() {
+		if scanner.Err() != nil {
+			break
+		}
 		line := strings.TrimSuffix(scanner.Text(), "\r")
 		if line == "" {
 			continue
@@ -266,11 +269,14 @@ func parseCommandReader(path string, reader io.Reader, foldNames bool) (map[stri
 		if separator := strings.Index(line, "<<"); separator >= 0 && (equals < 0 || separator < equals) {
 			name, delimiter := line[:separator], line[separator+2:]
 			if name == "" || delimiter == "" {
-				return nil, fmt.Errorf("invalid multiline file command %q", line)
+				return nil, errWorkflowValidationf("invalid multiline file command %q", line)
 			}
 			var lines []string
 			found := false
 			for scanner.Scan() {
+				if scanner.Err() != nil {
+					break
+				}
 				value := strings.TrimSuffix(scanner.Text(), "\r")
 				if value == delimiter {
 					found = true
@@ -279,7 +285,10 @@ func parseCommandReader(path string, reader io.Reader, foldNames bool) (map[stri
 				lines = append(lines, value)
 			}
 			if !found {
-				return nil, fmt.Errorf("missing delimiter %q for %q", delimiter, name)
+				if scanner.Err() != nil {
+					break
+				}
+				return nil, errWorkflowValidationf("missing delimiter %q for %q", delimiter, name)
 			}
 			if foldNames {
 				identity := strings.ToUpper(name)
@@ -289,13 +298,13 @@ func parseCommandReader(path string, reader io.Reader, foldNames bool) (map[stri
 			values[name] = strings.Join(lines, "\n")
 			entries++
 			if entries > maxCommandEntries {
-				return nil, fmt.Errorf("file command %s exceeds the %d-entry limit", filepath.Base(path), maxCommandEntries)
+				return nil, errWorkflowValidationf("file command %s exceeds the %d-entry limit", filepath.Base(path), maxCommandEntries)
 			}
 			continue
 		}
 		name, value, ok := strings.Cut(line, "=")
 		if !ok || name == "" {
-			return nil, fmt.Errorf("invalid file command %q", line)
+			return nil, errWorkflowValidationf("invalid file command %q", line)
 		}
 		if foldNames {
 			identity := strings.ToUpper(name)
@@ -305,10 +314,13 @@ func parseCommandReader(path string, reader io.Reader, foldNames bool) (map[stri
 		values[name] = value
 		entries++
 		if entries > maxCommandEntries {
-			return nil, fmt.Errorf("file command %s exceeds the %d-entry limit", filepath.Base(path), maxCommandEntries)
+			return nil, errWorkflowValidationf("file command %s exceeds the %d-entry limit", filepath.Base(path), maxCommandEntries)
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return nil, errWorkflowValidationf("parse file command %s: %w", filepath.Base(path), err)
+		}
 		return nil, fmt.Errorf("parse file command %s: %w", filepath.Base(path), err)
 	}
 	return values, nil

@@ -1,0 +1,45 @@
+name: Composite hashFiles smoke action
+description: Verifies composite hashing fields, workspace scope, and empty matches.
+
+inputs:
+  expected:
+    description: Independently calculated digest of the fixture lockfile.
+    required: true
+
+outputs:
+  digest:
+    description: Digest captured by a composite step.
+    value: ${{ steps.capture.outputs.digest }}
+  cache-key:
+    description: Cache key passed through a nested composite input.
+    value: ${{ steps.nested.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - name: Verify hashing in if, env, run, shell, and working-directory
+      id: capture
+      if: hashFiles('.hash-files-proof/package-lock.json') != ''
+      env:
+        EXPECTED: ${{ inputs.expected }}
+        DIGEST: ${{ hashFiles('.hash-files-proof/package-lock.json') }}
+      shell: ${{ hashFiles('.hash-files-proof/package-lock.json') != '' && 'bash' || 'sh' }}
+      working-directory: ${{ hashFiles('.hash-files-proof/package-lock.json') != '' && '.hash-files-proof' || '.' }}
+      run: |
+        test -n "${BASH_VERSION:-}"
+        test "$PWD" = "$GITHUB_WORKSPACE/.hash-files-proof"
+        test "$DIGEST" = "$EXPECTED"
+        test '${{ hashFiles('.hash-files-proof/package-lock.json') }}' = "$EXPECTED"
+        printf 'digest=%s\n' "$DIGEST" >> "$GITHUB_OUTPUT"
+
+    - name: Verify hashing in a nested action input
+      id: nested
+      uses: ./.github/actions/oracle-composite
+      with:
+        message: npm-${{ hashFiles('.hash-files-proof/package-lock.json') }}
+
+    - name: Verify an empty match stays empty
+      shell: bash
+      env:
+        EMPTY_HASH: ${{ hashFiles('.hash-files-proof/missing-lockfile.json') }}
+      run: test -z "$EMPTY_HASH"
