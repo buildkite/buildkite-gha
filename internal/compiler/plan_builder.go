@@ -499,7 +499,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 		built.capabilities = capabilities
 		return built, nil
 	}
-	compiled, err := b.actionGraphs.compile(b.ctx, instance, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs)
+	compiled, err := b.actionGraphs.compile(b.ctx, instance, plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL), actionRefs, actionInputs)
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -575,7 +575,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 // github.token still requests the token.
 func (b planBuilder) authorityReferences(instance JobInstance) map[string]any {
 	return map[string]any{
-		"github.server_url": plan.EventServerURL(b.ir.Event.Provider),
+		"github.server_url": plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL),
 		"inputs":            instance.Inputs,
 		"matrix":            instance.Matrix,
 		"strategy":          instance.Strategy,
@@ -600,7 +600,7 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 				checkoutInputs[name] = b.ir.Event.SHA
 			}
 		}
-		if err := actionintegration.ValidateCheckoutInputs(lock.Commit, checkoutInputs, b.ir.Event.Repository.Owner+"/"+b.ir.Event.Repository.Name, b.ir.Event.SHA); err != nil {
+		if err := actionintegration.ValidateCheckoutInputs(lock.Commit, checkoutInputs, b.ir.Event.Repository.Owner+"/"+b.ir.Event.Repository.Name, plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL)); err != nil {
 			span := instance.Steps[stepIndex].Span.Start
 			return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 		}
@@ -647,7 +647,7 @@ func addContainerCapabilities(instance JobInstance, built *builtPlanActions) err
 }
 
 func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram program.Program, actions *builtPlanActions) ([]string, map[string]string, *plan.GitHubToken, error) {
-	serverURL := plan.EventServerURL(b.ir.Event.Provider)
+	serverURL := plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL)
 	secrets, mappings, tokenAliases, referencesGitHubToken, referencesEventPayload, err := requiredSecrets(workflowProgram, instance.secretAuthority, actions.requiredSecrets, actions.reachableSecrets, actions.inputsInspected, serverURL, b.authorityReferences(instance))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
@@ -705,7 +705,7 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 			SelfRepository: planRemoteWorkflowSource(actions.workflowSource),
 		},
 		Event: plan.Event{
-			Provider: b.ir.Event.Provider, Name: b.ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(b.eventDigest[:]),
+			Provider: b.ir.Event.Provider, ServerURL: b.ir.Event.ServerURL, Name: b.ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(b.eventDigest[:]),
 			Repository: b.ir.Event.Repository.Owner + "/" + b.ir.Event.Repository.Name,
 			Ref:        b.ir.Event.Ref, HeadRef: eventHeadRef(b.ir.Event), BaseRef: eventBaseRef(b.ir.Event), SHA: b.ir.Event.SHA, Actor: b.ir.Event.Actor,
 		},

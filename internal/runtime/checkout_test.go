@@ -221,16 +221,18 @@ esac
 
 func TestCheckoutRepositoryURL(t *testing.T) {
 	for _, test := range []struct {
-		provider, repository, wantURL, wantHost string
-		wantOK                                  bool
+		provider, repository, serverURL, wantURL, wantHost string
+		wantOK                                             bool
 	}{
 		{provider: "github", repository: "acme/widgets", wantURL: "https://github.com/acme/widgets.git", wantHost: "github.com", wantOK: true},
+		{provider: "github", repository: "acme/widgets", serverURL: "https://buildkite-ghe.com", wantURL: "https://buildkite-ghe.com/acme/widgets.git", wantHost: "buildkite-ghe.com", wantOK: true},
+		{provider: "github", repository: "acme/widgets", serverURL: "https://user:pass@buildkite-ghe.com"},
 		{provider: "cursor-origin", repository: "acme/widgets", wantURL: "https://origin.cursor.com/git/acme/widgets.git", wantHost: "origin.cursor.com", wantOK: true},
 		{provider: "other", repository: "acme/widgets"},
 		{provider: "cursor-origin", repository: "acme/widgets/extra"},
 	} {
 		t.Run(test.provider+"/"+test.repository, func(t *testing.T) {
-			url, host, ok := checkoutRepositoryURL(test.provider, test.repository)
+			url, host, ok := checkoutRepositoryURL(test.provider, test.repository, test.serverURL)
 			if url != test.wantURL || host != test.wantHost || ok != test.wantOK {
 				t.Fatalf("checkoutRepositoryURL() = %q, %q, %t", url, host, ok)
 			}
@@ -515,31 +517,35 @@ func TestCheckoutGitConfigEnvironment(t *testing.T) {
 }
 
 func TestCheckoutSubmoduleNativeCommandSequenceAndFlags(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "git.log")
-	git := filepath.Join(t.TempDir(), "git")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellTestQuote(logPath) + "\n"
-	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
-	if err := runner.runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "7", true, false, ""); err != nil {
-		t.Fatal(err)
-	}
-	contents, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(contents)), "\n")
-	if len(lines) != 3 || !strings.Contains(lines[0], "submodule sync --recursive") || !strings.Contains(lines[1], "submodule update --init --force --depth=7 --recursive") || !strings.Contains(lines[2], "submodule status --recursive") {
-		t.Fatalf("native submodule command sequence = %q", lines)
-	}
-	for _, line := range lines {
-		if !strings.Contains(line, "url.https://github.com/.insteadOf=git@github.com:") {
-			t.Fatalf("command lacks scoped GitHub rewrite: %q", line)
-		}
-		if strings.Contains(line, "credential.helper=!") {
-			t.Fatalf("command contains generic credential helper: %q", line)
-		}
+	for _, host := range []string{"github.com", "buildkite-ghe.com"} {
+		t.Run(host, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "git.log")
+			git := filepath.Join(t.TempDir(), "git")
+			script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellTestQuote(logPath) + "\n"
+			if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
+			if err := runner.runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "7", true, false, host); err != nil {
+				t.Fatal(err)
+			}
+			contents, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(contents)), "\n")
+			if len(lines) != 3 || !strings.Contains(lines[0], "submodule sync --recursive") || !strings.Contains(lines[1], "submodule update --init --force --depth=7 --recursive") || !strings.Contains(lines[2], "submodule status --recursive") {
+				t.Fatalf("native submodule command sequence = %q", lines)
+			}
+			for _, line := range lines {
+				if !strings.Contains(line, "url.https://"+host+"/.insteadOf=git@"+host+":") {
+					t.Fatalf("command lacks scoped GitHub rewrite: %q", line)
+				}
+				if strings.Contains(line, "credential.helper=!") {
+					t.Fatalf("command contains generic credential helper: %q", line)
+				}
+			}
+		})
 	}
 }
 
@@ -561,7 +567,7 @@ exit 0
 			if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			err := (Runner{Stdout: io.Discard, Stderr: io.Discard}).runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "0", false, false, "")
+			err := (Runner{Stdout: io.Discard, Stderr: io.Discard}).runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "0", false, false, "github.com")
 			if err == nil || !strings.Contains(err.Error(), "invalid state") {
 				t.Fatalf("status prefix %q error = %v", prefix, err)
 			}
@@ -593,7 +599,7 @@ func TestCheckoutSubmodulesUsesNativePorcelain(t *testing.T) {
 			if test.depthOne {
 				depth = "1"
 			}
-			if err := runner.runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), workspace, "git", map[string]string{"HOME": filepath.Join(workspace, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}, base, depth, test.recursive, false, ""); err != nil {
+			if err := runner.runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), workspace, "git", map[string]string{"HOME": filepath.Join(workspace, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}, base, depth, test.recursive, false, "github.com"); err != nil {
 				t.Fatal(err)
 			}
 			childPath := filepath.Join(workspace, "deps", "child")
@@ -658,7 +664,7 @@ func TestSubmoduleResolvedCredentialsWithoutCapabilityDoNotInvokeHelper(t *testi
 		t.Fatal(err)
 	}
 	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "secret"}, Stdout: io.Discard, Stderr: io.Discard}
-	if err := runner.runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "0", false, false, ""); err != nil {
+	if err := runner.runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "0", false, false, "github.com"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -969,7 +975,7 @@ exec ` + shellTestQuote(realGit) + ` "$@"
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.runCheckoutSubmodules(ctx, newCommandOutputProcessor(io.Discard, io.Discard), workspace, wrapper, map[string]string{}, append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always"), "1", false, false, "")
+		done <- runner.runCheckoutSubmodules(ctx, newCommandOutputProcessor(io.Discard, io.Discard), workspace, wrapper, map[string]string{}, append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always"), "1", false, false, "github.com")
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -1017,7 +1023,7 @@ exit 0
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.runCheckoutSubmodules(ctx, newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "0", true, false, "")
+		done <- runner.runCheckoutSubmodules(ctx, newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "0", true, false, "github.com")
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {

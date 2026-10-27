@@ -2227,6 +2227,47 @@ runs:
 	}
 }
 
+func TestCompiledGitHubServerURLs(t *testing.T) {
+	for _, test := range []struct {
+		server, rest, graphql string
+	}{
+		{"https://github.com", "https://api.github.com", "https://api.github.com/graphql"},
+		{"https://buildkite-ghe.com", "https://buildkite-ghe.com/api/v3", "https://buildkite-ghe.com/api/graphql"},
+	} {
+		t.Run(test.server, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			workflow := fmt.Sprintf(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_SERVER_URL: https://wrong.example
+      GITHUB_API_URL: https://wrong.example
+      GITHUB_GRAPHQL_URL: https://wrong.example
+    steps:
+      - run: |
+          test "$GITHUB_SERVER_URL" = '%s'
+          test "$GITHUB_API_URL" = '%s'
+          test "$GITHUB_GRAPHQL_URL" = '%s'
+          test '${{ github.server_url }}' = "$GITHUB_SERVER_URL"
+          test '${{ github.api_url }}' = "$GITHUB_API_URL"
+          test '${{ github.graphql_url }}' = "$GITHUB_GRAPHQL_URL"
+`, test.server, test.rest, test.graphql)
+			writeFixtureFile(t, workspace, workflowPath, workflow)
+			event := []byte(fmt.Sprintf(`{"provider":"github","server_url":%q,"event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat"}`, test.server))
+			jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+			if err != nil || len(jobs) != 1 {
+				t.Fatalf("compile = %#v, %v", jobs, err)
+			}
+			result, err := (Runner{}).RunJob(t.Context(), jobs[0], workspace)
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("RunJob() = %#v, %v", result, err)
+			}
+		})
+	}
+}
+
 func TestCompiledCompositeServerURLCondition(t *testing.T) {
 	for _, test := range []struct {
 		name, provider, disabled, server string
@@ -2234,6 +2275,8 @@ func TestCompiledCompositeServerURLCondition(t *testing.T) {
 	}{
 		{"GitHub enabled", "github", "false", "https://github.com", false, true},
 		{"GitHub disabled", "github", "true", "https://github.com", false, false},
+		{"GHES enabled", "github", "false", "https://buildkite-ghe.com", false, false},
+		{"GHES token body", "github", "false", "https://buildkite-ghe.com", true, false},
 		{"Origin enabled", "cursor-origin", "false", "https://origin.cursor.com", false, false},
 		{"Origin disabled", "cursor-origin", "true", "https://origin.cursor.com", false, false},
 		{"token body cannot authorize token", "github", "false", "https://github.com", true, true},
@@ -2272,6 +2315,9 @@ runs:
       run: echo '${{ github.server_url }}' > provider-url
 `, command))
 			event := []byte(fmt.Sprintf(`{"provider":%q,"event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat"}`, test.provider))
+			if test.server == "https://buildkite-ghe.com" {
+				event = bytes.Replace(event, []byte(`"event":"push"`), []byte(`"event":"push","server_url":"https://buildkite-ghe.com"`), 1)
+			}
 			jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
 			if err != nil || len(jobs) != 1 {
 				t.Fatalf("compile composite condition = %#v, %v", jobs, err)

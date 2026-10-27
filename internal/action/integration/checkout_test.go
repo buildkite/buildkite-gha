@@ -84,7 +84,7 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		{"submodules": " TrUe "},
 		{"submodules": " ReCuRsIvE "},
 	} {
-		if err := ValidateCheckoutInputs(CheckoutV7Commit, inputs, repository, sha); err != nil {
+		if err := ValidateCheckoutInputs(CheckoutV7Commit, inputs, repository, "https://github.com"); err != nil {
 			t.Fatalf("ValidateCheckoutInputs(%#v) = %v", inputs, err)
 		}
 	}
@@ -109,10 +109,20 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		"git metadata path":    {"path": ".git"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := ValidateCheckoutInputs(CheckoutV7Commit, inputs, repository, sha); err == nil || !strings.Contains(err.Error(), "unsupported") {
+			if err := ValidateCheckoutInputs(CheckoutV7Commit, inputs, repository, "https://github.com"); err == nil || !strings.Contains(err.Error(), "unsupported") {
 				t.Fatalf("ValidateCheckoutInputs(%#v) = %v, want unsupported-capability rejection", inputs, err)
 			}
 		})
+	}
+}
+
+func TestValidateCheckoutInputsBindsServer(t *testing.T) {
+	for _, server := range []string{"https://github.com", "https://buildkite-ghe.com"} {
+		inputs := map[string]string{"github-server-url": server}
+		err := ValidateCheckoutInputs(CheckoutV7Commit, inputs, "acme/widgets", "https://buildkite-ghe.com")
+		if (err == nil) != (server == "https://buildkite-ghe.com") {
+			t.Fatalf("checkout input %q for GHES event = %v", server, err)
+		}
 	}
 }
 
@@ -123,7 +133,7 @@ func TestValidateCheckoutV3InputsRejectsLaterContract(t *testing.T) {
 		{"show-progress": "true"},
 		{"ssh-user": "git"},
 	} {
-		if err := ValidateCheckoutInputs(CheckoutV3Commit, input, repository, sha); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		if err := ValidateCheckoutInputs(CheckoutV3Commit, input, repository, "https://github.com"); err == nil || !strings.Contains(err.Error(), "unsupported") {
 			t.Fatalf("ValidateCheckoutInputs(%#v) = %v, want v3 contract rejection", input, err)
 		}
 	}
@@ -131,7 +141,7 @@ func TestValidateCheckoutV3InputsRejectsLaterContract(t *testing.T) {
 		"repository": repository,
 		"ref":        sha,
 		"fetch-tags": "false",
-	}, repository, sha); err != nil {
+	}, repository, "https://github.com"); err != nil {
 		t.Fatalf("ValidateCheckoutInputs() rejected v3 inputs: %v", err)
 	}
 }
@@ -141,14 +151,14 @@ func TestValidateCheckoutLegacyInputsRejectLaterContracts(t *testing.T) {
 	if err := ValidateCheckoutInputs(CheckoutV1Commit, map[string]string{
 		"repository": repository, "ref": sha, "fetch-depth": "0",
 		"clean": "true", "lfs": "false", "submodules": "recursive", "path": "sources",
-	}, repository, sha); err != nil {
+	}, repository, "https://github.com"); err != nil {
 		t.Fatalf("ValidateCheckoutInputs() rejected v1 inputs: %v", err)
 	}
 	if err := ValidateCheckoutInputs(CheckoutV2Commit, map[string]string{
 		"repository": repository, "ref": sha, "fetch-depth": "1",
 		"ssh-key": "", "ssh-known-hosts": "", "ssh-strict": "true", "persist-credentials": "false",
 		"set-safe-directory": "true", "allow-unsafe-pr-checkout": "false",
-	}, repository, sha); err != nil {
+	}, repository, "https://github.com"); err != nil {
 		t.Fatalf("ValidateCheckoutInputs() rejected v2 inputs: %v", err)
 	}
 
@@ -168,7 +178,7 @@ func TestValidateCheckoutLegacyInputsRejectLaterContracts(t *testing.T) {
 		"v2 ssh-user":            {CheckoutV2Commit, map[string]string{"ssh-user": "git"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := ValidateCheckoutInputs(test.commit, test.inputs, repository, sha)
+			err := ValidateCheckoutInputs(test.commit, test.inputs, repository, "https://github.com")
 			if err == nil || !strings.Contains(err.Error(), "unsupported by this actions/checkout release") {
 				t.Fatalf("ValidateCheckoutInputs(%#v) = %v, want release-contract rejection", test.inputs, err)
 			}
@@ -177,7 +187,7 @@ func TestValidateCheckoutLegacyInputsRejectLaterContracts(t *testing.T) {
 }
 
 func TestValidateCheckoutInputsUsesPerCommitContract(t *testing.T) {
-	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
+	repository := "buildkite/buildkite-gha"
 	for _, test := range []struct {
 		name, commit, input string
 		wantAccepted        bool
@@ -194,7 +204,7 @@ func TestValidateCheckoutInputsUsesPerCommitContract(t *testing.T) {
 			if test.input == "filter" {
 				value = ""
 			}
-			err := ValidateCheckoutInputs(test.commit, map[string]string{test.input: value}, repository, sha)
+			err := ValidateCheckoutInputs(test.commit, map[string]string{test.input: value}, repository, "https://github.com")
 			if test.wantAccepted && err != nil {
 				t.Fatalf("ValidateCheckoutInputs() = %v", err)
 			}
@@ -213,7 +223,7 @@ func TestValidateCheckoutInputsUsesBoundedFallbackContract(t *testing.T) {
 		"ref":        sha,
 		"path":       "sources/app",
 		"filter":     "blob:none",
-	}, repository, sha); err != nil {
+	}, repository, "https://github.com"); err != nil {
 		t.Fatalf("fallback contract rejected bounded current inputs: %v", err)
 	}
 	for name, inputs := range map[string]map[string]string{
@@ -223,7 +233,7 @@ func TestValidateCheckoutInputsUsesBoundedFallbackContract(t *testing.T) {
 		"persist credentials": {"persist-credentials": "true"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := ValidateCheckoutInputs(unknown, inputs, repository, sha); err == nil || !strings.Contains(err.Error(), "unsupported") {
+			if err := ValidateCheckoutInputs(unknown, inputs, repository, "https://github.com"); err == nil || !strings.Contains(err.Error(), "unsupported") {
 				t.Fatalf("fallback contract accepted %#v: %v", inputs, err)
 			}
 		})

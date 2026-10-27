@@ -270,7 +270,7 @@ func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(strin
 	selectedPath := compatibilityPath
 	if workflowRef := getenv(githubWorkflowRefEnvironment); workflowRef != "" {
 		var err error
-		selectedPath, _, err = parsePipelineTriggerWorkflowRef(workflowRef, event, getenv("BUILDKITE_REPO"))
+		selectedPath, _, err = parsePipelineTriggerWorkflowRef(workflowRef, event, getenv("BUILDKITE_REPO"), getenv(githubServerURLEnvironment))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -285,7 +285,7 @@ func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(strin
 	return []string{selectedPath}, &pipelineTriggerWorkflow{Name: workflowName, SHA: workflowSHA}, nil
 }
 
-func parsePipelineTriggerWorkflowRef(workflowRef, event, repository string) (string, string, error) {
+func parsePipelineTriggerWorkflowRef(workflowRef, event, repository, serverURL string) (string, string, error) {
 	separator := strings.Index(workflowRef, "@refs/")
 	if separator < 0 && (event == "deployment" || event == "deployment_status") {
 		separator = strings.LastIndex(workflowRef, "@")
@@ -298,7 +298,7 @@ func parsePipelineTriggerWorkflowRef(workflowRef, event, repository string) (str
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
 		return "", "", fmt.Errorf("%s must have <owner>/<repo>/<workflow-path>@<event-ref> format", githubWorkflowRefEnvironment)
 	}
-	provider, owner, name, _, err := parseBuildkiteRepository(repository)
+	provider, owner, name, _, err := parseBuildkiteRepository(repository, serverURL)
 	if err != nil {
 		return "", "", fmt.Errorf("BUILDKITE_REPO: %w", err)
 	}

@@ -187,6 +187,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			PipelineSlug:     os.Getenv("BUILDKITE_PIPELINE_SLUG"),
 			BuildURL:         os.Getenv("BUILDKITE_BUILD_URL"),
 			ClientVersion:    clientVersion,
+			ServerURL:        job.Event.ServerURL,
 		})
 		if tokenErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure GitHub token service: %v\n", tokenErr)

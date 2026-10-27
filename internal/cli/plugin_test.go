@@ -552,7 +552,7 @@ func TestParsePipelineTriggerWorkflowRefPreservesDelimiterInEventRef(t *testing.
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			workflowRef := "acme/widgets/.github/workflows/ci.yml@" + test.ref
-			path, ref, err := parsePipelineTriggerWorkflowRef(workflowRef, "push", "https://github.com/acme/widgets.git")
+			path, ref, err := parsePipelineTriggerWorkflowRef(workflowRef, "push", "https://github.com/acme/widgets.git", "")
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -216,7 +216,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	// Reachability never resolves vars: jobs.<id>.if and step conditions see
 	// different vars scopes, so unknown vars keep every step reachable.
 	reachability, err := executionprogram.WorkflowReachability(*job.Program, expression.AbstractValues{References: map[string]any{
-		"github.server_url": plan.EventServerURL(job.Event.Provider),
+		"github.server_url": plan.EventServerURL(job.Event.Provider, job.Event.ServerURL),
 		"inputs":            planningInputs,
 		"matrix":            job.Matrix,
 		"strategy":          job.Strategy,
@@ -1444,7 +1444,7 @@ func githubContext(job plan.Job) map[string]any {
 		event = *job.Event.Payload
 	}
 	workflowRef, workflowSHA := workflowRunIdentity(job)
-	return map[string]any{
+	github := map[string]any{
 		"action":            "",
 		"action_path":       "",
 		"action_ref":        "",
@@ -1460,12 +1460,16 @@ func githubContext(job plan.Job) map[string]any {
 		"actor":             job.Event.Actor,
 		"event_name":        job.Event.Name,
 		"event":             event,
-		"server_url":        plan.EventServerURL(job.Event.Provider),
+		"server_url":        plan.EventServerURL(job.Event.Provider, job.Event.ServerURL),
 		"workflow":          workflowDisplayName(job),
 		"workflow_ref":      workflowRef,
 		"workflow_sha":      workflowSHA,
 		"job":               job.Workflow.LogicalJobID,
 	}
+	if rest, graphql := plan.EventAPIURLs(job.Event.Provider, job.Event.ServerURL); rest != "" {
+		github["api_url"], github["graphql_url"] = rest, graphql
+	}
+	return github
 }
 
 func workflowDisplayName(job plan.Job) string {
@@ -1508,7 +1512,7 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, 
 		"GITHUB_REF_NAME":     plan.EventRefName(job.Event.Ref),
 		"GITHUB_REF_TYPE":     plan.EventRefType(job.Event.Name, job.Event.Ref),
 		"GITHUB_REPOSITORY":   job.Event.Repository,
-		"GITHUB_SERVER_URL":   plan.EventServerURL(job.Event.Provider),
+		"GITHUB_SERVER_URL":   plan.EventServerURL(job.Event.Provider, job.Event.ServerURL),
 		"GITHUB_SHA":          job.Event.SHA,
 		"GITHUB_WORKFLOW":     workflowName,
 		"GITHUB_WORKFLOW_REF": workflowRef,
@@ -1519,6 +1523,9 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, 
 		"RUNNER_ENVIRONMENT":  runner["environment"],
 		"RUNNER_TEMP":         runnerTemp,
 		"RUNNER_TOOL_CACHE":   toolCache,
+	}
+	if rest, graphql := plan.EventAPIURLs(job.Event.Provider, job.Event.ServerURL); rest != "" {
+		env["GITHUB_API_URL"], env["GITHUB_GRAPHQL_URL"] = rest, graphql
 	}
 	for name, value := range identity.githubValues() {
 		env["GITHUB_"+strings.ToUpper(name)] = value
@@ -1655,6 +1662,8 @@ func isRuntimeContextEnvironment(name string) bool {
 	switch name {
 	case "GITHUB_ACTIONS",
 		"GITHUB_ACTOR",
+		"GITHUB_API_URL",
+		"GITHUB_GRAPHQL_URL",
 		"GITHUB_EVENT_NAME",
 		"GITHUB_EVENT_PATH",
 		"GITHUB_JOB",
