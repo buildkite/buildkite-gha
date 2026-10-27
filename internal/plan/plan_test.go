@@ -20,6 +20,43 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
+func TestGitHubServerPlanBoundary(t *testing.T) {
+	for _, server := range []string{"", "https://github.com", "https://buildkite-ghe.com", "https://ghe.example:8443"} {
+		job := validJob()
+		job.Event.ServerURL = server
+		encoded, err := Encode(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		validateJobPlanSchema(t, encoded)
+		decoded, err := Decode(encoded)
+		if err != nil || decoded.Event.ServerURL != server {
+			t.Fatalf("server %q: decoded %q, error %v", server, decoded.Event.ServerURL, err)
+		}
+		if server == "" && bytes.Contains(encoded, []byte(`"server_url"`)) {
+			t.Fatal("legacy plan gained a server_url field")
+		}
+	}
+	for _, test := range []struct{ provider, server string }{
+		{"cursor-origin", "https://buildkite-ghe.com"},
+		{"github", "http://buildkite-ghe.com"},
+		{"github", "https://user:password@buildkite-ghe.com"},
+		{"github", "https://buildkite-ghe.com/api/v3"},
+		{"github", "https://buildkite-ghe.com?token=secret"},
+		{"github", "https://buildkite-ghe.com#fragment"},
+	} {
+		job := validJob()
+		job.Event.Provider, job.Event.ServerURL = test.provider, test.server
+		source, err := json.Marshal(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Decode(source); err == nil {
+			t.Fatalf("decoded invalid server identity %q / %q", test.provider, test.server)
+		}
+	}
+}
+
 func TestCacheModePlanBoundary(t *testing.T) {
 	for _, mode := range []string{"", "read", "write", "write-only", "none"} {
 		job := validJob()

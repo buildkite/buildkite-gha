@@ -17,8 +17,9 @@ type ActionAuthority struct {
 }
 
 type ActionAuthorityOptions struct {
-	ServerURL string
-	Strategy  map[string]any
+	ServerURL      string
+	Strategy       map[string]any
+	WorkflowInputs expression.InputScope
 }
 
 // InventoryActionAuthority interprets action input resolution and nested
@@ -85,7 +86,14 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 			if err != nil {
 				return fmt.Errorf("action input %q: %w", binding.Name, err)
 			}
-			analysis, err := engine.Analyze(binding.Value.expressionSite(), expression.AbstractValues{References: known})
+			caller := expression.AbstractValues{References: known}
+			if workflowAuthored {
+				caller = expression.AbstractValues{
+					References: map[string]any{"github.server_url": options.ServerURL, "job.check_run_id": "", "strategy": options.Strategy},
+					Inputs:     options.WorkflowInputs,
+				}
+			}
+			analysis, err := engine.Analyze(binding.Value.expressionSite(), caller)
 			if err != nil {
 				return fmt.Errorf("action input %q: %w", binding.Name, err)
 			}

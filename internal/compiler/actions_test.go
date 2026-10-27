@@ -29,7 +29,7 @@ import (
 // compileActionLocks builds one shared action DAG for all roots. Selectors are
 // returned in the same order as refs.
 func compileActionLocks(ctx context.Context, workspace string, actionSource ActionSource, refs []string) ([]plan.ActionSelector, []plan.ActionLock, []string, bool, error) {
-	compiled, err := compileActionInvocations(ctx, workspace, actionSource, plan.EventServerURL("github"), refs, nil)
+	compiled, err := compileActionInvocations(ctx, workspace, actionSource, plan.EventServerURL("github", ""), refs, nil)
 	if err != nil {
 		return nil, nil, nil, true, err
 	}
@@ -1609,11 +1609,228 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Condition != "false" || len(bundle.Plans[0].Job.Actions) == 0 || bundle.Plans[0].Job.HasCapability("provider-token-read") {
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Condition != "inputs.enabled" || bundle.Plans[0].Job.Inputs["enabled"] != false || len(bundle.Plans[0].Job.Actions) == 0 || bundle.Plans[0].Job.HasCapability("provider-token-read") {
 		t.Fatalf("statically skipped checkout plan = %#v", bundle.Plans)
 	}
 	if _, err := compile(true); err == nil || !strings.Contains(err.Error(), `explicit input "persist-credentials" value is unsupported`) {
 		t.Fatalf("reachable checkout adapter error = %v", err)
+	}
+}
+
+func TestCompileReusableInputAuthorityUsesWorkflowScope(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  enabled:
+    uses: ./.github/workflows/reusable.yml
+    secrets: inherit
+    with:
+      enabled: true
+      name: ALPHA_KEY
+  disabled:
+    uses: ./.github/workflows/reusable.yml
+    secrets: inherit
+    with:
+      enabled: false
+      name: BETA_KEY
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      enabled: {type: boolean, required: true}
+      name: {type: string, required: true}
+jobs:
+  action:
+    runs-on: ubuntu-latest
+    env:
+      KEY: ${{ secrets[inputs.name] }}
+    steps:
+      - uses: ./.github/actions/token
+        with:
+          enabled: ''
+          token: ${{ inputs.enabled && github.token || '' }}
+          key: ${{ secrets[inputs.name] }}
+`)
+	writeAction(t, repository, ".github/actions/token", `name: scoped token
+inputs:
+  enabled: {}
+  token: {}
+  key: {required: true}
+runs:
+  using: node24
+  main: index.js
+`)
+	plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %d, want two sibling calls", len(plans))
+	}
+	for _, job := range plans {
+		enabled := job.Workflow.LogicalJobID == "enabled.action"
+		key := "BETA_KEY"
+		if enabled {
+			key = "ALPHA_KEY"
+		}
+		if (job.GitHubToken != nil) != enabled || job.HasCapability("provider-token-write") != enabled || !reflect.DeepEqual(job.RequiredSecrets, []string{key}) {
+			t.Fatalf("authority for %q = token %v, secrets %v", job.Workflow.LogicalJobID, job.GitHubToken, job.RequiredSecrets)
+		}
+		if want := "${{ secrets['" + key + "'] }}"; job.Env["KEY"] != want {
+			t.Fatalf("input-selected secret source = %q, want %q", job.Env["KEY"], want)
+		}
+	}
+}
+
+func TestCompileReusableDeferredInputTokenAuthority(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.meta.outputs.value }}
+    steps:
+      - id: meta
+        run: echo value=yes >> "$GITHUB_OUTPUT"
+  call:
+    needs: meta
+    uses: ./.github/workflows/reusable.yml
+    with:
+      key: value
+      enabled: false
+      value: ${{ needs.meta.outputs.value }}
+`)
+	writeAction(t, repository, ".github/actions/token", `name: synthetic token consumer
+inputs:
+  key: {}
+  enabled: {}
+  value: {}
+  token: {}
+runs:
+  using: node24
+  main: index.js
+`)
+	for _, tc := range []struct {
+		name       string
+		expression string
+		wantToken  bool
+	}{
+		{"computed input", "inputs[inputs.key] && github.token || ''", true},
+		{"JSON aggregate", "contains(toJSON(inputs), 'yes') && github.token || ''", true},
+		{"JSON round trip", "fromJSON(toJSON(inputs)).value && github.token || ''", true},
+		{"known false named input", "inputs.enabled && github.token || ''", false},
+	} {
+		for _, position := range []string{"run", "with"} {
+			t.Run(tc.name+"/"+position, func(t *testing.T) {
+				step := "run: echo ${{ " + tc.expression + " }}"
+				if position == "with" {
+					// Deliberately shadow the workflow inputs with false action inputs.
+					step = "uses: ./.github/actions/token\n        with:\n          key: ''\n          enabled: ''\n          value: ''\n          token: ${{ " + tc.expression + " }}"
+				}
+				writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      key: {type: string, required: true}
+      enabled: {type: boolean, required: true}
+      value: {type: string, required: true}
+jobs:
+  consume:
+    runs-on: ubuntu-latest
+    steps:
+      - `+step+"\n")
+				plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(plans) != 2 || plans[1].Workflow.LogicalJobID != "call.consume" {
+					t.Fatalf("plans = %#v, want producer and reusable consumer", plans)
+				}
+				job := plans[1]
+				if (job.GitHubToken != nil) != tc.wantToken || job.HasCapability("provider-token-write") != tc.wantToken {
+					t.Errorf("token authority = token %v, provider-token-write %t; want token %t", job.GitHubToken, job.HasCapability("provider-token-write"), tc.wantToken)
+				}
+			})
+		}
+	}
+}
+
+func TestCompileReusableDeferredInputSecretSelectors(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.meta.outputs.value }}
+    steps:
+      - id: meta
+        run: echo value=SYNTHETIC_SELECTED_KEY >> "$GITHUB_OUTPUT"
+  call:
+    needs: meta
+    uses: ./.github/workflows/reusable.yml
+    secrets: inherit
+    with:
+      key: value
+      name: SYNTHETIC_KNOWN_KEY
+      sentinel: synthetic-input-value-must-not-leak
+      value: ${{ needs.meta.outputs.value }}
+`)
+	for _, tc := range []struct {
+		name     string
+		selector string
+		wantKey  string
+	}{
+		{"deferred computed input", "inputs[inputs.key] || 'FALLBACK_KEY'", ""},
+		{"deferred JSON aggregate", "fromJSON(toJSON(inputs)).value || 'FALLBACK_KEY'", ""},
+		{"known named input with unrelated deferred data", "inputs.name", "SYNTHETIC_KNOWN_KEY"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      key: {type: string, required: true}
+      name: {type: string, required: true}
+      sentinel: {type: string, required: true}
+      value: {type: string, required: true}
+jobs:
+  consume:
+    runs-on: ubuntu-latest
+    env:
+      KEY: ${{ secrets[`+tc.selector+`] }}
+    steps:
+      - run: echo synthetic
+`)
+			plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+			if tc.wantKey == "" {
+				if err == nil {
+					var selected []string
+					for _, job := range plans {
+						selected = append(selected, job.RequiredSecrets...)
+					}
+					t.Fatalf("compiled deferred secret selector; required secrets = %v", selected)
+				}
+				if !strings.Contains(err.Error(), "compile-known workflow inputs") {
+					t.Errorf("error = %v, want compile-known input diagnostic", err)
+				}
+				for _, value := range []string{"SYNTHETIC_KNOWN_KEY", "synthetic-input-value-must-not-leak", "SYNTHETIC_SELECTED_KEY"} {
+					if strings.Contains(err.Error(), value) {
+						t.Errorf("diagnostic exposed an input-derived value: %v", err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 2 || plans[1].Workflow.LogicalJobID != "call.consume" || !reflect.DeepEqual(plans[1].RequiredSecrets, []string{tc.wantKey}) {
+				t.Fatalf("plans = %#v, want only named secret %q on consumer", plans, tc.wantKey)
+			}
+		})
 	}
 }
 
@@ -2621,6 +2838,53 @@ runs:
 	}
 	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.GitHubToken != nil || bundle.Plans[0].Job.HasCapability("provider-token-write") {
 		t.Fatalf("non-GitHub conditional-token plan = %#v", bundle.Plans)
+	}
+}
+
+func TestReusableUploadArtifactValidatesInputsWithoutRewritingSource(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	caller := writeWorkflow(t, workspace, "caller.yml", "")
+	writeAction(t, remote, "", uploadArtifactTestManifest(actionintegration.UploadArtifactV6Commit))
+	writeWorkflow(t, workspace, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      path: {type: string, required: true}
+      hidden: {type: boolean, default: false}
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@`+actionintegration.UploadArtifactV6Commit+`
+        with:
+          path: ${{ inputs.path }}
+          include-hidden-files: ${{ inputs.hidden }}
+`)
+	compile := func(path string) ([]plan.Job, error) {
+		source := []byte(fmt.Sprintf("on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    with:\n      path: %s\n      hidden: true\n", path))
+		if err := os.WriteFile(caller, source, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return compilePlansForTest(t.Context(), caller, source, pushEvent(t), "artifact-test", testDistributionDigest, Options{
+			EventTrust:     EventUntrusted,
+			Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+			ResolveActions: true,
+			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+		})
+	}
+	plans, err := compile("payload/result.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("plans = %d, want one reusable upload", len(plans))
+	}
+	with := testBindingSources(plans[0].ExecutionJob().Steps[0].Invocation.With)
+	if with["path"] != "${{ inputs.path }}" || with["include-hidden-files"] != "${{ inputs.hidden }}" || plans[0].Inputs["hidden"] != true {
+		t.Fatalf("adapter rewrote workflow inputs: %v / %v", with, plans[0].Inputs)
+	}
+	_, err = compile("synthetic-input-sentinel/../result.txt")
+	if err == nil || !strings.Contains(err.Error(), "bounded upload-artifact adapter") || strings.Contains(err.Error(), "synthetic-input-sentinel") {
+		t.Fatalf("expected value-safe adapter rejection, got %v", err)
 	}
 }
 

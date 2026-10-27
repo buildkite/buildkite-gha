@@ -20,6 +20,7 @@ import (
 // Event is the explicit provider event snapshot supplied to compilation.
 type Event struct {
 	Provider   string         `json:"provider"`
+	ServerURL  string         `json:"server_url,omitempty"`
 	Event      string         `json:"event"`
 	Trust      EventTrust     `json:"trust"`
 	Repository Repository     `json:"repository"`
@@ -50,6 +51,7 @@ func parseEvent(source []byte) (Event, error) {
 	}
 	var input struct {
 		Provider   string         `json:"provider"`
+		ServerURL  string         `json:"server_url,omitempty"`
 		Event      string         `json:"event"`
 		Repository Repository     `json:"repository"`
 		Ref        string         `json:"ref"`
@@ -72,6 +74,17 @@ func parseEvent(source []byte) (Event, error) {
 	deployment := input.Event == "deployment" || input.Event == "deployment_status"
 	if strings.TrimSpace(input.Provider) == "" || strings.TrimSpace(input.Event) == "" || strings.TrimSpace(input.Repository.Owner) == "" || strings.TrimSpace(input.Repository.Name) == "" || (!deployment && strings.TrimSpace(input.Ref) == "") || strings.TrimSpace(input.SHA) == "" || strings.TrimSpace(input.Actor) == "" {
 		return Event{}, fmt.Errorf("event snapshot requires provider, event, repository owner/name, ref, sha, and actor")
+	}
+	if input.ServerURL != "" {
+		if input.Provider != "github" {
+			return Event{}, fmt.Errorf("event server_url requires a GitHub provider")
+		}
+		if err := plan.ValidateGitHubServerURL(input.ServerURL); err != nil {
+			return Event{}, err
+		}
+		if input.Repository.CloneURL != "" && input.Repository.CloneURL != input.ServerURL+"/"+input.Repository.Owner+"/"+input.Repository.Name+".git" {
+			return Event{}, fmt.Errorf("event repository clone_url does not match server_url and repository identity")
+		}
 	}
 	if input.Payload == nil {
 		input.Payload = map[string]any{}
@@ -142,7 +155,7 @@ func parseEvent(source []byte) (Event, error) {
 		}
 	}
 	return Event{
-		Provider: input.Provider, Event: input.Event, Repository: input.Repository,
+		Provider: input.Provider, ServerURL: input.ServerURL, Event: input.Event, Repository: input.Repository,
 		Ref: input.Ref, SHA: input.SHA, Actor: input.Actor, Payload: input.Payload,
 	}, nil
 }

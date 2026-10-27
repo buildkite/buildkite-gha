@@ -53,6 +53,36 @@ func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 	}
 }
 
+func TestAgentGitHubTokensKeepsGHESWorkflowAndPublicActionHostsSeparate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		want := `{"repo_url":"https://buildkite-ghe.com/acme/widgets","workflow":"ci.yml","permissions":{"contents":"read"}}`
+		if strings.HasSuffix(r.URL.Path, "/github_action_source_access_token") {
+			want = `{"repo_url":"https://github.com/acme/widgets"}`
+		}
+		if string(body) != want {
+			t.Errorf("request = %s, want %s", body, want)
+		}
+		_, _ = io.WriteString(w, `{"token":"ghs_scoped"}`)
+	}))
+	defer server.Close()
+	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{
+		Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret", ServerURL: "https://buildkite-ghe.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token, err := provider.WorkflowToken(t.Context(), "acme/widgets", "ci.yml", map[string]string{"contents": "read"}); err != nil || token != "ghs_scoped" {
+		t.Fatalf("WorkflowToken() = %q, %v", token, err)
+	}
+	if token, err := provider.ActionSourceToken(t.Context(), "acme/widgets"); err != nil || token != "ghs_scoped" {
+		t.Fatalf("ActionSourceToken() = %q, %v", token, err)
+	}
+}
+
 func TestAgentGitHubTokensMintsExactAllWorkflowPermissions(t *testing.T) {
 	for _, access := range []string{"read", "write"} {
 		t.Run(access, func(t *testing.T) {

@@ -78,7 +78,7 @@ func (c sourceLinkContext) excerpt(diagnostic compatibility.Diagnostic) string {
 
 func sourceLinksForEvent(event compiler.Event) sourceLinkContext {
 	return sourceLinkContext{
-		serverURL:  plan.EventServerURL(event.Provider),
+		serverURL:  plan.EventServerURL(event.Provider, event.ServerURL),
 		repository: event.Repository.Owner + "/" + event.Repository.Name,
 		sha:        event.SHA,
 	}

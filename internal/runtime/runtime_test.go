@@ -87,16 +87,55 @@ func TestRunJobEvaluatesIndexedWorkflowInputs(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/inputs.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: inputs\n")
-	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
-		ID: "check", Kind: "run", Command: `test "$VALUE" = dispatched`,
-		Env: map[string]string{"VALUE": "${{ inputs[env.KEY] }}"},
-	}})
-	job.Inputs = map[string]any{"label": "dispatched"}
-	job.Env = map[string]string{"KEY": "label"}
+	tests := []struct {
+		label   string
+		enabled bool
+		count   int
+	}{
+		{label: "alpha", enabled: true, count: 7},
+		{label: "beta", enabled: false, count: 12},
+	}
+	jobs := make([]plan.Job, len(tests))
+	for i, test := range tests {
+		job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+			{ID: "check", Kind: "run", Command: `test "$VALUE" = "$EXPECTED_LABEL"
+test "$JOB_LABEL" = "$EXPECTED_LABEL"
+test '${{ toJSON(inputs.enabled) }}' = "$EXPECTED_ENABLED"
+test '${{ toJSON(inputs.count) }}' = "$EXPECTED_COUNT"
+printf 'value=%s\n' "$VALUE" >> "$GITHUB_OUTPUT"`,
+				Env: map[string]string{"VALUE": "${{ inputs[env.KEY] }}"}},
+			{ID: "enabled", Kind: "run", Condition: "inputs.enabled", Command: `echo 'value=enabled' >> "$GITHUB_OUTPUT"`},
+			{ID: "disabled", Kind: "run", Condition: "!inputs.enabled", Command: `echo 'value=disabled' >> "$GITHUB_OUTPUT"`},
+		})
+		job.Workflow.LogicalJobID = test.label
+		job.Target.StepKey = "gha-" + test.label
+		job.Inputs = map[string]any{"label": test.label, "enabled": test.enabled, "count": test.count}
+		job.Env = map[string]string{
+			"KEY": "label", "JOB_LABEL": "${{ inputs.label }}",
+			"EXPECTED_LABEL": test.label, "EXPECTED_ENABLED": strconv.FormatBool(test.enabled), "EXPECTED_COUNT": strconv.Itoa(test.count),
+		}
+		job.Outputs = map[string]string{
+			"label": "${{ steps.check.outputs.value }}", "count": "${{ toJSON(inputs.count) }}",
+			"enabled": "${{ steps.enabled.outputs.value }}", "disabled": "${{ steps.disabled.outputs.value }}",
+		}
+		jobs[i] = job
+	}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
-	if err != nil || result.Conclusion != "success" {
-		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	runner := Runner{Stdout: &logs, Stderr: &logs}
+	for i, job := range jobs {
+		t.Run(tests[i].label, func(t *testing.T) {
+			result, err := runner.runTestJob(t.Context(), job, workspace)
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+			}
+			want := map[string]string{"label": tests[i].label, "count": strconv.Itoa(tests[i].count), "enabled": "", "disabled": "disabled"}
+			if tests[i].enabled {
+				want["enabled"], want["disabled"] = "enabled", ""
+			}
+			if !reflect.DeepEqual(result.Outputs, want) {
+				t.Fatalf("RunJob() outputs = %#v, want %#v", result.Outputs, want)
+			}
+		})
 	}
 }
 
@@ -2202,16 +2241,30 @@ func TestCompositeChildConditionUsesActionInputs(t *testing.T) {
 inputs:
   enabled:
     required: true
+  label:
+    required: true
 runs:
   using: composite
   steps:
+    - shell: sh
+      run: |
+        test '${{ inputs.label }}' = action-workflow-label
+        test "$WORKFLOW_LABEL" = workflow-label
     - if: inputs.enabled == 'true'
       shell: sh
       run: touch "$CONDITIONAL_RAN"
 `)
 			marker := filepath.Join(workspace, "conditional-ran")
-			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "composite", Kind: "uses", Uses: "./.github/actions/conditional", With: map[string]string{"enabled": enabled}}})
-			job.Env = map[string]string{"CONDITIONAL_RAN": marker}
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+				{ID: "composite", Kind: "uses", Uses: "./.github/actions/conditional",
+					With: map[string]string{"enabled": enabled, "label": "action-${{ inputs.label }}"},
+					Env:  map[string]string{"WORKFLOW_LABEL": "${{ inputs.label }}"}},
+				{ID: "after", Kind: "run", Command: `test '${{ inputs.label }}' = workflow-label
+test '${{ inputs.enabled }}' = "$WORKFLOW_ENABLED"`},
+			})
+			workflowEnabled := strconv.FormatBool(enabled != "true")
+			job.Inputs = map[string]any{"enabled": workflowEnabled, "label": "workflow-label"}
+			job.Env = map[string]string{"CONDITIONAL_RAN": marker, "WORKFLOW_ENABLED": workflowEnabled}
 			result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 			if err != nil || result.Conclusion != "success" {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -2227,6 +2280,47 @@ runs:
 	}
 }
 
+func TestCompiledGitHubServerURLs(t *testing.T) {
+	for _, test := range []struct {
+		server, rest, graphql string
+	}{
+		{"https://github.com", "https://api.github.com", "https://api.github.com/graphql"},
+		{"https://buildkite-ghe.com", "https://buildkite-ghe.com/api/v3", "https://buildkite-ghe.com/api/graphql"},
+	} {
+		t.Run(test.server, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			workflow := fmt.Sprintf(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_SERVER_URL: https://wrong.example
+      GITHUB_API_URL: https://wrong.example
+      GITHUB_GRAPHQL_URL: https://wrong.example
+    steps:
+      - run: |
+          test "$GITHUB_SERVER_URL" = '%s'
+          test "$GITHUB_API_URL" = '%s'
+          test "$GITHUB_GRAPHQL_URL" = '%s'
+          test '${{ github.server_url }}' = "$GITHUB_SERVER_URL"
+          test '${{ github.api_url }}' = "$GITHUB_API_URL"
+          test '${{ github.graphql_url }}' = "$GITHUB_GRAPHQL_URL"
+`, test.server, test.rest, test.graphql)
+			writeFixtureFile(t, workspace, workflowPath, workflow)
+			event := []byte(fmt.Sprintf(`{"provider":"github","server_url":%q,"event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat"}`, test.server))
+			jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+			if err != nil || len(jobs) != 1 {
+				t.Fatalf("compile = %#v, %v", jobs, err)
+			}
+			result, err := (Runner{}).RunJob(t.Context(), jobs[0], workspace)
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("RunJob() = %#v, %v", result, err)
+			}
+		})
+	}
+}
+
 func TestCompiledCompositeServerURLCondition(t *testing.T) {
 	for _, test := range []struct {
 		name, provider, disabled, server string
@@ -2234,6 +2328,8 @@ func TestCompiledCompositeServerURLCondition(t *testing.T) {
 	}{
 		{"GitHub enabled", "github", "false", "https://github.com", false, true},
 		{"GitHub disabled", "github", "true", "https://github.com", false, false},
+		{"GHES enabled", "github", "false", "https://buildkite-ghe.com", false, false},
+		{"GHES token body", "github", "false", "https://buildkite-ghe.com", true, false},
 		{"Origin enabled", "cursor-origin", "false", "https://origin.cursor.com", false, false},
 		{"Origin disabled", "cursor-origin", "true", "https://origin.cursor.com", false, false},
 		{"token body cannot authorize token", "github", "false", "https://github.com", true, true},
@@ -2272,6 +2368,9 @@ runs:
       run: echo '${{ github.server_url }}' > provider-url
 `, command))
 			event := []byte(fmt.Sprintf(`{"provider":%q,"event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat"}`, test.provider))
+			if test.server == "https://buildkite-ghe.com" {
+				event = bytes.Replace(event, []byte(`"event":"push"`), []byte(`"event":"push","server_url":"https://buildkite-ghe.com"`), 1)
+			}
 			jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
 			if err != nil || len(jobs) != 1 {
 				t.Fatalf("compile composite condition = %#v, %v", jobs, err)

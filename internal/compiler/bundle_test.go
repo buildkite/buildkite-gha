@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 	"go.yaml.in/yaml/v4"
@@ -2700,7 +2701,7 @@ jobs:
 
 func TestRequiredSecretsDoesNotInterpretConditionLiteralsAsTemplates(t *testing.T) {
 	instance := JobInstance{If: "'${{ github.token }} ${{ secrets.DEPLOY }} ${{ github.event.action }}' == runner.os"}
-	secrets, _, _, referencesToken, _, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, nil, false, "https://github.com", nil)
+	secrets, _, _, referencesToken, _, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, nil, false, "https://github.com", expression.AbstractValues{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2721,7 +2722,7 @@ func TestRequiredSecretsNarrowsTokenAuthorityByKnownServerURL(t *testing.T) {
 		{name: "non-GitHub provider", serverURL: "https://origin.cursor.com"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, _, _, token, _, err := requiredSecrets(workflowProgram, instance.secretAuthority, nil, nil, false, test.serverURL, nil)
+			_, _, _, token, _, err := requiredSecrets(workflowProgram, instance.secretAuthority, nil, nil, false, test.serverURL, expression.AbstractValues{})
 			if err != nil {
 				t.Fatal(err)
 			}

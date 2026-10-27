@@ -18,7 +18,6 @@ func TestPathFilterFailureReportsDistinguishEvidenceAndFileLimit(t *testing.T) {
 	}{
 		{"push", "push before commit is unavailable in the local checkout", "already non-shallow checkout", true},
 		{"push", "new-branch push requires complete pushed commit evidence", "commit list is empty or does not include the new branch's after commit", true},
-		{"push", "combined added and deleted files require provider rename conformance data", "Buildkite compatibility limit, not an invalid workflow", true},
 		{"push", "webhook push requires its commits array", "original GitHub push commit list", true},
 		{"push", "push path filters require a complete non-shallow checkout", "ask the agent administrator to fetch full history before import", true},
 		{"push", "push exceeds GitHub's 1000-commit path-filter diff bound", "Push in batches of at most 1000 commits", false},

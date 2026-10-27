@@ -6,6 +6,8 @@ import (
 	"maps"
 	"strings"
 	"testing"
+
+	"github.com/buildkite/buildkite-gha/internal/compiler"
 )
 
 func TestParseBuildkiteRepository(t *testing.T) {
@@ -15,7 +17,7 @@ func TestParseBuildkiteRepository(t *testing.T) {
 		"git@github.com:acme/widgets.git",
 	} {
 		t.Run(raw, func(t *testing.T) {
-			provider, owner, name, cloneURL, err := parseBuildkiteRepository(raw)
+			provider, owner, name, cloneURL, err := parseBuildkiteRepository(raw, "")
 			if err != nil || provider != "github" || owner != "acme" || name != "widgets" || cloneURL != "https://github.com/acme/widgets.git" {
 				t.Fatalf("parseBuildkiteRepository() = %q, %q, %q, %q, %v", provider, owner, name, cloneURL, err)
 			}
@@ -23,14 +25,14 @@ func TestParseBuildkiteRepository(t *testing.T) {
 	}
 	t.Run("Origin", func(t *testing.T) {
 		raw := "https://origin.cursor.com/git/acme/widgets.git"
-		provider, owner, name, cloneURL, err := parseBuildkiteRepository(raw)
+		provider, owner, name, cloneURL, err := parseBuildkiteRepository(raw, "")
 		if err != nil || provider != "cursor-origin" || owner != "acme" || name != "widgets" || cloneURL != raw {
 			t.Fatalf("parseBuildkiteRepository() = %q, %q, %q, %q, %v", provider, owner, name, cloneURL, err)
 		}
 	})
 	for _, raw := range []string{"", "http://github.com/a/b", "https://user:pass@github.com/a/b", "https://github.example/a/b", "https://github.com/a", "https://github.com/a/b/extra", "https://github.com/a/..", "git@evil.example:a/b", "ssh://user@github.com/a/b"} {
 		t.Run("reject "+raw, func(t *testing.T) {
-			if _, _, _, _, err := parseBuildkiteRepository(raw); err == nil {
+			if _, _, _, _, err := parseBuildkiteRepository(raw, ""); err == nil {
 				t.Fatalf("parseBuildkiteRepository(%q) unexpectedly succeeded", raw)
 			}
 		})
@@ -48,10 +50,38 @@ func TestParseBuildkiteRepository(t *testing.T) {
 		"https://user:pass@origin.cursor.com/git/acme/widgets.git",
 	} {
 		t.Run("reject Origin "+raw, func(t *testing.T) {
-			if _, _, _, _, err := parseBuildkiteRepository(raw); err == nil {
+			if _, _, _, _, err := parseBuildkiteRepository(raw, ""); err == nil {
 				t.Fatalf("parseBuildkiteRepository(%q) unexpectedly succeeded", raw)
 			}
 		})
+	}
+}
+
+func TestBuildkiteEventSourceGHESIdentity(t *testing.T) {
+	env := map[string]string{
+		"BUILDKITE": "true", "BUILDKITE_REPO": "git@buildkite-ghe.com:acme/widgets.git",
+		"GITHUB_SERVER_URL": "https://buildkite-ghe.com",
+		"BUILDKITE_COMMIT":  strings.Repeat("a", 40), "BUILDKITE_BRANCH": "main",
+		"BUILDKITE_BUILD_AUTHOR": "octocat",
+		"GITHUB_WORKFLOW_REF":    "acme/widgets/.github/workflows/ci.yml@refs/heads/main",
+	}
+	getenv := func(key string) string { return env[key] }
+	source, err := buildkiteEventSource(getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := compiler.ParseEvent(source)
+	if err != nil || event.Provider != "github" || event.ServerURL != "https://buildkite-ghe.com" || event.Repository.CloneURL != "https://buildkite-ghe.com/acme/widgets.git" {
+		t.Fatalf("GHES event = %#v, %v", event, err)
+	}
+	if candidateWorkflowSource(source) != nil {
+		t.Fatal("GHES event must not infer a github.com workflow source")
+	}
+	for _, server := range []string{"", "https://github.com", "https://buildkite-ghe.com/path", "https://user:pass@buildkite-ghe.com", "http://buildkite-ghe.com"} {
+		env["GITHUB_SERVER_URL"] = server
+		if _, err := buildkiteEventSource(getenv); err == nil {
+			t.Errorf("GHES repository accepted with server %q", server)
+		}
 	}
 }
 

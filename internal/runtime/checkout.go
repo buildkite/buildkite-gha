@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,11 +78,11 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandOutputProcess
 	result := newResult()
 	const adapter = "checkout adapter"
 	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil
-	url, credentialHost, validProvider := checkoutRepositoryURL(job.Event.Provider, job.Event.Repository)
+	url, credentialHost, validProvider := checkoutRepositoryURL(job.Event.Provider, job.Event.Repository, job.Event.ServerURL)
 	if !validProvider || !gitutil.ValidObjectID(job.Event.SHA) {
 		return result, fmt.Errorf("%s requires a valid GitHub or Origin event repository and exact SHA; other event sources are unsupported", adapter)
 	}
-	if err := actionintegration.ValidateCheckoutInputs(commit, inputs, job.Event.Repository, job.Event.SHA); err != nil {
+	if err := actionintegration.ValidateCheckoutInputs(commit, inputs, job.Event.Repository, plan.EventServerURL(job.Event.Provider, job.Event.ServerURL)); err != nil {
 		return result, fmt.Errorf("%s: %w", adapter, err)
 	}
 	inputs = checkoutInputsWithReleaseDefaults(commit, inputs)
@@ -241,13 +242,18 @@ func checkoutInputsWithReleaseDefaults(commit string, inputs map[string]string) 
 	return defaulted
 }
 
-func checkoutRepositoryURL(provider, repository string) (url, credentialHost string, ok bool) {
+func checkoutRepositoryURL(provider, repository, serverURL string) (cloneURL, credentialHost string, ok bool) {
 	if !validCheckoutRepository(repository) {
 		return "", "", false
 	}
 	switch provider {
 	case "github":
-		return "https://github.com/" + repository + ".git", "github.com", true
+		serverURL = plan.EventServerURL(provider, serverURL)
+		if plan.ValidateGitHubServerURL(serverURL) != nil {
+			return "", "", false
+		}
+		u, _ := url.Parse(serverURL)
+		return serverURL + "/" + repository + ".git", u.Host, true
 	case "cursor-origin":
 		return "https://origin.cursor.com/git/" + repository + ".git", "origin.cursor.com", true
 	default:
@@ -360,7 +366,7 @@ func (w *checkoutSubmoduleStatusWriter) Write(p []byte) (int, error) {
 }
 
 func (r Runner) runCheckoutSubmodules(ctx context.Context, processor *commandOutputProcessor, workspace string, git string, env map[string]string, base []string, depth string, recursive, credentialed bool, credentialHost string) error {
-	policy := append(append([]string{}, base...), "-c", "url.https://github.com/.insteadOf=git@github.com:")
+	policy := append(append([]string{}, base...), "-c", "url.https://"+credentialHost+"/.insteadOf=git@"+credentialHost+":")
 	run := func(withCredentials bool, args ...string) error {
 		if withCredentials {
 			if err := r.runRepositoryProviderCheckoutGit(ctx, processor, workspace, env, git, policy, args, credentialHost); err != nil {
@@ -618,7 +624,7 @@ func (r Runner) repositoryProviderCheckoutCredentialEnvironment(processor *comma
 	if credentials == nil || credentials.Agent == "" || !filepath.IsAbs(credentials.Agent) {
 		return nil, fmt.Errorf("repository-provider credentials were not resolved before workflow execution")
 	}
-	if credentialHost != "github.com" && credentialHost != "origin.cursor.com" {
+	if plan.ValidateGitHubServerURL("https://"+credentialHost) != nil {
 		return nil, fmt.Errorf("repository-provider credentials require a supported event repository host")
 	}
 	processor.addMask(credentials.JobToken)

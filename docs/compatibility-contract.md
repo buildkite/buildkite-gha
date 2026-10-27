@@ -98,9 +98,62 @@ separate contract; local tests with constructed events do not verify it.
 Path filtering requires verified repository identity and bounded Git evidence.
 Non-path exclusions can retain their conditions when diff history is unavailable,
 but identity failures remain errors. Do not turn missing history into an empty
-diff or infer rename equivalence without provider evidence. The
+diff. Evaluate renames as deletion of the old path and addition of the new path;
+a copy that leaves its source unchanged contributes only the destination path.
+Keep local diffs independent of Git rename-detection settings. The
 [path-filter implementation](../internal/cli/path_filters.go) and
 [regression tests](../internal/cli/path_filters_test.go) own those checks.
+
+Native GitHub evidence from October 27, 2026 used `push` and `pull_request`
+workflows filtering the old path, new path, both, or neither. Pure renames,
+renames with edits, and unrelated additions/deletions selected old, new, and
+both-path workflows. Copies retaining the source selected only new and
+both-path workflows. All 22 selected runs passed; the ten absent runs had
+same-commit positive controls. Fixtures:
+[pure rename](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18d8ff7b4/tree/3b1dd8632e281b521186944f92321aa86df4a73b),
+[edited rename](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18d8ff7b4/tree/603b1823fad13c42b4ff0ddb6f1b3d7e5116c406),
+[unrelated addition/deletion](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18d8ff7b4/tree/26d77b4c4e3ed81e1623911074733445c2ca6cc4),
+and [copy](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18d8ff7b4/tree/8015e0d8c2215d3b14eee51b6b01a29a1ecfe96f).
+The [old-path push run](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18d8ff7b4/actions/runs/40449274845)
+and [old-path PR run](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18d8ff7b4/actions/runs/40449278164)
+demonstrate that rename sources participate in filtering. These small fixtures
+do not establish GitHub's file ordering or behavior beyond diff limits.
+
+### GitHub server identity
+
+For selected GHES imports, the backend supplies `GITHUB_SERVER_URL`
+from the authorized App connection, with precedence over build and step input.
+Never infer GitHub identity from an arbitrary `BUILDKITE_REPO` host. Persist the
+canonical HTTPS origin as `server_url` in event snapshots and digest-bound job
+plans; omission retains github.com behavior.
+
+Checkout, credential-helper scoping, workflow-token `repo_url`, expression
+contexts, and runtime environment must use that same origin. GHES REST and
+GraphQL URLs use `/api/v3` and `/api/graphql`. The origin identifies the requested
+repository; it does not authorize access. The backend still binds each token
+to the job, repository, App installation, and workflow policy at the build commit.
+
+Public action sources remain on github.com. Never attach GHES workflow tokens
+to public action requests or infer a github.com self-repository identity from
+a GHES event. Private reusable source resolution requires host-bound identity;
+reject it for GHES imports until that contract exists.
+
+The [GHES spike](https://ampcode.com/threads/T-01a15c91-9015-754b-a5f3-bebba85e76e8)
+ran a real GHES 3.17.14 repository against an isolated Buildkite backend and a
+candidate runtime. The [read-only fixture](https://buildkite-ghe.com/sj26-testier/gha-e2e-ghes-r-9059cd8ae32b/commit/0ec96bc9c7fdf4497bb0dd569dfd67ef5c032a2b)
+denied issue writes despite a broader App grant; the
+[explicit-write fixture](https://buildkite-ghe.com/sj26-testier/gha-e2e-ghes-r-9059cd8ae32b/commit/28e75f8f6ee03fc28756305573da91898f439c54)
+created and closed one issue. Its
+[same-repository PR](https://buildkite-ghe.com/sj26-testier/gha-e2e-ghes-r-9059cd8ae32b/pull/2)
+was denied a workflow token before steps ran. These runs establish the tested
+Buildkite paths, not native GitHub execution, all App permissions, backend-importer
+parity, or released availability.
+
+The [combined execution fixture](https://buildkite-ghe.com/sj26-testier/gha-e2e-ghes-r-9059cd8ae32b/commit/50e1c53abd0917fd64ea168ea7b5f5b0209df73d)
+passed through a signed push, agent importer and runtime with backend import
+enabled. It checked exact-SHA checkout, server/API identity, a one-repository
+token scope and denied hook access. This used an unpublished CLI launcher and
+local Agent API proxy; it does not prove released plugin acquisition.
 
 ### Expressions and authority
 
@@ -155,6 +208,12 @@ Source lookup and credential behavior must remain separate:
 - Repository visibility checks and rate-limit suppression are resolver-local.
   Cached refs and exact commit pins remain usable when new API requests are
   suppressed. Do not persist a temporary rate-limit failure as source identity.
+- The compilation-scoped missing-ref cache retains failures only after all
+  applicable API lookups return HTTP 404. It must not retain authentication,
+  transient, or cancellation failures, suppress permitted Git fallback, or omit
+  an affected action's diagnostic. Later compilations retry missing refs unless
+  the caller explicitly selects a durable resolution snapshot; see the
+  [missing-ref regression](../internal/compiler/missing_ref_resolutions_test.go).
 - Docker action arguments are ordered literal arguments after expression
   evaluation, not shell text or Docker options. `--privileged` in an argument
   cannot become a container privilege flag.

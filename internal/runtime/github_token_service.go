@@ -52,6 +52,7 @@ type AgentGitHubTokenConfig struct {
 	PipelineSlug     string
 	BuildURL         string
 	ClientVersion    string
+	ServerURL        string
 	Client           *http.Client
 }
 
@@ -63,10 +64,15 @@ type AgentGitHubTokens struct {
 	repositorySettings  string
 	repositoryProviders string
 	buildURL            string
+	serverURL           string
 	agent               *agentapi.Client
 }
 
 func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, error) {
+	serverURL := plan.EventServerURL("github", config.ServerURL)
+	if err := plan.ValidateGitHubServerURL(serverURL); err != nil {
+		return nil, err
+	}
 	agent, err := agentapi.New(agentapi.Config{
 		Endpoint: config.Endpoint, JobID: config.JobID, JobToken: config.JobToken,
 		ClientVersion: config.ClientVersion, HTTPClient: config.Client,
@@ -84,6 +90,7 @@ func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, er
 		repositorySettings:  pipelineRepositorySettingsURL(config.OrganizationSlug, config.PipelineSlug),
 		repositoryProviders: repositoryProviders,
 		buildURL:            safeBuildkiteBuildURL(config.BuildURL),
+		serverURL:           serverURL,
 		agent:               agent,
 	}, nil
 }
@@ -117,7 +124,7 @@ func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository, workf
 			return "", err
 		}
 		attemptCtx, cancelAttempt := context.WithTimeout(budgetCtx, 15*time.Second)
-		token, err = c.mint(attemptCtx, c.workflowURL, repository, workflow, permissions, "workflow")
+		token, err = c.mint(attemptCtx, c.workflowURL, c.serverURL, repository, workflow, permissions, "workflow")
 		cancelAttempt()
 		var retry *workflowTokenRetryError
 		if attempt == 2 || !errors.As(err, &retry) {
@@ -144,10 +151,10 @@ func (c *AgentGitHubTokens) ActionSourceToken(ctx context.Context, repository st
 	if c == nil {
 		return "", fmt.Errorf("GitHub action source token provider is not configured")
 	}
-	return c.mint(ctx, c.actionSourceURL, repository, "", nil, "action source")
+	return c.mint(ctx, c.actionSourceURL, "https://github.com", repository, "", nil, "action source")
 }
 
-func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workflow string, permissions map[string]string, purpose string) (token string, err error) {
+func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, serverURL, repository, workflow string, permissions map[string]string, purpose string) (token string, err error) {
 	if c == nil {
 		return "", fmt.Errorf("GitHub %s token provider is not configured", purpose)
 	}
@@ -159,7 +166,7 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 		Workflow      string            `json:"workflow,omitempty"`
 		Permissions   map[string]string `json:"permissions,omitempty"`
 	}{
-		RepositoryURL: "https://github.com/" + repository,
+		RepositoryURL: serverURL + "/" + repository,
 		Workflow:      workflow,
 		Permissions:   permissions,
 	})

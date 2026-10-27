@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"path"
 	"regexp"
 	"slices"
@@ -115,6 +116,7 @@ type Runtime struct {
 
 type Event struct {
 	Provider        string          `json:"provider"`
+	ServerURL       string          `json:"server_url,omitempty"`
 	Name            string          `json:"name"`
 	PayloadDigest   string          `json:"payload_digest"`
 	PayloadArtifact bool            `json:"payload_artifact,omitempty"`
@@ -161,15 +163,41 @@ func EventRefType(event, ref string) string {
 
 // EventServerURL returns the repository provider URL exposed through the
 // GitHub-compatible expression context and environment.
-func EventServerURL(provider string) string {
+func EventServerURL(provider, serverURL string) string {
 	switch provider {
 	case "github":
+		if serverURL != "" {
+			return serverURL
+		}
 		return "https://github.com"
 	case "cursor-origin":
 		return "https://origin.cursor.com"
 	default:
 		return ""
 	}
+}
+
+// EventAPIURLs returns GitHub REST and GraphQL endpoints for the event server.
+// Non-GitHub providers do not expose GitHub APIs.
+func EventAPIURLs(provider, serverURL string) (rest, graphql string) {
+	if provider != "github" {
+		return "", ""
+	}
+	serverURL = EventServerURL(provider, serverURL)
+	if serverURL == "https://github.com" {
+		return "https://api.github.com", "https://api.github.com/graphql"
+	}
+	return serverURL + "/api/v3", serverURL + "/api/graphql"
+}
+
+// ValidateGitHubServerURL accepts a canonical HTTPS origin, never credentials,
+// a repository path, or a query. The backend separately authorizes the host.
+func ValidateGitHubServerURL(serverURL string) error {
+	u, err := url.Parse(serverURL)
+	if err != nil || len(serverURL) > 512 || u.Scheme != "https" || u.Hostname() == "" || strings.Contains(u.Host, "*") || u.User != nil || u.Opaque != "" || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.String() != serverURL || u.Host != strings.ToLower(u.Host) {
+		return fmt.Errorf("GitHub server URL must be a canonical HTTPS origin without credentials, path, query, or fragment")
+	}
+	return nil
 }
 
 type Workflow struct {
@@ -625,6 +653,14 @@ func (job Job) Validate() error {
 	}
 	if (job.Event.Provider != "github" && job.Event.Provider != "cursor-origin") || job.Event.Name == "" || !digestPattern.MatchString(job.Event.PayloadDigest) {
 		return fmt.Errorf("job plan requires a supported event binding")
+	}
+	if job.Event.ServerURL != "" {
+		if job.Event.Provider != "github" {
+			return fmt.Errorf("job plan server_url requires a GitHub event")
+		}
+		if err := ValidateGitHubServerURL(job.Event.ServerURL); err != nil {
+			return err
+		}
 	}
 	if job.Event.PayloadFile && !job.Event.PayloadArtifact {
 		return fmt.Errorf("job plan event file requires a payload artifact")
