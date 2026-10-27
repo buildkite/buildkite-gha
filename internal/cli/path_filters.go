@@ -535,7 +535,6 @@ func parseChangedPaths(output []byte) ([]string, error) {
 	}
 	fields = fields[:len(fields)-1]
 	paths := make([]string, 0, len(fields)/2)
-	added, deleted := false, false
 	for len(fields) != 0 {
 		if len(fields) < 2 {
 			return nil, fmt.Errorf("git changed-path output is incomplete")
@@ -546,25 +545,15 @@ func parseChangedPaths(output []byte) ([]string, error) {
 			return nil, fmt.Errorf("git returned an invalid changed path")
 		}
 		switch status[0] {
-		case 'A':
-			added = true
+		// --no-renames exposes both rename paths and only the new path of a copy.
+		case 'A', 'D', 'M', 'T', 'U', 'X', 'B':
 			paths = append(paths, path)
-		case 'D':
-			deleted = true
-			paths = append(paths, path)
-		case 'M', 'T', 'U', 'X', 'B':
-			paths = append(paths, path)
-		case 'R', 'C':
-			return nil, fmt.Errorf("renamed and copied files require provider conformance data")
 		default:
 			return nil, fmt.Errorf("git returned unsupported changed-path status %q", status)
 		}
 		if len(paths) > maxLocallyEvaluatedPathFilterFiles {
 			return nil, fmt.Errorf("changed paths exceed the importer's %d-file local evaluation bound", maxLocallyEvaluatedPathFilterFiles)
 		}
-	}
-	if added && deleted {
-		return nil, fmt.Errorf("combined added and deleted files require provider rename conformance data")
 	}
 	return paths, nil
 }

@@ -98,9 +98,26 @@ separate contract; local tests with constructed events do not verify it.
 Path filtering requires verified repository identity and bounded Git evidence.
 Non-path exclusions can retain their conditions when diff history is unavailable,
 but identity failures remain errors. Do not turn missing history into an empty
-diff or infer rename equivalence without provider evidence. The
+diff. Evaluate renames as deletion of the old path and addition of the new path;
+a copy that leaves its source unchanged contributes only the destination path.
+Keep local diffs independent of Git rename-detection settings. The
 [path-filter implementation](../internal/cli/path_filters.go) and
 [regression tests](../internal/cli/path_filters_test.go) own those checks.
+
+Native GitHub evidence from October 27, 2026 used `push` and `pull_request`
+workflows filtering the old path, new path, both, or neither. Pure renames,
+renames with edits, and unrelated additions/deletions selected old, new, and
+both-path workflows. Copies retaining the source selected only new and
+both-path workflows. All 22 selected runs passed; the ten absent runs had
+same-commit positive controls. Fixtures:
+[pure rename](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18d8ff7b4/tree/3b1dd8632e281b521186944f92321aa86df4a73b),
+[edited rename](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18d8ff7b4/tree/603b1823fad13c42b4ff0ddb6f1b3d7e5116c406),
+[unrelated addition/deletion](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18d8ff7b4/tree/26d77b4c4e3ed81e1623911074733445c2ca6cc4),
+and [copy](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18d8ff7b4/tree/8015e0d8c2215d3b14eee51b6b01a29a1ecfe96f).
+The [old-path push run](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18d8ff7b4/actions/runs/40449274845)
+and [old-path PR run](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18d8ff7b4/actions/runs/40449278164)
+demonstrate that rename sources participate in filtering. These small fixtures
+do not establish GitHub's file ordering or behavior beyond diff limits.
 
 ### Expressions and authority
 
