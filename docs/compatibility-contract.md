@@ -208,6 +208,12 @@ Source lookup and credential behavior must remain separate:
 - Repository visibility checks and rate-limit suppression are resolver-local.
   Cached refs and exact commit pins remain usable when new API requests are
   suppressed. Do not persist a temporary rate-limit failure as source identity.
+- The compilation-scoped missing-ref cache retains failures only after all
+  applicable API lookups return HTTP 404. It must not retain authentication,
+  transient, or cancellation failures, suppress permitted Git fallback, or omit
+  an affected action's diagnostic. Later compilations retry missing refs unless
+  the caller explicitly selects a durable resolution snapshot; see the
+  [missing-ref regression](../internal/compiler/missing_ref_resolutions_test.go).
 - Docker action arguments are ordered literal arguments after expression
   evaluation, not shell text or Docker options. `--privileged` in an argument
   cannot become a container privilege flag.
