@@ -121,7 +121,7 @@ do not establish GitHub's file ordering or behavior beyond diff limits.
 
 ### GitHub server identity
 
-For selected GHES imports, the backend supplies `BUILDKITE_GITHUB_SERVER_URL`
+For selected GHES imports, the backend supplies `GITHUB_SERVER_URL`
 from the authorized App connection, with precedence over build and step input.
 Never infer GitHub identity from an arbitrary `BUILDKITE_REPO` host. Persist the
 canonical HTTPS origin as `server_url` in event snapshots and digest-bound job

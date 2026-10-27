@@ -60,8 +60,8 @@ func TestParseBuildkiteRepository(t *testing.T) {
 func TestBuildkiteEventSourceGHESIdentity(t *testing.T) {
 	env := map[string]string{
 		"BUILDKITE": "true", "BUILDKITE_REPO": "git@buildkite-ghe.com:acme/widgets.git",
-		"BUILDKITE_GITHUB_SERVER_URL": "https://buildkite-ghe.com",
-		"BUILDKITE_COMMIT":            strings.Repeat("a", 40), "BUILDKITE_BRANCH": "main",
+		"GITHUB_SERVER_URL": "https://buildkite-ghe.com",
+		"BUILDKITE_COMMIT":  strings.Repeat("a", 40), "BUILDKITE_BRANCH": "main",
 		"BUILDKITE_BUILD_AUTHOR": "octocat",
 		"GITHUB_WORKFLOW_REF":    "acme/widgets/.github/workflows/ci.yml@refs/heads/main",
 	}
@@ -78,7 +78,7 @@ func TestBuildkiteEventSourceGHESIdentity(t *testing.T) {
 		t.Fatal("GHES event must not infer a github.com workflow source")
 	}
 	for _, server := range []string{"", "https://github.com", "https://buildkite-ghe.com/path", "https://user:pass@buildkite-ghe.com", "http://buildkite-ghe.com"} {
-		env["BUILDKITE_GITHUB_SERVER_URL"] = server
+		env["GITHUB_SERVER_URL"] = server
 		if _, err := buildkiteEventSource(getenv); err == nil {
 			t.Errorf("GHES repository accepted with server %q", server)
 		}

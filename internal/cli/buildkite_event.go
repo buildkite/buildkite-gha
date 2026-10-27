@@ -19,7 +19,7 @@ import (
 )
 
 const githubEventNameEnvironment = "GITHUB_EVENT_NAME"
-const githubServerURLEnvironment = "BUILDKITE_GITHUB_SERVER_URL"
+const githubServerURLEnvironment = "GITHUB_SERVER_URL"
 
 var githubEventNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,99}$`)
 
