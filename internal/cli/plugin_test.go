@@ -297,6 +297,68 @@ func TestPluginPrefersGitHubPipelineTriggerIdentity(t *testing.T) {
 	}
 }
 
+func TestPluginUsesPipelineTriggerWorkflowDispatch(t *testing.T) {
+	requireImporterHost(t)
+	for _, test := range []struct {
+		name, ref, webhook, target string
+	}{
+		{name: "branch with default inputs", ref: "refs/heads/main", target: "staging"},
+		{name: "tag with supplied inputs", ref: "refs/tags/v1.2.3", webhook: `{"ref":"refs/tags/v1.2.3","inputs":{"target":"production"}}`, target: "production"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := writeUploadWorkflowRepository(t, map[string]string{
+				"ci.yml": "name: CI\non:\n  workflow_dispatch:\n    inputs:\n      target:\n        type: string\n        default: staging\njobs:\n  test:\n    name: Test ${{ inputs.target }}\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			})
+			t.Chdir(repository)
+			t.Setenv(pluginConfigurationEnvironment, `{}`)
+			setCLIPluginBuildkiteEnvironment(t, "dispatch-importer")
+			t.Setenv("BUILDKITE_SOURCE", "ui")
+			t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+			if tag, ok := strings.CutPrefix(test.ref, "refs/tags/"); ok {
+				t.Setenv("BUILDKITE_TAG", tag)
+				t.Setenv("BUILDKITE_BRANCH", tag)
+			}
+			setCLIPipelineTriggerEnvironment(t, ".github/workflows/ci.yml", "CI", "workflow_dispatch", "buildkite/buildkite-gha/.github/workflows/ci.yml@"+test.ref)
+			runner := &cliCaptureRunner{}
+			if test.webhook != "" {
+				runner.webhook = []byte(test.webhook)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 || !strings.Contains(stdout.String(), "Uploaded 1 job") {
+				t.Fatalf("plugin code/stdout/stderr = %d / %q / %q", code, stdout.String(), stderr.String())
+			}
+			var pipeline struct {
+				Steps []struct {
+					Label string `yaml:"label"`
+				} `yaml:"steps"`
+			}
+			if err := yaml.Unmarshal(lastPipelineUpload(t, runner), &pipeline); err != nil {
+				t.Fatal(err)
+			}
+			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Label != ":github: job · Test "+test.target {
+				t.Fatalf("dispatch steps = %#v", pipeline.Steps)
+			}
+			found := false
+			for path, contents := range runner.uploaded {
+				if !strings.HasPrefix(path, ".buildkite-gha/plans/") || !strings.HasSuffix(path, ".json") {
+					continue
+				}
+				job, err := plan.Decode(contents)
+				if err != nil {
+					t.Fatal(err)
+				}
+				found = true
+				if job.Event.Name != "workflow_dispatch" || job.Event.Ref != test.ref || job.Event.SHA != os.Getenv("BUILDKITE_COMMIT") {
+					t.Fatalf("dispatch event = %#v", job.Event)
+				}
+			}
+			if !found {
+				t.Fatal("plugin uploaded no dispatch job plan")
+			}
+		})
+	}
+}
+
 func TestPluginUsesPipelineTriggerPullRequestIdentity(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
@@ -516,6 +578,7 @@ func TestPluginRejectsMalformedPipelineTriggerEnvironment(t *testing.T) {
 		{name: "malformed preferred workflow ref", fullPrefix: true, env: map[string]string{githubWorkflowRefEnvironment: "buildkite/buildkite-gha/.github/workflows/ci.yml"}, want: "GITHUB_WORKFLOW_REF must have", wantCode: 2},
 		{name: "preferred workflow ref for another repository", fullPrefix: true, env: map[string]string{githubWorkflowRefEnvironment: "other/repository/.github/workflows/ci.yml@refs/heads/main"}, want: "GITHUB_WORKFLOW_REF repository", wantCode: 2},
 		{name: "preferred workflow ref with mismatched event ref", fullPrefix: true, env: map[string]string{githubWorkflowRefEnvironment: "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/pull/42/merge"}, want: "GITHUB_WORKFLOW_REF event ref", wantCode: 2},
+		{name: "dispatch with pull request ref", fullPrefix: true, env: map[string]string{githubEventNameEnvironment: "workflow_dispatch", githubWorkflowRefEnvironment: "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/pull/42/merge"}, want: "GITHUB_WORKFLOW_REF event ref", wantCode: 2},
 		{name: "malformed preferred workflow SHA", fullPrefix: true, env: map[string]string{githubWorkflowSHAEnvironment: "HEAD"}, want: "GITHUB_WORKFLOW_SHA must be a full lowercase 40-hex commit", wantCode: 2},
 		{name: "preferred workflow SHA does not match checkout", fullPrefix: true, env: map[string]string{githubWorkflowSHAEnvironment: strings.Repeat("a", 40)}, want: "GITHUB_WORKFLOW_SHA does not match BUILDKITE_COMMIT", wantCode: 1},
 		{name: "issues without preferred workflow ref", fullPrefix: true, env: map[string]string{githubEventNameEnvironment: "issues", githubWorkflowRefEnvironment: ""}, want: "GITHUB_WORKFLOW_REF and GITHUB_WORKFLOW_SHA are required for issues", wantCode: 2},

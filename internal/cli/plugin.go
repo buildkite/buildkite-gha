@@ -259,8 +259,8 @@ func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(strin
 	if event == "" {
 		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT is required", githubEventNameEnvironment)
 	}
-	if event != "discussion_comment" && event != "discussion" && event != "branch_protection_rule" && event != "milestone" && event != "watch" && event != "page_build" && event != "gollum" && event != "public" && event != "fork" && event != "label" && event != "create" && event != "delete" && event != "push" && event != "pull_request" && event != "issues" && event != "issue_comment" && event != "pull_request_review" && event != "pull_request_review_comment" && event != "release" && event != "merge_group" && event != "deployment" && event != "deployment_status" {
-		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT must be push, pull_request, issues, issue_comment, pull_request_review, pull_request_review_comment, release, merge_group, deployment, deployment_status, create, delete, label, fork, public, gollum, page_build, watch, milestone, branch_protection_rule, discussion, or discussion_comment", githubEventNameEnvironment)
+	if event != "workflow_dispatch" && event != "discussion_comment" && event != "discussion" && event != "branch_protection_rule" && event != "milestone" && event != "watch" && event != "page_build" && event != "gollum" && event != "public" && event != "fork" && event != "label" && event != "create" && event != "delete" && event != "push" && event != "pull_request" && event != "issues" && event != "issue_comment" && event != "pull_request_review" && event != "pull_request_review_comment" && event != "release" && event != "merge_group" && event != "deployment" && event != "deployment_status" {
+		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT must be push, pull_request, workflow_dispatch, issues, issue_comment, pull_request_review, pull_request_review_comment, release, merge_group, deployment, deployment_status, create, delete, label, fork, public, gollum, page_build, watch, milestone, branch_protection_rule, discussion, or discussion_comment", githubEventNameEnvironment)
 	}
 
 	workflowName := getenv(githubWorkflowEnvironment)
@@ -321,7 +321,7 @@ func pipelineTriggerEventRef(event, ref string) bool {
 	switch event {
 	case "deployment", "deployment_status":
 		return git.ValidObjectID(ref) || pipelineTriggerEventRef("push", ref)
-	case "push", "create":
+	case "push", "create", "workflow_dispatch":
 		for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
 			if value, ok := strings.CutPrefix(ref, prefix); ok {
 				return value != ""

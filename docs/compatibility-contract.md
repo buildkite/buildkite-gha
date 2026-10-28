@@ -95,6 +95,17 @@ and [upload](../internal/cli/upload.go). Event validation lives in
 [compiler event handling](../internal/compiler/event.go). Backend delivery is a
 separate contract; local tests with constructed events do not verify it.
 
+Manual `workflow_dispatch` selection must accept branch and tag workflow refs
+and preserve the event identity without requiring a webhook payload. The server
+[selects dispatch when declared and supplies workflow identity](https://github.com/buildkite/buildkite/blob/ad7682856e029374db39e0e8e6c39c327bf929b0/app/models/build/manual.rb#L54-L143),
+but does not supply dispatch inputs. Use declared defaults when inputs are absent.
+[Mailcatcher build 1](https://buildkite.com/sj26-test/mailcatcher/builds/1)
+confirmed dispatch identity reached the importer; it failed at event admission,
+not workflow execution. The
+[plugin regression](../internal/cli/plugin_test.go) covers branch and tag imports,
+default inputs, and supplied payload inputs. It does not establish a successful
+hosted run or UI support for supplying inputs.
+
 Path filtering requires verified repository identity and bounded Git evidence.
 Non-path exclusions can retain their conditions when diff history is unavailable,
 but identity failures remain errors. Do not turn missing history into an empty
