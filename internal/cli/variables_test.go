@@ -867,7 +867,7 @@ func TestAgentVariableSourceMemoizesFailures(t *testing.T) {
 		t.Fatal("variableSourceFromAgent() = nil with a configured Agent connection")
 	}
 	for range 3 {
-		if _, err := source.ResolveVariables(t.Context(), "buildkite", "buildkite-gha"); err == nil || !strings.Contains(err.Error(), "variables: the variable resolution service is temporarily unavailable") {
+		if _, err := source.ResolveVariables(t.Context(), "", "buildkite", "buildkite-gha"); err == nil || !strings.Contains(err.Error(), "variables: the variable resolution service is temporarily unavailable") {
 			t.Fatalf("ResolveVariables() error = %v", err)
 		}
 	}

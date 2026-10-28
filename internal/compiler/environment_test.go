@@ -112,7 +112,7 @@ type fakeEnvironmentSource struct {
 	calls       map[string]int
 }
 
-func (f *fakeEnvironmentSource) ResolveEnvironment(_ context.Context, owner, repository, name string) (EnvironmentProtection, error) {
+func (f *fakeEnvironmentSource) ResolveEnvironment(_ context.Context, _, owner, repository, name string) (EnvironmentProtection, error) {
 	if owner != "buildkite" || repository != "buildkite-gha" {
 		return EnvironmentProtection{}, fmt.Errorf("unexpected repository %s/%s", owner, repository)
 	}
@@ -417,12 +417,12 @@ type fakeEnvironmentBatchSource struct {
 	singleCalls int
 }
 
-func (f *fakeEnvironmentBatchSource) ResolveEnvironment(context.Context, string, string, string) (EnvironmentProtection, error) {
+func (f *fakeEnvironmentBatchSource) ResolveEnvironment(context.Context, string, string, string, string) (EnvironmentProtection, error) {
 	f.singleCalls++
 	return EnvironmentProtection{}, fmt.Errorf("single-name resolution must not be used when batching is available")
 }
 
-func (f *fakeEnvironmentBatchSource) ResolveEnvironments(_ context.Context, owner, repository string, names []string) ([]EnvironmentProtection, error) {
+func (f *fakeEnvironmentBatchSource) ResolveEnvironments(_ context.Context, _, owner, repository string, names []string) ([]EnvironmentProtection, error) {
 	f.batches = append(f.batches, append([]string(nil), names...))
 	if owner != "buildkite" || repository != "buildkite-gha" {
 		return nil, fmt.Errorf("unexpected repository %s/%s", owner, repository)

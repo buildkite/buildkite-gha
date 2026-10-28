@@ -9,13 +9,14 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
 
 // variableSource resolves a repository's GitHub Actions repository and
 // organization variables into the compiler's pre-environment scopes.
 type variableSource interface {
-	ResolveVariables(ctx context.Context, owner, repository string) (compiler.VariableSources, error)
+	ResolveVariables(ctx context.Context, serverURL, owner, repository string) (compiler.VariableSources, error)
 }
 
 // variableSourceFromAgent builds the variable source over the job-scoped Agent
@@ -56,14 +57,15 @@ type agentVariableResolution struct {
 	err  error
 }
 
-func (a *agentVariableSource) ResolveVariables(ctx context.Context, owner, repository string) (compiler.VariableSources, error) {
+func (a *agentVariableSource) ResolveVariables(ctx context.Context, serverURL, owner, repository string) (compiler.VariableSources, error) {
 	repo := owner + "/" + repository
+	identity := plan.EventServerURL("github", serverURL) + "/" + repo
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if result, ok := a.resolved[repo]; ok {
+	if result, ok := a.resolved[identity]; ok {
 		return result.vars, result.err
 	}
-	snapshot, err := a.resolver.ResolveVariables(ctx, repo)
+	snapshot, err := a.resolver.ResolveVariables(ctx, serverURL, repo)
 	result := agentVariableResolution{}
 	switch {
 	case errors.Is(err, gharuntime.ErrVariablesUnavailable):
@@ -73,7 +75,7 @@ func (a *agentVariableSource) ResolveVariables(ctx context.Context, owner, repos
 	default:
 		result.vars = compiler.VariableSources{Repository: snapshot.Repository, Organization: snapshot.Organization, Resolved: true}
 	}
-	a.resolved[repo] = result
+	a.resolved[identity] = result
 	return result.vars, result.err
 }
 
@@ -81,13 +83,13 @@ func (a *agentVariableSource) ResolveVariables(ctx context.Context, owner, repos
 // the event repository when the workflows about to compile reference vars.
 // Without a reference there is nothing to resolve, so no request is made and
 // the scopes stay empty. Without a source, such as compile outside a
-// Buildkite job, the scopes also stay empty. Only GitHub.com repositories
+// Buildkite job, the scopes also stay empty. Only GitHub repositories
 // have GitHub variables, so events from other providers never make a request.
 func resolveVariableSources(ctx context.Context, source variableSource, event compiler.Event, referencesVars bool) (compiler.VariableSources, error) {
 	if source == nil || !referencesVars || event.Provider != "github" {
 		return compiler.VariableSources{}, nil
 	}
-	return source.ResolveVariables(ctx, event.Repository.Owner, event.Repository.Name)
+	return source.ResolveVariables(ctx, event.ServerURL, event.Repository.Owner, event.Repository.Name)
 }
 
 // resolveActionVariables handles a vars reference that only compilation can
