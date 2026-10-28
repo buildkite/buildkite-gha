@@ -271,6 +271,10 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			switch strings.ToLower(path[0]) {
 			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow_ref", "workflow_sha":
 				return nil
+			case "event_path":
+				if scope == StepCondition || scope == actionStepCondition || scope == actionLifecycleCondition {
+					return nil
+				}
 			case "server_url":
 				if scope == actionStepCondition {
 					return nil
@@ -278,6 +282,9 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			}
 		}
 		supported := "actor, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, sha, workflow_ref, and workflow_sha"
+		if scope == StepCondition || scope == actionStepCondition || scope == actionLifecycleCondition {
+			supported += ", plus event_path during execution"
+		}
 		if scope == actionStepCondition {
 			supported += ", plus server_url in composite step conditions"
 		}

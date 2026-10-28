@@ -339,6 +339,18 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			}()
 		}
 	}
+	var eventPath string
+	if job.Event.PayloadFile {
+		eventPath, err = newEventFile(job.Event, job.HasCapability("docker"))
+		if err != nil {
+			return jobResult, err
+		}
+		defer func() { _ = os.RemoveAll(filepath.Dir(eventPath)) }()
+		eval.GitHub["event_path"] = eventPath
+		if job.Container != nil {
+			eval.GitHub["event_path"] = containerEventPath
+		}
+	}
 	jobEnv, err := executionprogram.EvaluateBindings(executionJob.Env, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("evaluate job environment: %w", err))
@@ -371,14 +383,6 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		if err := os.Chmod(runnerTemp, 0o777); err != nil {
 			return jobResult, fmt.Errorf("make Docker runner temp writable: %w", err)
 		}
-	}
-	var eventPath string
-	if job.Event.PayloadFile {
-		eventPath, err = newEventFile(job.Event, job.HasCapability("docker"))
-		if err != nil {
-			return jobResult, err
-		}
-		defer func() { _ = os.RemoveAll(filepath.Dir(eventPath)) }()
 	}
 	toolCache := r.ToolCache
 	if toolCache == "" {
@@ -1461,6 +1465,7 @@ func githubContext(job plan.Job) map[string]any {
 		"sha":               job.Event.SHA,
 		"actor":             job.Event.Actor,
 		"event_name":        job.Event.Name,
+		"event_path":        "",
 		"event":             event,
 		"server_url":        plan.EventServerURL(job.Event.Provider, job.Event.ServerURL),
 		"workflow":          workflowDisplayName(job),

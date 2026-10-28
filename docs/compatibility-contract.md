@@ -300,6 +300,30 @@ These records preserve the evidence behind the former combined reference.
 They distinguish reported observations from independently inspectable receipts.
 They are not an exhaustive conformance suite.
 
+### Event file paths
+
+Only linked webhooks and explicit snapshots authorize an event file. Preserve
+the verified payload, per-job isolation, read-only container mounts, and lifetime
+through action posts. Synthesized environment fallback events must not acquire
+a file merely because an expression reads `github.event_path`; that value is
+empty without an event file. Environment overrides cannot replace the runtime
+path.
+
+The runner [writes the payload and sets `github.event_path`](https://github.com/actions/runner/blob/4197182ef8f39c719f66038c1bc9b34cd9e9ac9a/src/Runner.Worker/ExecutionContext.cs#L1331-L1347).
+Its [container expression context](https://github.com/actions/runner/blob/4197182ef8f39c719f66038c1bc9b34cd9e9ac9a/src/Runner.Worker/ExecutionContext.cs#L1583-L1623)
+translates paths for container execution. Docker actions
+[evaluate literal arguments](https://github.com/actions/runner/blob/4197182ef8f39c719f66038c1bc9b34cd9e9ac9a/src/Runner.Worker/Handlers/ContainerActionHandler.cs#L135-L150)
+and [translate environment paths](https://github.com/actions/runner/blob/4197182ef8f39c719f66038c1bc9b34cd9e9ac9a/src/Runner.Worker/Handlers/ContainerActionHandler.cs#L253-L258).
+Do not rewrite argument strings into container paths.
+
+Local [compiled lifecycle tests](../internal/runtime/event_file_test.go) cover
+job environment, shell expressions, action defaults, nested composites,
+JavaScript pre/main/post hooks, outputs, payload integrity, and cleanup.
+[Container tests](../internal/runtime/event_file_containers_test.go) exercise
+host and job-container shell/composite reads and non-root Docker action reads.
+This is runner-source and local execution evidence, not a native GitHub run or
+released-availability claim.
+
 ### Prerequisite bootstrap failures
 
 [PR #550](https://github.com/buildkite/buildkite-gha/pull/550) reports live agent
