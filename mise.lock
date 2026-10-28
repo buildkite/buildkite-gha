@@ -175,38 +175,6 @@ url_api = "https://api.github.com/repos/jqlang/jq/releases/assets/453012788"
 provenance = "github-attestations"
 
 [[tools.node]]
-version = "20.20.2"
-backend = "core:node"
-
-[tools.node."platforms.linux-arm64"]
-checksum = "sha256:47ef73d543ecf6eb19435f6c03a0ac4809b3bf0dd6b26c7c571efc2a6572a74d"
-url = "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-arm64.tar.gz"
-
-[tools.node."platforms.linux-arm64-musl"]
-checksum = "sha256:7549872a8d1be4670d5219f39dc0aed6e6432c976f3cd25543bc249aa850f041"
-url = "https://unofficial-builds.nodejs.org/download/release/v20.20.2/node-v20.20.2-linux-arm64-musl.tar.gz"
-
-[tools.node."platforms.linux-x64"]
-checksum = "sha256:19e56f0825510207dd904f087fe52faa0a4eb6b2aab5f0ea7a33830d04888b8b"
-url = "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-x64.tar.gz"
-
-[tools.node."platforms.linux-x64-musl"]
-checksum = "sha256:0a335b43b5f0a3279d9c411b333a55ce98c02b875ba14033952c809ef89ac773"
-url = "https://unofficial-builds.nodejs.org/download/release/v20.20.2/node-v20.20.2-linux-x64-musl.tar.gz"
-
-[tools.node."platforms.macos-arm64"]
-checksum = "sha256:466e05f3477c20dfb723054dfebffe55bc74660ee77f612166fca121dacb65b6"
-url = "https://nodejs.org/dist/v20.20.2/node-v20.20.2-darwin-arm64.tar.gz"
-
-[tools.node."platforms.macos-x64"]
-checksum = "sha256:8be6f5e4bb128c82774f8a0b8d7a1cc1365a7977d9657cece0ca647b3fe04e61"
-url = "https://nodejs.org/dist/v20.20.2/node-v20.20.2-darwin-x64.tar.gz"
-
-[tools.node."platforms.windows-x64"]
-checksum = "sha256:dc3700fdd57a63eedb8fd7e3c7baaa32e6a740a1b904167ff4204bc68ed8bf77"
-url = "https://nodejs.org/dist/v20.20.2/node-v20.20.2-win-x64.zip"
-
-[[tools.node]]
 version = "24.18.0"
 backend = "core:node"
 
@@ -237,6 +205,38 @@ url = "https://nodejs.org/dist/v24.18.0/node-v24.18.0-darwin-x64.tar.gz"
 [tools.node."platforms.windows-x64"]
 checksum = "sha256:0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821"
 url = "https://nodejs.org/dist/v24.18.0/node-v24.18.0-win-x64.zip"
+
+[[tools.node]]
+version = "20.20.2"
+backend = "core:node"
+
+[tools.node."platforms.linux-arm64"]
+checksum = "sha256:47ef73d543ecf6eb19435f6c03a0ac4809b3bf0dd6b26c7c571efc2a6572a74d"
+url = "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-arm64.tar.gz"
+
+[tools.node."platforms.linux-arm64-musl"]
+checksum = "sha256:7549872a8d1be4670d5219f39dc0aed6e6432c976f3cd25543bc249aa850f041"
+url = "https://unofficial-builds.nodejs.org/download/release/v20.20.2/node-v20.20.2-linux-arm64-musl.tar.gz"
+
+[tools.node."platforms.linux-x64"]
+checksum = "sha256:19e56f0825510207dd904f087fe52faa0a4eb6b2aab5f0ea7a33830d04888b8b"
+url = "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-x64.tar.gz"
+
+[tools.node."platforms.linux-x64-musl"]
+checksum = "sha256:0a335b43b5f0a3279d9c411b333a55ce98c02b875ba14033952c809ef89ac773"
+url = "https://unofficial-builds.nodejs.org/download/release/v20.20.2/node-v20.20.2-linux-x64-musl.tar.gz"
+
+[tools.node."platforms.macos-arm64"]
+checksum = "sha256:466e05f3477c20dfb723054dfebffe55bc74660ee77f612166fca121dacb65b6"
+url = "https://nodejs.org/dist/v20.20.2/node-v20.20.2-darwin-arm64.tar.gz"
+
+[tools.node."platforms.macos-x64"]
+checksum = "sha256:8be6f5e4bb128c82774f8a0b8d7a1cc1365a7977d9657cece0ca647b3fe04e61"
+url = "https://nodejs.org/dist/v20.20.2/node-v20.20.2-darwin-x64.tar.gz"
+
+[tools.node."platforms.windows-x64"]
+checksum = "sha256:dc3700fdd57a63eedb8fd7e3c7baaa32e6a740a1b904167ff4204bc68ed8bf77"
+url = "https://nodejs.org/dist/v20.20.2/node-v20.20.2-win-x64.zip"
 
 [[tools.powershell]]
 version = "7.4.13"
