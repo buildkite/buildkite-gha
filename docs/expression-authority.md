@@ -92,6 +92,12 @@ supplies the owning build ID separately from the shared GitHub context, so
 evaluating a group cannot make run identity available to other graph-time
 positions. Offline callers leave that identity unavailable.
 
+`github.event_path` remains unknown during compilation and authority planning.
+Runtime supplies it after creating the job's event file, before job environment
+evaluation. Graph-time fields and pre-setup job/call conditions cannot read it.
+The expression does not grant payload provenance or credential authority; see
+the [event-file contract](compatibility-contract.md#event-file-paths).
+
 Program sites serialize source text and diagnostic location. Their position in
 the program derives profile, result type, provenance, and purpose after decode.
 This prevents a plan from claiming broader semantics in serialized profile

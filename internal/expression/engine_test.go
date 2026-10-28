@@ -34,6 +34,55 @@ func TestEngineLiteralPreservesExpressionTypes(t *testing.T) {
 	}
 }
 
+func TestEngineEventPathRemainsRuntimeOnly(t *testing.T) {
+	engine := NewEngine()
+	for _, profile := range []ProfileID{ProfileJobEnvironment, ProfileJobOutput, ProfileStepTemplate, ProfileActionStepTemplate, ProfileActionInputDefault} {
+		site := Site{Source: "${{ github.event_path }}", Profile: profile, Result: ResultString}
+		reduced, err := engine.Reduce(site, Values{Compile: CompileContext{GitHub: map[string]any{"event": map[string]any{}}}})
+		if err != nil || reduced.Known || !strings.Contains(reduced.Source, "github.event_path") {
+			t.Fatalf("Reduce(%s) = %#v, %v; want runtime event path", profile, reduced, err)
+		}
+		for _, path := range []string{"", "/runtime/event.json"} {
+			got, err := engine.Evaluate(site, Values{Runtime: Context{GitHub: map[string]any{"event_path": path}}})
+			if err != nil || got != path {
+				t.Errorf("Evaluate(%s) = %#v, %v; want %q", profile, got, err, path)
+			}
+		}
+	}
+	for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunsOnTemplate, ProfileRunName, ProfileWorkflowConcurrency} {
+		if _, err := engine.Validate(Site{Source: "${{ github.event_path }}", Profile: profile, Result: ResultString}); err == nil {
+			t.Errorf("%s admitted an execution path during graph construction", profile)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileJobCondition, ProfileCallCondition} {
+		if _, err := engine.Validate(Site{Source: "github.event_path != ''", Profile: profile, Result: ResultBoolean}); err == nil {
+			t.Errorf("%s admitted an execution path before job setup", profile)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileStepTemplate, ProfileActionInputDefault} {
+		site := Site{Source: "${{ github.event_path != '' && github.token || 'missing' }}", Profile: profile, Result: ResultString}
+		unknown, err := engine.Analyze(site, AbstractValues{})
+		if err != nil || unknown.Value.Known || unknown.Effects.GitHubToken != GitHubTokenDirect || unknown.Effects.EventPayload {
+			t.Fatalf("unknown event path authority = %#v, %v", unknown, err)
+		}
+		for _, path := range []string{"", "/runtime/event.json"} {
+			known := map[string]any{"github.event_path": path, "github.token": "synthetic-token"}
+			analysis, err := engine.Analyze(site, AbstractValues{References: known})
+			want, effect := "missing", GitHubTokenEffect(0)
+			if path != "" {
+				want, effect = "synthetic-token", GitHubTokenDirect
+			}
+			if err != nil || !analysis.Value.Known || analysis.Value.Value != want || analysis.Effects.GitHubToken != effect || analysis.Effects.EventPayload {
+				t.Fatalf("known event path authority = %#v, %v; want %q, %v", analysis, err, want, effect)
+			}
+			value, err := engine.Evaluate(site, Values{Runtime: Context{GitHub: map[string]any{"event_path": path, "token": "synthetic-token"}}})
+			if err != nil || value != want {
+				t.Fatalf("concrete event path branch = %#v, %v; want %q", value, err, want)
+			}
+		}
+	}
+}
+
 func TestEngineInputReferences(t *testing.T) {
 	for _, test := range []struct {
 		source  string

@@ -19,6 +19,7 @@ func TestEventFileJobContainerMount(t *testing.T) {
 	fake := newJobDocker(t, "")
 	workspace := t.TempDir()
 	job := jobContainerPlan(t, workspace, []runtimeTestStep{{ID: "read", Kind: "run", Shell: "sh", Command: `cmp "$GITHUB_EVENT_PATH" expected.json`}})
+	job.Env = map[string]string{"EXPRESSION_PATH": "${{ github.event_path }}"}
 	payload := setEventFilePayload(t, &job, `{"comment":{"body":"not-in-logs"}}`)
 	writeFixtureFile(t, workspace, "expected.json", string(payload))
 	if _, err := (Runner{Docker: fake.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), job, workspace); err != nil {
@@ -31,7 +32,8 @@ func TestEventFileJobContainerMount(t *testing.T) {
 	}
 	found := false
 	for _, call := range calls {
-		if call.Args[0] == "exec" && strings.Contains(strings.Join(call.Args, " "), "GITHUB_EVENT_PATH="+containerEventPath) {
+		args := strings.Join(call.Args, " ")
+		if call.Args[0] == "exec" && strings.Contains(args, "GITHUB_EVENT_PATH="+containerEventPath) && strings.Contains(args, "EXPRESSION_PATH="+containerEventPath) {
 			found = true
 		}
 	}
@@ -56,6 +58,8 @@ func TestEventFileDockerActionMount(t *testing.T) {
 			run.runtimeEnv = map[string]string{"GITHUB_EVENT_PATH": path}
 			run.runnerTemp = t.TempDir()
 			action.Env["GITHUB_EVENT_PATH"] = "/spoofed"
+			action.Env["EXPRESSION_PATH"] = path
+			action.Args = []string{path}
 			if inJobContainer {
 				run.jobContainer = &jobContainerBackend{workspace: action.Workspace, temp: run.runnerTemp}
 			}
@@ -69,6 +73,9 @@ func TestEventFileDockerActionMount(t *testing.T) {
 				args := strings.Join(call.args, " ")
 				if strings.Count(args, "GITHUB_EVENT_PATH=") != 1 || !strings.Contains(args, "GITHUB_EVENT_PATH="+containerEventPath) || !strings.Contains(args, "source="+filepath.Dir(path)+",target="+containerEventDirectory+",readonly") {
 					t.Fatalf("Docker event mount/environment = %s", args)
+				}
+				if !strings.Contains(args, "EXPRESSION_PATH="+containerEventPath) || call.args[len(call.args)-1] != path {
+					t.Fatalf("Docker must translate environment paths but preserve literal arguments: %s", args)
 				}
 			}
 		})
@@ -85,12 +92,33 @@ func TestLiveEventFileContainers(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeFixtureFile(t, workspace, "workflow.yml", "name: live event file\n")
-			writeFixtureFile(t, workspace, ".github/actions/docker/action.yml", "name: event reader\nruns:\n  using: docker\n  image: Dockerfile\n")
+			writeFixtureFile(t, workspace, ".github/actions/docker/action.yml", `name: event reader
+inputs:
+  path:
+    default: ${{ github.event_path }}
+runs:
+  using: docker
+  image: Dockerfile
+  args:
+    - ${{ inputs.path }}
+  env:
+    EVENT_EXPRESSION: ${{ inputs.path }}
+`)
 			writeFixtureFile(t, workspace, ".github/actions/docker/Dockerfile", "FROM alpine:3.20\nCOPY --chmod=755 read-event /read-event\nUSER 12345\nENTRYPOINT [\"/read-event\"]\n")
 			readEvent := `test -n "$GITHUB_EVENT_PATH"; cmp "$GITHUB_EVENT_PATH" "$GITHUB_WORKSPACE/expected.json"`
-			writeFixtureFile(t, workspace, ".github/actions/docker/read-event", "#!/bin/sh\nset -eu\n"+readEvent+"\ntest ! -w \"$GITHUB_EVENT_PATH\"\ntest \"$(id -u)\" != 0\necho event-file-read\n")
+			writeFixtureFile(t, workspace, ".github/actions/docker/read-event", "#!/bin/sh\nset -eu\n"+readEvent+`
+test "$EVENT_EXPRESSION" = "$GITHUB_EVENT_PATH"
+test "$INPUT_PATH" = "$GITHUB_EVENT_PATH"
+test "$1" = "$(cat "$GITHUB_WORKSPACE/expression-path")"
+test ! -w "$GITHUB_EVENT_PATH"
+test "$(id -u)" != 0
+echo event-file-read
+`)
+			expressionRead := `test '${{ github.event_path }}' = "$GITHUB_EVENT_PATH"; cmp '${{ github.event_path }}' "$GITHUB_WORKSPACE/expected.json"; printf '%s' '${{ github.event_path }}' > expression-path`
+			writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "name: composite reader\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: "+expressionRead+"\n")
 			job := runtimePlan(t, workspace, "workflow.yml", []runtimeTestStep{
-				{ID: "shell", Kind: "run", Shell: "sh", Command: readEvent},
+				{ID: "shell", Kind: "run", Shell: "sh", Command: expressionRead},
+				{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"},
 				{ID: "docker", Kind: "uses", Uses: "./.github/actions/docker", Env: map[string]string{"GITHUB_EVENT_PATH": "/spoofed"}},
 			})
 			job.RequiredCapabilities = []string{"docker", "network"}

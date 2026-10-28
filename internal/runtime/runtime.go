@@ -457,6 +457,12 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandOutputProcesso
 			{host: jobContainerTemp, target: "/github/runner_temp"},
 		}}
 	}
+	if eventPath != "" {
+		if siblingPaths == nil {
+			siblingPaths = &jobContainerBackend{}
+		}
+		siblingPaths.mounts = append(siblingPaths.mounts, containerMount{host: filepath.Dir(eventPath), target: containerEventDirectory})
+	}
 	for _, name := range sortedKeys(action.Env) {
 		if name == "GITHUB_EVENT_PATH" && eventPath != "" {
 			continue
