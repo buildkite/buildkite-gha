@@ -46,6 +46,7 @@ func newMutableRefCache(root string, freshness time.Duration) (*mutableRefCache,
 func (c *mutableRefCache) resolve(ctx context.Context, ref Reference, resolve func(context.Context, Reference) (Resolved, error)) (Resolved, error) {
 	path := c.path(ref)
 	if resolved, ok := c.load(path, ref, time.Now()); ok {
+		recordSourceCacheHit(ctx, cacheMutableRef)
 		return resolved, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -60,6 +61,7 @@ func (c *mutableRefCache) resolve(ctx context.Context, ref Reference, resolve fu
 	}
 	defer unlock()
 	if resolved, ok := c.load(path, ref, time.Now()); ok {
+		recordSourceCacheHit(ctx, cacheMutableRef)
 		return resolved, nil
 	}
 	resolved, err := resolve(ctx, ref)

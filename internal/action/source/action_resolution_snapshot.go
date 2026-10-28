@@ -56,8 +56,14 @@ type actionResolutionSnapshotEntry struct {
 // WithActionResolutionSnapshot pins mutable refs to durable per-generation
 // entries. Refresh starts a new generation without disrupting active readers.
 func WithActionResolutionSnapshot(root string, refresh bool) Option {
+	return WithActionResolutionSnapshotContext(context.Background(), root, refresh)
+}
+
+// WithActionResolutionSnapshotContext is WithActionResolutionSnapshot with a
+// context for waiting on the snapshot initialization lock.
+func WithActionResolutionSnapshotContext(ctx context.Context, root string, refresh bool) Option {
 	return func(c *config) error {
-		snapshot, err := newActionResolutionSnapshot(root, refresh)
+		snapshot, err := newActionResolutionSnapshot(ctx, root, refresh)
 		if err != nil {
 			return err
 		}
@@ -66,7 +72,7 @@ func WithActionResolutionSnapshot(root string, refresh bool) Option {
 	}
 }
 
-func newActionResolutionSnapshot(root string, refresh bool) (*actionResolutionSnapshot, error) {
+func newActionResolutionSnapshot(ctx context.Context, root string, refresh bool) (*actionResolutionSnapshot, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("action resolution snapshot root is required")
 	}
@@ -90,7 +96,7 @@ func newActionResolutionSnapshot(root string, refresh bool) (*actionResolutionSn
 		return nil, fmt.Errorf("action resolution snapshot root changed while canonicalizing")
 	}
 	absolute = canonical
-	unlock, err := lockMutableRefCache(context.Background(), filepath.Join(absolute, ".snapshot.lock"))
+	unlock, err := lockMutableRefCache(ctx, filepath.Join(absolute, ".snapshot.lock"))
 	if err != nil {
 		return nil, fmt.Errorf("lock action resolution snapshot: %w", err)
 	}
@@ -200,6 +206,11 @@ func (s *actionResolutionSnapshot) resolve(ctx context.Context, ref Reference, r
 				if claimErr := storeActionResolutionSnapshotClaim(path + ".claimed"); claimErr != nil {
 					return Resolved{}, claimErr
 				}
+			}
+			if err == nil {
+				recordSourceCacheHit(ctx, cacheSnapshotResolved)
+			} else {
+				recordSourceCacheHit(ctx, cacheSnapshotMissing)
 			}
 		}
 		return resolved, err

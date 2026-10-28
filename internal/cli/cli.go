@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -22,6 +23,8 @@ func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRun
 	if args[0] == gharuntime.ContainerProcessHelperCommand {
 		return gharuntime.RunContainerProcessHelper(args[1:])
 	}
+	ctx, finishStats := sourceAPIStatsContext(context.Background(), args, stderr)
+	defer finishStats()
 	version := commandVersion(clientVersion)
 
 	switch args[0] {
@@ -37,7 +40,7 @@ func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRun
 		_, _ = fmt.Fprintf(stdout, "buildkite-gha %s\n", clientVersion)
 		return 0
 	case "plugin":
-		return plugin(args[1:], stdout, stderr, version, clientVersion, agentRunner)
+		return plugin(ctx, args[1:], stdout, stderr, version, clientVersion, agentRunner)
 	default:
 		if _, ok := commandUsage[args[0]]; ok {
 			if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
@@ -46,13 +49,13 @@ func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRun
 			}
 			switch args[0] {
 			case "validate":
-				return validate(args[1:], stdout, stderr, clientVersion, transport.Agent{Runner: agentRunner})
+				return validate(ctx, args[1:], stdout, stderr, clientVersion, transport.Agent{Runner: agentRunner})
 			case "validate-batch":
-				return validateBatch(args[1:], stderr, clientVersion)
+				return validateBatch(ctx, args[1:], stderr, clientVersion)
 			case "compile":
-				return compile(args[1:], stdout, stderr, clientVersion, transport.Agent{Runner: agentRunner})
+				return compile(ctx, args[1:], stdout, stderr, clientVersion, transport.Agent{Runner: agentRunner})
 			case "upload":
-				return upload(args[1:], stdout, stderr, clientVersion, transport.Agent{Runner: agentRunner})
+				return upload(ctx, args[1:], stdout, stderr, clientVersion, transport.Agent{Runner: agentRunner})
 			case "run-job":
 				return runJob(args[1:], stdout, stderr, version, clientVersion, transport.Agent{Runner: agentRunner})
 			default:

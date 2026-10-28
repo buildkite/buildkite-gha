@@ -54,6 +54,9 @@ func (r *Resolver) ensurePublic(ctx context.Context, ref Reference) error {
 				if errors.Is(check.err, context.Canceled) || errors.Is(check.err, context.DeadlineExceeded) {
 					continue
 				}
+				if check.err == nil {
+					recordSourceCacheHit(ctx, cachePublicRepositoryCheck)
+				}
 				return check.err
 			}
 		}

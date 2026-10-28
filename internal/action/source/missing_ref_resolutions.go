@@ -65,6 +65,9 @@ func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved,
 				if errors.Is(call.err, context.Canceled) || errors.Is(call.err, context.DeadlineExceeded) {
 					continue
 				}
+				if errors.As(call.err, new(*missingRefError)) {
+					recordSourceCacheHit(ctx, cacheCompilationMissingRef)
+				}
 				resolved := call.resolved
 				if call.err == nil {
 					resolved.Reference = ref

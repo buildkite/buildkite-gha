@@ -29,8 +29,8 @@ const (
 	githubWorkflowSHAEnvironment           = "GITHUB_WORKFLOW_SHA"
 )
 
-func plugin(args []string, stdout, stderr io.Writer, version, clientVersion string, runner transport.Runner) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+func plugin(ctx context.Context, args []string, stdout, stderr io.Writer, version, clientVersion string, runner transport.Runner) int {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return pluginContext(ctx, args, stdout, stderr, version, clientVersion, runner)
 }
