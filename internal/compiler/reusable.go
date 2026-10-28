@@ -352,11 +352,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		if strings.TrimSpace(job.If) != "" {
 			// Call guards keep vars residual, like every other condition; see
 			// resolveCompileTimeConditions.
-			conditionContext := resolver.context
-			conditionContext.Inputs = inputs.values
-			conditionContext.InputsComplete = len(inputs.deferred) == 0
-			conditionContext.Matrix = nil
-			conditionContext.Strategy = nil
+			conditionContext := resolver.callerContext(inputs)
 			conditionContext.Vars = nil
 			if err := validateCompileSite(job.If, expression.ProfileCompileCallCondition, expression.ResultBoolean); err != nil {
 				if blockerDetailUnsafe {
@@ -439,12 +435,8 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		}
 		calleeDigest := "sha256:" + sha256Sum(source)
 
-		matrixContext := resolver.context
-		matrixContext.Inputs = inputs.values
-		matrixContext.InputsComplete = len(inputs.deferred) == 0
-		matrixContext.Matrix = nil
-		matrixContext.Strategy = nil
-		matrices, err := expandMatrix(path, job, matrixContext)
+		callerContext := resolver.callerContext(inputs)
+		matrices, err := expandMatrix(path, job, callerContext)
 		if err != nil {
 			if matrixInputsApplied(originalJob, job) {
 				return reusableResolution{}, inputSubstitutedFinding(path, job, StageMatrix, CodeMatrixInvalid, job.Matrix.Span.Start, "matrix could not be expanded or validated"+inputValueHiddenNote)
@@ -461,7 +453,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		var callOutputs []needOutputBinding
 		callNamespaces := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
-			callInputs, err := resolveCallInputs(path, job, call, callee, inputs, needBindings, matrix, resolver.context)
+			callInputs, err := resolveCallInputs(path, job, call, callee, inputs, needBindings, matrix, callerContext)
 			if err != nil {
 				return reusableResolution{}, err
 			}
@@ -499,11 +491,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			}
 			calleeConcurrencyGates := concurrencyGates
 			if callee.Concurrency != nil {
-				concurrencyContext := resolver.context
-				concurrencyContext.Inputs = callInputs.values
-				concurrencyContext.InputsComplete = len(callInputs.deferred) == 0
-				concurrencyContext.Matrix = nil
-				concurrencyContext.Strategy = nil
+				concurrencyContext := resolver.callerContext(callInputs)
 				group, err := resolveConcurrency(calleeSource.displayPath, "", callee.Concurrency, concurrencyContext, nil)
 				if err != nil {
 					return reusableResolution{}, err
@@ -833,6 +821,17 @@ func cloneNeedBinding(binding needBinding) needBinding {
 	binding.members = append([]string(nil), binding.members...)
 	binding.outputs = append([]needOutputBinding(nil), binding.outputs...)
 	return binding
+}
+
+// callerContext scopes compile-time evaluation to one workflow frame: its own
+// inputs, never the root workflow's, and no matrix from an enclosing job.
+func (resolver *reusableResolver) callerContext(inputs reusableInputs) expression.CompileContext {
+	context := resolver.context
+	context.Inputs = inputs.values
+	context.InputsComplete = len(inputs.deferred) == 0
+	context.Matrix = nil
+	context.Strategy = nil
+	return context
 }
 
 func cloneReusableInputs(inputs reusableInputs) reusableInputs {
