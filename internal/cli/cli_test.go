@@ -1270,15 +1270,20 @@ func TestProcessingReportRedactsInputSubstitutedErrors(t *testing.T) {
 	}
 	const prep = "  prep:\n    runs-on: ubuntu-latest\n    outputs:\n      value: ${{ steps.s.outputs.value }}\n    steps:\n      - id: s\n        run: true\n"
 	const callee = "on:\n  workflow_call:\n    inputs:\n      value:\n        type: string\njobs:\n  inner:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
-	for _, test := range []struct{ name, jobs string }{
-		{"matrix expression", "  test:\n    strategy:\n      matrix: ${{ github[inputs.key] }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"},
-		{"needs-derived scheduling", "  prep:\n    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.s.outputs.matrix }}\n    steps:\n      - id: s\n        run: true\n  test:\n    needs: prep\n    concurrency: ${{ needs[inputs.key].outputs.group }}\n    strategy:\n      matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"},
-		{"runs-on label", "  test:\n    runs-on: [\"${{ inputs.key }}-${{ github.run_attempt }}\"]\n    steps:\n      - run: true\n"},
-		{"needs-derived runs-on", prep + "  test:\n    needs: prep\n    runs-on: ${{ needs[inputs.key].outputs.value }}\n    steps:\n      - run: true\n"},
-		{"reusable call matrix", "  call:\n    strategy:\n      matrix: ${{ github[inputs.key] }}\n    uses: ./.github/workflows/callee.yml\n"},
-		{"reusable call input", prep + "  call:\n    needs: prep\n    uses: ./.github/workflows/callee.yml\n    with:\n      value: ${{ needs[inputs.key].outputs.value }}\n"},
-		{"step timeout", "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        timeout-minutes: ${{ github[inputs.key] }}\n"},
-		{"step continue-on-error", "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        continue-on-error: ${{ github[inputs.key] }}\n"},
+	for _, test := range []struct {
+		name, jobs string
+		// explained diagnostics quote only authored source, so they keep
+		// their cause.
+		explained bool
+	}{
+		{name: "matrix expression", jobs: "  test:\n    strategy:\n      matrix: ${{ github[inputs.key] }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"},
+		{name: "needs-derived scheduling", jobs: "  prep:\n    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.s.outputs.matrix }}\n    steps:\n      - id: s\n        run: true\n  test:\n    needs: prep\n    concurrency: ${{ needs[inputs.key].outputs.group }}\n    strategy:\n      matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"},
+		{name: "runs-on label", jobs: "  test:\n    runs-on: [\"${{ inputs.key }}-${{ github.run_attempt }}\"]\n    steps:\n      - run: true\n"},
+		{name: "needs-derived runs-on", jobs: prep + "  test:\n    needs: prep\n    runs-on: ${{ needs[inputs.key].outputs.value }}\n    steps:\n      - run: true\n"},
+		{name: "reusable call matrix", jobs: "  call:\n    strategy:\n      matrix: ${{ github[inputs.key] }}\n    uses: ./.github/workflows/callee.yml\n"},
+		{name: "reusable call input", jobs: prep + "  call:\n    needs: prep\n    uses: ./.github/workflows/callee.yml\n    with:\n      value: ${{ needs[inputs.key].outputs.value }}\n", explained: true},
+		{name: "step timeout", jobs: "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        timeout-minutes: ${{ github[inputs.key] }}\n"},
+		{name: "step continue-on-error", jobs: "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        continue-on-error: ${{ github[inputs.key] }}\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			workflows := filepath.Join(t.TempDir(), ".github", "workflows")
@@ -1303,7 +1308,11 @@ func TestProcessingReportRedactsInputSubstitutedErrors(t *testing.T) {
 			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 				t.Fatal(err)
 			}
-			if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "error" || report.Diagnostics[0].Detail != "" || !strings.HasSuffix(report.Diagnostics[0].Message, "so the cause is not shown") {
+			if len(report.Diagnostics) != 1 {
+				t.Fatalf("diagnostics = %#v", report.Diagnostics)
+			}
+			redacted := report.Diagnostics[0].Detail == "" && strings.HasSuffix(report.Diagnostics[0].Message, "so the cause is not shown")
+			if report.Diagnostics[0].Level != "error" || redacted == test.explained {
 				t.Fatalf("diagnostics = %#v", report.Diagnostics)
 			}
 		})

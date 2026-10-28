@@ -3,8 +3,8 @@
 ## Problem
 
 The compiler originally substituted caller input values into callee expression
-source when expanding a `workflow_call`. Graph, scheduling, and service fields
-still use this path; runtime fields now use
+source when expanding a `workflow_call`. Scheduling and service fields still use
+this path; runtime fields, graph fields, call guards, and deferred inputs now use
 [scoped input evaluation](../expression-authority.md#normalized-execution-program).
 [`SubstituteCompileInputs`](../../internal/expression/compile_template.go) is
 called only from [`internal/compiler/reusable.go`](../../internal/compiler/reusable.go).
@@ -38,19 +38,18 @@ from exactly one place:
 | --- | --- |
 | Flattened job | `Job.Inputs`, plus deferred values hydrated at runtime |
 | Call guard | `CallGuard.Inputs` and its deferred bindings |
-| Deferred input template | Caller inputs captured with the template (new) |
+| Deferred input template | Caller inputs captured with the template |
 | Action body and defaults | Action invocation inputs, which shadow workflow inputs |
 
 The runtime supplies `Job.Inputs` through `WorkflowInputs` and condition
-contexts. Runtime literal consumers and authority analysis use scoped inputs.
-The remaining gaps are graph-time consumers, call guards, and caller capture
-for nested arguments and deferred inputs.
+contexts. Runtime literal consumers, graph fields, call guards, and authority
+analysis use scoped inputs. The remaining gaps are scheduling, service, and
+credential fields.
 
 ### Invariants
 
-- A callee's expressions never see the root workflow's inputs.
-  `resolver.context.Inputs` is the root scope today; nested call arguments
-  evaluate against their caller's scope.
+- A callee's expressions never see the root workflow's inputs. Each workflow
+  frame builds its compile context from its own inputs.
 - Exact forwarding of a deferred input keeps its original caller capture and
   producer bindings.
 - Authority analysis evaluates call guards with caller-scoped inputs, so

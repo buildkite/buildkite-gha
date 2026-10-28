@@ -2717,6 +2717,57 @@ jobs:
 	}
 }
 
+func TestCompileGraphFieldsReadTheirOwnWorkflowInputs(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  middle:
+    uses: ./.github/workflows/middle.yml
+    with: {target: outer, os: bogus}
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string}
+      os: {type: string}
+jobs:
+  call:
+    name: call ${{ inputs.target }}
+    uses: ./.github/workflows/leaf.yml
+    with:
+      target: inner-${{ inputs.target }}
+      os: latest
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string}
+      os: {type: string}
+jobs:
+  build:
+    name: build ${{ inputs.target }}
+    runs-on: ubuntu-${{ inputs.os }}
+    concurrency: group-${{ inputs.target }}
+    strategy:
+      matrix:
+        target: ["${{ inputs.target }}"]
+    steps:
+      - run: echo ${{ matrix.target }}
+`)
+	result, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	job := ir.Jobs[0]
+	if job.Label != "middle / call outer / build inner-outer (target=inner-outer)" || job.ConcurrencyGroup != "group-inner-outer" || !reflect.DeepEqual(job.RunsOn, []string{"ubuntu-latest"}) || job.Matrix["target"] != "inner-outer" {
+		t.Fatalf("label = %q, concurrency = %q, runs-on = %#v, matrix = %#v", job.Label, job.ConcurrencyGroup, job.RunsOn, job.Matrix)
+	}
+}
+
 func TestCompileResolvesStaticExpressionsInNestedReusableMatrices(t *testing.T) {
 	repository := t.TempDir()
 	path := writeWorkflow(t, repository, "caller.yml", `on: push
