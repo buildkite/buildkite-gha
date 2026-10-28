@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"maps"
@@ -1156,5 +1157,48 @@ func TestRuntimeMatrixPinsDeferredSelfRepositoryActions(t *testing.T) {
 	// for a deferred job any more than for a static one.
 	if _, err := compile(nil, nil, nil); err == nil || !strings.Contains(err.Error(), "containing workflow repository") {
 		t.Fatalf("event identity substituted for missing workflow identity: %v", err)
+	}
+}
+
+func TestRuntimeMatrixDeferredLabelsReadTheirOwnWorkflowInputs(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on:
+  workflow_dispatch:
+    inputs:
+      name: {type: string}
+jobs:
+  call:
+    uses: ./.github/workflows/leaf.yml
+    with: {name: callee}
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      name: {type: string}
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        run: echo 'matrix=[]' >> "$GITHUB_OUTPUT"
+  build:
+    name: build ${{ inputs.name }}
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - run: true
+`)
+	event := bytes.Replace(readFile(t, smokePath("events", "workflow_dispatch.json")), []byte(`"inputs": {}`), []byte(`"inputs": {"name": "root"}`), 1)
+	ir, err := CompileIRWithOptionsContext(t.Context(), callerPath, readFile(t, callerPath), event, defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Continuations) != 1 || ir.Continuations[0].Labels["call.build"] != "call / build callee" {
+		t.Fatalf("continuations = %#v", ir.Continuations)
 	}
 }

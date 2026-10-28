@@ -52,8 +52,9 @@ credential fields.
   frame builds its compile context from its own inputs.
 - Exact forwarding of a deferred input keeps its original caller capture and
   producer bindings.
-- Authority analysis evaluates call guards with caller-scoped inputs, so
-  known-false branches still receive no token.
+- Compilation folds call guards with caller-scoped inputs, so known-false
+  branches still receive no token. Authority analysis does not read guard
+  inputs, so an input read left in a guard stays unknown.
 - Partial reduction keeps `inputs.*` references, including inside expressions
   that also reference `event` or `matrix`.
 - Literal consumers, such as action adapters reading `with`, `uses`

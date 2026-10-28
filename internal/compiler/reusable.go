@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -354,7 +353,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		if strings.TrimSpace(job.If) != "" {
 			// Call guards keep vars residual, like every other condition; see
 			// resolveCompileTimeConditions.
-			conditionContext := resolver.callerContext(inputs)
+			conditionContext := resolver.frameContext(inputs)
 			conditionContext.Vars = nil
 			if err := validateCompileSite(job.If, expression.ProfileCompileCallCondition, expression.ResultBoolean); err != nil {
 				if blockerDetailUnsafe {
@@ -445,7 +444,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		}
 		calleeDigest := "sha256:" + sha256Sum(source)
 
-		callerContext := resolver.callerContext(inputs)
+		callerContext := resolver.frameContext(inputs)
 		matrices, err := expandMatrix(path, job, callerContext)
 		if err != nil {
 			if matrixReadsInputs(job) {
@@ -495,7 +494,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			}
 			calleeConcurrencyGates := concurrencyGates
 			if callee.Concurrency != nil {
-				concurrencyContext := resolver.callerContext(callInputs)
+				concurrencyContext := resolver.frameContext(callInputs)
 				group, err := resolveConcurrency(calleeSource.displayPath, "", callee.Concurrency, concurrencyContext, nil)
 				if err != nil {
 					return reusableResolution{}, err
@@ -827,9 +826,9 @@ func cloneNeedBinding(binding needBinding) needBinding {
 	return binding
 }
 
-// callerContext scopes compile-time evaluation to one workflow frame: its own
+// frameContext scopes compile-time evaluation to one workflow frame: its own
 // inputs, never the root workflow's, and no matrix from an enclosing job.
-func (resolver *reusableResolver) callerContext(inputs reusableInputs) expression.CompileContext {
+func (resolver *reusableResolver) frameContext(inputs reusableInputs) expression.CompileContext {
 	context := resolver.context
 	context.Inputs = inputs.values
 	context.InputsComplete = len(inputs.deferred) == 0
@@ -1028,6 +1027,21 @@ func usesNeeds(value string) bool {
 	return err == nil && referenced
 }
 
+// referencedInputs captures only the caller inputs a deferred template reads.
+func referencedInputs(template string, values map[string]any) map[string]any {
+	names, _, _ := compilerExpressionEngine.InputReferences(expression.Site{Source: template, Profile: expression.ProfileDeferredInput, Result: expression.ResultAny})
+	var captured map[string]any
+	for name, value := range values {
+		if slices.Contains(names, strings.ToLower(name)) {
+			if captured == nil {
+				captured = make(map[string]any, len(names))
+			}
+			captured[name] = value
+		}
+	}
+	return captured
+}
+
 // deferredNeedInput reduces a caller value that reads needs outputs to its
 // residual template and binds every referenced output to the call's needs.
 func deferredNeedInput(value string, parentInputs reusableInputs, needs map[string]needBinding, matrix map[string]any, context expression.CompileContext) (deferredInput, error) {
@@ -1042,9 +1056,7 @@ func deferredNeedInput(value string, parentInputs reusableInputs, needs map[stri
 		return deferredInput{}, err
 	}
 	deferred := deferredInput{template: template, needs: make(map[string]needBinding, len(references))}
-	if hasInputExpression(template) {
-		deferred.inputs = cloneAnyMap(parentInputs.values)
-	}
+	deferred.inputs = referencedInputs(template, parentInputs.values)
 	for _, reference := range references {
 		need, binding, ok := findNeedBinding(needs, reference.Job)
 		if !ok {
@@ -1285,22 +1297,15 @@ func stepControlError(path string, job workflow.Job, step workflow.Step, control
 }
 
 func blockerFieldsChanged(before, after workflow.Job) bool {
-	if before.If != after.If || before.DefaultShell != after.DefaultShell || !slices.Equal(before.RunsOn, after.RunsOn) || expressionText(before.RunsOnExpr) != expressionText(after.RunsOnExpr) || !reflect.DeepEqual(before.Matrix, after.Matrix) {
+	if before.DefaultShell != after.DefaultShell {
 		return true
 	}
 	for i := range before.Steps {
-		if before.Steps[i].If != after.Steps[i].If || before.Steps[i].Uses != after.Steps[i].Uses || before.Steps[i].Shell != after.Steps[i].Shell {
+		if before.Steps[i].Uses != after.Steps[i].Uses || before.Steps[i].Shell != after.Steps[i].Shell {
 			return true
 		}
 	}
 	return false
-}
-
-func expressionText(value *expression.Expression) string {
-	if value == nil {
-		return ""
-	}
-	return value.Text
 }
 
 func staticTimeoutMinutes(value any) (float64, bool) {
@@ -1476,13 +1481,13 @@ func hasInputExpression(value string) bool {
 }
 
 // inputValueHiddenNote ends a diagnostic whose cause is withheld because the
-// failing expression was rewritten with workflow input values or read a job
-// output, so the cause can quote event data or job results.
+// failing expression read a workflow input or job output, so the cause can
+// quote event data or job results.
 const inputValueHiddenNote = "; it uses a workflow input or job output value, so the cause is not shown"
 
-// inputSubstitutedFinding reports a failure in expression source that static
-// input substitution rewrote. The underlying error can quote input values,
-// which can carry event data, so only the fixed message is reported.
+// inputSubstitutedFinding reports a failure in an expression that reads
+// inputs. The underlying error can quote input values, which can carry event
+// data, so only the fixed message is reported.
 func inputSubstitutedFinding(path string, job workflow.Job, stage ProcessingStage, code string, position workflow.Position, message string) error {
 	return &ProcessingFinding{
 		Stage: stage, Code: code, Category: "compatibility",
@@ -1492,8 +1497,6 @@ func inputSubstitutedFinding(path string, job workflow.Job, stage ProcessingStag
 	}
 }
 
-// runsOnInputsApplied reports whether static input substitution changed the
-// job's runs-on labels or expression.
 // runsOnReadsInputs and matrixReadsInputs report graph fields whose errors can
 // quote evaluated input values, so their diagnostics withhold the cause.
 func runsOnReadsInputs(job workflow.Job) bool {

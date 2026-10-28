@@ -519,12 +519,14 @@ jobs:
     uses: ./.github/workflows/middle.yml
     with:
       prefix: outer
+      count: 3
 `
 	writeFixtureFile(t, workspace, workflowPath, caller)
 	writeFixtureFile(t, workspace, ".github/workflows/middle.yml", `on:
   workflow_call:
     inputs:
       prefix: {type: string}
+      count: {type: number}
 jobs:
   detect:
     runs-on: ubuntu-latest
@@ -538,7 +540,7 @@ jobs:
     uses: ./.github/workflows/forward.yml
     with:
       prefix: inner
-      label: ${{ inputs.prefix }}-${{ needs.detect.outputs.tag }}
+      label: ${{ inputs.prefix }}-${{ needs.detect.outputs.tag }}-${{ inputs.count }}
 `)
 	writeFixtureFile(t, workspace, ".github/workflows/forward.yml", `on:
   workflow_call:
@@ -580,7 +582,7 @@ jobs:
 		t.Fatal(err)
 	}
 	label := job.DeferredInputs["label"]
-	if label.Template != "${{ inputs.prefix }}-${{ needs.detect.outputs.tag }}" || label.Inputs["prefix"] != "outer" || job.Inputs["prefix"] != "leaf" {
+	if label.Template != "${{ inputs.prefix }}-${{ needs.detect.outputs.tag }}-${{ inputs.count }}" || len(label.Inputs) != 2 || label.Inputs["prefix"] != "outer" || job.Inputs["prefix"] != "leaf" {
 		t.Fatalf("label = %#v, job inputs = %#v", label, job.Inputs)
 	}
 	const buildID = "11111111-1111-4111-8111-111111111111"
@@ -600,7 +602,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if values["label"] != "outer-v1" {
+	if values["label"] != "outer-v1-3" {
 		t.Fatalf("label = %#v, want the middle workflow's prefix", values["label"])
 	}
 }

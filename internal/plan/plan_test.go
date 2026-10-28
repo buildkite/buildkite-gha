@@ -344,6 +344,9 @@ func TestDeferredInputTemplateValidation(t *testing.T) {
 			input.Template = "${{ inputs.prefix }}-${{ needs.prepare.outputs.tag }}-${{ needs.prepare.outputs.flavor }}"
 			input.Inputs = map[string]any{"prefix": "outer", "enabled": true}
 		}},
+		{name: "uncaptured input", edit: func(input *DeferredInput) {
+			input.Template = "${{ inputs.prefix }}-${{ needs.prepare.outputs.tag }}-${{ needs.prepare.outputs.flavor }}"
+		}, want: `reads uncaptured input "prefix"`},
 		{name: "captured input type", edit: func(input *DeferredInput) { input.Inputs = map[string]any{"prefix": []any{"outer"}} }, want: `captured inputs: job plan input "prefix" has unsupported type`},
 		{name: "unknown type", edit: func(input *DeferredInput) { input.Type = "object" }, want: "invalid type"},
 		{name: "boolean template", edit: func(input *DeferredInput) { input.Type = "boolean" }, want: "invalid template"},

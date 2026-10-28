@@ -183,9 +183,10 @@ jobs therefore use the same lowering and authority paths.
 Runtime job and step expressions retain reusable-workflow input references.
 Evaluation and authority analysis read each job's typed `Job.Inputs`; action
 bodies use invocation inputs instead. Call guards and deferred input templates
-read the caller inputs captured with them, never the callee's. A guard that
-caller inputs decide folds to a literal, so a known-false call gets no token;
-other guards keep their input reads. Unknown deferred values keep authority
+read the caller inputs captured with them, never the callee's. Compilation
+folds each guard with its caller inputs, so a known-false call gets no token.
+Authority analysis does not read guard inputs; a guard that stays unknown after
+folding keeps its input reads and grants authority conservatively. Unknown deferred values keep authority
 conservative. Planning distinguishes known individual input properties from a
 complete input object. With deferred inputs, named known reads can still prune
 branches, but computed and whole-object reads remain unknown.

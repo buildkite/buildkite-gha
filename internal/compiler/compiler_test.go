@@ -1021,9 +1021,7 @@ func TestBlockerFieldsChangedTracksInputSubstitutionSurfaces(t *testing.T) {
 		change func(*workflow.Job)
 		want   bool
 	}{
-		{name: "job condition", change: func(job *workflow.Job) { job.If = "false" }, want: true},
-		{name: "runner", change: func(job *workflow.Job) { job.RunsOn = []string{"private"} }, want: true},
-		{name: "matrix", change: func(job *workflow.Job) { job.Matrix = &workflow.Matrix{} }, want: true},
+		{name: "default shell", change: func(job *workflow.Job) { job.DefaultShell = "pwsh" }, want: true},
 		{name: "action", change: func(job *workflow.Job) { job.Steps[0].Uses = "owner/other@v1" }, want: true},
 		{name: "shell", change: func(job *workflow.Job) { job.Steps[0].Shell = "pwsh" }, want: true},
 		{name: "unrelated run command", change: func(job *workflow.Job) { job.Steps[0].Run = "echo changed" }},
