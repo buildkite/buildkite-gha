@@ -314,7 +314,9 @@ type ServiceContainer struct {
 type DeferredInput struct {
 	Template string `json:"template"`
 	// An omitted type retains string rendering for existing plans.
-	Type        string                  `json:"type,omitempty"`
+	Type string `json:"type,omitempty"`
+	// Inputs are the caller inputs Template reads.
+	Inputs      map[string]any          `json:"inputs,omitempty"`
 	NeedSources map[string][]NeedSource `json:"need_sources"`
 	NeedOutputs map[string][]NeedOutput `json:"need_outputs"`
 }
@@ -1161,6 +1163,9 @@ func validateDeferredInputs(inputs map[string]any, deferred map[string]DeferredI
 		}
 		if _, err := expression.NewEngine().Validate(expression.Site{Source: input.Template, Profile: expression.ProfileDeferredInput, Result: expression.ResultType(input.Type)}); err != nil {
 			return nil, fmt.Errorf("input %q has an invalid template: %w", name, err)
+		}
+		if err := validateInputs(input.Inputs); err != nil {
+			return nil, fmt.Errorf("input %q captured inputs: %w", name, err)
 		}
 		references, err := expression.DeferredInputReferences(input.Template)
 		if err != nil {

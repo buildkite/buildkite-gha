@@ -102,7 +102,10 @@ type reusableInputs struct {
 type deferredInput struct {
 	template  string
 	inputType string
-	needs     map[string]needBinding
+	// inputs are the caller's static inputs that template reads. Exact
+	// forwarding keeps them with the template, never the callee's inputs.
+	inputs map[string]any
+	needs  map[string]needBinding
 }
 
 type needBinding struct {
@@ -853,7 +856,7 @@ func cloneDeferredInputs(inputs map[string]deferredInput) map[string]deferredInp
 }
 
 func cloneDeferredInput(input deferredInput) deferredInput {
-	return deferredInput{template: input.template, inputType: input.inputType, needs: cloneNeedBindings(input.needs)}
+	return deferredInput{template: input.template, inputType: input.inputType, inputs: maps.Clone(input.inputs), needs: cloneNeedBindings(input.needs)}
 }
 
 func cloneSourcedCallGuards(guards []sourcedCallGuard) []sourcedCallGuard {
@@ -1027,21 +1030,20 @@ func usesNeeds(value string) bool {
 // deferredNeedInput reduces a caller value that reads needs outputs to its
 // residual template and binds every referenced output to the call's needs.
 func deferredNeedInput(value string, parentInputs reusableInputs, needs map[string]needBinding, matrix map[string]any, context expression.CompileContext) (deferredInput, error) {
-	resolved := replaceStaticInputs(value, parentInputs.values)
-	if hasInputExpression(resolved) {
-		for _, name := range sortedKeys(parentInputs.deferred) {
-			if referencesInput(resolved, name) {
-				return deferredInput{}, compoundForwardedInputError{input: name}
-			}
+	for _, name := range sortedKeys(parentInputs.deferred) {
+		if referencesInput(value, name) {
+			return deferredInput{}, compoundForwardedInputError{input: name}
 		}
-		return deferredInput{}, fmt.Errorf("expression references an unavailable or unsupported input")
 	}
 	context.Matrix = matrix
-	template, references, err := expression.ReduceDeferredInput(resolved, context)
+	template, references, err := expression.ReduceDeferredInput(value, context)
 	if err != nil {
 		return deferredInput{}, err
 	}
 	deferred := deferredInput{template: template, needs: make(map[string]needBinding, len(references))}
+	if hasInputExpression(template) {
+		deferred.inputs = cloneAnyMap(parentInputs.values)
+	}
 	for _, reference := range references {
 		need, binding, ok := findNeedBinding(needs, reference.Job)
 		if !ok {

@@ -502,6 +502,101 @@ jobs:
 	}
 }
 
+func TestDeferredInputReadsCapturedCallerInputsThroughExactForwarding(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/ci.yaml"
+	caller := `on: push
+jobs:
+  middle:
+    uses: ./.github/workflows/middle.yml
+    with:
+      prefix: outer
+`
+	writeFixtureFile(t, workspace, workflowPath, caller)
+	writeFixtureFile(t, workspace, ".github/workflows/middle.yml", `on:
+  workflow_call:
+    inputs:
+      prefix: {type: string}
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        run: echo unused
+  call:
+    needs: detect
+    uses: ./.github/workflows/forward.yml
+    with:
+      prefix: inner
+      label: ${{ inputs.prefix }}-${{ needs.detect.outputs.tag }}
+`)
+	writeFixtureFile(t, workspace, ".github/workflows/forward.yml", `on:
+  workflow_call:
+    inputs:
+      prefix: {type: string}
+      label: {type: string}
+jobs:
+  call:
+    uses: ./.github/workflows/leaf.yml
+    with:
+      prefix: leaf
+      label: ${{ inputs.label }}
+`)
+	writeFixtureFile(t, workspace, ".github/workflows/leaf.yml", `on:
+  workflow_call:
+    inputs:
+      prefix: {type: string}
+      label: {type: string}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ inputs.label }}"
+`)
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(caller), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := plan.Encode(jobs[len(jobs)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := plan.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	label := job.DeferredInputs["label"]
+	if label.Template != "${{ inputs.prefix }}-${{ needs.detect.outputs.tag }}" || label.Inputs["prefix"] != "outer" || job.Inputs["prefix"] != "leaf" {
+		t.Fatalf("label = %#v, job inputs = %#v", label, job.Inputs)
+	}
+	const buildID = "11111111-1111-4111-8111-111111111111"
+	const jobID = "22222222-2222-4222-8222-222222222222"
+	producer := label.NeedSources["detect"][0]
+	manifest, err := transport.MarshalResultManifest(transport.ResultManifest{
+		PlanDigest: producer.PlanDigest,
+		Producer:   transport.Producer{BuildID: buildID, JobID: jobID, StepKey: producer.StepKey},
+		Result:     "success",
+		Outputs:    []transport.Output{{Name: "tag", Value: "v1"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := transport.Agent{Runner: deferredInputRunner{jobID: jobID, path: transport.ResultPath(producer.StepKey, producer.PlanDigest), data: manifest}}
+	values, err := ResolveDeferredInputs(t.Context(), agent, t.TempDir(), buildID, job.DeferredInputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["label"] != "outer-v1" {
+		t.Fatalf("label = %#v, want the middle workflow's prefix", values["label"])
+	}
+}
+
 func TestDeferredReusableWorkflowInputFlowsFromVerifiedOutputToCalleeStep(t *testing.T) {
 	const (
 		buildID = "11111111-1111-4111-8111-111111111111"

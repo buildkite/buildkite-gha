@@ -15,8 +15,10 @@ import (
 
 // ReduceDeferredInput folds the graph-time parts of a reusable-workflow input
 // template and returns the residual template with the needs outputs it still
-// references, in first-use order without repeats. Static parent inputs must
-// already be substituted. The residual validates under ProfileDeferredInput.
+// references, in first-use order without repeats. Every inputs reference must
+// name a value in context.Inputs but stays in the residual, which the runtime
+// evaluates against the captured caller inputs. The residual validates under
+// ProfileDeferredInput.
 // An input without needs references reduces to a plain string.
 func ReduceDeferredInput(template string, context CompileContext) (string, []NeedOutputReference, error) {
 	const open = "${{"
@@ -24,6 +26,10 @@ func ReduceDeferredInput(template string, context CompileContext) (string, []Nee
 		reduced    strings.Builder
 		references []NeedOutputReference
 	)
+	// Absent inputs are undeclared, and inputs stay residual.
+	context.InputsComplete = false
+	residual := context
+	residual.Inputs = nil
 	remaining := template
 	for {
 		start := strings.Index(remaining, open)
@@ -47,7 +53,7 @@ func ReduceDeferredInput(template string, context CompileContext) (string, []Nee
 		if err := validateDeferredInputGraphReferences(node, context); err != nil {
 			return "", nil, err
 		}
-		value, available, err := evaluateCompileNodeAvailable(node, context)
+		value, available, err := evaluateCompileNodeAvailable(node, residual)
 		if err != nil {
 			return "", nil, err
 		}
@@ -64,7 +70,7 @@ func ReduceDeferredInput(template string, context CompileContext) (string, []Nee
 			references = appendNeedOutputReferences(references, node)
 			reduced.WriteString(open)
 			reduced.WriteString(" ")
-			reduced.WriteString(reduceCompileNode(node, context))
+			reduced.WriteString(reduceCompileNode(node, residual))
 			reduced.WriteString(" }}")
 		}
 		remaining = source[consumed:]
@@ -76,7 +82,7 @@ func ReduceDeferredInput(template string, context CompileContext) (string, []Nee
 func DeferredInputReferences(template string) ([]NeedOutputReference, error) {
 	var references []NeedOutputReference
 	err := visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
-		if err := validateDeferredInputNode(node); err != nil {
+		if err := validateDeferredInputNode(node, profileContextMap(profiles[ProfileDeferredInput])); err != nil {
 			return err
 		}
 		references = appendNeedOutputReferences(references, node)
@@ -145,10 +151,10 @@ func validateDeferredInputGraphReferences(node actionlint.ExprNode, context Comp
 	return validationErr
 }
 
-// validateDeferredInputNode validates one residual expression: needs-only
-// runtime grammar with direct output references.
-func validateDeferredInputNode(node actionlint.ExprNode) error {
-	if err := validateStepRuntimeExpression(node, false, false, map[string]bool{"needs": true}); err != nil {
+// validateDeferredInputNode validates one residual expression: runtime grammar
+// over contexts, with direct needs output references.
+func validateDeferredInputNode(node actionlint.ExprNode, contexts map[string]bool) error {
+	if err := validateStepRuntimeExpression(node, false, false, contexts); err != nil {
 		return err
 	}
 	var validationErr error

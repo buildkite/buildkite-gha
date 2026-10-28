@@ -91,7 +91,7 @@ func ResolveDeferredInputs(ctx context.Context, agent transport.Agent, root, bui
 		}
 		value, err := engine.Evaluate(
 			expression.Site{Source: input.Template, Profile: expression.ProfileDeferredInput, Result: resultType, Purpose: expression.PurposeExpression},
-			expression.Values{Runtime: expression.Context{Needs: outputs}},
+			expression.Values{Runtime: expression.Context{Needs: outputs, WorkflowInputs: input.Inputs}},
 		)
 		if err != nil {
 			return nil, fmt.Errorf("input %q: %w", name, err)

@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"fmt"
+	"maps"
 
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
@@ -51,7 +52,7 @@ func buildPlanDeferredInputs(inputs map[string]DeferredInput, planDigests map[st
 		if err != nil {
 			return nil, fmt.Errorf("deferred input %q: %w", name, err)
 		}
-		resolved[name] = plan.DeferredInput{Template: input.Template, Type: input.Type, NeedSources: sources, NeedOutputs: buildPlanLogicalNeedOutputs(input.NeedOutputs)}
+		resolved[name] = plan.DeferredInput{Template: input.Template, Type: input.Type, Inputs: maps.Clone(input.Inputs), NeedSources: sources, NeedOutputs: buildPlanLogicalNeedOutputs(input.NeedOutputs)}
 	}
 	return resolved, nil
 }
