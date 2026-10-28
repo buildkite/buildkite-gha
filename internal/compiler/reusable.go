@@ -29,7 +29,6 @@ const (
 	maxFlattenedJobs         = 1024
 )
 
-var staticInputCondition = regexp.MustCompile(`(?i)^\s*(?:\$\{\{\s*inputs\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*'([A-Za-z0-9_-]{1,255})'\s*\])\s*\}\}|inputs\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*'([A-Za-z0-9_-]{1,255})'\s*\]))\s*$`)
 var staticValueExpression = regexp.MustCompile(`(?i)^\s*\$\{\{\s*(inputs|matrix)\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*'([A-Za-z0-9_-]{1,255})'\s*\])\s*\}\}\s*$`)
 var callOutputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 
@@ -369,6 +368,14 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 					err = suppressBlockerDetail(err)
 				}
 				return reusableResolution{}, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "reduce reusable-workflow call condition", err)
+			}
+			if !reduced.Known {
+				// Keep inputs references; the runtime reads CallGuard.Inputs.
+				conditionContext.Inputs, conditionContext.InputsComplete = nil, false
+				reduced, err = reduceCompileSite(job.If, expression.ProfileCompileCallCondition, expression.ResultBoolean, conditionContext)
+				if err != nil {
+					return reusableResolution{}, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "reduce reusable-workflow call condition", suppressBlockerDetail(err))
+				}
 			}
 			guard := sourcedCallGuard{
 				condition: reduced.Source, inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(needBindings),
@@ -1207,9 +1214,6 @@ func applyStaticInputs(path string, job workflow.Job, scope expression.InputScop
 	job.Env = selectMapSecrets(job.Span.Start, job.Env)
 	job.Outputs = selectMapSecrets(job.Span.Start, job.Outputs)
 	job.Name = replaceStaticInputs(job.Name, inputs)
-	if job.Reusable != nil {
-		job.If = replaceStaticInputCondition(job.If, inputs)
-	}
 	if job.Concurrency != nil {
 		concurrency := *job.Concurrency
 		concurrency.Group = replaceStaticInputs(concurrency.Group, inputs)
@@ -1695,45 +1699,6 @@ func replaceMapInputs(values map[string]string, inputs map[string]any) map[strin
 		out[name] = replaceStaticInputs(value, inputs)
 	}
 	return out
-}
-
-func replaceStaticInputCondition(value string, inputs map[string]any) string {
-	match := staticInputCondition.FindStringSubmatch(value)
-	if match == nil {
-		if !strings.Contains(value, "${{") {
-			usesInputs, err := referencesContext(value, expression.ProfileCompileStepCondition, "inputs", false)
-			if err == nil && usesInputs {
-				value = "${{ " + value + " }}"
-			}
-		}
-		resolved, err := expression.SubstituteCompileInputs(value, inputs)
-		if err != nil || resolved == value {
-			return value
-		}
-		if reduced, err := reduceCompileSite(resolved, expression.ProfilePartialTemplate, expression.ResultString, expression.CompileContext{}); err == nil {
-			if reduced.Known {
-				return reduced.Value.(string)
-			}
-			return reduced.Source
-		}
-		return resolved
-	}
-	inputName := ""
-	for _, candidate := range match[1:] {
-		if candidate != "" {
-			inputName = candidate
-			break
-		}
-	}
-	for name, input := range inputs {
-		if strings.EqualFold(name, inputName) {
-			if text, ok := input.(string); ok {
-				return "'" + strings.ReplaceAll(text, "'", "''") + "'"
-			}
-			return fmt.Sprint(input)
-		}
-	}
-	return value
 }
 
 func replaceStaticInputs(value string, inputs map[string]any) string {

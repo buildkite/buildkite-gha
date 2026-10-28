@@ -402,6 +402,7 @@ jobs:
     with:
       deps: ${{ needs.detect.outputs.deps == 'true' }}
       count: ${{ fromJSON(needs.detect.outputs.count) }}
+      mode: scan
 `
 			writeFixtureFile(t, workspace, workflowPath, caller)
 			writeFixtureFile(t, workspace, ".github/workflows/middle.yml", `on:
@@ -409,19 +410,22 @@ jobs:
     inputs:
       deps: {type: boolean}
       count: {type: number}
+      mode: {type: string}
 jobs:
   call:
-    if: inputs.deps
+    if: inputs.deps && inputs.mode == 'scan'
     uses: ./.github/workflows/leaf.yml
     with:
       deps: ${{ inputs.deps }}
       count: ${{ inputs.count }}
+      mode: other
 `)
 			writeFixtureFile(t, workspace, ".github/workflows/leaf.yml", `on:
   workflow_call:
     inputs:
       deps: {type: boolean}
       count: {type: number}
+      mode: {type: string}
 jobs:
   scan:
     if: inputs.deps
@@ -478,6 +482,10 @@ jobs:
 			}
 			if job.DeferredInputValues["count"] != float64(7) {
 				t.Fatalf("count = %#v, want number 7", job.DeferredInputValues["count"])
+			}
+			guard := job.CallGuards[len(job.CallGuards)-1]
+			if !strings.Contains(guard.Condition, "inputs.mode") || guard.Inputs["mode"] != "scan" {
+				t.Fatalf("call guard = %#v, want caller-scoped inputs", guard)
 			}
 			job.CallGuards, _, err = ResolveCallGuards(t.Context(), agent, t.TempDir(), buildID, job.CallGuards)
 			if err != nil {
