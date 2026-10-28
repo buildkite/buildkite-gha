@@ -20,6 +20,20 @@ const (
 // ResolveNeeds converts compiler-owned producer identities into the verified
 // logical results and outputs consumed by runtime expression contexts.
 func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID string, sources map[string][]plan.NeedSource, outputs map[string][]plan.NeedOutput) (map[string]plan.Need, error) {
+	transportSources, projections := needsTransportBindings(sources, outputs)
+	verified, err := transport.LoadNeeds(ctx, agent, root, buildID, transportSources, projections)
+	return planNeeds(verified), err
+}
+
+// ResolveRuntimeNeeds also accepts terminal Buildkite failures without results.
+// Returned observations supply no outputs or artifact authority.
+func ResolveRuntimeNeeds(ctx context.Context, agent transport.Agent, root, buildID string, sources map[string][]plan.NeedSource, outputs map[string][]plan.NeedOutput) (map[string]plan.Need, []transport.TerminalNeedResult, error) {
+	transportSources, projections := needsTransportBindings(sources, outputs)
+	resolved, terminal, err := transport.LoadRuntimeNeeds(ctx, agent, root, buildID, transportSources, projections)
+	return planNeeds(resolved), terminal, err
+}
+
+func needsTransportBindings(sources map[string][]plan.NeedSource, outputs map[string][]plan.NeedOutput) (map[string][]transport.ResultSource, map[string][]transport.OutputProjection) {
 	transportSources := make(map[string][]transport.ResultSource, len(sources))
 	for name, producers := range sources {
 		for _, producer := range producers {
@@ -35,12 +49,15 @@ func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID stri
 			projections[name][i] = transport.OutputProjection{Name: output.Name, StepKey: output.StepKey, Output: output.Output}
 		}
 	}
-	verified, err := transport.LoadNeeds(ctx, agent, root, buildID, transportSources, projections)
-	if err != nil {
-		return nil, err
+	return transportSources, projections
+}
+
+func planNeeds(resolved map[string]transport.NeedResult) map[string]plan.Need {
+	if resolved == nil {
+		return nil
 	}
-	needs := make(map[string]plan.Need, len(verified))
-	for name, result := range verified {
+	needs := make(map[string]plan.Need, len(resolved))
+	for name, result := range resolved {
 		need := plan.Need{Result: result.Result, Outputs: result.Outputs}
 		for _, retained := range result.Artifacts {
 			a, p := retained.Artifact, retained.Producer
@@ -48,7 +65,7 @@ func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID stri
 		}
 		needs[name] = need
 	}
-	return needs, nil
+	return needs
 }
 
 // ResolveDeferredInputs evaluates each workflow_call input from
@@ -86,25 +103,28 @@ func ResolveDeferredInputs(ctx context.Context, agent transport.Agent, root, bui
 
 // ResolveCallGuards hydrates each caller scope independently so nested guards
 // cannot observe a callee job's needs or another call boundary's producers.
-func ResolveCallGuards(ctx context.Context, agent transport.Agent, root, buildID string, guards []plan.CallGuard) ([]plan.CallGuard, error) {
+// Needs may use terminal failures; deferred inputs still require verified results.
+func ResolveCallGuards(ctx context.Context, agent transport.Agent, root, buildID string, guards []plan.CallGuard) ([]plan.CallGuard, []transport.TerminalNeedResult, error) {
 	resolved := append([]plan.CallGuard(nil), guards...)
+	var terminal []transport.TerminalNeedResult
 	for i := range resolved {
 		if len(resolved[i].NeedSources) != 0 {
-			needs, err := ResolveNeeds(ctx, agent, root, buildID, resolved[i].NeedSources, resolved[i].NeedOutputs)
+			needs, observed, err := ResolveRuntimeNeeds(ctx, agent, root, buildID, resolved[i].NeedSources, resolved[i].NeedOutputs)
+			terminal = append(terminal, observed...)
 			if err != nil {
-				return nil, fmt.Errorf("call guard %d: %w", i+1, err)
+				return nil, terminal, fmt.Errorf("call guard %d: %w", i+1, err)
 			}
 			resolved[i].Needs = needs
 		}
 		if len(resolved[i].DeferredInputs) != 0 {
 			inputs, err := ResolveDeferredInputs(ctx, agent, root, buildID, resolved[i].DeferredInputs)
 			if err != nil {
-				return nil, fmt.Errorf("call guard %d: %w", i+1, err)
+				return nil, terminal, fmt.Errorf("call guard %d: %w", i+1, err)
 			}
 			resolved[i].DeferredInputValues = inputs
 		}
 	}
-	return resolved, nil
+	return resolved, terminal, nil
 }
 
 // PublishJobResult maps every terminal runtime conclusion to the canonical

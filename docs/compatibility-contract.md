@@ -194,6 +194,16 @@ Do not silently choose between ambiguous retried producers or matrix outputs.
 Keep logical Actions results separate from the Buildkite job's scheduling state,
 including skipped and tolerated-failure results.
 
+Runtime job and reusable-workflow call conditions may recover only a failure
+status when the matching generated step remains `finished` with outcome
+`hard_failed` across successful artifact searches confirming absence from every
+attempt. Require the expected step key and plan digest, emit a warning, and
+never publish a replacement producer receipt. Supply no outputs or artifacts
+from that status. Deferred inputs, matrices, and runner selection still require
+verified receipts. Query, download, verification, and ambiguous-state failures
+remain errors; see [terminal-result tests](../internal/transport/terminal_results_test.go).
+Recovery must not change the producer's Buildkite failure or dependency scheduling.
+
 ### Action sources and native adapters
 
 Resolve mutable action refs to commits and lock the extracted source tree.
@@ -289,6 +299,22 @@ runner account. See [cache lifecycle tests](../internal/runtime/cache_service_te
 These records preserve the evidence behind the former combined reference.
 They distinguish reported observations from independently inspectable receipts.
 They are not an exhaustive conformance suite.
+
+### Prerequisite bootstrap failures
+
+[PR #550](https://github.com/buildkite/buildkite-gha/pull/550) reports live agent
+v3.129.0 captures with these mappings and artifact-search results:
+
+| Producer | Step state / outcome | Result search across attempts |
+| --- | --- | --- |
+| Docker command-hook failure, exit 125; job exit -1 (`process_run_error`) | `finished` / `hard_failed` | Exit 0, empty stdout |
+| Completed producer with a receipt | `finished` / `passed` | Exit 0, exact producer job UUID |
+
+The report supplies no immutable run or capture links. It establishes neither
+native GitHub behavior nor other agent versions or failure states. Keep recovery
+limited to the accepted status-only boundary above. The
+[API contract](development.md#prerequisite-status-api-contract) records the
+commands needed to repeat the observation.
 
 ### Trigger activity defaults and ignored filters
 

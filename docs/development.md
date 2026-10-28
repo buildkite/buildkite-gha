@@ -154,6 +154,20 @@ Explicit client mappings override automatic selection, but the backend validates
 their queue and platform before upload. Backend eligibility and label mapping
 remain server-owned.
 
+## Prerequisite status API contract
+
+Recovery uses public commands supported by agent v3.129. `artifact search
+--allow-empty-results --format '%j\n'` establishes absence only on success
+with zero stdout bytes; recovery also searches `--include-retried-jobs=true`.
+`step get --step <key> --build <build-id> --format json` provides the
+[step attributes](https://buildkite.com/docs/agent/cli/reference/step), including
+the generated `env.BUILDKITE_GHA_PLAN_DIGEST`. This evidence describes a step,
+not a REST job or individual retry. See the
+[result contract](compatibility-contract.md#deferred-jobs-outputs-and-results)
+for accepted states and receipt boundaries, and the
+[bootstrap-failure evidence](compatibility-contract.md#prerequisite-bootstrap-failures)
+for reported observations and their limits.
+
 ## Monitor dependency security
 
 Renovate uses the shared `buildkite/renovate-config` preset and runs every four

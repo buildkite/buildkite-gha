@@ -1850,7 +1850,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	job.CallGuards, err = ResolveCallGuards(t.Context(), agent, t.TempDir(), buildID, job.CallGuards)
+	job.CallGuards, _, err = ResolveCallGuards(t.Context(), agent, t.TempDir(), buildID, job.CallGuards)
 	if err != nil {
 		t.Fatal(err)
 	}
