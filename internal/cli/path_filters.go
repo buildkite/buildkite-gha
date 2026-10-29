@@ -189,6 +189,11 @@ func pushChangedPaths(event compiler.Event, workflows []workflowInput, checkoutP
 		}
 	}
 
+	for i := range workflows {
+		if workflows[i].PathFiltersIdentityVerified {
+			workflows[i].PathFiltersComparisonBase = diffBase
+		}
+	}
 	output, err := boundedCommandOutput(gitCommand(root, "diff", "--name-status", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", diffBase, after), maxGitChangedPathBytes)
 	if err != nil {
 		return nil, workflowErrors, fmt.Errorf("list push changed paths: %w", err)
@@ -392,6 +397,11 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 	for _, tip := range []string{baseSHA, headSHA} {
 		if ancestor, err := gitIsAncestor(root, mergeBase, tip); err != nil || !ancestor {
 			return nil, pathEvaluationErrors(workflows, event.Event, workflowErrors, "pull request merge base must be an ancestor of both base and head commits"), nil
+		}
+	}
+	for i := range workflows {
+		if workflows[i].PathFiltersIdentityVerified {
+			workflows[i].PathFiltersComparisonBase = mergeBase
 		}
 	}
 	output, err := boundedCommandOutput(gitCommand(root, "diff", "--name-status", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", mergeBase, headSHA), maxGitChangedPathBytes)

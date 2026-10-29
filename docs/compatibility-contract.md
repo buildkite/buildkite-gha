@@ -115,6 +115,10 @@ Keep local diffs independent of Git rename-detection settings. The
 [path-filter implementation](../internal/cli/path_filters.go) and
 [regression tests](../internal/cli/path_filters_test.go) own those checks.
 
+Observe path-filter admission independently of command completion: uploading
+error steps can succeed. [Runtime telemetry](development.md#path-filter-telemetry)
+must not change selection or fetch provider data solely for measurement.
+
 Native GitHub evidence from October 27, 2026 used `push` and `pull_request`
 workflows filtering the old path, new path, both, or neither. Pure renames,
 renames with edits, and unrelated additions/deletions selected old, new, and

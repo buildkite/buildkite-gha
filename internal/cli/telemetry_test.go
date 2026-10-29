@@ -3,10 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -22,7 +26,215 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"go.yaml.in/yaml/v4"
 )
+
+func TestPluginPathFilterTelemetry(t *testing.T) {
+	requireImporterHost(t)
+	jobs := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	filtered := "on:\n  push:\n    paths: ['src/**']\n  pull_request:\n    paths: ['src/**']\n"
+	sources := map[string]string{
+		"match.yml":        filtered + jobs,
+		"nonmatch.yml":     strings.ReplaceAll(filtered, "src/**", "docs/**") + jobs,
+		"excluded.yml":     strings.ReplaceAll(filtered, "    paths:", "    branches: [other]\n    paths:") + jobs,
+		"mismatch.yml":     filtered + jobs,
+		"invalid-glob.yml": strings.ReplaceAll(filtered, "src/**", "[") + jobs,
+		"broken.yml":       "on: [",
+		"plain.yml":        "on: [push, pull_request]\n" + jobs,
+		"callee.yml":       "on: workflow_call\n" + jobs,
+	}
+	repository := writeUploadWorkflowRepository(t, sources)
+	runGit := func(args ...string) string {
+		t.Helper()
+		output, err := exec.Command("git", append([]string{"-C", repository}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	runGit("config", "user.name", "Test")
+	runGit("config", "user.email", "test@example.com")
+	runGit("remote", "add", "origin", "https://github.com/buildkite/buildkite-gha.git")
+	runGit("commit", "-qm", "base")
+	base := runGit("rev-parse", "HEAD")
+	if err := os.Mkdir(filepath.Join(repository, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "src", "changed.go"), []byte("package changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "src")
+	runGit("commit", "-qm", "head")
+	head := runGit("rev-parse", "HEAD")
+	prBase := runGit("commit-tree", base+"^{tree}", "-p", base, "-m", "diverged base")
+	if err := os.WriteFile(filepath.Join(repository, ".github/workflows/mismatch.yml"), []byte(filtered+jobs+"# local change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	setCLIPluginBuildkiteEnvironment(t, "path-telemetry-importer")
+	t.Setenv("BUILDKITE_COMMIT", head)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	var paths []string
+	for name := range sources {
+		paths = append(paths, ".github/workflows/"+name)
+	}
+	configuration, err := json.Marshal(map[string]any{"workflows": paths})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+
+	for _, test := range []struct {
+		name, event                                      string
+		status                                           int
+		disabled, shallow, newBranch, tag, uploadFailure bool
+	}{
+		{name: "push", event: "push", status: 202},
+		{name: "new branch", event: "push", status: 202, newBranch: true},
+		{name: "PR divergent base", event: "pull_request", status: 202},
+		{name: "unavailable history", event: "push", status: 202, shallow: true},
+		{name: "tag", event: "push", status: 202, tag: true},
+		{name: "old receiver", event: "push", status: 400},
+		{name: "failed transport", event: "push", status: 503},
+		{name: "failed pipeline upload", event: "push", status: 202, uploadFailure: true},
+		{name: "opt out", event: "push", status: 202, disabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", fmt.Sprint(test.disabled))
+			t.Setenv("BUILDKITE_GITHUB_EVENT", test.event)
+			ref, before, pinnedBase := "refs/heads/main", base, base
+			if test.newBranch {
+				before, pinnedBase = zeroGitCommit, ""
+			}
+			if test.tag {
+				ref = "refs/tags/v1"
+				t.Setenv("BUILDKITE_TAG", "v1")
+			}
+			payload := map[string]any{"ref": ref, "before": before, "after": head,
+				"created": test.newBranch, "deleted": false, "forced": false,
+				"commits": []any{map[string]any{"id": head}}, "repository": map[string]any{"full_name": "buildkite/buildkite-gha"}}
+			if test.event == "pull_request" {
+				pinnedBase, ref = prBase, "refs/pull/42/head"
+				t.Setenv("BUILDKITE_PULL_REQUEST", "42")
+				t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
+				payload["action"], payload["number"] = "opened", 42
+				payload["pull_request"] = map[string]any{
+					"head": map[string]any{"sha": head, "ref": "main", "repo": map[string]any{"full_name": "buildkite/buildkite-gha"}},
+					"base": map[string]any{"sha": prBase, "ref": "main", "repo": map[string]any{"full_name": "buildkite/buildkite-gha"}},
+				}
+			}
+			if test.shallow {
+				shallow := filepath.Join(repository, ".git/shallow")
+				if err := os.WriteFile(shallow, []byte(base+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Remove(shallow) })
+			}
+			var received telemetry.Properties
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/github-actions/runners") {
+					// Automatic runner resolution retains its existing local fallback.
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if r.URL.Path != "/v3/jobs/"+cliTestJobID+"/posthog/events" || r.Header.Get("Authorization") != "Token telemetry-token" {
+					t.Errorf("unexpected request %s", r.URL.Path)
+				}
+				var event struct {
+					Properties telemetry.Properties `json:"properties"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+					t.Error(err)
+				}
+				received, requests = event.Properties, requests+1
+				w.WriteHeader(test.status)
+			}))
+			defer server.Close()
+			t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+			webhook, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &cliCaptureRunner{webhook: webhook}
+			wantCode, wantOutcome := 0, telemetry.OutcomeSuccess
+			if test.uploadFailure {
+				runner.pipelineUploadErr = fmt.Errorf("pipeline upload rejected")
+				wantCode, wantOutcome = 1, telemetry.OutcomeFailure
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != wantCode {
+				t.Fatalf("code=%d stderr=%s", code, stderr.String())
+			}
+			// A successful error-step upload is command success, never path success.
+			var pipeline struct {
+				Steps []struct {
+					Command string `yaml:"command"`
+				} `yaml:"steps"`
+			}
+			for _, command := range runner.commands {
+				if reflect.DeepEqual(command.args, []string{"pipeline", "upload", "--no-interpolation"}) {
+					if err := yaml.Unmarshal(command.stdin, &pipeline); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			failures := 0
+			for _, step := range pipeline.Steps {
+				if isGeneratedFailureCommand(step.Command) {
+					failures++
+				}
+			}
+			if failures == 0 {
+				t.Fatal("expected uploaded error steps")
+			}
+			if test.disabled {
+				if requests != 0 {
+					t.Fatal("opt-out sent telemetry")
+				}
+				return
+			}
+			if requests != 1 || received.Outcome != wantOutcome || received.PathFilters == nil || received.PathFiltersTruncated == nil || *received.PathFiltersTruncated {
+				t.Fatalf("requests=%d telemetry=%#v", requests, received)
+			}
+			decisions := make(map[string]telemetry.PathFilter)
+			for _, decision := range *received.PathFilters {
+				decisions[filepath.Base(decision.WorkflowPath)] = decision
+			}
+			if len(decisions) != 7 {
+				t.Fatalf("decisions=%#v", decisions)
+			}
+			want := map[string]string{"match.yml": "match/paths_match", "nonmatch.yml": "nonmatch/paths_do_not_match",
+				"excluded.yml": "not_evaluated/non_path_filter_exclusion", "mismatch.yml": "error/path_evidence_unavailable",
+				"broken.yml": "error/workflow_parse_error", "plain.yml": "not_evaluated/no_path_filters", "invalid-glob.yml": "error/trigger_error"}
+			if test.shallow {
+				want["match.yml"], want["nonmatch.yml"] = "error/path_evidence_unavailable", "error/path_evidence_unavailable"
+			}
+			if test.tag {
+				for _, name := range []string{"match.yml", "nonmatch.yml", "excluded.yml", "mismatch.yml"} {
+					want[name] = "not_evaluated/tag_push"
+				}
+			}
+			for name, expected := range want {
+				decision := decisions[name]
+				if got := decision.Outcome + "/" + decision.Reason; got != expected {
+					t.Errorf("%s=%s want %s", name, got, expected)
+				}
+			}
+			matched := decisions["match.yml"]
+			if matched.HeadSHA != head || matched.EventName != test.event || matched.EventRef != ref || matched.WorkflowDigest != fmt.Sprintf("%x", sha256.Sum256([]byte(sources["match.yml"]))) {
+				t.Fatalf("event/source identity=%#v", matched)
+			}
+			if !test.tag && !test.shallow && (matched.WorkflowSHA != head || matched.BaseSHA != pinnedBase || matched.ComparisonBaseSHA != base) {
+				t.Fatalf("comparison identity=%#v", matched)
+			}
+			if decisions["mismatch.yml"].WorkflowSHA != "" {
+				t.Fatal("unverified workflow claimed a source commit")
+			}
+		})
+	}
+}
 
 func TestCommandTelemetryOmitsInvalidOrUnrelatedAgentStatus(t *testing.T) {
 	events := make(chan telemetry.Properties, 1)
