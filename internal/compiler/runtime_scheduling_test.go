@@ -181,3 +181,30 @@ jobs:
 		t.Fatalf("sibling gate error = %v", err)
 	}
 }
+
+func TestRuntimeSchedulingReusableGroupReadsCallerInput(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/leaf.yml\n    with: {prefix: pre}\n")
+	callee := strings.Replace(schedulingWorkflow(), "on: push\n", "on:\n  workflow_call:\n    inputs:\n      prefix: {type: string}\n", 1)
+	callee = strings.Replace(callee, "concurrency: ${{ needs.plan.outputs.group }}", "concurrency: ${{ inputs.prefix }}-${{ needs.plan.outputs.group }}", 1)
+	writeWorkflow(t, repository, "leaf.yml", callee)
+	compile := func(options Options) IR {
+		t.Helper()
+		ir, err := CompileIRWithOptionsContext(t.Context(), callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ir
+	}
+	if initial := compile(defaultOptions()); len(initial.Continuations) != 1 || !initial.Continuations[0].Scheduling {
+		t.Fatalf("continuations = %#v", initial.Continuations)
+	}
+	options := defaultOptions()
+	options.RuntimeMatrixRows = map[string][]map[string]any{"call.build": {{"runner": "ubuntu-latest", "target": "one"}}}
+	options.RuntimeSchedulingOutputs = map[string]map[string]string{"call.build": {"group": "deploy", "parallel": "1"}}
+	for _, job := range compile(options).Jobs {
+		if job.LogicalJobID == "call.build" && job.ConcurrencyGroup != "pre-deploy" {
+			t.Fatalf("concurrency group = %q, want caller input and producer output", job.ConcurrencyGroup)
+		}
+	}
+}

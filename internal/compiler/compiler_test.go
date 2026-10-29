@@ -1021,9 +1021,7 @@ func TestBlockerFieldsChangedTracksInputSubstitutionSurfaces(t *testing.T) {
 		change func(*workflow.Job)
 		want   bool
 	}{
-		{name: "job condition", change: func(job *workflow.Job) { job.If = "false" }, want: true},
-		{name: "runner", change: func(job *workflow.Job) { job.RunsOn = []string{"private"} }, want: true},
-		{name: "matrix", change: func(job *workflow.Job) { job.Matrix = &workflow.Matrix{} }, want: true},
+		{name: "default shell", change: func(job *workflow.Job) { job.DefaultShell = "pwsh" }, want: true},
 		{name: "action", change: func(job *workflow.Job) { job.Steps[0].Uses = "owner/other@v1" }, want: true},
 		{name: "shell", change: func(job *workflow.Job) { job.Steps[0].Shell = "pwsh" }, want: true},
 		{name: "unrelated run command", change: func(job *workflow.Job) { job.Steps[0].Run = "echo changed" }},
@@ -2714,6 +2712,95 @@ jobs:
 	}
 	if !reflect.DeepEqual(ir.Jobs[2].NeedGroups, map[string][]string{"middle": {ir.Jobs[0].Key, ir.Jobs[1].Key}}) || !reflect.DeepEqual(ir.Jobs[2].NeedOutputs, map[string][]NeedOutput{"middle": {}}) {
 		t.Fatalf("nested reusable caller projection = %#v / %#v", ir.Jobs[2].NeedGroups, ir.Jobs[2].NeedOutputs)
+	}
+}
+
+func TestCompileRedactsEvaluatedValuesInDeferredCallInputErrors(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on:
+  workflow_dispatch:
+    inputs:
+      pattern: {type: string}
+jobs:
+  call:
+    uses: ./.github/workflows/middle.yml
+    with: {prefix: p}
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      prefix: {type: string}
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+    steps:
+      - id: t
+        run: true
+  call:
+    needs: prepare
+    uses: ./.github/workflows/leaf.yml
+    with:
+      target: ${{ inputs.prefix }}-${{ format(github.event.inputs.pattern, 'x') }}-${{ needs.prepare.outputs.tag }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", "on:\n  workflow_call:\n    inputs:\n      target: {type: string}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	event := bytes.Replace(readFile(t, smokePath("events", "workflow_dispatch.json")), []byte(`"inputs": {}`), []byte(`"inputs": {"pattern": "{PRIVATE_VALUE}"}`), 1)
+	_, err := Compile(callerPath, readFile(t, callerPath), event)
+	var finding *ProcessingFinding
+	if err == nil || !errors.As(err, &finding) || strings.Contains(err.Error()+finding.Message+finding.Detail, "PRIVATE_VALUE") {
+		t.Fatalf("Compile() error = %v", err)
+	}
+}
+
+func TestCompileGraphFieldsReadTheirOwnWorkflowInputs(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  middle:
+    uses: ./.github/workflows/middle.yml
+    with: {target: outer, os: bogus}
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string}
+      os: {type: string}
+jobs:
+  call:
+    name: call ${{ inputs.target }}
+    uses: ./.github/workflows/leaf.yml
+    with:
+      target: inner-${{ inputs.target }}
+      os: latest
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string}
+      os: {type: string}
+jobs:
+  build:
+    name: build ${{ inputs.target }}
+    runs-on: ubuntu-${{ inputs.os }}
+    concurrency: group-${{ inputs.target }}
+    strategy:
+      matrix:
+        target: ["${{ inputs.target }}"]
+    steps:
+      - run: echo ${{ matrix.target }}
+`)
+	result, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	job := ir.Jobs[0]
+	if job.Label != "middle / call outer / build inner-outer (target=inner-outer)" || job.ConcurrencyGroup != "group-inner-outer" || !reflect.DeepEqual(job.RunsOn, []string{"ubuntu-latest"}) || job.Matrix["target"] != "inner-outer" {
+		t.Fatalf("label = %q, concurrency = %q, runs-on = %#v, matrix = %#v", job.Label, job.ConcurrencyGroup, job.RunsOn, job.Matrix)
 	}
 }
 

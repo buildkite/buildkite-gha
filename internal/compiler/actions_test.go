@@ -1414,21 +1414,53 @@ jobs:
 }
 
 func TestCompilePlansPrunesActionTokenAuthorityBehindKnownFalseCallGuard(t *testing.T) {
-	repository := t.TempDir()
-	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+	for _, test := range []struct {
+		name, guard string
+		pruned      bool
+	}{
+		{name: "literal", guard: "false", pruned: true},
+		{name: "caller input", guard: "inputs.enabled", pruned: true},
+		{name: "caller input with needs", guard: "inputs.enabled && needs.prepare.result == 'success'", pruned: true},
+		{name: "callee input name", guard: "inputs.run", pruned: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			caller := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
-  delegated:
-    if: false
-    uses: ./.github/workflows/reusable.yml
+  outer:
+    uses: ./.github/workflows/middle.yml
+    with:
+      enabled: false
+      run: true
 `)
-	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+			writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      enabled: {type: boolean}
+      run: {type: boolean}
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+  delegated:
+    needs: prepare
+    if: `+test.guard+`
+    uses: ./.github/workflows/reusable.yml
+    with:
+      run: false
+`)
+			writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      run: {type: boolean}
 jobs:
   action:
     runs-on: ubuntu-latest
     steps:
       - uses: ./.github/actions/token
 `)
-	writeAction(t, repository, ".github/actions/token", `name: token default
+			writeAction(t, repository, ".github/actions/token", `name: token default
 inputs:
   token:
     default: ${{ github.token }}
@@ -1436,15 +1468,22 @@ runs:
   using: node24
   main: index.js
 `)
-	plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plans) != 1 || len(plans[0].CallGuards) != 1 || plans[0].GitHubToken != nil || plans[0].HasCapability("provider-token-write") {
-		t.Fatalf("known-false call guard retained token authority: %#v", plans)
-	}
-	if len(plans[0].Actions) == 0 || len(plans[0].Program.Actions) == 0 {
-		t.Fatal("known-false call guard skipped action resolution")
+			plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := plans[len(plans)-1]
+			guard := job.CallGuards[len(job.CallGuards)-1]
+			if pruned := job.GitHubToken == nil; pruned != test.pruned {
+				t.Fatalf("pruned = %v, want %v; guard = %#v", pruned, test.pruned, guard)
+			}
+			if test.pruned && guard.Condition != "false" {
+				t.Fatalf("known-false guard condition = %q", guard.Condition)
+			}
+			if len(job.Actions) == 0 {
+				t.Fatal("known-false call guard skipped action resolution")
+			}
+		})
 	}
 }
 

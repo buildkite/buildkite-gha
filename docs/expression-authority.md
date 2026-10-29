@@ -188,8 +188,11 @@ jobs therefore use the same lowering and authority paths.
 
 Runtime job and step expressions retain reusable-workflow input references.
 Evaluation and authority analysis read each job's typed `Job.Inputs`; action
-bodies use invocation inputs instead. Call guards do not read inputs yet, so
-their input reads stay unknown. Unknown deferred values keep authority
+bodies use invocation inputs instead. Call guards and deferred input templates
+read the caller inputs captured with them, never the callee's. Compilation
+folds each guard with its caller inputs, so a known-false call gets no token.
+Authority analysis does not read guard inputs; a guard that stays unknown after
+folding keeps its input reads and grants authority conservatively. Unknown deferred values keep authority
 conservative. Planning distinguishes known individual input properties from a
 complete input object. With deferred inputs, named known reads can still prune
 branches, but computed and whole-object reads remain unknown.
@@ -199,8 +202,9 @@ Shell checks and native action adapters evaluate a separate literal view without
 rewriting program source. Secret inventory needs static names, so flattening
 rewrites input-selected secret names, such as `secrets[inputs.name]`, to
 literals. It rejects selectors that deferred inputs could change. Evaluator
-diagnostics must not quote input-derived values. Graph and scheduling fields
-still use substitution during the
+diagnostics must not quote input-derived values. Graph fields, such as labels, matrices,
+`runs-on`, and concurrency, evaluate against the workflow frame's own inputs.
+Scheduling and service fields still use substitution during the
 [input-evaluation migration](plans/reusable-workflow-input-evaluation.md).
 
 Deferred runner selection supplies verified job outputs only to the `runs-on`

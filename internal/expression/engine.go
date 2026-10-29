@@ -161,7 +161,7 @@ var profiles = map[ProfileID]Profile{
 	ProfileWorkflowEnvironment:      {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "secrets", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
 	ProfileServiceTemplate:          {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsServiceTemplate},
 	ProfileServiceEnvironment:       {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
-	ProfileDeferredInput:            {Form: FormTemplate, Scope: ScopeCall, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDeferredInput},
+	ProfileDeferredInput:            {Form: FormTemplate, Scope: ScopeCall, Contexts: ContextSet{"needs", "inputs"}, Functions: profileFunctions(), Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDeferredInput},
 	ProfileSchedulingGroup:          {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsDeferredInput},
 	ProfileSchedulingParallel:       {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: FunctionSet{"fromJSON"}, Missing: MissingError, Token: TokenDenied, semantics: semanticsJobControl},
 	ProfileCompileServiceCredential: {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsServiceCredential},
@@ -459,10 +459,12 @@ func (Engine) Validate(site Site) (Validation, error) {
 			var node actionlint.ExprNode
 			node, err = parseCompleteExpression(site.Source)
 			if err == nil {
-				err = validateDeferredInputNode(node)
+				err = validateDeferredInputNode(node, profileContextMap(profile))
 			}
 		} else {
-			err = visitTemplateExpressions(site.Source, validateDeferredInputNode)
+			err = visitTemplateExpressions(site.Source, func(node actionlint.ExprNode) error {
+				return validateDeferredInputNode(node, profileContextMap(profile))
+			})
 		}
 	case semanticsServiceCredential:
 		err = validateStepProfile(site.Source, profile)

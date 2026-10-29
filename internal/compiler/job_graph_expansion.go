@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -326,12 +327,7 @@ func (e *jobGraphExpansion) expandMatrices() {
 			if e.skippedPrerequisite(id) {
 				e.skip(id)
 			}
-			matrixContext := e.context
-			matrixContext.Inputs = sourced.inputs.values
-			matrixContext.InputsComplete = len(sourced.inputs.deferred) == 0
-			matrixContext.Matrix = nil
-			matrixContext.Strategy = nil
-			matrices, err = expandMatrix(sourced.path, job, matrixContext)
+			matrices, err = expandMatrix(sourced.path, job, e.frameContext(sourced))
 			if err == nil && continuation >= 0 {
 				e.deferJob(sourced, continuation, matrices)
 			}
@@ -377,6 +373,17 @@ func (e *jobGraphExpansion) skip(id string) {
 	e.result.skippedJobs[id] = true
 }
 
+// frameContext scopes compile-time evaluation to the workflow that declared
+// the job: its own inputs, never the root workflow's.
+func (e *jobGraphExpansion) frameContext(sourced sourcedJob) expression.CompileContext {
+	context := e.context
+	context.Inputs = sourced.inputs.values
+	context.InputsComplete = len(sourced.inputs.deferred) == 0
+	context.Matrix = nil
+	context.Strategy = nil
+	return context
+}
+
 // deferJob hands a job to the continuation at index, which compiles it once
 // the rows of its roots are known. matrices are the instances the job's
 // static matrix expands to; a root whose rows the producer supplies has none.
@@ -385,7 +392,7 @@ func (e *jobGraphExpansion) deferJob(sourced sourcedJob, index int, matrices []m
 	e.deferred[id] = index
 	deferred := &e.result.continuations[index]
 	deferred.Jobs = append(deferred.Jobs, id)
-	deferred.Labels[id] = instanceLabel(job, nil, e.context)
+	deferred.Labels[id] = instanceLabel(job, nil, e.frameContext(sourced))
 	deferred.Sources[id] = deferredJobSource(sourced)
 	e.recordDeferredActions(deferred.Descriptor.Job, sourced)
 	for _, matrix := range matrices {
@@ -398,7 +405,7 @@ func (e *jobGraphExpansion) deferJob(sourced sourcedJob, index int, matrices []m
 			deferred.Instances = make(map[string][]RuntimeMatrixInstance)
 		}
 		deferred.Instances[id] = append(deferred.Instances[id], RuntimeMatrixInstance{
-			Key: key, Label: instanceLabel(job, matrix, e.context), CheckLabel: instanceCheckLabel(JobInstance{LogicalJobID: id, Matrix: matrix}),
+			Key: key, Label: instanceLabel(job, matrix, e.frameContext(sourced)), CheckLabel: instanceCheckLabel(JobInstance{LogicalJobID: id, Matrix: matrix}),
 		})
 	}
 }
@@ -762,9 +769,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 	jobFailed := e.failedJobs[id]
 	matrices := e.matricesByJob[id]
 	concurrencyGroups := make(map[string]struct{}, len(matrices))
-	jobContext := e.context
-	jobContext.Inputs = sourced.inputs.values
-	jobContext.InputsComplete = len(sourced.inputs.deferred) == 0
+	jobContext := e.frameContext(sourced)
 	for matrixIndex, matrix := range matrices {
 		strategy := matrixStrategy(job, matrixIndex, len(matrices))
 		instanceContext := jobContext
@@ -1071,7 +1076,7 @@ func resolveDeferredInputBindings(inputs map[string]deferredInput, byLogicalID m
 		if err != nil {
 			return nil, nil, fmt.Errorf("input %q: %w", name, err)
 		}
-		resolved[name] = DeferredInput{Template: input.template, Type: input.inputType, NeedGroups: groups, NeedOutputs: outputs}
+		resolved[name] = DeferredInput{Template: input.template, Type: input.inputType, Inputs: maps.Clone(input.inputs), NeedGroups: groups, NeedOutputs: outputs}
 		dependencies = append(dependencies, inputDependencies...)
 	}
 	return resolved, dependencies, nil

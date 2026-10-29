@@ -9,6 +9,7 @@ import (
 	"maps"
 	"math/big"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -414,28 +415,30 @@ func reportableRunnerLabels(job workflow.Job, labels []string) []string {
 }
 
 func matrixContainsExpressions(matrix *workflow.Matrix) bool {
+	return matrixHasString(matrix, func(value string) bool { return strings.Contains(value, "${{") })
+}
+
+// matrixHasString reports whether test matches any authored matrix expression
+// or string value.
+func matrixHasString(matrix *workflow.Matrix, test func(string) bool) bool {
 	if matrix == nil {
 		return false
 	}
-	if matrix.Expression != nil || matrix.IncludeExpression != nil || matrix.ExcludeExpression != nil {
-		return true
-	}
-	for _, row := range matrix.Rows {
-		if row.Expression != nil {
+	for _, expr := range []*expression.Expression{matrix.Expression, matrix.IncludeExpression, matrix.ExcludeExpression} {
+		if expr != nil && test(expr.Text) {
 			return true
 		}
-		for _, value := range row.Values {
-			if containsExpression(value.Data) {
-				return true
-			}
+	}
+	matches := func(value workflow.Value) bool { return anyString(value.Data, test) }
+	for _, row := range matrix.Rows {
+		if row.Expression != nil && test(row.Expression.Text) || slices.ContainsFunc(row.Values, matches) {
+			return true
 		}
 	}
-	for _, combinations := range [][]workflow.MatrixCombination{matrix.Include, matrix.Exclude} {
-		for _, combination := range combinations {
-			for _, value := range combination.Values {
-				if containsExpression(value.Data) {
-					return true
-				}
+	for _, combination := range slices.Concat(matrix.Include, matrix.Exclude) {
+		for _, value := range combination.Values {
+			if matches(value) {
+				return true
 			}
 		}
 	}

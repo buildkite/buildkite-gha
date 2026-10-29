@@ -186,6 +186,7 @@ type CallGuard struct {
 type DeferredInput struct {
 	Template    string                  `json:"template"`
 	Type        string                  `json:"type,omitempty"`
+	Inputs      map[string]any          `json:"inputs,omitempty"`
 	NeedGroups  map[string][]string     `json:"need_groups"`
 	NeedOutputs map[string][]NeedOutput `json:"need_outputs"`
 }

@@ -113,10 +113,10 @@ func describeRuntimeRunsOn(sourced sourcedJob, context expression.CompileContext
 			return descriptor, context, err
 		}
 		if output != nil {
-			value, err := engine.Evaluate(expression.Site{Source: input.template, Profile: expression.ProfileRunsOnTemplate, Result: expression.ResultString}, expression.Values{Compile: expression.CompileContext{Needs: values}})
+			value, err := engine.Evaluate(expression.Site{Source: input.template, Profile: expression.ProfileRunsOnTemplate, Result: expression.ResultString}, expression.Values{Compile: expression.CompileContext{Needs: values, Inputs: input.inputs, InputsComplete: true}})
 			if err != nil {
-				// The template was built from the caller's input values and is
-				// evaluated with a producer output, so its error can quote either.
+				// The template reads captured caller inputs and a producer
+				// output, so its error can quote either.
 				return descriptor, context, fmt.Errorf("resolve scheduling input %q: the value cannot be evaluated with the producer output", name)
 			}
 			if context.Inputs == nil {

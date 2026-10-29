@@ -288,3 +288,30 @@ func TestRuntimeRunsOnDescriptorAndOutputBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeRunsOnComputedInputSelectorDefersRunner(t *testing.T) {
+	root := t.TempDir()
+	caller := writeWorkflow(t, root, "caller.yml", strings.Replace(runtimeRunsOnWorkflow, `    runs-on: ${{ needs.plan.outputs.runner }}
+    steps:
+      - run: echo ready`, `    uses: ./.github/workflows/callee.yml
+    with:
+      key: runner
+      runner: ${{ needs.plan.outputs.runner }}`, 1))
+	writeWorkflow(t, root, "callee.yml", `on:
+  workflow_call:
+    inputs:
+      key: {type: string}
+      runner: {type: string}
+jobs:
+  run:
+    runs-on: ${{ inputs[inputs.key] }}
+    steps: [{run: true}]
+`)
+	initial, err := CompileIRWithOptionsContext(t.Context(), caller, readFile(t, caller), pushEvent(t), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(initial.Continuations) != 1 || initial.Continuations[0].Descriptor.Job != "build.run" {
+		t.Fatalf("continuations=%+v", initial.Continuations)
+	}
+}
