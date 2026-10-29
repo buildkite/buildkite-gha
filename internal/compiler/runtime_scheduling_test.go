@@ -208,3 +208,37 @@ func TestRuntimeSchedulingReusableGroupReadsCallerInput(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeSchedulingReusableGroupRejectsDeferredInputs(t *testing.T) {
+	for _, test := range []struct {
+		group  string
+		reject bool
+	}{
+		{"${{ inputs.key }}-${{ needs.plan.outputs.group }}", false},
+		{"${{ inputs.prefix }}-${{ needs.plan.outputs.group }}", true},
+		{"${{ inputs[inputs.key] }}-${{ needs.plan.outputs.group }}", true},
+	} {
+		t.Run(test.group, func(t *testing.T) {
+			repository := t.TempDir()
+			callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    outputs: {value: '${{ steps.value.outputs.value }}'}
+    steps: [{id: value, run: true}]
+  call:
+    needs: seed
+    uses: ./.github/workflows/leaf.yml
+    with: {prefix: '${{ needs.seed.outputs.value }}', key: prefix}
+`)
+			callee := strings.Replace(schedulingWorkflow(), "on: push\n", "on:\n  workflow_call:\n    inputs:\n      prefix: {type: string}\n      key: {type: string}\n", 1)
+			writeWorkflow(t, repository, "leaf.yml", strings.Replace(callee, "concurrency: ${{ needs.plan.outputs.group }}", "concurrency: "+test.group, 1))
+			_, err := CompileIRWithOptionsContext(t.Context(), callerPath, readFile(t, callerPath), pushEvent(t), defaultOptions())
+			// The group profile admits inputs, so admission alone keeps deferred
+			// inputs out of scheduling.
+			if rejected := err != nil && strings.Contains(err.Error(), "scheduling values can read only workflow inputs known before jobs run"); rejected != test.reject {
+				t.Fatalf("compile error = %v, want rejection %t", err, test.reject)
+			}
+		})
+	}
+}

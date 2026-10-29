@@ -3,8 +3,8 @@
 ## Problem
 
 The compiler originally substituted caller input values into callee expression
-source when expanding a `workflow_call`. Scheduling and service fields still use
-this path; runtime fields, graph fields, call guards, and deferred inputs now use
+source when expanding a `workflow_call`. Only step `uses` still uses this path;
+other fields now use
 [scoped input evaluation](../expression-authority.md#normalized-execution-program).
 [`SubstituteCompileInputs`](../../internal/expression/compile_template.go) is
 called only from [`internal/compiler/reusable.go`](../../internal/compiler/reusable.go).
@@ -42,9 +42,9 @@ from exactly one place:
 | Action body and defaults | Action invocation inputs, which shadow workflow inputs |
 
 The runtime supplies `Job.Inputs` through `WorkflowInputs` and condition
-contexts. Runtime literal consumers, graph fields, call guards, and authority
-analysis use scoped inputs. The remaining gaps are scheduling, service, and
-credential fields.
+contexts. Runtime literal consumers, graph, scheduling and service fields, call
+guards, and authority analysis use scoped inputs. Step `uses` is the remaining
+gap.
 
 ### Invariants
 
@@ -106,7 +106,11 @@ substitution.
    decoding, bounds, cloning and digest change together; the additive field
    does not need a new schema version.
 4. **Scheduling, services and credentials.** Pass scoped inputs without widening
-   these profiles to deferred-input forms they reject today.
+   these profiles to deferred-input forms they reject today. Services evaluate
+   while compiling, so an image that resolves empty still drops the service.
+   Credentials and needs-derived concurrency groups keep their input reads.
+   A computed selector, such as `inputs[inputs.key]`, counts as reading every
+   deferred input in its frame.
 5. **Cleanup.** Delete substitution and substitution-only redaction. Accept
    `${{` in input values as data only after no reparse path remains and a
    hosted fixture confirms GitHub's nested `workflow_call` behavior. Move

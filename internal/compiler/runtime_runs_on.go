@@ -39,7 +39,7 @@ func runsOnSites(job workflow.Job) []expression.Site {
 
 func hasRuntimeRunsOn(sourced sourcedJob) bool {
 	for _, site := range runsOnSites(sourced.Job) {
-		if usesNeeds(site.Source) || referencesDeferredInput(site.Source, sourced.inputs.deferred) {
+		if usesNeeds(site.Source) || len(deferredInputsRead(site.Source, sourced.inputs.deferred)) != 0 {
 			return true
 		}
 	}
@@ -96,10 +96,8 @@ func describeRuntimeRunsOn(sourced sourcedJob, context expression.CompileContext
 		if err := bind(references, sourced.needBindings, context.Needs); err != nil {
 			return descriptor, context, err
 		}
-		for name := range sourced.inputs.deferred {
-			if referencesInput(site.Source, name) {
-				inputs[name] = true
-			}
+		for _, name := range deferredInputsRead(site.Source, sourced.inputs.deferred) {
+			inputs[name] = true
 		}
 	}
 	for _, name := range sortedKeys(inputs) {

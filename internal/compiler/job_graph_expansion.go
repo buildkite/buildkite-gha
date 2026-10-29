@@ -759,7 +759,7 @@ func (e *jobGraphExpansion) expandInstances() {
 
 func (e *jobGraphExpansion) expandJobInstances(id string) {
 	sourced := e.accepted[e.acceptedIndex[id]]
-	job, schedulingGroup, schedulingErr := resolveRuntimeScheduling(sourced.Job, e.options.RuntimeSchedulingOutputs[id])
+	job, schedulingGroup, schedulingErr := resolveRuntimeScheduling(sourced, e.options.RuntimeSchedulingOutputs[id])
 	if schedulingErr != nil {
 		e.rejectRuntimeMatrix(sourced, schedulingErr)
 		return

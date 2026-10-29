@@ -770,13 +770,6 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 				values[j] = resolvedValue
 			}
 		}
-		for _, value := range append(append([]string{container.Image, container.Options, container.Command, container.Entrypoint}, container.Ports...), container.Volumes...) {
-			if strings.Contains(value, "${{") {
-				if err := validateCompileSite(value, expression.ProfileServiceTemplate, expression.ResultString); err != nil {
-					return nil, fmt.Errorf("service %q: %w", service.Name, err)
-				}
-			}
-		}
 		if container.Image == "" {
 			continue
 		}

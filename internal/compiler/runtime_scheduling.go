@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -56,6 +57,9 @@ func (e *jobGraphExpansion) validateRuntimeScheduling(sourced sourcedJob, descri
 		if _, err := expression.NewEngine().Validate(site); err != nil {
 			return false, err
 		}
+		if readsUnknownInput(site, sourced.inputs) {
+			return false, errors.New("scheduling values can read only workflow inputs known before jobs run")
+		}
 		references, err := expression.DeferredInputReferences(site.Source)
 		if err != nil {
 			return false, err
@@ -77,14 +81,16 @@ func (e *jobGraphExpansion) validateRuntimeScheduling(sourced sourcedJob, descri
 }
 
 // resolveRuntimeScheduling evaluates only the admitted scheduling sites, using
-// outputs from the producer manifest the continuation verified. The group is
-// returned separately so output text is never parsed again as workflow syntax.
-func resolveRuntimeScheduling(job workflow.Job, outputs map[string]string) (workflow.Job, *string, error) {
+// the job's own workflow inputs and outputs from the producer manifest the
+// continuation verified. The group is returned separately so output text is
+// never parsed again as workflow syntax.
+func resolveRuntimeScheduling(sourced sourcedJob, outputs map[string]string) (workflow.Job, *string, error) {
+	job := sourced.Job
 	sites, err := runtimeSchedulingSites(job)
 	if err != nil {
 		return job, nil, err
 	}
-	values := expression.Values{Runtime: expression.Context{Needs: make(map[string]expression.NeedStatus)}}
+	values := expression.Values{Runtime: expression.Context{WorkflowInputs: sourced.inputs.values, Needs: make(map[string]expression.NeedStatus)}}
 	for _, site := range sites {
 		references, err := expression.DeferredInputReferences(site.Source)
 		if err != nil {
@@ -122,4 +128,22 @@ func resolveRuntimeScheduling(job workflow.Job, outputs map[string]string) (work
 		}
 	}
 	return job, group, nil
+}
+
+// readsUnknownInput reports an input read that has no value before jobs run:
+// an undeclared or deferred name, or a computed selector that could pick a
+// deferred input.
+func readsUnknownInput(site expression.Site, inputs reusableInputs) bool {
+	names, dynamic, err := compilerExpressionEngine.InputReferences(site)
+	if err != nil || dynamic && len(inputs.deferred) != 0 {
+		return true
+	}
+	return slices.ContainsFunc(names, func(name string) bool {
+		for candidate := range inputs.values {
+			if strings.EqualFold(candidate, name) {
+				return false
+			}
+		}
+		return true
+	})
 }
