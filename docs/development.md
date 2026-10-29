@@ -78,6 +78,42 @@ Bugsnag project ingestion key, never an account-management credential. Runtime
 configuration and report contents are documented in
 [Bugsnag error reports](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/cli#disable-telemetry-bugsnag-error-reports).
 
+## Source telemetry contract
+
+Deploy Agent API support for the optional `source_stats` completion property
+before releasing this CLI. Older servers reject unknown properties and would
+drop the entire event. Older clients remain accepted. The existing telemetry
+opt-out and best-effort delivery apply; source observation never changes cache,
+authentication, retry, or command-exit behavior.
+
+`plugin_import` and `run_job` include a source summary even when it is empty.
+The server marks these completions with `source_stats_version=1`, records totals,
+and emits grouped `gha.source_request` and `gha.source_cache` logs with the same
+server-resolved build/job context. Query distinct job/build UUIDs, not log rows,
+for affected-build counts. A successful partial import can still have source
+errors. Missing telemetry is not evidence of zero requests.
+
+Requests distinguish action sources from repository-root sources (including
+reusable workflows), REST operations from codeload archives, and actual HTTP
+attempts from suppressed cooldown lookups. Results distinguish throttles from
+permission denials, missing sources, timeouts, and other failures. Counts,
+consumed response bytes, and duration are summed per group. Duration includes
+body consumption/extraction, not later tree-digest verification. An archive
+attempt can follow redirects; it is not a count of every wire request.
+
+Only numeric rate-limit hints are retained: maximum `Retry-After` (capped at a
+day), minimum known remaining quota (`-1` means unknown), and latest reset
+timestamp (`0` means unknown). These aggregates do not establish that a primary
+or secondary limit was the sole cause of a build failure. Repository names,
+refs, URLs, credentials, response text, and arbitrary headers are excluded.
+
+There are at most 64 request groups per command; omitted attempts increment
+`dropped_requests`. Cache hits cover the existing named resolution caches and
+verified source-tree reuse, not dependency caches. `materializations` counts
+store calls, not unique repositories or runtime action invocations. Git
+fallback traffic and API calls made by executed actions are not observed.
+The opt-in `BUILDKITE_GHA_GITHUB_API_STATS` stderr diagnostic remains REST-only.
+
 ## Runner-resolution API contract
 
 The CLI posts to `POST /v3/jobs/:job_id/github-actions/runners` with the

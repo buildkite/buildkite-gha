@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/telemetry"
 )
 
 type sourceAPICommandSummary struct {
@@ -119,6 +120,9 @@ func TestSourceAPIStatsCountRealCommandRequestsOnResolutionFailure(t *testing.T)
 	}
 	originalTransport := http.DefaultTransport
 	http.DefaultTransport = sourceStatsRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/posthog/events") {
+			return originalTransport.RoundTrip(r)
+		}
 		if r.URL.Host != "api.github.com" {
 			return nil, errors.New("unexpected non-source request in accounting test")
 		}
@@ -139,6 +143,10 @@ func TestSourceAPIStatsCountRealCommandRequestsOnResolutionFailure(t *testing.T)
 			t.Setenv("XDG_CACHE_HOME", t.TempDir())
 			setCLIPluginBuildkiteEnvironment(t, "source-stats-importer")
 			t.Setenv(pluginConfigurationEnvironment, `{"workflow":".github/workflows/ci.yml"}`)
+			var events <-chan telemetry.Properties
+			if command == "plugin" {
+				events = captureCommandTelemetry(t)
+			}
 			workflow := filepath.Join(repository, ".github", "workflows", "ci.yml")
 			args := []string{command, "--event-path", eventPath, workflow}
 			wantCode := 1
@@ -176,6 +184,20 @@ func TestSourceAPIStatsCountRealCommandRequestsOnResolutionFailure(t *testing.T)
 			}
 			if counted != observed || strings.Contains(stdout.String(), sourceAPIStatsPrefix) {
 				t.Fatalf("counted requests = %d, observed = %d, stdout = %q", counted, observed, stdout.String())
+			}
+			if events != nil {
+				select {
+				case event := <-events:
+					if event.Outcome != telemetry.OutcomeSuccess || event.SourceStats == nil || len(event.SourceStats.Requests) != 1 {
+						t.Fatalf("successful partial import lost source telemetry: %#v", event)
+					}
+					request := event.SourceStats.Requests[0]
+					if request.Result != "rate_limit" || request.Kind != "repository" || request.Status != 429 || request.Count != observed {
+						t.Fatalf("import source request = %#v", request)
+					}
+				default:
+					t.Fatal("missing importer telemetry")
+				}
 			}
 			encoded, err := json.Marshal(summary)
 			if err != nil || strings.Contains(string(encoded), "secret") || strings.Contains(string(encoded), repository) || strings.Contains(string(encoded), server.URL) {

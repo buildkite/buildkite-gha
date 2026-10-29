@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -33,6 +34,7 @@ func emitCommandTelemetry(ctx context.Context, command telemetry.Command, outcom
 	if err != nil || client == nil {
 		return
 	}
+	details.SourceStats = actionsource.SourceStatsSnapshot(ctx)
 	_ = client.EmitContext(context.WithoutCancel(ctx), command, outcome, duration, details)
 }
 
