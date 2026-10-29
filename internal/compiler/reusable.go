@@ -1220,6 +1220,10 @@ func applyStaticInputs(path string, job workflow.Job, scope expression.InputScop
 	selectSecrets(job.Span.Start, &job.DefaultShell, &job.DefaultWorkingDirectory)
 	job.Env = selectMapSecrets(job.Span.Start, job.Env)
 	job.Outputs = selectMapSecrets(job.Span.Start, job.Outputs)
+	job.Services = append([]workflow.Service(nil), job.Services...)
+	for i := range job.Services {
+		job.Services[i].Container.Env = selectMapSecrets(job.Span.Start, job.Services[i].Container.Env)
+	}
 	job.Steps = append([]workflow.Step(nil), job.Steps...)
 	for i := range job.Steps {
 		step := &job.Steps[i]

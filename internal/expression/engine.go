@@ -790,19 +790,29 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 			if err := requireKnownNamedInputs(engine, site, context.Inputs); err != nil {
 				return Reduced{}, err
 			}
+		}
+		var reduced string
+		var err error
+		switch {
+		case site.Profile == ProfileCompileServiceCredential:
+			reduced, err = reduceCredentialMatrix(engine, site, context)
+			if err != nil {
+				return Reduced{}, err
+			}
 			// Input values containing expression syntax stay rejected until
 			// they are proven safe to accept as data, so evaluate a discarded
 			// view with the inputs to apply the same check as other templates.
-			probe, err := reduceAvailableCompileTemplate(site.Source, context, true)
-			if err == nil {
-				_, err = evaluateAvailableCompileTemplate(probe, context)
-			}
-			if err != nil {
+			if _, err := evaluateAvailableCompileTemplate(reduced, context); err != nil {
 				return Reduced{}, siteError(site, err)
 			}
 			context.Inputs, context.InputsComplete = nil, false
+		case profile.semantics == semanticsPartialTemplate:
+			// Service residuals read only needs, so input subtrees fold even
+			// inside expressions that also read needs outputs.
+			reduced, err = reduceAvailableCompileTemplate(site.Source, context, "inputs")
+		default:
+			reduced, err = reduceAvailableCompileTemplate(site.Source, context, "")
 		}
-		reduced, err := reduceAvailableCompileTemplate(site.Source, context, site.Profile == ProfileCompileServiceCredential)
 		if err != nil {
 			return Reduced{}, siteError(site, err)
 		}
@@ -862,7 +872,7 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 		}
 		return Reduced{Source: residual.Source}, nil
 	}
-	reduced, err := reduceAvailableCompileTemplate(site.Source, values.Compile, false)
+	reduced, err := reduceAvailableCompileTemplate(site.Source, values.Compile, "")
 	if err != nil {
 		return Reduced{}, siteError(site, err)
 	}
@@ -1001,6 +1011,25 @@ func zeroResult(result ResultType) any {
 	default:
 		return nil
 	}
+}
+
+// reduceCredentialMatrix folds the compile-only matrix out of a credential.
+// Input reads stay for the runtime unless an input selects a matrix value,
+// such as matrix[inputs.key]; only then does matrix folding use the inputs.
+func reduceCredentialMatrix(engine Engine, site Site, context CompileContext) (string, error) {
+	withoutInputs := context
+	withoutInputs.Inputs, withoutInputs.InputsComplete = nil, false
+	reduced, err := reduceAvailableCompileTemplate(site.Source, withoutInputs, "matrix")
+	if err != nil {
+		return "", siteError(site, err)
+	}
+	residual := site
+	residual.Source = reduced
+	if readsMatrix, err := engine.ReferencesContext(residual, "matrix", false); err != nil || !readsMatrix {
+		return reduced, err
+	}
+	reduced, err = reduceAvailableCompileTemplate(site.Source, context, "matrix")
+	return reduced, siteError(site, err)
 }
 
 // requireKnownNamedInputs rejects input reads the compiler cannot prove

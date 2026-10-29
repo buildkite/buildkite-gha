@@ -5236,6 +5236,43 @@ jobs:
 	}
 }
 
+func TestCompilePlansReusableServicesFoldInputsBesideNeeds(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "services.yml", `on:
+  workflow_call:
+    inputs:
+      image: {type: string}
+      secret_name: {type: string}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: ${{ format('{0}:{1}', inputs.image, needs.build.outputs.tag) }}
+        env: {PASSWORD: '${{ secrets[inputs.secret_name] }}'}
+    steps: [{run: true}]
+`)
+	source := `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/services.yml
+    secrets: inherit
+    with: {image: postgres, secret_name: DB_PASSWORD}
+`
+	path := writeWorkflow(t, repository, "caller.yml", source)
+	plans, err := compilePlansForTest(t.Context(), path, []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err != nil || len(plans) != 1 {
+		t.Fatalf("compile = %d plans, %v", len(plans), err)
+	}
+	service := plans[0].Program.Job.Services.Static[0].Container
+	if service.Image.Source != "${{ format('{0}:{1}', 'postgres', needs.build.outputs.tag) }}" {
+		t.Fatalf("service image = %q", service.Image.Source)
+	}
+	if !slices.Equal(plans[0].RequiredSecrets, []string{"DB_PASSWORD"}) {
+		t.Fatalf("required secrets = %v", plans[0].RequiredSecrets)
+	}
+}
+
 func TestCompilePlansOptionalMatrixContainer(t *testing.T) {
 	const image = "node:24"
 	for _, object := range []bool{false, true} {
@@ -5321,6 +5358,7 @@ func TestResolveCompileServiceMatrixCredentials(t *testing.T) {
 		{"${{ matrix.user || secrets.REGISTRY_PASSWORD }}", "registry-user"},
 		{"${{ format('{0}:{1}', matrix.user, strategy.job-index) }}", "registry-user:2"},
 		{"${{ format('{0}:{1}', matrix.user, needs.auth.outputs.name) }}", "registry-user:upstream"},
+		{"${{ matrix[inputs.key] }}", "registry-user"},
 	} {
 		t.Run(test.source, func(t *testing.T) {
 			services := []workflow.Service{{Name: "database", Container: workflow.ServiceContainer{
@@ -5328,7 +5366,7 @@ func TestResolveCompileServiceMatrixCredentials(t *testing.T) {
 			}}}
 			resolved, err := resolveCompileServices(services, expression.CompileContext{
 				Matrix: map[string]any{"user": "registry-user"}, Strategy: map[string]any{"job-index": 2},
-				Vars: map[string]string{"USER": "repository"},
+				Vars: map[string]string{"USER": "repository"}, Inputs: map[string]any{"key": "user"}, InputsComplete: true,
 			})
 			if err != nil {
 				t.Fatal(err)
