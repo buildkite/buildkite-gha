@@ -18,6 +18,111 @@ import (
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
 
+func TestRunCompileAndUploadResolveGHESActionsLookups(t *testing.T) {
+	requireImporterHost(t)
+	const origin = "https://ghe.example.com"
+	requests := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/github-actions/runners") {
+			var body struct {
+				Requirements []struct{ ID string } `json:"requirements"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			resolutions := make([]map[string]any, len(body.Requirements))
+			for i, requirement := range body.Requirements {
+				resolutions[i] = map[string]any{"id": requirement.ID, "target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": resolutions})
+			return
+		}
+		if r.Header.Get("Authorization") != "Token job-secret" {
+			t.Errorf("unexpected authentication")
+		}
+		var body struct {
+			RepositoryURL string `json:"repo_url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body.RepositoryURL != origin+"/buildkite/buildkite-gha" {
+			t.Errorf("repository URL = %q", body.RepositoryURL)
+		}
+		requests[r.URL.Path]++
+		switch r.URL.Path {
+		case "/jobs/" + os.Getenv("BUILDKITE_JOB_ID") + "/github-actions/variables":
+			_, _ = w.Write([]byte(`{"repository_variables":[{"name":"TARGET","value":"production"}],"organization_variables":[{"name":"TARGET","value":"wrong"}]}`))
+		case "/jobs/" + os.Getenv("BUILDKITE_JOB_ID") + "/github-actions/environments":
+			_, _ = w.Write([]byte(`{"environments":[{"name":"production","required_reviewers":true,"prevent_self_review":false,"wait_timer_minutes":0,"branch_policy":false,"unsupported_rules":[],"secret_names":["DEPLOY_KEY"],"variables":[{"name":"REGION","value":"eu-west-1"}]}]}`))
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	setAgentResolutionEnvironment(t, server.URL)
+	input, err := os.ReadFile(pushEventPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event map[string]any
+	if err := json.Unmarshal(input, &event); err != nil {
+		t.Fatal(err)
+	}
+	event["server_url"] = origin
+	event["repository"].(map[string]any)["clone_url"] = origin + "/buildkite/buildkite-gha.git"
+	input, err = json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(eventPath, input, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workflow := filepath.Join(t.TempDir(), "deploy.yml")
+	if err := os.WriteFile(workflow, []byte(`on: push
+concurrency: deploy-${{ vars.TARGET }}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - run: echo "${{ vars.REGION }}"
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"compile", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code != 0 {
+		t.Fatalf("compile = %d: %s", code, stderr.String())
+	}
+	if len(requests) != 2 || requests["/jobs/"+os.Getenv("BUILDKITE_JOB_ID")+"/github-actions/variables"] != 1 || requests["/jobs/"+os.Getenv("BUILDKITE_JOB_ID")+"/github-actions/environments"] != 1 {
+		t.Fatalf("lookup requests = %v", requests)
+	}
+	if !strings.Contains(stdout.String(), `block: ":github: approval · production"`) {
+		t.Fatalf("missing GHES environment approval gate: %s", stdout.String())
+	}
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "ghes-lookups-importer")
+	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"upload", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("upload = %d: %s", code, stderr.String())
+	}
+	jobs := uploadedPlans(t, runner)["deploy"]
+	if len(jobs) != 1 || jobs[0].Event.ServerURL != origin || !maps.Equal(jobs[0].Vars(), map[string]string{"TARGET": "production", "REGION": "eu-west-1"}) {
+		t.Fatalf("uploaded GHES plans = %#v", jobs)
+	}
+	for path, count := range requests {
+		if count != 2 {
+			t.Fatalf("%s requests = %d; want one per compile/upload", path, count)
+		}
+	}
+}
+
 // TestRunCompileRequiresAgentContextForEnvironments proves standalone compile
 // has no environment access: a workflow that declares an environment fails
 // with a concise error pointing at the job-scoped Agent API instead of
@@ -294,7 +399,7 @@ func TestAgentEnvironmentResolverSurfacesBackendBatchRejection(t *testing.T) {
 		names[i] = fmt.Sprintf("environment-%d", i)
 	}
 	// Case-insensitive duplicates collapse before the request.
-	_, err = source.ResolveEnvironments(t.Context(), "buildkite", "buildkite-gha", append([]string{"ENVIRONMENT-0"}, names...))
+	_, err = source.ResolveEnvironments(t.Context(), "", "buildkite", "buildkite-gha", append([]string{"ENVIRONMENT-0"}, names...))
 	if err == nil || !strings.Contains(err.Error(), rejection) {
 		t.Fatalf("ResolveEnvironments() error = %v, want backend rejection %q", err, rejection)
 	}

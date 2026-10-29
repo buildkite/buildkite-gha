@@ -1643,7 +1643,7 @@ jobs:
 
 type serviceEnvironmentSource map[string]compiler.EnvironmentProtection
 
-func (s serviceEnvironmentSource) ResolveEnvironment(_ context.Context, _, _, name string) (compiler.EnvironmentProtection, error) {
+func (s serviceEnvironmentSource) ResolveEnvironment(_ context.Context, _, _, _, name string) (compiler.EnvironmentProtection, error) {
 	value, ok := s[name]
 	if !ok {
 		return compiler.EnvironmentProtection{}, fmt.Errorf("unknown environment %q", name)

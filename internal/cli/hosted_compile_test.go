@@ -126,7 +126,7 @@ func sameStringSet(left, right []string) bool {
 
 type stubEnvironmentSource struct{}
 
-func (stubEnvironmentSource) ResolveEnvironment(context.Context, string, string, string) (compiler.EnvironmentProtection, error) {
+func (stubEnvironmentSource) ResolveEnvironment(context.Context, string, string, string, string) (compiler.EnvironmentProtection, error) {
 	return compiler.EnvironmentProtection{}, nil
 }
 

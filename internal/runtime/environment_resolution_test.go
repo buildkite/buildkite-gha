@@ -34,7 +34,7 @@ func TestAgentEnvironmentResolverResolvesEnvironmentBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshots, err := resolver.ResolveEnvironments(t.Context(), "buildkite/buildkite-gha", []string{"production", "staging"})
+	snapshots, err := resolver.ResolveEnvironments(t.Context(), "", "buildkite/buildkite-gha", []string{"production", "staging"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,8 +64,13 @@ func TestAgentEnvironmentResolverRejectsInvalidInputBeforeNetwork(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, repository := range []string{"", "other", "../other/repo", "owner/..", "owner/repo/extra", "owner/repo?permission=write"} {
-		if _, err := resolver.ResolveEnvironments(t.Context(), repository, []string{"production"}); err == nil {
+		if _, err := resolver.ResolveEnvironments(t.Context(), "", repository, []string{"production"}); err == nil {
 			t.Errorf("ResolveEnvironments(%q) succeeded", repository)
+		}
+	}
+	for _, serverURL := range []string{"http://ghe.example.com", "https://user@ghe.example.com", "https://ghe.example.com/path"} {
+		if _, err := resolver.ResolveEnvironments(t.Context(), serverURL, "owner/repo", []string{"production"}); err == nil {
+			t.Errorf("ResolveEnvironments(%q) succeeded", serverURL)
 		}
 	}
 	for name, names := range map[string][]string{
@@ -74,7 +79,7 @@ func TestAgentEnvironmentResolverRejectsInvalidInputBeforeNetwork(t *testing.T) 
 		"duplicate names":         {"production", "production"},
 		"case-insensitive repeat": {"Production", "production"},
 	} {
-		if _, err := resolver.ResolveEnvironments(t.Context(), "buildkite/buildkite-gha", names); err == nil {
+		if _, err := resolver.ResolveEnvironments(t.Context(), "", "buildkite/buildkite-gha", names); err == nil {
 			t.Errorf("ResolveEnvironments with %s succeeded", name)
 		}
 	}
@@ -140,7 +145,7 @@ func TestAgentEnvironmentResolverStatusErrors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = resolver.ResolveEnvironments(t.Context(), "buildkite/buildkite-gha", []string{"production"})
+			_, err = resolver.ResolveEnvironments(t.Context(), "", "buildkite/buildkite-gha", []string{"production"})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("ResolveEnvironments() error = %v, want %q", err, test.want)
 			}
@@ -198,7 +203,7 @@ func TestAgentEnvironmentResolverRejectsUntrustedResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = resolver.ResolveEnvironments(t.Context(), "buildkite/buildkite-gha", []string{"production"})
+			_, err = resolver.ResolveEnvironments(t.Context(), "", "buildkite/buildkite-gha", []string{"production"})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("ResolveEnvironments() error = %v, want %q", err, test.want)
 			}
@@ -219,7 +224,7 @@ func TestAgentEnvironmentResolverRejectsUntrustedResponses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolver.ResolveEnvironments(t.Context(), "buildkite/buildkite-gha", []string{"production"}); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
+	if _, err := resolver.ResolveEnvironments(t.Context(), "", "buildkite/buildkite-gha", []string{"production"}); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
 		t.Fatalf("redirect ResolveEnvironments() error/redirected = %v / %v", err, redirected)
 	}
 }
@@ -236,7 +241,7 @@ func TestAgentEnvironmentResolverScalesResponseLimitWithBatchSize(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolver.ResolveEnvironments(t.Context(), "buildkite/buildkite-gha", []string{"production", "staging"}); err != nil {
+	if _, err := resolver.ResolveEnvironments(t.Context(), "", "buildkite/buildkite-gha", []string{"production", "staging"}); err != nil {
 		t.Fatalf("ResolveEnvironments() = %v", err)
 	}
 }
@@ -261,7 +266,7 @@ func TestAgentEnvironmentResolverDecodesMaximalEscapedVariables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshots, err := resolver.ResolveEnvironments(t.Context(), "buildkite/buildkite-gha", []string{"production"})
+	snapshots, err := resolver.ResolveEnvironments(t.Context(), "", "buildkite/buildkite-gha", []string{"production"})
 	if err != nil {
 		t.Fatalf("ResolveEnvironments() = %v", err)
 	}

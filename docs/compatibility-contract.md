@@ -148,6 +148,16 @@ GraphQL URLs use `/api/v3` and `/api/graphql`. The origin identifies the request
 repository; it does not authorize access. The backend still binds each token
 to the job, repository, App installation, and workflow policy at the build commit.
 
+Environment and configuration-variable lookups also preserve the event origin,
+including batched upload lookups and memoization. They use only the job-scoped
+Agent API; GitHub installation credentials remain server-side. GHES requires an
+existing code-access App installation with `actions:read` and `environments:read` for
+environments (including their variables), and `actions_variables:read` for
+repository/organization variables. No lookup feature flag is required. Deploy
+backend support before this client.
+Local regression tests establish host preservation and fail-closed lookup
+behavior, not live GHES API availability or installation grants.
+
 Public action sources remain on github.com. Never attach GHES workflow tokens
 to public action requests or infer a github.com self-repository identity from
 a GHES event. Private reusable source resolution requires host-bound identity;
