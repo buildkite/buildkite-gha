@@ -186,7 +186,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix) || runsOnReadsInputs(job), matrixDetailUnsafe: matrixReadsInputs(originalJob), runsOnDetailUnsafe: runsOnReadsInputs(job)}
+			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix) || runsOnReadsInputs(job), matrixDetailUnsafe: matrixReadsInputs(originalJob), runsOnDetailUnsafe: runsOnReadsInputs(originalJob)}
 			workflowJobs[job.ID] = job
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
@@ -334,7 +334,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
 				blockerDetailUnsafe: blockerDetailUnsafe,
 				matrixDetailUnsafe:  matrixReadsInputs(originalJob),
-				runsOnDetailUnsafe:  runsOnReadsInputs(job),
+				runsOnDetailUnsafe:  runsOnReadsInputs(originalJob),
 				callGuards:          cloneSourcedCallGuards(callGuards),
 				concurrencyGates:    append([]WorkflowConcurrencyGate(nil), concurrencyGates...),
 			})
@@ -1231,6 +1231,16 @@ func applyStaticInputs(path string, job workflow.Job, scope expression.InputScop
 		concurrency := *job.Concurrency
 		concurrency.Group = replaceStaticInputs(concurrency.Group, inputs)
 		job.Concurrency = &concurrency
+	}
+	if !scope.Complete {
+		// With deferred inputs, runs-on may select a runner from producer
+		// outputs, a scheduling field that still substitutes static inputs.
+		job.RunsOn = replaceSliceInputs(job.RunsOn, inputs)
+		if job.RunsOnExpr != nil {
+			expr := *job.RunsOnExpr
+			expr.Text = replaceStaticInputs(expr.Text, inputs)
+			job.RunsOnExpr = &expr
+		}
 	}
 	job.Services = append([]workflow.Service(nil), job.Services...)
 	for i := range job.Services {
