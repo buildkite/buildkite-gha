@@ -186,7 +186,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix) || runsOnReadsInputs(job), matrixDetailUnsafe: matrixReadsInputs(job), runsOnDetailUnsafe: runsOnReadsInputs(job)}
+			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix) || runsOnReadsInputs(job), matrixDetailUnsafe: matrixReadsInputs(originalJob), runsOnDetailUnsafe: runsOnReadsInputs(job)}
 			workflowJobs[job.ID] = job
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
@@ -333,7 +333,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				secretAuthority: cloneSecretAuthority(secrets), needBindings: needBindings,
 				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
 				blockerDetailUnsafe: blockerDetailUnsafe,
-				matrixDetailUnsafe:  matrixReadsInputs(job),
+				matrixDetailUnsafe:  matrixReadsInputs(originalJob),
 				runsOnDetailUnsafe:  runsOnReadsInputs(job),
 				callGuards:          cloneSourcedCallGuards(callGuards),
 				concurrencyGates:    append([]WorkflowConcurrencyGate(nil), concurrencyGates...),
@@ -447,7 +447,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		callerContext := resolver.frameContext(inputs)
 		matrices, err := expandMatrix(path, job, callerContext)
 		if err != nil {
-			if matrixReadsInputs(job) {
+			if matrixReadsInputs(originalJob) {
 				return reusableResolution{}, inputSubstitutedFinding(path, job, StageMatrix, CodeMatrixInvalid, job.Matrix.Span.Start, "matrix could not be expanded or validated"+inputValueHiddenNote)
 			}
 			return reusableResolution{}, err
@@ -913,7 +913,7 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 			} else {
 				resolved, err = evaluateStaticCallValue(text, parentInputs.values, matrix, context)
 			}
-			if err != nil && !needsDependent && hasInputExpression(text) {
+			if err != nil && hasInputExpression(text) && !authoredInputError(err) {
 				return reusableInputs{}, inputSubstitutedFinding(path, job, StageGraph, CodeGraphInvalid, value.Span.Start, fmt.Sprintf("Reusable workflow input %q cannot be resolved", name)+inputValueHiddenNote)
 			}
 			if err != nil {
@@ -1020,6 +1020,13 @@ type compoundForwardedInputError struct{ input string }
 
 func (e compoundForwardedInputError) Error() string {
 	return fmt.Sprintf("expression combines needs-dependent parent input %q with other text", e.input)
+}
+
+// authoredInputError reports call-input errors that quote only authored names.
+func authoredInputError(err error) bool {
+	var unlisted unlistedNeedError
+	var forwarded compoundForwardedInputError
+	return errors.As(err, &unlisted) || errors.As(err, &forwarded)
 }
 
 func usesNeeds(value string) bool {
@@ -1218,6 +1225,12 @@ func applyStaticInputs(path string, job workflow.Job, scope expression.InputScop
 	selectSecrets(job.Span.Start, &job.DefaultShell, &job.DefaultWorkingDirectory)
 	job.Env = selectMapSecrets(job.Span.Start, job.Env)
 	job.Outputs = selectMapSecrets(job.Span.Start, job.Outputs)
+	if job.Concurrency != nil && usesNeeds(job.Concurrency.Group) {
+		// Needs-derived groups are scheduling fields, which still substitute.
+		concurrency := *job.Concurrency
+		concurrency.Group = replaceStaticInputs(concurrency.Group, inputs)
+		job.Concurrency = &concurrency
+	}
 	job.Services = append([]workflow.Service(nil), job.Services...)
 	for i := range job.Services {
 		container := job.Services[i].Container

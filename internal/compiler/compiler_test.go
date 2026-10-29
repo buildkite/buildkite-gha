@@ -2715,6 +2715,44 @@ jobs:
 	}
 }
 
+func TestCompileRedactsEvaluatedValuesInDeferredCallInputErrors(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on:
+  workflow_dispatch:
+    inputs:
+      pattern: {type: string}
+jobs:
+  call:
+    uses: ./.github/workflows/middle.yml
+    with: {prefix: p}
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      prefix: {type: string}
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+    steps:
+      - id: t
+        run: true
+  call:
+    needs: prepare
+    uses: ./.github/workflows/leaf.yml
+    with:
+      target: ${{ inputs.prefix }}-${{ format(github.event.inputs.pattern, 'x') }}-${{ needs.prepare.outputs.tag }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", "on:\n  workflow_call:\n    inputs:\n      target: {type: string}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	event := bytes.Replace(readFile(t, smokePath("events", "workflow_dispatch.json")), []byte(`"inputs": {}`), []byte(`"inputs": {"pattern": "{PRIVATE_VALUE}"}`), 1)
+	_, err := Compile(callerPath, readFile(t, callerPath), event)
+	var finding *ProcessingFinding
+	if err == nil || !errors.As(err, &finding) || strings.Contains(err.Error()+finding.Message+finding.Detail, "PRIVATE_VALUE") {
+		t.Fatalf("Compile() error = %v", err)
+	}
+}
+
 func TestCompileGraphFieldsReadTheirOwnWorkflowInputs(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
