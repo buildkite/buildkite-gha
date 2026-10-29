@@ -4188,3 +4188,16 @@ func liveDockerOwnedResources(t *testing.T, docker string) []string {
 	slices.Sort(resources)
 	return resources
 }
+
+func TestEvaluateProgramServicesKeepsInputExpressionSyntaxAsData(t *testing.T) {
+	const user = "it's ${{ secrets.ADMIN }}"
+	services, _, err := evaluateProgramServices(testProgramServices(map[string]plan.ServiceContainer{
+		"private": {Image: "registry.example.test/team/app:1", Credentials: &plan.ContainerCredentials{Username: "${{ inputs.user }}", Password: "${{ secrets.REGISTRY_PASSWORD }}"}},
+	}), expression.Context{WorkflowInputs: map[string]any{"user": user}, Secrets: map[string]string{"REGISTRY_PASSWORD": "registry-password", "ADMIN": "admin"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials := services["private"].Credentials; credentials == nil || credentials.Username != user {
+		t.Fatalf("credentials = %#v, want the input value unchanged", credentials)
+	}
+}

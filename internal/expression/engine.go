@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/rhysd/actionlint"
@@ -162,10 +163,10 @@ var profiles = map[ProfileID]Profile{
 	ProfileServiceTemplate:          {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsServiceTemplate},
 	ProfileServiceEnvironment:       {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
 	ProfileDeferredInput:            {Form: FormTemplate, Scope: ScopeCall, Contexts: ContextSet{"needs", "inputs"}, Functions: profileFunctions(), Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDeferredInput},
-	ProfileSchedulingGroup:          {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsDeferredInput},
+	ProfileSchedulingGroup:          {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"needs", "inputs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsDeferredInput},
 	ProfileSchedulingParallel:       {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: FunctionSet{"fromJSON"}, Missing: MissingError, Token: TokenDenied, semantics: semanticsJobControl},
 	ProfileCompileServiceCredential: {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsServiceCredential},
-	ProfileServiceCredential:        {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsServiceCredential},
+	ProfileServiceCredential:        {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsServiceCredential},
 	ProfileServiceMap:               {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsServiceMap},
 	ProfileActionInputDefault:       {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsActionInputDefault},
 	ProfileDockerActionArg:          {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"inputs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsDockerActionArg},
@@ -782,30 +783,40 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 		if _, err := engine.Validate(site); err != nil {
 			return Reduced{}, err
 		}
-		source := site.Source
+		context := values.Compile
 		if site.Profile == ProfileCompileServiceCredential {
-			// Validate authored secret names before substitution. Substitute once
-			// so computed input indexes cannot become admitted named references.
-			var err error
-			source, err = substituteCompileInputsOnce(source, values.Compile.Inputs)
-			if err != nil {
-				return Reduced{}, siteError(site, err)
+			// Credentials read only named inputs the compiler knows, but keep
+			// those reads so the runtime evaluates them against the job's inputs.
+			if err := requireKnownNamedInputs(engine, site, context.Inputs); err != nil {
+				return Reduced{}, err
 			}
-			residual := site
-			residual.Source = source
-			referencesInputs, err := engine.ReferencesContext(residual, "inputs", false)
+		}
+		var reduced string
+		var err error
+		switch {
+		case site.Profile == ProfileCompileServiceCredential:
+			reduced, err = reduceCredentialMatrix(engine, site, context)
 			if err != nil {
 				return Reduced{}, err
 			}
-			if referencesInputs {
-				return Reduced{}, siteError(site, fmt.Errorf("runtime context %q is unavailable in this field: service credentials require compile-known named inputs", "inputs"))
+			// Input values containing expression syntax stay rejected until
+			// they are proven safe to accept as data, so evaluate a discarded
+			// view with the inputs to apply the same check as other templates.
+			if _, err := evaluateAvailableCompileTemplate(reduced, context); err != nil {
+				return Reduced{}, siteError(site, err)
 			}
+			context.Inputs, context.InputsComplete = nil, false
+		case profile.semantics == semanticsPartialTemplate:
+			// Service residuals read only needs, so input subtrees fold even
+			// inside expressions that also read needs outputs.
+			reduced, err = reduceAvailableCompileTemplate(site.Source, context, "inputs")
+		default:
+			reduced, err = reduceAvailableCompileTemplate(site.Source, context, "")
 		}
-		reduced, err := reduceAvailableCompileTemplate(source, values.Compile, site.Profile == ProfileCompileServiceCredential)
 		if err != nil {
 			return Reduced{}, siteError(site, err)
 		}
-		reduced, err = evaluateAvailableCompileTemplate(reduced, values.Compile)
+		reduced, err = evaluateAvailableCompileTemplate(reduced, context)
 		if err != nil {
 			return Reduced{}, siteError(site, err)
 		}
@@ -861,7 +872,7 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 		}
 		return Reduced{Source: residual.Source}, nil
 	}
-	reduced, err := reduceAvailableCompileTemplate(site.Source, values.Compile, false)
+	reduced, err := reduceAvailableCompileTemplate(site.Source, values.Compile, "")
 	if err != nil {
 		return Reduced{}, siteError(site, err)
 	}
@@ -1000,6 +1011,43 @@ func zeroResult(result ResultType) any {
 	default:
 		return nil
 	}
+}
+
+// reduceCredentialMatrix folds the compile-only matrix out of a credential.
+// Input reads stay for the runtime unless an input selects a matrix value,
+// such as matrix[inputs.key]; only then does matrix folding use the inputs.
+func reduceCredentialMatrix(engine Engine, site Site, context CompileContext) (string, error) {
+	withoutInputs := context
+	withoutInputs.Inputs, withoutInputs.InputsComplete = nil, false
+	reduced, err := reduceAvailableCompileTemplate(site.Source, withoutInputs, "matrix")
+	if err != nil {
+		return "", siteError(site, err)
+	}
+	residual := site
+	residual.Source = reduced
+	if readsMatrix, err := engine.ReferencesContext(residual, "matrix", false); err != nil || !readsMatrix {
+		return reduced, err
+	}
+	reduced, err = reduceAvailableCompileTemplate(site.Source, context, "matrix")
+	return reduced, siteError(site, err)
+}
+
+// requireKnownNamedInputs rejects input reads the compiler cannot prove
+// present: computed selectors, and names absent from known, including
+// deferred inputs that the runtime would hydrate later.
+func requireKnownNamedInputs(engine Engine, site Site, known map[string]any) error {
+	names, dynamic, err := engine.InputReferences(site)
+	if err != nil {
+		return err
+	}
+	unknown := dynamic || slices.ContainsFunc(names, func(name string) bool {
+		_, ok, _ := objectValue(known, name)
+		return !ok
+	})
+	if unknown {
+		return siteError(site, fmt.Errorf("runtime context %q is unavailable in this field: service credentials require compile-known named inputs", "inputs"))
+	}
+	return nil
 }
 
 func siteError(site Site, err error) error {

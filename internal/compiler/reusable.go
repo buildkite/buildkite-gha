@@ -902,7 +902,7 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 				continue
 			}
 			var err error
-			needsDependent := usesNeeds(text) || referencesDeferredInput(text, parentInputs.deferred)
+			needsDependent := usesNeeds(text) || len(deferredInputsRead(text, parentInputs.deferred)) != 0
 			if needsDependent {
 				var deferred deferredInput
 				deferred, err = deferredNeedInput(text, parentInputs, callNeeds, matrix, context)
@@ -1053,10 +1053,8 @@ func referencedInputs(template string, values map[string]any) map[string]any {
 // deferredNeedInput reduces a caller value that reads needs outputs to its
 // residual template and binds every referenced output to the call's needs.
 func deferredNeedInput(value string, parentInputs reusableInputs, needs map[string]needBinding, matrix map[string]any, context expression.CompileContext) (deferredInput, error) {
-	for _, name := range sortedKeys(parentInputs.deferred) {
-		if referencesInput(value, name) {
-			return deferredInput{}, compoundForwardedInputError{input: name}
-		}
+	if read := deferredInputsRead(value, parentInputs.deferred); len(read) != 0 {
+		return deferredInput{}, compoundForwardedInputError{input: read[0]}
 	}
 	context.Matrix = matrix
 	template, references, err := expression.ReduceDeferredInput(value, context)
@@ -1100,22 +1098,18 @@ func findNeedBinding(needs map[string]needBinding, job string) (string, needBind
 	return "", needBinding{}, false
 }
 
-// referencesInput reports whether substituting the named input changes the
-// value, which means the value reads that input.
-func referencesInput(value, name string) bool {
-	substituted, err := expression.SubstituteCompileInputs(value, map[string]any{name: "deferred"})
-	return err == nil && substituted != value
-}
-
-// referencesDeferredInput reports whether the value reads any parent input
-// that carries a needs value.
-func referencesDeferredInput(value string, deferred map[string]deferredInput) bool {
-	for name := range deferred {
-		if referencesInput(value, name) {
-			return true
+// deferredInputsRead lists, in name order, the inputs carrying a needs value
+// that the value may read. A computed selector such as inputs[inputs.key] may
+// read any of them.
+func deferredInputsRead(value string, deferred map[string]deferredInput) []string {
+	names, dynamic, _ := compilerExpressionEngine.InputReferences(compileExpressionSite(value, expression.ProfilePartialTemplate, expression.ResultAny))
+	var read []string
+	for _, name := range sortedKeys(deferred) {
+		if dynamic || slices.Contains(names, strings.ToLower(name)) {
+			read = append(read, name)
 		}
 	}
-	return false
+	return read
 }
 
 func evaluateStaticCallValue(value string, inputs, matrix map[string]any, context expression.CompileContext) (any, error) {
@@ -1226,35 +1220,9 @@ func applyStaticInputs(path string, job workflow.Job, scope expression.InputScop
 	selectSecrets(job.Span.Start, &job.DefaultShell, &job.DefaultWorkingDirectory)
 	job.Env = selectMapSecrets(job.Span.Start, job.Env)
 	job.Outputs = selectMapSecrets(job.Span.Start, job.Outputs)
-	if job.Concurrency != nil && usesNeeds(job.Concurrency.Group) {
-		// Needs-derived groups are scheduling fields, which still substitute.
-		concurrency := *job.Concurrency
-		concurrency.Group = replaceStaticInputs(concurrency.Group, inputs)
-		job.Concurrency = &concurrency
-	}
-	if !scope.Complete {
-		// With deferred inputs, runs-on may select a runner from producer
-		// outputs, a scheduling field that still substitutes static inputs.
-		job.RunsOn = replaceSliceInputs(job.RunsOn, inputs)
-		if job.RunsOnExpr != nil {
-			expr := *job.RunsOnExpr
-			expr.Text = replaceStaticInputs(expr.Text, inputs)
-			job.RunsOnExpr = &expr
-		}
-	}
 	job.Services = append([]workflow.Service(nil), job.Services...)
 	for i := range job.Services {
-		container := job.Services[i].Container
-		container.Image = replaceStaticInputs(container.Image, inputs)
-		// Credentials retain authored source until their profile validates and
-		// substitutes inputs in resolveCompileServices.
-		container.Env = replaceMapInputs(container.Env, inputs)
-		container.Options = replaceStaticInputs(container.Options, inputs)
-		container.Command = replaceStaticInputs(container.Command, inputs)
-		container.Entrypoint = replaceStaticInputs(container.Entrypoint, inputs)
-		container.Ports = replaceSliceInputs(container.Ports, inputs)
-		container.Volumes = replaceSliceInputs(container.Volumes, inputs)
-		job.Services[i].Container = container
+		job.Services[i].Container.Env = selectMapSecrets(job.Span.Start, job.Services[i].Container.Env)
 	}
 	job.Steps = append([]workflow.Step(nil), job.Steps...)
 	for i := range job.Steps {
@@ -1350,17 +1318,6 @@ func staticTimeoutMinutes(value any) (float64, bool) {
 	}
 }
 
-func replaceSliceInputs(values []string, inputs map[string]any) []string {
-	if values == nil {
-		return nil
-	}
-	result := make([]string, len(values))
-	for i, value := range values {
-		result[i] = replaceStaticInputs(value, inputs)
-	}
-	return result
-}
-
 func rejectUnresolvedInputExpressions(path string, job workflow.Job, inputs reusableInputs) error {
 	reject := func(line, column int, message string) error {
 		return &ProcessingFinding{
@@ -1373,31 +1330,35 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, inputs reus
 	rejectJob := func(message string) error {
 		return reject(job.Span.Start.Line, job.Span.Start.Column, message)
 	}
-	var jobValues []string
 	// Graph fields evaluate before jobs run, so only static inputs are known.
 	graphValues := []string{job.Name}
 	jobRuntimeValues := []string{job.DefaultShell, job.DefaultWorkingDirectory}
 	jobRuntimeValues = appendMapValues(jobRuntimeValues, job.Env)
 	jobRuntimeValues = appendMapValues(jobRuntimeValues, job.Outputs)
-	if job.Concurrency != nil {
+	// A needs-derived group is a scheduling site; validateRuntimeScheduling
+	// admits its input reads.
+	if job.Concurrency != nil && !usesNeeds(job.Concurrency.Group) {
 		graphValues = append(graphValues, job.Concurrency.Group)
-	}
-	if job.MaxParallelExpression != nil {
-		jobValues = append(jobValues, job.MaxParallelExpression.Text)
 	}
 	for _, site := range runsOnSites(job) {
 		if readsUndeclaredInput(site.Source, expression.ProfilePartialTemplate, inputs) {
 			return rejectJob("reusable-workflow input expression is not statically resolvable")
 		}
 	}
+	// Services evaluate with the static inputs while compiling. The credential
+	// profile rejects its own reads of inputs that are not known by then.
+	var serviceValues []string
 	for _, service := range job.Services {
 		container := service.Container
-		jobValues = append(jobValues, container.Image, container.Options, container.Command, container.Entrypoint)
-		jobValues = append(jobValues, container.Ports...)
-		jobValues = append(jobValues, container.Volumes...)
-		jobValues = appendMapValues(jobValues, container.Env)
-		// The credential profile owns known-input substitution and rejects
-		// residual inputs before reduction, including deferred inputs.
+		serviceValues = append(serviceValues, container.Image, container.Options, container.Command, container.Entrypoint)
+		serviceValues = append(serviceValues, container.Ports...)
+		serviceValues = append(serviceValues, container.Volumes...)
+		serviceValues = appendMapValues(serviceValues, container.Env)
+	}
+	if slices.ContainsFunc(serviceValues, func(value string) bool {
+		return readsUnknownInput(compileExpressionSite(value, expression.ProfilePartialTemplate, expression.ResultString), inputs)
+	}) {
+		return rejectJob("reusable-workflow input expression is not statically resolvable")
 	}
 	if job.Matrix != nil {
 		if job.Matrix.Expression != nil {
@@ -1428,9 +1389,6 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, inputs reus
 				}
 			}
 		}
-	}
-	if slices.ContainsFunc(jobValues, hasInputExpression) {
-		return rejectJob("reusable-workflow input expression is not statically resolvable")
 	}
 	if slices.ContainsFunc(graphValues, func(value string) bool { return graphInputUnresolvable(value, inputs.values) }) {
 		return rejectJob("reusable-workflow input expression is not statically resolvable")
@@ -1531,17 +1489,6 @@ func matrixReadsInputs(job workflow.Job) bool {
 	return job.Concurrency != nil && hasInputExpression(job.Concurrency.Group) ||
 		job.MaxParallelExpression != nil && hasInputExpression(job.MaxParallelExpression.Text) ||
 		matrixHasString(job.Matrix, hasInputExpression)
-}
-
-func replaceMapInputs(values map[string]string, inputs map[string]any) map[string]string {
-	if values == nil {
-		return nil
-	}
-	out := make(map[string]string, len(values))
-	for name, value := range values {
-		out[name] = replaceStaticInputs(value, inputs)
-	}
-	return out
 }
 
 func replaceStaticInputs(value string, inputs map[string]any) string {

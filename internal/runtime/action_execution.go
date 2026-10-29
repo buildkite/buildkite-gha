@@ -995,7 +995,10 @@ func evaluateProgramServices(services executionprogram.Services, eval expression
 		if resolved.Image == "" {
 			continue
 		}
-		if err := plan.ValidateEvaluatedServiceContainer(resolved); err != nil {
+		// Each field was evaluated from its program site and is never parsed
+		// again, so expression syntax in the result, such as from an input
+		// value, is data.
+		if err := plan.ValidateServiceContainer(resolved); err != nil {
 			return nil, nil, fmt.Errorf("service %q: %w", service.Name, err)
 		}
 		result[service.Name] = resolved
