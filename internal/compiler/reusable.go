@@ -44,12 +44,12 @@ type sourcedJob struct {
 	jobPermissionsIgnored bool
 	reusableCall          workflow.Position
 	blockerDetailUnsafe   bool
-	// matrixDetailUnsafe reports that static input substitution changed the
-	// matrix or its scheduling values, so their expression source can quote
-	// input values and matrix errors must not be shown as detail.
+	// matrixDetailUnsafe reports that the matrix or its scheduling values read
+	// inputs, so matrix errors can quote input values and must not be shown
+	// as detail.
 	matrixDetailUnsafe bool
-	// runsOnDetailUnsafe reports that static input substitution changed
-	// runs-on, so runs-on errors must not quote its expression source.
+	// runsOnDetailUnsafe reports that runs-on reads inputs, so runs-on errors
+	// can quote input values and must not be shown as detail.
 	runsOnDetailUnsafe bool
 	callGuards         []sourcedCallGuard
 	concurrencyGates   []WorkflowConcurrencyGate
@@ -1356,7 +1356,7 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, inputs reus
 		serviceValues = appendMapValues(serviceValues, container.Env)
 	}
 	if slices.ContainsFunc(serviceValues, func(value string) bool {
-		return readsUnknownInput(compileExpressionSite(value, expression.ProfilePartialTemplate, expression.ResultString), inputs)
+		return readsUnknownInput(value, expression.ProfilePartialTemplate, inputs)
 	}) {
 		return rejectJob("reusable-workflow input expression is not statically resolvable")
 	}
@@ -1430,6 +1430,16 @@ func graphInputUnresolvable(source string, static map[string]any) bool {
 		readsUndeclaredInput(source, expression.ProfileCompileTemplate, reusableInputs{values: static})
 }
 
+// readsUnknownInput reports an input read that has no value before jobs run:
+// an undeclared or deferred name, or a computed selector that could pick a
+// deferred input.
+func readsUnknownInput(source string, profile expression.ProfileID, inputs reusableInputs) bool {
+	_, dynamic, err := compilerExpressionEngine.InputReferences(compileExpressionSite(source, profile, expression.ResultAny))
+	return err != nil || dynamic && len(inputs.deferred) != 0 || readsUndeclaredInput(source, profile, reusableInputs{values: inputs.values})
+}
+
+// readsUndeclaredInput reports a named input read that matches neither a
+// static nor a deferred input.
 func readsUndeclaredInput(source string, profile expression.ProfileID, inputs reusableInputs) bool {
 	names, _, err := compilerExpressionEngine.InputReferences(compileExpressionSite(source, profile, expression.ResultAny))
 	if err != nil {

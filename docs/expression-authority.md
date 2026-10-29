@@ -201,7 +201,9 @@ Event reduction preserves input reads, including mixed event/input expressions.
 Shell checks and native action adapters evaluate a separate literal view without
 rewriting program source. Secret inventory needs static names, so flattening
 rewrites input-selected secret names, such as `secrets[inputs.name]`, to
-literals. It rejects selectors that deferred inputs could change. Evaluator
+literals. It rejects selectors that deferred inputs could change. Service
+credentials reject input-selected secret names, so a reusable workflow cannot
+choose which secret a credential reads. Evaluator
 diagnostics must not quote input-derived values. Graph fields, such as labels, matrices,
 `runs-on`, and concurrency, evaluate against the workflow frame's own inputs.
 So do service templates, which compile to literals or `needs`-only residuals.

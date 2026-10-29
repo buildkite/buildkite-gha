@@ -554,8 +554,8 @@ func (e *jobGraphExpansion) mergeContinuations() {
 
 // rejectRuntimeMatrix records why a needs-derived matrix, or a job that
 // depends on one, cannot be compiled. The reason quotes job and output
-// identifiers from the workflow source, so it travels in Detail unless static
-// input substitution rewrote that source.
+// identifiers from the workflow source, so it travels in Detail unless the
+// matrix reads inputs, whose values the reason could quote.
 func (e *jobGraphExpansion) rejectRuntimeMatrix(sourced sourcedJob, err error) {
 	job := sourced.Job
 	line, column := matrixErrorPosition(job, err)

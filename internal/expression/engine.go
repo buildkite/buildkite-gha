@@ -803,7 +803,7 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 			// they are proven safe to accept as data, so evaluate a discarded
 			// view with the inputs to apply the same check as other templates.
 			if _, err := evaluateAvailableCompileTemplate(reduced, context); err != nil {
-				return Reduced{}, siteError(site, err)
+				return Reduced{}, siteError(site, inputEvaluationError(site, err))
 			}
 			context.Inputs, context.InputsComplete = nil, false
 		case profile.semantics == semanticsPartialTemplate:
@@ -813,12 +813,13 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 		default:
 			reduced, err = reduceAvailableCompileTemplate(site.Source, context, "")
 		}
-		if err != nil {
-			return Reduced{}, siteError(site, err)
+		if err == nil {
+			reduced, err = evaluateAvailableCompileTemplate(reduced, context)
 		}
-		reduced, err = evaluateAvailableCompileTemplate(reduced, context)
 		if err != nil {
-			return Reduced{}, siteError(site, err)
+			// Evaluator errors, such as an invalid format placeholder, can
+			// quote input values.
+			return Reduced{}, siteError(site, inputEvaluationError(site, err))
 		}
 		if site.Profile == ProfileCompileServiceCredential {
 			// Authored validation precedes reduction so lazy evaluation cannot
