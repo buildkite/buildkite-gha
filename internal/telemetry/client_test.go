@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,104 @@ import (
 )
 
 const testJobID = "22222222-2222-4222-8222-222222222222"
+
+func TestPathFilterPayloadBounds(t *testing.T) {
+	var body []byte
+	client, err := New(Config{Endpoint: "https://agent.example/v3", JobID: testJobID, JobToken: "token",
+		Client: &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			body, _ = io.ReadAll(r.Body)
+			return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+		})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := PathFilter{WorkflowPath: ".github/workflows/ci.yml", WorkflowDigest: strings.Repeat("a", 64),
+		EventName: "push", EventOrigin: "buildkite-webhook", Outcome: "match", Reason: "paths_match",
+		HeadSHA: strings.Repeat("b", 40), WorkflowSHA: strings.Repeat("b", 40), ComparisonBaseSHA: strings.Repeat("c", 40)}
+	for _, test := range []struct {
+		name      string
+		decisions []PathFilter
+		count     int
+		truncated bool
+	}{
+		{name: "new branch without prior base", decisions: []PathFilter{decision}, count: 1},
+		{name: "duplicate", decisions: []PathFilter{decision, decision}, count: 1, truncated: true},
+		{name: "empty", decisions: []PathFilter{}, count: 0},
+		{name: "invalid path", decisions: []PathFilter{func() PathFilter { d := decision; d.WorkflowPath = "bad\npath"; return d }()}, truncated: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := client.Emit(CommandPluginImport, OutcomeSuccess, 0, Details{PathFilters: test.decisions}); err != nil {
+				t.Fatal(err)
+			}
+			var event struct {
+				Properties Properties `json:"properties"`
+			}
+			if err := json.Unmarshal(body, &event); err != nil {
+				t.Fatal(err)
+			}
+			p := event.Properties
+			if p.PathFilters == nil || p.PathFiltersTruncated == nil || len(*p.PathFilters) != test.count || *p.PathFiltersTruncated != test.truncated {
+				t.Fatalf("payload=%s", body)
+			}
+			if test.count > 0 && (*p.PathFilters)[0] != decision {
+				t.Fatalf("identity changed: %s", body)
+			}
+		})
+	}
+	if err := client.Emit(CommandRunJob, OutcomeSuccess, 0, Details{PathFilters: []PathFilter{decision}}); err == nil {
+		t.Fatal("run_job accepted path decisions")
+	}
+	if err := client.Emit(CommandPluginImport, OutcomeSuccess, 0, Details{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "path_filters") {
+		t.Fatalf("absent coverage changed legacy payload: %s", body)
+	}
+
+	// HTML-sensitive ASCII expands sixfold with Go's JSON encoder. Exercise
+	// maximum text in every existing diagnostic field alongside new identities.
+	text := strings.Repeat("<", 1024)
+	details := Details{ErrorMessage: text, Blocker: "path_filter", BlockerDetail: text}
+	for i := range 20 {
+		details.Diagnostics = append(details.Diagnostics, Diagnostic{Code: "E_EVENT_INVALID", Severity: SeverityError,
+			Blocker: "path_filter", BlockerDetail: text, Message: text, WorkflowPath: fmt.Sprintf("%02d", i) + text[2:]})
+	}
+	for i := range 101 {
+		d := decision
+		d.WorkflowPath, d.EventRef = fmt.Sprintf("%03d", i)+text[3:], text
+		details.PathFilters = append(details.PathFilters, d)
+	}
+	if err := client.Emit(CommandPluginImport, OutcomeFailure, time.Hour, details); err != nil {
+		t.Fatal(err)
+	}
+	var event struct {
+		Properties Properties `json:"properties"`
+	}
+	if err := json.Unmarshal(body, &event); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(event.Properties.PathFilters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > 512<<10 || len(encoded) > 96<<10 || !*event.Properties.PathFiltersTruncated || len(*event.Properties.PathFilters) == 0 {
+		t.Fatalf("body=%d array=%d truncated=%v", len(body), len(encoded), event.Properties.PathFiltersTruncated)
+	}
+	t.Logf("maximum-escaped fixture: body=%d bytes array=%d bytes entries=%d", len(body), len(encoded), len(*event.Properties.PathFilters))
+	for i := range details.PathFilters {
+		details.PathFilters[i].WorkflowPath = fmt.Sprintf("%d.yml", i)
+		details.PathFilters[i].EventRef = ""
+	}
+	if err := client.Emit(CommandPluginImport, OutcomeSuccess, 0, details); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(body, &event); err != nil {
+		t.Fatal(err)
+	}
+	if len(*event.Properties.PathFilters) != 100 || !*event.Properties.PathFiltersTruncated {
+		t.Fatalf("count bound=%s", body)
+	}
+}
 
 func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 	var request struct {

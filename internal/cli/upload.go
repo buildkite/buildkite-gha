@@ -264,6 +264,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			processingReports[i] = compatibility.InitialProcessingReport(workflows[i].Path, hostedProfile, false, parsed, err)
 			processingReports[i].Result = "incompatible"
 			workflows[i].Applicable = true
+			uploadArguments.telemetry.addPathFilter(workflows[i], effectiveEvent, workflowTriggerSelection{}, err)
 			continue
 		}
 		workflowEvent := effectiveEvent
@@ -274,6 +275,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if workflows[i].PathFiltersError != "" && !workflows[i].PathFiltersIdentityVerified {
 			triggerErr = &buildkitepipeline.UnsupportedPathFiltersError{Event: effectiveEvent.Event.Event, Reason: workflows[i].PathFiltersError}
 		}
+		uploadArguments.telemetry.addPathFilter(workflows[i], effectiveEvent, selection, triggerErr)
 		switch {
 		case triggerErr != nil:
 			workflows[i].Applicable = true
@@ -994,6 +996,7 @@ type workflowInput struct {
 	TriggerCondition, SkipReason, AnnotationReason  string
 	PathFiltersError                                string
 	PathFiltersIdentityVerified                     bool
+	PathFiltersComparisonBase                       string
 	ReusableOnly, Applicable                        bool
 	// ReferencesVars records whether the event-independent validation found
 	// any vars reference in the workflow or a reusable workflow it calls.

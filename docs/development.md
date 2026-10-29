@@ -314,6 +314,52 @@ Root discovery grants no source identity or token authority. Keep the
 [self-repository verification](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#step-syntax-self-repository-actions)
 and workflow-token policy checks separate from filesystem root discovery.
 
+## Path-filter telemetry
+
+`plugin_import` completion telemetry includes `path_filters` for top-level
+workflows reaching push or pull-request admission. It reuses the authenticated
+`/jobs/:id/posthog/events` request, opt-out, timeout, and best-effort delivery.
+Deploy receiver support before distributing this CLI: older receivers reject
+the entire enriched completion with HTTP 400. No compatibility retry is sent.
+
+| Outcome | Stable reasons |
+| --- | --- |
+| `match` | `paths_match` |
+| `nonmatch` | `paths_do_not_match` |
+| `error` | `workflow_parse_error`, `trigger_error`, `path_evidence_unavailable` |
+| `not_evaluated` | `no_path_filters`, `tag_push`, `non_path_filter_exclusion` |
+
+Records contain `workflow_path`, the loaded bytes' SHA-256 `workflow_digest`,
+`event_name`, and `event_origin`. Optional `event_ref`, `head_sha`, and `base_sha`
+describe the effective event and webhook's pinned base. `workflow_sha` appears
+only after the loaded bytes match the head commit's Git blob.
+`comparison_base_sha` records the actual local diff ancestor: the previous push
+commit, new-branch ancestor, or PR merge base. `head_sha` is the comparison head.
+Unavailable identities are omitted, never shortened or replaced. New-branch
+pushes omit the zero `base_sha`. The digest is not a workflow commit SHA, and
+runtime-reported source verification is not server attestation.
+
+The collection is bounded to 100 records and 96 KiB of encoded JSON. Paths and
+refs are control-free UTF-8, at most 1,024 bytes. `path_filters_truncated` always
+accompanies the array, including `false`; omitted records set it to `true`.
+An absent collection means no coverage, not success. Reusable-only workflows
+are excluded. No workflow bodies, event bodies, or changed-file lists are added.
+
+Join structured logs using authenticated build/job identity and verified source
+and comparison identities, not workflow path alone. Keep high-cardinality
+identities out of metrics. Command success can mean error steps uploaded;
+path-filter match does not establish compilation or execution success. Backend
+nonmatches never run and cannot be validated through runtime telemetry.
+
+Run the focused tests to check admission payloads, successful error-step
+uploads, unavailable history, opt-out, rejected delivery, and the combined
+512 KiB request bound:
+
+```sh
+mise exec -- go test ./internal/cli ./internal/telemetry \
+  -run 'TestPluginPathFilterTelemetry|TestPathFilterPayloadBounds' -v
+```
+
 ## Verify runtime behavior
 
 Service readiness failures emit `E_SERVICE_READINESS` in `run_job` completion
