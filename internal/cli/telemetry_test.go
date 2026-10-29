@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -285,13 +287,14 @@ func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
 	type event struct {
 		Event      string `json:"event"`
 		Properties struct {
-			Command       string `json:"command"`
-			Outcome       string `json:"outcome"`
-			ClientVersion string `json:"client_version"`
-			DurationMS    int64  `json:"duration_ms"`
-			FailurePhase  string `json:"failure_phase"`
-			FailureCode   string `json:"failure_code"`
-			ErrorMessage  string `json:"error_message"`
+			Command       string                           `json:"command"`
+			Outcome       string                           `json:"outcome"`
+			ClientVersion string                           `json:"client_version"`
+			DurationMS    int64                            `json:"duration_ms"`
+			FailurePhase  string                           `json:"failure_phase"`
+			FailureCode   string                           `json:"failure_code"`
+			ErrorMessage  string                           `json:"error_message"`
+			SourceStats   *actionsource.SourceStatsSummary `json:"source_stats"`
 		} `json:"properties"`
 	}
 	events := make(chan event, 2)
@@ -334,6 +337,10 @@ func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
 		if received.Properties.ClientVersion != "test-version" || received.Properties.DurationMS < 0 {
 			t.Fatalf("run(%q) client version/duration = %q/%d", test.args, received.Properties.ClientVersion, received.Properties.DurationMS)
 		}
+		stats := received.Properties.SourceStats
+		if stats == nil || stats.Requests == nil || stats.CacheHits == nil || len(stats.Requests) != 0 || len(stats.CacheHits) != 0 || stats.Materializations != 0 {
+			t.Fatalf("run(%q) must report an empty source summary, got %#v", test.args, stats)
+		}
 		if received.Properties.FailurePhase != "configuration" || received.Properties.FailureCode != "unknown" {
 			t.Fatalf("run(%q) failure = %q/%q", test.args, received.Properties.FailurePhase, received.Properties.FailureCode)
 		}
@@ -364,6 +371,55 @@ func TestCommandCompletionTelemetryOptOut(t *testing.T) {
 	}
 	if requests != 0 {
 		t.Fatalf("telemetry requests = %d, want 0", requests)
+	}
+}
+
+func TestCommandTelemetryReportsRuntimeSourceThrottle(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+	}))
+	defer upstream.Close()
+	localURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := http.DefaultTransport
+	http.DefaultTransport = sourceStatsRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "codeload.github.com" {
+			return original.RoundTrip(r)
+		}
+		local := r.Clone(r.Context())
+		local.URL.Scheme, local.URL.Host = localURL.Scheme, localURL.Host
+		response, err := original.RoundTrip(local)
+		if response != nil {
+			response.Request = r
+		}
+		return response, err
+	})
+	t.Cleanup(func() { http.DefaultTransport = original })
+	job := cliRunJobPlan()
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{{ID: "a-0000000000000001", Source: "github", Repository: "actions/upload-artifact", RequestedRef: "v7", Commit: actionintegration.UploadArtifactV7Commit, SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
+	job.Program.Job.Steps = []program.Step{cliActionStep("upload", "actions/upload-artifact@v7", job.Actions[0].ID)}
+	path, digest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, digest)
+	events := captureCommandTelemetry(t)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", path}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 || !strings.Contains(stderr.String(), "rate limit exceeded") {
+		t.Fatalf("run = %d: %s", code, &stderr)
+	}
+	select {
+	case event := <-events:
+		if event.SourceStats == nil || len(event.SourceStats.Requests) != 1 {
+			t.Fatalf("missing source telemetry: %#v", event)
+		}
+		request := event.SourceStats.Requests[0]
+		if event.Outcome != telemetry.OutcomeFailure || request.Operation != "archive" || request.Kind != "action" || request.Result != "rate_limit" || request.Status != 429 || request.Count != 1 || event.SourceStats.Materializations != 1 {
+			t.Fatalf("source telemetry: %#v / %#v", event, event.SourceStats)
+		}
+	default:
+		t.Fatal("missing command event")
 	}
 }
 

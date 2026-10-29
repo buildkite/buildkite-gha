@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
@@ -125,6 +126,7 @@ type Details struct {
 	AgentAPIHTTPStatus    int
 	PathFilters           []PathFilter
 	PathFiltersTruncated  bool
+	SourceStats           *source.SourceStatsSummary
 }
 
 // PathFilter describes admission, not compilation or command success. Commit
@@ -144,20 +146,21 @@ type PathFilter struct {
 }
 
 type Properties struct {
-	Command               Command       `json:"command"`
-	Outcome               Outcome       `json:"outcome"`
-	ClientVersion         string        `json:"client_version"`
-	DurationMS            int64         `json:"duration_ms,omitempty"`
-	FailurePhase          FailurePhase  `json:"failure_phase,omitempty"`
-	FailureCode           FailureCode   `json:"failure_code,omitempty"`
-	ErrorMessage          string        `json:"error_message,omitempty"`
-	ErrorMessageTruncated bool          `json:"error_message_truncated,omitempty"`
-	Diagnostics           []Diagnostic  `json:"diagnostics,omitempty"`
-	Blocker               string        `json:"blocker,omitempty"`
-	BlockerDetail         string        `json:"blocker_detail,omitempty"`
-	AgentAPIHTTPStatus    int           `json:"agent_api_http_status,omitempty"`
-	PathFilters           *[]PathFilter `json:"path_filters,omitempty"`
-	PathFiltersTruncated  *bool         `json:"path_filters_truncated,omitempty"`
+	Command               Command                    `json:"command"`
+	Outcome               Outcome                    `json:"outcome"`
+	ClientVersion         string                     `json:"client_version"`
+	DurationMS            int64                      `json:"duration_ms,omitempty"`
+	FailurePhase          FailurePhase               `json:"failure_phase,omitempty"`
+	FailureCode           FailureCode                `json:"failure_code,omitempty"`
+	ErrorMessage          string                     `json:"error_message,omitempty"`
+	ErrorMessageTruncated bool                       `json:"error_message_truncated,omitempty"`
+	Diagnostics           []Diagnostic               `json:"diagnostics,omitempty"`
+	Blocker               string                     `json:"blocker,omitempty"`
+	BlockerDetail         string                     `json:"blocker_detail,omitempty"`
+	AgentAPIHTTPStatus    int                        `json:"agent_api_http_status,omitempty"`
+	PathFilters           *[]PathFilter              `json:"path_filters,omitempty"`
+	PathFiltersTruncated  *bool                      `json:"path_filters_truncated,omitempty"`
+	SourceStats           *source.SourceStatsSummary `json:"source_stats,omitempty"`
 }
 
 type Config struct {
@@ -278,6 +281,7 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 			ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated, Diagnostics: diagnostics,
 			Blocker: blocker, BlockerDetail: blockerDetail, AgentAPIHTTPStatus: details.AgentAPIHTTPStatus,
 			PathFilters: pathFilters, PathFiltersTruncated: pathFiltersTruncated,
+			SourceStats: details.SourceStats,
 		},
 	})
 	if err != nil {

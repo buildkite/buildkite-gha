@@ -324,6 +324,7 @@ func TestGitHubAPIStatsConcurrentRequestsAndSnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, stats := WithGitHubAPIStats(t.Context())
+	ctx, sourceStats := WithSourceStats(ctx)
 	ctx = WithPublicRepositoryChecks(ctx)
 	var group sync.WaitGroup
 	errors := make(chan error, workers)
@@ -333,6 +334,7 @@ func TestGitHubAPIStatsConcurrentRequestsAndSnapshots(t *testing.T) {
 			_, err := resolver.Resolve(ctx, ref)
 			errors <- err
 			_ = stats.Snapshot()
+			_ = sourceStats.Snapshot()
 		})
 	}
 	group.Wait()
@@ -358,6 +360,15 @@ func TestGitHubAPIStatsConcurrentRequestsAndSnapshots(t *testing.T) {
 	if !slices.Equal(stats.Snapshot().Requests, want) || stats.Snapshot().CacheHits[0].Count != workers-1 {
 		t.Fatal("mutating a snapshot changed the shared counters")
 	}
+	summary := sourceStats.Snapshot()
+	if len(summary.Requests) != 2 || summary.Requests[0].Count != 1 || summary.Requests[1].Count != workers || summary.Requests[1].Authentication != "authenticated" || summary.Requests[1].Result != "success" || summary.CacheHits["public_repository_check"] != workers-1 {
+		t.Fatalf("source summary = %#v", summary)
+	}
+	summary.Requests[0].Count = 999
+	summary.CacheHits["public_repository_check"] = 999
+	if next := sourceStats.Snapshot(); next.Requests[0].Count != 1 || next.CacheHits["public_repository_check"] != workers-1 {
+		t.Fatal("mutating a source snapshot changed the shared counters")
+	}
 }
 
 func TestGitHubAPIStatsExcludeSourceArchivesAndTreeCache(t *testing.T) {
@@ -376,6 +387,7 @@ func TestGitHubAPIStatsExcludeSourceArchivesAndTreeCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, stats := WithGitHubAPIStats(t.Context())
+	ctx, sourceStats := WithSourceStats(ctx)
 	ref, _ := Parse("owner/action@" + testSHA)
 	for range 2 {
 		materialized, err := store.Materialize(ctx, Resolved{Reference: ref, Commit: testSHA})
@@ -387,5 +399,13 @@ func TestGitHubAPIStatsExcludeSourceArchivesAndTreeCache(t *testing.T) {
 	got := stats.Snapshot()
 	if downloads.Load() != 1 || got.HTTPAttempts != 0 || got.HTTPResponses != 0 || len(got.Requests) != 0 || len(got.CacheHits) != 0 || len(got.Suppressed) != 0 {
 		t.Fatalf("archive downloads = %d; REST summary = %#v", downloads.Load(), got)
+	}
+	summary := sourceStats.Snapshot()
+	if summary.Materializations != 2 || summary.CacheHits["source_tree"] != 1 || len(summary.Requests) != 1 {
+		t.Fatalf("source summary = %#v", summary)
+	}
+	request := summary.Requests[0]
+	if request.Operation != "archive" || request.Authentication != "anonymous" || request.Status != 200 || request.Result != "success" || request.Count != 1 || request.Bytes != int64(len(archive)) {
+		t.Fatalf("archive request = %#v", request)
 	}
 }

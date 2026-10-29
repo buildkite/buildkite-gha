@@ -367,6 +367,7 @@ func makeConfig(opts []Option) (config, error) {
 
 // Resolve pins a ref to a commit. Full lowercase SHA pins bypass mutable refs.
 func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error) {
+	ctx = context.WithValue(ctx, sourceRepositoryRootKey{}, ref.RepositoryRoot)
 	parsed, err := Parse(ref.Raw)
 	if err != nil {
 		return Resolved{}, err
@@ -523,6 +524,7 @@ func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
 		var rate *RateLimitError
 		if errors.As(err, &rate) {
 			recordGitHubAPISuppression(ctx, authenticated, parts)
+			recordSourceStat(ctx, "suppressed")
 		}
 		return err
 	}
@@ -533,7 +535,7 @@ func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
 	}
 	return err
 }
-func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []string, out any) error {
+func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []string, out any) (err error) {
 	u := apiURL(cfg.api, parts...)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -546,6 +548,8 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	observation := beginGitHubAPIRequest(ctx, req.Header.Get("Authorization") != "", parts)
 	status, outcome := 0, apiOutcomeTransportError
 	defer func() { observation.finish(status, outcome) }()
+	sourceObservation := beginSourceRequest(ctx, sourceAPIEndpoint(parts), req.Header.Get("Authorization") != "")
+	defer func() { sourceObservation.finish(err) }()
 	resp, err := c.Do(req)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -554,6 +558,7 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 		return fmt.Errorf("GitHub API request: %w", err)
 	}
 	status, outcome = resp.StatusCode, apiOutcomeResponse
+	sourceObservation.response(resp)
 	defer func() { _ = resp.Body.Close() }()
 	lr := io.LimitReader(resp.Body, 1<<20+1)
 	body, err := io.ReadAll(lr)
@@ -1033,6 +1038,8 @@ func NewStoreContext(ctx context.Context, root string, client *http.Client, opts
 
 // Materialize returns the verified repository and selected source identity.
 func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialized, error) {
+	ctx = context.WithValue(ctx, sourceRepositoryRootKey{}, resolved.Reference.RepositoryRoot)
+	recordSourceStat(ctx, "materialization")
 	if !git.ValidObjectID(resolved.Commit) {
 		return Materialized{}, fmt.Errorf("commit must be lower-case full SHA")
 	}
@@ -1067,6 +1074,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 			return Materialized{}, err
 		}
 		s.touch(base)
+		recordSourceStat(ctx, "source_tree")
 		return s.materializedLease(ctx, entryLock, resolved, tree, selectedPath, m.Digest)
 	}
 	if _, statErr := os.Stat(base); statErr == nil {
@@ -1079,6 +1087,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 				return Materialized{}, err
 			}
 			s.touch(base)
+			recordSourceStat(ctx, "source_tree")
 			return s.materializedLease(ctx, entryLock, resolved, tree, selectedPath, m.Digest)
 		}
 		entryLock.unlock()
@@ -1096,6 +1105,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 		return Materialized{}, err
 	}
 	if cached != nil {
+		recordSourceStat(ctx, "source_tree")
 		return *cached, nil
 	}
 	defer func() {
@@ -1109,6 +1119,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 		}
 		exclusive := entryLock
 		entryLock = nil
+		recordSourceStat(ctx, "source_tree")
 		return s.reacquireMaterializedLease(ctx, exclusive, resolved, base, tree, selectedPath)
 	}
 	tmp, partialLock, err := s.createPartial(ctx, parent)
@@ -1302,7 +1313,7 @@ func (s *Store) extractGitRepository(ctx context.Context, resolved Resolved, dst
 	return nil
 }
 
-func (s *Store) downloadArchive(ctx context.Context, u *url.URL, dst string) error {
+func (s *Store) downloadArchive(ctx context.Context, u *url.URL, dst string) (err error) {
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if e != nil {
 		return e
@@ -1324,10 +1335,13 @@ func (s *Store) downloadArchive(ctx context.Context, u *url.URL, dst string) err
 		req.Header.Set("User-Agent", s.cfg.userAgent)
 		return nil
 	}
+	observation := beginSourceRequest(ctx, "archive", false)
+	defer func() { observation.finish(err) }()
 	resp, e := c.Do(req)
 	if e != nil {
 		return fmt.Errorf("download archive: %w", e)
 	}
+	observation.response(resp)
 	defer func() { _ = resp.Body.Close() }()
 	if !validArchiveURL(resp.Request.URL, s.cfg.finalHosts) {
 		return fmt.Errorf("archive final URL denied")

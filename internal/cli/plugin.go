@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/git"
@@ -36,6 +37,7 @@ func plugin(ctx context.Context, args []string, stdout, stderr io.Writer, versio
 }
 
 func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer, version, clientVersion string, runner transport.Runner) (code int) {
+	ctx, _ = actionsource.WithSourceStats(ctx)
 	started := time.Now()
 	details := &commandTelemetryDetails{}
 	stderr = details.captureErrors(stderr)

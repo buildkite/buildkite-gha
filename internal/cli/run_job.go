@@ -41,6 +41,7 @@ func runJob(args []string, stdout, stderr io.Writer, version, clientVersion stri
 }
 
 func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) (code int) {
+	ctx, _ = actionsource.WithSourceStats(ctx)
 	started := time.Now()
 	var result gharuntime.JobResult
 	details := &commandTelemetryDetails{}

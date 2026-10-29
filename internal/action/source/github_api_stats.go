@@ -213,6 +213,9 @@ func (o githubAPIRequestObservation) finish(status int, outcome githubAPIRequest
 }
 
 func recordSourceCacheHit(ctx context.Context, kind sourceCacheKind) {
+	if kind < sourceCacheKindCount {
+		recordSourceStat(ctx, sourceCacheNames[kind])
+	}
 	stats := githubAPIStatsFromContext(ctx)
 	if stats == nil || kind >= sourceCacheKindCount {
 		return
