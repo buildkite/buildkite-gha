@@ -790,6 +790,16 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 			if err := requireKnownNamedInputs(engine, site, context.Inputs); err != nil {
 				return Reduced{}, err
 			}
+			// Input values containing expression syntax stay rejected until
+			// they are proven safe to accept as data, so evaluate a discarded
+			// view with the inputs to apply the same check as other templates.
+			probe, err := reduceAvailableCompileTemplate(site.Source, context, true)
+			if err == nil {
+				_, err = evaluateAvailableCompileTemplate(probe, context)
+			}
+			if err != nil {
+				return Reduced{}, siteError(site, err)
+			}
 			context.Inputs, context.InputsComplete = nil, false
 		}
 		reduced, err := reduceAvailableCompileTemplate(site.Source, context, site.Profile == ProfileCompileServiceCredential)

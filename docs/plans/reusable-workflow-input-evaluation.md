@@ -42,9 +42,11 @@ from exactly one place:
 | Action body and defaults | Action invocation inputs, which shadow workflow inputs |
 
 The runtime supplies `Job.Inputs` through `WorkflowInputs` and condition
-contexts. Runtime literal consumers, graph, scheduling and service fields, call
-guards, and authority analysis use scoped inputs. Step `uses` is the remaining
-gap.
+contexts. Runtime literal consumers, graph fields, service templates and
+credentials, needs-derived concurrency groups, call guards, and authority
+analysis use scoped inputs. Step `uses` is the remaining gap. Dynamic service
+maps and needs-derived `max-parallel` accept only `needs` outputs, so they never
+read inputs.
 
 ### Invariants
 
@@ -109,8 +111,9 @@ substitution.
    these profiles to deferred-input forms they reject today. Services evaluate
    while compiling, so an image that resolves empty still drops the service.
    Credentials and needs-derived concurrency groups keep their input reads.
-   A computed selector, such as `inputs[inputs.key]`, counts as reading every
-   deferred input in its frame.
+   Credentials still reject input values that would add expression syntax,
+   like other compile-time templates. A computed selector, such as
+   `inputs[inputs.key]`, counts as reading every deferred input in its frame.
 5. **Cleanup.** Delete substitution and substitution-only redaction. Accept
    `${{` in input values as data only after no reparse path remains and a
    hosted fixture confirms GitHub's nested `workflow_call` behavior. Move

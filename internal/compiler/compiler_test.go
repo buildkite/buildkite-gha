@@ -5553,20 +5553,22 @@ func TestCompilePlansServiceCredentialInputData(t *testing.T) {
 		t.Run(credential, func(t *testing.T) {
 			source := []byte("on:\n  workflow_dispatch:\n    inputs:\n      user: {type: string}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      database:\n        image: postgres:16\n        credentials:\n          username: user\n          password: " + credential + "\n    steps: [{run: true}]\n")
 			plans, err := compilePlansForTest(t.Context(), "credentials.yml", source, eventSource, "0.0.0-test", testDistributionDigest, defaultOptions())
+			if credential == "${{ inputs.user }}" {
+				if err == nil || !strings.Contains(err.Error(), "contains expression syntax") {
+					t.Fatalf("expression-shaped literal error = %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			job := plans[0]
-			want, wantSecrets := input, []string(nil)
-			if credential != "${{ inputs.user }}" {
-				want, wantSecrets = input+":private", []string{"REGISTRY_PASSWORD"}
-			}
-			if !slices.Equal(job.RequiredSecrets, wantSecrets) || job.GitHubToken != nil {
+			if !slices.Equal(job.RequiredSecrets, []string{"REGISTRY_PASSWORD"}) || job.GitHubToken != nil {
 				t.Fatalf("input data introduced authority: secrets=%v token=%v", job.RequiredSecrets, job.GitHubToken)
 			}
 			got, err := program.EvaluateSite(job.Program.Job.Services.Static[0].Container.Credentials.Password, program.EvaluationContext{Expression: expression.Context{WorkflowInputs: job.Inputs, Secrets: map[string]string{"REGISTRY_PASSWORD": "private"}}})
-			if err != nil || got != want {
-				t.Fatalf("credential = %q, %v; want %q", got, err, want)
+			if err != nil || got != input+":private" {
+				t.Fatalf("credential = %q, %v; want literal input plus :private", got, err)
 			}
 		})
 	}

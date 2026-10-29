@@ -204,7 +204,8 @@ rewrites input-selected secret names, such as `secrets[inputs.name]`, to
 literals. It rejects selectors that deferred inputs could change. Evaluator
 diagnostics must not quote input-derived values. Graph fields, such as labels, matrices,
 `runs-on`, and concurrency, evaluate against the workflow frame's own inputs.
-So do service fields, which compile to literals or `needs`-only residuals.
+So do service templates, which compile to literals or `needs`-only residuals.
+Dynamic service maps and needs-derived `max-parallel` read only `needs` outputs.
 Service credentials keep their input reads, which the runtime evaluates against
 `Job.Inputs`. A needs-derived concurrency group reads the frame's static inputs
 when its continuation resolves the group. Credentials and scheduling groups reject
