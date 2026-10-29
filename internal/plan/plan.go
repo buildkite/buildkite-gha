@@ -1168,10 +1168,13 @@ func validateDeferredInputs(inputs map[string]any, deferred map[string]DeferredI
 			return nil, fmt.Errorf("input %q captured inputs: %w", name, err)
 		}
 		inputNames, dynamic, err := expression.NewEngine().InputReferences(expression.Site{Source: input.Template, Profile: expression.ProfileDeferredInput, Result: expression.ResultAny})
-		if err != nil || dynamic {
-			return nil, fmt.Errorf("input %q template must read inputs by name", name)
+		if err != nil {
+			return nil, fmt.Errorf("input %q has an invalid template: %w", name, err)
 		}
 		for _, inputName := range inputNames {
+			if dynamic {
+				break
+			}
 			if _, ok := lowerKey(input.Inputs, inputName); !ok {
 				return nil, fmt.Errorf("input %q template reads uncaptured input %q", name, inputName)
 			}

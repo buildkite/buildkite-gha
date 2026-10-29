@@ -1034,12 +1034,13 @@ func usesNeeds(value string) bool {
 	return err == nil && referenced
 }
 
-// referencedInputs captures only the caller inputs a deferred template reads.
+// referencedInputs captures the caller inputs a deferred template reads.
 func referencedInputs(template string, values map[string]any) map[string]any {
-	names, _, _ := compilerExpressionEngine.InputReferences(expression.Site{Source: template, Profile: expression.ProfileDeferredInput, Result: expression.ResultAny})
+	names, dynamic, _ := compilerExpressionEngine.InputReferences(expression.Site{Source: template, Profile: expression.ProfileDeferredInput, Result: expression.ResultAny})
 	var captured map[string]any
 	for name, value := range values {
-		if slices.Contains(names, strings.ToLower(name)) {
+		// A computed selector such as inputs[inputs.key] may read any input.
+		if dynamic || slices.Contains(names, strings.ToLower(name)) {
 			if captured == nil {
 				captured = make(map[string]any, len(names))
 			}
