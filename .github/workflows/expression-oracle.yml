@@ -17,6 +17,21 @@ jobs:
   reusable-defaults:
     uses: ./.github/workflows/expression-oracle-reusable.yml
 
+  # format() builds values containing ${{ so the caller passes data, not an
+  # expression. A reparsed secret name would select GITHUB_TOKEN.
+  reusable-input-data:
+    uses: ./.github/workflows/expression-oracle-input-data.yml
+    with:
+      payload: ${{ format('{0}{{{{ github.sha }}}}', '$') }}
+      secret-name: ${{ format('{0}{{{{ ''GITHUB_TOKEN'' }}}}', '$') }}
+      depth: "1"
+
+  nested-reusable-input-data:
+    uses: ./.github/workflows/expression-oracle-input-data-forward.yml
+    with:
+      payload: ${{ format('{0}{{{{ github.sha }}}}', '$') }}
+      secret-name: ${{ format('{0}{{{{ ''GITHUB_TOKEN'' }}}}', '$') }}
+
   expressions:
     runs-on: ubuntu-latest
     steps:
