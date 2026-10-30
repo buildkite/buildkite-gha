@@ -541,7 +541,9 @@ unchanged, not the commit SHA, in:
 while a control lookup of `GITHUB_TOKEN` was not. GitHub therefore treats
 evaluated input values as data in these positions. The run does not cover
 `runs-on`, `services`, `concurrency`, container credentials, or JavaScript and
-Docker action inputs.
+Docker action inputs. A local
+[regression test](../internal/runtime/reusable_input_data_test.go) compiles and
+runs the same callee at both depths.
 
 ### Archive aliases
 

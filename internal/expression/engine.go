@@ -799,12 +799,6 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 			if err != nil {
 				return Reduced{}, err
 			}
-			// Input values containing expression syntax stay rejected until
-			// they are proven safe to accept as data, so evaluate a discarded
-			// view with the inputs to apply the same check as other templates.
-			if _, err := evaluateAvailableCompileTemplate(reduced, context); err != nil {
-				return Reduced{}, siteError(site, inputEvaluationError(site, err))
-			}
 			context.Inputs, context.InputsComplete = nil, false
 		case profile.semantics == semanticsPartialTemplate:
 			// Service residuals read only needs, so input subtrees fold even

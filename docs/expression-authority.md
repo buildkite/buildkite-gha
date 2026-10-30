@@ -213,10 +213,18 @@ Service credentials keep their input reads, which the runtime evaluates against
 when its continuation resolves the group. Credentials and scheduling groups reject
 input reads that are unknown at compile time, including deferred inputs.
 Step `uses` must be a literal action reference, because GitHub resolves
-actions before the job starts. Input values containing `${{` stay rejected
-until the
-[input-evaluation migration](plans/reusable-workflow-input-evaluation.md)
-confirms GitHub treats them as data.
+actions before the job starts.
+
+GitHub treats input values as data, including values containing `${{`
+([evidence](compatibility-contract.md#expression-and-composite-source-evidence)).
+No input value is pasted into expression source, except an input-selected
+secret name, which becomes a quoted string literal. An inherited or
+input-selected name that is not a valid secret name, such as `${{ 'TOKEN' }}`,
+reads as empty. Service and job container images still reject a folded value
+that would introduce `${{`, because the runtime evaluates their partially
+folded result again. Exact forwarding of a deferred input keeps its original caller capture
+and producer bindings; compound forwarding of deferred parent inputs is
+unsupported. Input defaults keep the `github` and `vars` restriction.
 
 Deferred runner selection supplies verified job outputs only to the `runs-on`
 expression profiles. It does not resolve job conditions or reusable inputs in

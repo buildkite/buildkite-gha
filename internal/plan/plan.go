@@ -52,6 +52,12 @@ func ValidContainerImageReference(image string) bool {
 	return metadata.ValidDockerImageReference(image)
 }
 
+// ValidSecretName reports whether name can name a GitHub or Buildkite secret.
+// Looking up any other name yields an empty value.
+func ValidSecretName(name string) bool {
+	return secretNamePattern.MatchString(name)
+}
+
 var githubTokenPermissionAccess = map[string]map[string]bool{
 	"actions":             {"read": true, "write": true},
 	"artifact_metadata":   {"read": true, "write": true},

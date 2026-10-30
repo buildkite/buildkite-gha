@@ -320,7 +320,8 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				if name == "" {
 					name = id
 				}
-				job.Name = labelPrefix + " / " + name
+				// The prefix is already evaluated; the name is still a template.
+				job.Name = expression.TemplateText(labelPrefix+" / ") + name
 			}
 			resolver.expanded++
 			if resolver.expanded > maxFlattenedJobs {
@@ -984,9 +985,6 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 			}
 			return reusableInputs{}, locatedJobError(locationPath, job, span.Start.Line, span.Start.Column, fmt.Sprintf("reusable-workflow input %q must be %s", name, declaration.Type))
 		}
-		if containsExpression(value) {
-			return reusableInputs{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow input %q is not statically resolvable", name))
-		}
 		resolved[name] = value
 	}
 	return reusableInputs{values: resolved, deferred: deferred}, nil
@@ -1122,9 +1120,6 @@ func evaluateStaticCallValue(value string, inputs, matrix map[string]any, contex
 		}
 		for name, value := range values {
 			if strings.EqualFold(name, valueName) {
-				if containsExpression(value) {
-					return nil, fmt.Errorf("expression references runtime-dependent %s value %q", match[1], valueName)
-				}
 				return value, nil
 			}
 		}
@@ -1135,10 +1130,6 @@ func evaluateStaticCallValue(value string, inputs, matrix map[string]any, contex
 		return evaluateCompileSite(value, expression.ProfileCompile, expression.ResultAny, context)
 	}
 	return evaluateCompileSite(value, expression.ProfileCompileTemplate, expression.ResultString, context)
-}
-
-func containsExpression(value any) bool {
-	return anyString(value, func(value string) bool { return strings.Contains(value, "${{") })
 }
 
 // anyString reports whether test matches any string in a decoded YAML value.
