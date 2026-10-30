@@ -38,6 +38,7 @@ func TestPluginPathFilterTelemetry(t *testing.T) {
 	sources := map[string]string{
 		"match.yml":        filtered + jobs,
 		"nonmatch.yml":     strings.ReplaceAll(filtered, "src/**", "docs/**") + jobs,
+		"ignore.yml":       strings.ReplaceAll(filtered, "paths: ['src/**']", "paths-ignore: ['docs/**']") + jobs,
 		"excluded.yml":     strings.ReplaceAll(filtered, "    paths:", "    branches: [other]\n    paths:") + jobs,
 		"mismatch.yml":     filtered + jobs,
 		"invalid-glob.yml": strings.ReplaceAll(filtered, "src/**", "[") + jobs,
@@ -91,9 +92,11 @@ func TestPluginPathFilterTelemetry(t *testing.T) {
 		name, event                                      string
 		status                                           int
 		disabled, shallow, newBranch, tag, uploadFailure bool
+		emptyCommits                                     bool
 	}{
 		{name: "push", event: "push", status: 202},
 		{name: "new branch", event: "push", status: 202, newBranch: true},
+		{name: "new ref at existing commit", event: "push", status: 202, newBranch: true, emptyCommits: true},
 		{name: "PR divergent base", event: "pull_request", status: 202},
 		{name: "unavailable history", event: "push", status: 202, shallow: true},
 		{name: "tag", event: "push", status: 202, tag: true},
@@ -116,6 +119,11 @@ func TestPluginPathFilterTelemetry(t *testing.T) {
 			payload := map[string]any{"ref": ref, "before": before, "after": head,
 				"created": test.newBranch, "deleted": false, "forced": false,
 				"commits": []any{map[string]any{"id": head}}, "repository": map[string]any{"full_name": "buildkite/buildkite-gha"}}
+			if test.emptyCommits {
+				payload["commits"] = []any{}
+				// The head commit changed src, but this ref creation pushes no commits.
+				payload["head_commit"] = map[string]any{"id": head, "added": []string{"src/changed.go"}}
+			}
 			if test.event == "pull_request" {
 				pinnedBase, ref = prBase, "refs/pull/42/head"
 				t.Setenv("BUILDKITE_PULL_REQUEST", "42")
@@ -173,6 +181,9 @@ func TestPluginPathFilterTelemetry(t *testing.T) {
 			var pipeline struct {
 				Steps []struct {
 					Command string `yaml:"command"`
+					Label   string `yaml:"label"`
+					Group   string `yaml:"group"`
+					Skip    string `yaml:"skip"`
 				} `yaml:"steps"`
 			}
 			for _, command := range runner.commands {
@@ -191,6 +202,20 @@ func TestPluginPathFilterTelemetry(t *testing.T) {
 			if failures == 0 {
 				t.Fatal("expected uploaded error steps")
 			}
+			if test.emptyCommits {
+				skipped, control := 0, false
+				for _, step := range pipeline.Steps {
+					if step.Label == ":github: workflow · .github/workflows/match.yml" || step.Label == ":github: workflow · .github/workflows/ignore.yml" {
+						if step.Skip == "Changed paths do not match this workflow's path filters" && !isGeneratedFailureCommand(step.Command) {
+							skipped++
+						}
+					}
+					control = control || step.Group == ":github: workflow · .github/workflows/plain.yml"
+				}
+				if skipped != 2 || !control {
+					t.Fatalf("empty ref must skip filtered workflow and retain control: %#v", pipeline.Steps)
+				}
+			}
 			if test.disabled {
 				if requests != 0 {
 					t.Fatal("opt-out sent telemetry")
@@ -204,17 +229,25 @@ func TestPluginPathFilterTelemetry(t *testing.T) {
 			for _, decision := range *received.PathFilters {
 				decisions[filepath.Base(decision.WorkflowPath)] = decision
 			}
-			if len(decisions) != 7 {
+			if len(decisions) != 8 {
 				t.Fatalf("decisions=%#v", decisions)
 			}
 			want := map[string]string{"match.yml": "match/paths_match", "nonmatch.yml": "nonmatch/paths_do_not_match",
+				"ignore.yml":   "match/paths_match",
 				"excluded.yml": "not_evaluated/non_path_filter_exclusion", "mismatch.yml": "error/path_evidence_unavailable",
 				"broken.yml": "error/workflow_parse_error", "plain.yml": "not_evaluated/no_path_filters", "invalid-glob.yml": "error/trigger_error"}
+			comparisonBase := base
+			if test.emptyCommits {
+				want["match.yml"] = "nonmatch/paths_do_not_match"
+				want["ignore.yml"] = "nonmatch/paths_do_not_match"
+				comparisonBase = head
+			}
 			if test.shallow {
 				want["match.yml"], want["nonmatch.yml"] = "error/path_evidence_unavailable", "error/path_evidence_unavailable"
+				want["ignore.yml"] = "error/path_evidence_unavailable"
 			}
 			if test.tag {
-				for _, name := range []string{"match.yml", "nonmatch.yml", "excluded.yml", "mismatch.yml"} {
+				for _, name := range []string{"match.yml", "nonmatch.yml", "ignore.yml", "excluded.yml", "mismatch.yml"} {
 					want[name] = "not_evaluated/tag_push"
 				}
 			}
@@ -228,7 +261,7 @@ func TestPluginPathFilterTelemetry(t *testing.T) {
 			if matched.HeadSHA != head || matched.EventName != test.event || matched.EventRef != ref || matched.WorkflowDigest != fmt.Sprintf("%x", sha256.Sum256([]byte(sources["match.yml"]))) {
 				t.Fatalf("event/source identity=%#v", matched)
 			}
-			if !test.tag && !test.shallow && (matched.WorkflowSHA != head || matched.BaseSHA != pinnedBase || matched.ComparisonBaseSHA != base) {
+			if !test.tag && !test.shallow && (matched.WorkflowSHA != head || matched.BaseSHA != pinnedBase || matched.ComparisonBaseSHA != comparisonBase) {
 				t.Fatalf("comparison identity=%#v", matched)
 			}
 			if decisions["mismatch.yml"].WorkflowSHA != "" {

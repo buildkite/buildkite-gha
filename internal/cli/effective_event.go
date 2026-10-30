@@ -224,7 +224,7 @@ func pushPathFilterFailureMessage(reason string) string {
 		detail = "This import has no linked GitHub push webhook. Manual builds and explicit event snapshots cannot supply the linked evidence required for push path filters."
 		nextStep = " Use a build triggered by a GitHub push with its original webhook payload."
 	case "new-branch push requires complete pushed commit evidence":
-		detail = "The webhook commit list is empty or does not include the new branch's after commit, so Buildkite cannot determine the changed paths. Changing workflow checkout settings cannot supply this evidence."
+		detail = "The webhook commit list does not include the new branch's after commit, so Buildkite cannot determine the changed paths. Changing workflow checkout settings cannot supply this evidence."
 	case "webhook push requires its commits array":
 		detail = "The linked webhook has no usable commits array. Buildkite needs the original GitHub push commit list; changing workflow checkout settings cannot supply it."
 	case "push before commit is unavailable in the local checkout":

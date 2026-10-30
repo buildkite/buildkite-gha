@@ -231,7 +231,12 @@ func pushWebhookCommits(payload map[string]any) ([]string, error) {
 }
 
 func newBranchPushDiffBase(root, after string, commits []string) (string, error) {
-	if len(commits) == 0 || !slices.Contains(commits, after) {
+	// Creating a ref at an already-published commit pushes no commits. Compare
+	// the verified head to itself, not to its parent or head_commit's file list.
+	if len(commits) == 0 {
+		return after, nil
+	}
+	if !slices.Contains(commits, after) {
 		return "", fmt.Errorf("new-branch push requires complete pushed commit evidence")
 	}
 	pushed := make(map[string]bool, len(commits))

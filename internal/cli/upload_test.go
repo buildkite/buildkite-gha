@@ -2725,8 +2725,7 @@ func TestRunUploadPreservesVerifiedPushExclusionsWithUnavailablePaths(t *testing
 	}{
 		{"shallow", "push path filters require a complete non-shallow checkout", "fetch full history before import"},
 		{"missing before", "push before commit is unavailable in the local checkout", "already non-shallow checkout"},
-		{"empty new branch commits", "new-branch push requires complete pushed commit evidence", "commit list is empty or does not include"},
-		{"missing new branch after", "new-branch push requires complete pushed commit evidence", "commit list is empty or does not include"},
+		{"missing new branch after", "new-branch push requires complete pushed commit evidence", "commit list does not include"},
 		{"missing commits array", "webhook push requires its commits array", "original GitHub push commit list"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2742,8 +2741,6 @@ func TestRunUploadPreservesVerifiedPushExclusionsWithUnavailablePaths(t *testing
 				t.Cleanup(func() { _ = os.Remove(shallowPath) })
 			case "missing before":
 				before = strings.Repeat("f", 40)
-			case "empty new branch commits":
-				before, created, commits = zeroGitCommit, true, []any{}
 			case "missing new branch after":
 				before, created, commits = zeroGitCommit, true, []any{map[string]any{"id": base}}
 			}
