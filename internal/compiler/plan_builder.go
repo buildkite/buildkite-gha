@@ -823,6 +823,10 @@ func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, 
 	mappings := map[string]string{}
 	var tokenAliases []string
 	for alias := range found {
+		if !plan.ValidSecretName(alias) {
+			// No secret can have this name, so the lookup is empty.
+			continue
+		}
 		if alias == "GITHUB_TOKEN" {
 			if workflowFound[alias] || reachableActionFound[alias] {
 				tokenAliases = append(tokenAliases, alias)
