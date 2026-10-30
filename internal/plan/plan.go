@@ -40,6 +40,10 @@ var compilerVersionPattern = regexp.MustCompile(`^[ -~]{1,256}$`)
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var logicalJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$`)
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// secretAliasPattern matches a workflow_call secret ID, which names the
+// callee's view of a mapped secret and, unlike a secret name, may contain -.
+var secretAliasPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
 var actionLockIDPattern = regexp.MustCompile(`^a-[0-9a-f]{16}$`)
 var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
@@ -815,7 +819,7 @@ func (job Job) Validate() error {
 		}
 	}
 	for alias, source := range job.SecretMappings {
-		if !secretNamePattern.MatchString(alias) || strings.EqualFold(alias, "GITHUB_TOKEN") || !secretNamePattern.MatchString(source) {
+		if !secretAliasPattern.MatchString(alias) || strings.EqualFold(alias, "GITHUB_TOKEN") || !secretNamePattern.MatchString(source) {
 			return fmt.Errorf("job plan contains invalid secret mapping %q to %q", alias, source)
 		}
 		if _, ok := requiredSecrets[source]; !ok {
@@ -850,7 +854,7 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job plan GitHub token aliases must be sorted")
 		}
 		for i, alias := range job.GitHubToken.Aliases {
-			if !secretNamePattern.MatchString(alias) || strings.EqualFold(alias, "GITHUB_TOKEN") || i > 0 && strings.EqualFold(job.GitHubToken.Aliases[i-1], alias) {
+			if !secretAliasPattern.MatchString(alias) || strings.EqualFold(alias, "GITHUB_TOKEN") || i > 0 && strings.EqualFold(job.GitHubToken.Aliases[i-1], alias) {
 				return fmt.Errorf("job plan contains invalid or repeated GitHub token alias %q", alias)
 			}
 			if _, exists := ordinaryAliases[strings.ToUpper(alias)]; exists {
