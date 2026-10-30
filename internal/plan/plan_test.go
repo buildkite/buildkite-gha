@@ -839,7 +839,7 @@ func TestSecretMappingsRoundTripAsNamesOnlyAndValidateAuthority(t *testing.T) {
 	job := validJob()
 	job.RequiredCapabilities = []string{"secrets"}
 	job.RequiredSecrets = []string{"ORIGINAL"}
-	job.SecretMappings = map[string]string{"ALIAS": "ORIGINAL"}
+	job.SecretMappings = map[string]string{"ALIAS": "ORIGINAL", "ACCESS-TOKEN": "ORIGINAL"}
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -859,6 +859,8 @@ func TestSecretMappingsRoundTripAsNamesOnlyAndValidateAuthority(t *testing.T) {
 	}{
 		{name: "missing source", edit: func(j *Job) { j.SecretMappings["ALIAS"] = "OTHER" }, want: "undeclared source"},
 		{name: "reserved alias", edit: func(j *Job) { j.SecretMappings = map[string]string{"GITHUB_TOKEN": "ORIGINAL"} }, want: "invalid secret mapping"},
+		// Aliases are workflow_call secret IDs; sources are real secret names.
+		{name: "hyphenated source", edit: func(j *Job) { j.SecretMappings["ALIAS"] = "ORIGINAL-NAME" }, want: "invalid secret mapping"},
 		{name: "missing capability", edit: func(j *Job) { j.RequiredCapabilities = nil }, want: "secrets capability"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

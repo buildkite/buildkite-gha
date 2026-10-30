@@ -3326,6 +3326,8 @@ jobs:
       required_alias: ${{ secrets.ORIGINAL }}
       duplicate_alias: ${{ secrets.ORIGINAL }}
       token_alias: ${{ secrets.GITHUB_TOKEN }}
+      access-token: ${{ secrets.ORIGINAL }}
+      token-alias: ${{ secrets.GITHUB_TOKEN }}
 `)
 	writeWorkflow(t, repository, "reusable.yml", `on:
   workflow_call:
@@ -3335,6 +3337,8 @@ jobs:
       duplicate_alias:
       optional_alias:
       token_alias:
+      access-token:
+      token-alias:
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -3343,6 +3347,8 @@ jobs:
       DUPLICATE: ${{ secrets['duplicate_alias'] }}
       OPTIONAL: ${{ secrets.optional_alias }}
       TOKEN: ${{ secrets.token_alias }}
+      HYPHENATED: ${{ secrets.access-token }}
+      HYPHENATED_TOKEN: ${{ secrets.token-alias }}
     steps:
       - run: true
 `)
@@ -3354,11 +3360,11 @@ jobs:
 		t.Fatalf("plans = %d, want two matrix instances", len(plans))
 	}
 	for _, job := range plans {
-		wantMappings := map[string]string{"DUPLICATE_ALIAS": "ORIGINAL", "REQUIRED_ALIAS": "ORIGINAL"}
+		wantMappings := map[string]string{"ACCESS-TOKEN": "ORIGINAL", "DUPLICATE_ALIAS": "ORIGINAL", "REQUIRED_ALIAS": "ORIGINAL"}
 		if !slices.Equal(job.RequiredSecrets, []string{"ORIGINAL"}) || !reflect.DeepEqual(job.SecretMappings, wantMappings) || !job.HasCapability("secrets") {
 			t.Fatalf("ordinary secret boundary = %#v / %#v / %#v", job.RequiredSecrets, job.SecretMappings, job.RequiredCapabilities)
 		}
-		if job.GitHubToken == nil || !slices.Equal(job.GitHubToken.Aliases, []string{"TOKEN_ALIAS"}) || !job.HasCapability("provider-token-write") {
+		if job.GitHubToken == nil || !slices.Equal(job.GitHubToken.Aliases, []string{"TOKEN-ALIAS", "TOKEN_ALIAS"}) || !job.HasCapability("provider-token-write") {
 			t.Fatalf("token alias boundary = %#v / %#v", job.GitHubToken, job.RequiredCapabilities)
 		}
 		encoded, encodeErr := plan.Encode(job)
@@ -3592,13 +3598,9 @@ func TestCompileSecretLookupsByImpossibleNames(t *testing.T) {
 	tests := []struct {
 		name, caller string
 		want         []string
-		wantError    string
 	}{
 		{name: "root", caller: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        env:\n          A: ${{ secrets['a-b'] }}\n          B: ${{ secrets.CANARY }}\n", want: []string{"CANARY"}},
 		{name: "inherited", caller: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets: inherit\n"},
-		// The alias is local to the callee; the source must be a real
-		// secret, which plan validation does not yet accept for this alias.
-		{name: "mapped hyphenated alias", caller: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets:\n      access-token: ${{ secrets.CANARY }}\n", wantError: `invalid secret mapping "ACCESS-TOKEN" to "CANARY"`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -3606,12 +3608,6 @@ func TestCompileSecretLookupsByImpossibleNames(t *testing.T) {
 			path := writeWorkflow(t, repository, "caller.yml", test.caller)
 			writeWorkflow(t, repository, "callee.yml", callee)
 			plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
-			if test.wantError != "" {
-				if err == nil || !strings.Contains(err.Error(), test.wantError) {
-					t.Fatalf("compile error = %v, want %q", err, test.wantError)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatal(err)
 			}

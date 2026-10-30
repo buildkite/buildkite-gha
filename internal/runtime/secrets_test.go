@@ -32,12 +32,14 @@ func TestRunJobResolvesOriginalSecretOnceAndProjectsAliases(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID: "aliases", Kind: "run", Command: `test "${{ secrets.FIRST }}" = shared-value
 test "${{ secrets.SECOND }}" = shared-value
+test "${{ secrets.access-token }}" = shared-value
+test "${{ secrets['Access-Token'] }}" = shared-value
 test -z "${{ secrets.OPTIONAL }}"
 echo "first=${{ secrets.FIRST }} second=${{ secrets.SECOND }}"`,
 	}})
 	job.RequiredCapabilities = []string{"secrets"}
 	job.RequiredSecrets = []string{"ORIGINAL"}
-	job.SecretMappings = map[string]string{"FIRST": "ORIGINAL", "SECOND": "ORIGINAL"}
+	job.SecretMappings = map[string]string{"FIRST": "ORIGINAL", "SECOND": "ORIGINAL", "ACCESS-TOKEN": "ORIGINAL"}
 	resolver := &countingSecretResolver{values: map[string]string{"ORIGINAL": "shared-value"}, calls: map[string]int{}}
 	redactor := &testRedactor{}
 	var logs bytes.Buffer
