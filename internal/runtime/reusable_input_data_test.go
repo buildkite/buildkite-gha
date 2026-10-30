@@ -61,6 +61,8 @@ jobs:
       matrix:
         payload:
           - ${{ inputs.payload }}
+    outputs:
+      payload: ${{ inputs.payload }}
     env:
       JOB_VALUE: ${{ inputs.payload }}
     steps:
@@ -125,6 +127,9 @@ runs:
 		result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: testSecretResolver{"CANARY": "canary-value"}, Redactor: &testRedactor{}}).runTestJob(t.Context(), job, workspace)
 		if err != nil || result.Conclusion != "success" {
 			t.Fatalf("RunJob(%s) result = %#v, error = %v\n%s", job.Workflow.LogicalJobID, result, err, logs.String())
+		}
+		if got := result.Outputs["payload"]; got != "${{ github.sha }}" {
+			t.Fatalf("RunJob(%s) output = %q, want the input text", job.Workflow.LogicalJobID, got)
 		}
 	}
 }

@@ -3587,6 +3587,41 @@ jobs:
 	}
 }
 
+func TestCompileSecretLookupsByImpossibleNames(t *testing.T) {
+	const callee = "on:\n  workflow_call:\n    secrets:\n      access-token:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        env:\n          A: ${{ secrets['a-b'] }}\n          T: ${{ secrets.access-token }}\n"
+	tests := []struct {
+		name, caller string
+		want         []string
+		wantError    string
+	}{
+		{name: "root", caller: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        env:\n          A: ${{ secrets['a-b'] }}\n          B: ${{ secrets.CANARY }}\n", want: []string{"CANARY"}},
+		{name: "inherited", caller: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets: inherit\n"},
+		// The alias is local to the callee; the source must be a real
+		// secret, which plan validation does not yet accept for this alias.
+		{name: "mapped hyphenated alias", caller: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets:\n      access-token: ${{ secrets.CANARY }}\n", wantError: `invalid secret mapping "ACCESS-TOKEN" to "CANARY"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			path := writeWorkflow(t, repository, "caller.yml", test.caller)
+			writeWorkflow(t, repository, "callee.yml", callee)
+			plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("compile error = %v, want %q", err, test.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 1 || !slices.Equal(plans[0].RequiredSecrets, test.want) {
+				t.Fatalf("required secrets = %v, want %v", plans[0].RequiredSecrets, test.want)
+			}
+		})
+	}
+}
+
 func TestCompileRequiresSecretInheritanceOnEveryReusableWorkflowEdge(t *testing.T) {
 	for _, test := range []struct {
 		name          string
@@ -5592,22 +5627,20 @@ func TestCompilePlansServiceCredentialInputData(t *testing.T) {
 		t.Run(credential, func(t *testing.T) {
 			source := []byte("on:\n  workflow_dispatch:\n    inputs:\n      user: {type: string}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      database:\n        image: postgres:16\n        credentials:\n          username: user\n          password: " + credential + "\n    steps: [{run: true}]\n")
 			plans, err := compilePlansForTest(t.Context(), "credentials.yml", source, eventSource, "0.0.0-test", testDistributionDigest, defaultOptions())
-			if credential == "${{ inputs.user }}" {
-				if err == nil || !strings.Contains(err.Error(), "contains expression syntax") {
-					t.Fatalf("expression-shaped literal error = %v", err)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			job := plans[0]
-			if !slices.Equal(job.RequiredSecrets, []string{"REGISTRY_PASSWORD"}) || job.GitHubToken != nil {
+			want, wantSecrets := input, []string(nil)
+			if credential != "${{ inputs.user }}" {
+				want, wantSecrets = input+":private", []string{"REGISTRY_PASSWORD"}
+			}
+			if !slices.Equal(job.RequiredSecrets, wantSecrets) || job.GitHubToken != nil {
 				t.Fatalf("input data introduced authority: secrets=%v token=%v", job.RequiredSecrets, job.GitHubToken)
 			}
 			got, err := program.EvaluateSite(job.Program.Job.Services.Static[0].Container.Credentials.Password, program.EvaluationContext{Expression: expression.Context{WorkflowInputs: job.Inputs, Secrets: map[string]string{"REGISTRY_PASSWORD": "private"}}})
-			if err != nil || got != input+":private" {
-				t.Fatalf("credential = %q, %v; want literal input plus :private", got, err)
+			if err != nil || got != want {
+				t.Fatalf("credential = %q, %v; want %q", got, err, want)
 			}
 		})
 	}

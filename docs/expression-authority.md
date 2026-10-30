@@ -215,12 +215,12 @@ input reads that are unknown at compile time, including deferred inputs.
 Step `uses` must be a literal action reference, because GitHub resolves
 actions before the job starts.
 
-Input values are data, including values that contain `${{`, as
-[native evidence](compatibility-contract.md#expression-and-composite-source-evidence)
-shows GitHub treats them. No input value is pasted into expression source,
-except an input-selected secret name, which becomes a quoted string literal. A
-name that no secret can have, such as `${{ 'TOKEN' }}`, reads as empty. Compile-time
-templates, such as service and container images, still reject a folded value
+GitHub treats input values as data, including values containing `${{`
+([evidence](compatibility-contract.md#expression-and-composite-source-evidence)).
+No input value is pasted into expression source, except an input-selected
+secret name, which becomes a quoted string literal. An inherited or
+input-selected name that is not a valid secret name, such as `${{ 'TOKEN' }}`,
+reads as empty. Service and job container images still reject a folded value
 that would introduce `${{`, because the runtime evaluates their partially
 folded result again. Exact forwarding of a deferred input keeps its original caller capture
 and producer bindings; compound forwarding of deferred parent inputs is
