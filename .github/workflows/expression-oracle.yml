@@ -34,6 +34,8 @@ jobs:
       secret-name: ${{ format('{0}{{{{ ''GITHUB_TOKEN'' }}}}', '$') }}
 
   reusable-input-data-outputs:
+    # Run even when a callee is skipped, so its empty output fails the check.
+    if: ${{ !cancelled() }}
     needs: [reusable-input-data, nested-reusable-input-data]
     runs-on: ubuntu-latest
     steps:
