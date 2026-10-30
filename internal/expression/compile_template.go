@@ -309,6 +309,16 @@ func SubstituteSecretSelectorInputs(template string, inputs map[string]any, inpu
 	}
 }
 
+// TemplateText returns a template that evaluates to text. Text containing
+// ${{ becomes one quoted literal expression, so it is not evaluated again.
+func TemplateText(text string) string {
+	if !strings.Contains(text, "${{") {
+		return text
+	}
+	literal, _ := compileInputLiteral(text)
+	return "${{ " + literal + " }}"
+}
+
 func compileInputLiteral(value any) (string, error) {
 	switch value := value.(type) {
 	case nil:

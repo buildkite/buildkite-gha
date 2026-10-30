@@ -320,7 +320,8 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				if name == "" {
 					name = id
 				}
-				job.Name = labelPrefix + " / " + name
+				// The prefix is already evaluated; the name is still a template.
+				job.Name = expression.TemplateText(labelPrefix+" / ") + name
 			}
 			resolver.expanded++
 			if resolver.expanded > maxFlattenedJobs {

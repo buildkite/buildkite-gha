@@ -6235,3 +6235,44 @@ func TestCompilerWarningsFlagIgnoredMergeGroupPathFilters(t *testing.T) {
 		t.Fatalf("warnings without path filters = %#v, want none", warnings)
 	}
 }
+
+func TestCompileReusableCallNamesKeepInputDataInLabels(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    name: ${{ format('{0}{{{{ github.sha }}}}', '$') }}
+    uses: ./.github/workflows/forward.yml
+    with:
+      payload: ${{ format('{0}{{{{ github.sha }}}}', '$') }}
+`)
+	writeWorkflow(t, repository, "forward.yml", `on:
+  workflow_call:
+    inputs:
+      payload: {type: string}
+jobs:
+  forward:
+    name: ${{ inputs.payload }}
+    uses: ./.github/workflows/callee.yml
+    with:
+      payload: ${{ inputs.payload }}
+`)
+	writeWorkflow(t, repository, "callee.yml", `on:
+  workflow_call:
+    inputs:
+      payload: {type: string}
+jobs:
+  test:
+    name: leaf-${{ inputs.payload }}
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	bundle, err := CompileBundle(path, readFile(t, path), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "${{ github.sha }} / ${{ github.sha }} / leaf-${{ github.sha }}"
+	if len(bundle.IR.Jobs) != 1 || bundle.IR.Jobs[0].Label != want {
+		t.Fatalf("labels = %#v, want %q", bundle.IR.Jobs, want)
+	}
+}
