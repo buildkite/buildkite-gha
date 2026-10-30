@@ -113,12 +113,12 @@ substitution.
    like other compile-time templates. A computed selector, such as
    `inputs[inputs.key]`, counts as reading every deferred input in its frame.
 5. **Cleanup.** Substitution is deleted. Redaction flags now mean that a
-   field reads inputs. Remaining: accept `${{` in input values as data once
-   a hosted GitHub fixture confirms GitHub's nested `workflow_call`
-   behavior, then move lasting decisions into
+   field reads inputs. Remaining: accept `${{` in input values as data, as
+   [recorded native evidence](../compatibility-contract.md#expression-and-composite-source-evidence)
+   shows GitHub does through nested `workflow_call`, then move lasting decisions into
    [Expression authority](../expression-authority.md) and remove this plan.
    Input-selected secret names stay rewritten to quoted literals, because
-   secret inventory needs static names; that proof must cover them.
+   secret inventory needs static names; the native evidence covers them.
 
 ## Verification
 

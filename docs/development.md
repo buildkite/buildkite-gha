@@ -470,9 +470,12 @@ contents. Repeat with `actions/cache/save` and `actions/cache/restore`. A passin
 compile or job without these assertions is not a cache round-trip proof.
 
 The **Expression differential oracle** records hosted GitHub expression results
-for the conformance fixtures in `internal/expression/conformance_test.go`. Run it
-manually when expression semantics change; it is not part of the local check
-gate.
+for the conformance fixtures in `internal/expression/conformance_test.go`. It
+also checks that reusable workflow input values containing `${{` reach `run`,
+`env`, `with`, and secret selectors as data through one and two `workflow_call`
+levels. Run it manually when expression semantics change; it is not part of the
+local check gate. Dispatch a branch with
+`gh workflow run expression-oracle.yml --ref <branch>`.
 
 Run the complete hosted smoke suite for a pushed commit with:
 

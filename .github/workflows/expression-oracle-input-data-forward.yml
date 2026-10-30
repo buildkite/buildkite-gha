@@ -1,0 +1,25 @@
+name: Expression differential oracle nested reusable input data
+
+on:
+  workflow_call:
+    inputs:
+      payload:
+        type: string
+        required: true
+      secret-name:
+        type: string
+        required: true
+    outputs:
+      payload:
+        value: ${{ jobs.forward.outputs.payload }}
+
+permissions:
+  contents: read
+
+jobs:
+  forward:
+    uses: ./.github/workflows/expression-oracle-input-data.yml
+    with:
+      payload: ${{ inputs.payload }}
+      secret-name: ${{ inputs.secret-name }}
+      depth: "2"

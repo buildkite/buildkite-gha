@@ -527,6 +527,22 @@ are not interchangeable with observed execution. Documentation and schema
 disagreement about reusable caller `with` does not independently broaden our
 supported caller-input positions.
 
+The October 30, 2026 [native `ubuntu-latest` run](https://github.com/buildkite/buildkite-gha/actions/runs/41002711572)
+of [this fixture](https://github.com/buildkite/buildkite-gha/blob/d4f07a6960dfeb36ae6ba57ed1d59433aea6243a/.github/workflows/expression-oracle.yml)
+passed the text `${{ github.sha }}` as a reusable workflow input, directly and
+through a second `workflow_call`. At both depths the callee received that text
+unchanged, not the commit SHA, in:
+
+- the job `if`, job `env`, and a `strategy.matrix` value
+- step `run` and `env`, and a local composite action's `with`
+- job and workflow outputs returned to the caller
+
+`secrets[inputs.secret-name]` with the name `${{ 'GITHUB_TOKEN' }}` was empty,
+while a control lookup of `GITHUB_TOKEN` was not. GitHub therefore treats
+evaluated input values as data in these positions. The run does not cover
+`runs-on`, `services`, `concurrency`, container credentials, or JavaScript and
+Docker action inputs.
+
 ### Archive aliases
 
 The [TruffleHog archive at the recorded commit](https://codeload.github.com/trufflesecurity/trufflehog/tar.gz/e28360875917c9c730f9c64aae29fb93aa6c359e)
