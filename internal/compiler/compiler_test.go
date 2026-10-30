@@ -3601,6 +3601,7 @@ func TestCompileSecretLookupsByImpossibleNames(t *testing.T) {
 	}{
 		{name: "root", caller: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        env:\n          A: ${{ secrets['a-b'] }}\n          B: ${{ secrets.CANARY }}\n", want: []string{"CANARY"}},
 		{name: "inherited", caller: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets: inherit\n"},
+		{name: "mapped", caller: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets:\n      access-token: ${{ secrets.MY-SECRET }}\n"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -3611,8 +3612,8 @@ func TestCompileSecretLookupsByImpossibleNames(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(plans) != 1 || !slices.Equal(plans[0].RequiredSecrets, test.want) {
-				t.Fatalf("required secrets = %v, want %v", plans[0].RequiredSecrets, test.want)
+			if len(plans) != 1 || !slices.Equal(plans[0].RequiredSecrets, test.want) || len(plans[0].SecretMappings) != 0 {
+				t.Fatalf("required secrets = %v, mappings = %v, want %v", plans[0].RequiredSecrets, plans[0].SecretMappings, test.want)
 			}
 		})
 	}
