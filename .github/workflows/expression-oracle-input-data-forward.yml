@@ -9,6 +9,9 @@ on:
       secret-name:
         type: string
         required: true
+    outputs:
+      payload:
+        value: ${{ jobs.forward.outputs.payload }}
 
 permissions:
   contents: read

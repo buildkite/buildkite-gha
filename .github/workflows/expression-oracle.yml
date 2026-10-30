@@ -18,7 +18,8 @@ jobs:
     uses: ./.github/workflows/expression-oracle-reusable.yml
 
   # format() builds values containing ${{ so the caller passes data, not an
-  # expression. A reparsed secret name would select GITHUB_TOKEN.
+  # expression. A reparsed secret name would select GITHUB_TOKEN. Both calls
+  # must pass identical values so the depths are comparable.
   reusable-input-data:
     uses: ./.github/workflows/expression-oracle-input-data.yml
     with:
@@ -31,6 +32,21 @@ jobs:
     with:
       payload: ${{ format('{0}{{{{ github.sha }}}}', '$') }}
       secret-name: ${{ format('{0}{{{{ ''GITHUB_TOKEN'' }}}}', '$') }}
+
+  reusable-input-data-outputs:
+    needs: [reusable-input-data, nested-reusable-input-data]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify reusable outputs stay data
+        shell: bash
+        env:
+          DIRECT_OUTPUT: ${{ needs.reusable-input-data.outputs.payload }}
+          NESTED_OUTPUT: ${{ needs.nested-reusable-input-data.outputs.payload }}
+        run: |
+          expected="$"'{{ github.sha }}'
+          printf '%s\n' "DIRECT_OUTPUT=$DIRECT_OUTPUT" "NESTED_OUTPUT=$NESTED_OUTPUT"
+          test "$DIRECT_OUTPUT" = "$expected"
+          test "$NESTED_OUTPUT" = "$expected"
 
   expressions:
     runs-on: ubuntu-latest
