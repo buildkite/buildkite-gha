@@ -5186,11 +5186,14 @@ jobs:
       db:
         image: ${{ inputs.image }}
         env: {USER: '${{ inputs.user }}'}
-        credentials: {username: '${{ inputs.user }}', password: '${{ secrets.REGISTRY_PASSWORD }}'}
+        credentials: {username: '${{ inputs.USER }}', password: '${{ secrets.REGISTRY_PASSWORD }}'}
     steps: [{run: true}]
 `)
 	source := `on: push
 jobs:
+  none:
+    uses: ./.github/workflows/services.yml
+    with: {image: '', user: gamma}
   first:
     uses: ./.github/workflows/services.yml
     secrets: inherit
@@ -5202,11 +5205,19 @@ jobs:
 `
 	path := writeWorkflow(t, repository, "caller.yml", source)
 	plans, err := compilePlansForTest(t.Context(), path, []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
-	if err != nil || len(plans) != 2 {
+	if err != nil || len(plans) != 3 {
 		t.Fatalf("compile = %d plans, %v", len(plans), err)
 	}
-	for i, want := range []struct{ image, user string }{{"postgres:16", "alpha"}, {"redis:7", "beta"}} {
-		job := plans[i]
+	byJob := make(map[string]plan.Job, len(plans))
+	for _, job := range plans {
+		byJob[job.Workflow.LogicalJobID] = job
+	}
+	// An image input that resolves empty runs the job without the service.
+	if none := byJob["none.test"]; len(none.Services) != 0 || len(none.Program.Job.Services.Static) != 0 {
+		t.Fatalf("empty image job services = %#v", none.Services)
+	}
+	for i, want := range []struct{ job, image, user string }{{"first.test", "postgres:16", "alpha"}, {"second.test", "redis:7", "beta"}} {
+		job := byJob[want.job]
 		service := job.Program.Job.Services.Static[0].Container
 		if service.Image.Source != want.image || job.Services["db"].Env["USER"] != want.user {
 			t.Fatalf("job %d service = %#v", i, job.Services["db"])
@@ -5270,6 +5281,26 @@ jobs:
 	}
 	if !slices.Equal(plans[0].RequiredSecrets, []string{"DB_PASSWORD"}) {
 		t.Fatalf("required secrets = %v", plans[0].RequiredSecrets)
+	}
+}
+
+func TestCompilePlansServiceErrorsWithholdInputValues(t *testing.T) {
+	repository := t.TempDir()
+	source := `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/services.yml
+    with: {pattern: '{9} SENSITIVE-VALUE'}
+`
+	path := writeWorkflow(t, repository, "caller.yml", source)
+	for _, field := range []string{"ports: ['${{ format(inputs.pattern, 1) }}']", "env: {VALUE: '${{ format(inputs.pattern, 1) }}'}", "credentials: {username: '${{ format(inputs.pattern, 1) }}', password: p}"} {
+		t.Run(field, func(t *testing.T) {
+			writeWorkflow(t, repository, "services.yml", "on:\n  workflow_call:\n    inputs:\n      pattern: {type: string}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      db:\n        image: postgres\n        "+field+"\n    steps: [{run: true}]\n")
+			_, err := compilePlansForTest(t.Context(), path, []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+			if err == nil || strings.Contains(err.Error(), "{9}") || strings.Contains(err.Error(), "SENSITIVE") {
+				t.Fatalf("error = %v, want a failure that withholds the input value", err)
+			}
+		})
 	}
 }
 

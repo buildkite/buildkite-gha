@@ -63,7 +63,7 @@ func ReduceDeferredInput(template string, context CompileContext) (string, []Nee
 				return "", nil, fmt.Errorf("template expression resolved to %T, want a scalar", value)
 			}
 			if introducesExpressionSyntax(reduced.String(), replacement, source[consumed:]) {
-				return "", nil, fmt.Errorf("compile-time expression result contains expression syntax")
+				return "", nil, authoredErrorf("compile-time expression result contains expression syntax")
 			}
 			reduced.WriteString(replacement)
 		} else {

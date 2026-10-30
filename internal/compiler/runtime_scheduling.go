@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"slices"
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -57,7 +56,7 @@ func (e *jobGraphExpansion) validateRuntimeScheduling(sourced sourcedJob, descri
 		if _, err := expression.NewEngine().Validate(site); err != nil {
 			return false, err
 		}
-		if readsUnknownInput(site, sourced.inputs) {
+		if readsUnknownInput(site.Source, site.Profile, sourced.inputs) {
 			return false, errors.New("scheduling values can read only workflow inputs known before jobs run")
 		}
 		references, err := expression.DeferredInputReferences(site.Source)
@@ -128,22 +127,4 @@ func resolveRuntimeScheduling(sourced sourcedJob, outputs map[string]string) (wo
 		}
 	}
 	return job, group, nil
-}
-
-// readsUnknownInput reports an input read that has no value before jobs run:
-// an undeclared or deferred name, or a computed selector that could pick a
-// deferred input.
-func readsUnknownInput(site expression.Site, inputs reusableInputs) bool {
-	names, dynamic, err := compilerExpressionEngine.InputReferences(site)
-	if err != nil || dynamic && len(inputs.deferred) != 0 {
-		return true
-	}
-	return slices.ContainsFunc(names, func(name string) bool {
-		for candidate := range inputs.values {
-			if strings.EqualFold(candidate, name) {
-				return false
-			}
-		}
-		return true
-	})
 }

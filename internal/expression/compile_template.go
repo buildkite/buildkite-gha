@@ -64,7 +64,7 @@ func evaluateCompileStringTemplate(template string, context CompileContext) (str
 			return "", fmt.Errorf("expression resolved to %T, want string", value)
 		}
 		if strings.Contains(text, "${{") {
-			return "", fmt.Errorf("compile-time expression result contains expression syntax")
+			return "", authoredErrorf("compile-time expression result contains expression syntax")
 		}
 		return text, nil
 	}
@@ -73,7 +73,7 @@ func evaluateCompileStringTemplate(template string, context CompileContext) (str
 		return "", err
 	}
 	if strings.Contains(evaluated, "${{") {
-		return "", fmt.Errorf("compile-time expression result contains expression syntax")
+		return "", authoredErrorf("compile-time expression result contains expression syntax")
 	}
 	return evaluated, nil
 }
@@ -106,7 +106,7 @@ func evaluateAvailableCompileTemplate(template string, context CompileContext) (
 				return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
 			}
 			if introducesExpressionSyntax(evaluated.String(), replacement, source[consumed:]) {
-				return "", fmt.Errorf("compile-time expression result contains expression syntax")
+				return "", authoredErrorf("compile-time expression result contains expression syntax")
 			}
 			evaluated.WriteString(replacement)
 		}
@@ -165,7 +165,7 @@ func reduceAvailableCompileTemplate(template string, context CompileContext, fol
 				return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
 			}
 			if introducesExpressionSyntax(reduced.String(), replacement, source[consumed:]) {
-				return "", fmt.Errorf("compile-time expression result contains expression syntax")
+				return "", authoredErrorf("compile-time expression result contains expression syntax")
 			}
 			reduced.WriteString(replacement)
 		} else {
