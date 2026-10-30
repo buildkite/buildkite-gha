@@ -1081,6 +1081,10 @@ func TestParseRejectsExpressionsInStepUses(t *testing.T) {
 			if err == nil || !strings.HasPrefix(err.Error(), "uses.yml:6:15:") || !strings.Contains(err.Error(), "uses must be a literal action reference") {
 				t.Fatalf("Parse() error = %v", err)
 			}
+			_, err = Parse("parallel.yml", []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - parallel:\n          - uses: '"+uses+"'\n"))
+			if err == nil || !strings.HasPrefix(err.Error(), "parallel.yml:7:19:") || !strings.Contains(err.Error(), "uses must be a literal action reference") {
+				t.Fatalf("Parse() parallel error = %v", err)
+			}
 		})
 	}
 }

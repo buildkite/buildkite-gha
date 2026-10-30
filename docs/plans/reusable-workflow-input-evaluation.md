@@ -114,7 +114,7 @@ substitution.
    `inputs[inputs.key]`, counts as reading every deferred input in its frame.
 5. **Cleanup.** Substitution is deleted. Redaction flags now mean that a
    field reads inputs. Remaining: accept `${{` in input values as data once
-   a hosted fixture (PB-3966) confirms GitHub's nested `workflow_call`
+   a hosted GitHub fixture confirms GitHub's nested `workflow_call`
    behavior, then move lasting decisions into
    [Expression authority](../expression-authority.md) and remove this plan.
    Input-selected secret names stay rewritten to quoted literals, because
