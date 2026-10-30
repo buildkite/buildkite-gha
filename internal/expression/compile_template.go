@@ -243,94 +243,6 @@ func introducesExpressionSyntax(before, replacement, after string) bool {
 	return false
 }
 
-// SubstituteCompileInputs replaces static inputs.<name> and inputs['name']
-// references inside expression regions with equivalent GitHub expression
-// literals. Text and string literals outside those references are preserved
-// byte-for-byte.
-func SubstituteCompileInputs(template string, inputs map[string]any) (string, error) {
-	resolved := template
-	for {
-		next, err := substituteCompileInputsOnce(resolved, inputs)
-		if err != nil {
-			return "", err
-		}
-		if next == resolved {
-			return next, nil
-		}
-		resolved = next
-	}
-}
-
-func substituteCompileInputsOnce(template string, inputs map[string]any) (string, error) {
-	const open = "${{"
-	var substituted strings.Builder
-	remaining := template
-	for {
-		start := strings.Index(remaining, open)
-		if start < 0 {
-			substituted.WriteString(remaining)
-			return substituted.String(), nil
-		}
-		substituted.WriteString(remaining[:start+len(open)])
-		source := remaining[start+len(open):]
-		tokens, consumed, lexErr := actionlint.LexExpression(source)
-		if lexErr != nil {
-			return "", fmt.Errorf("invalid expression: %w", lexErr)
-		}
-		expressionSource := source[:consumed]
-		type replacement struct {
-			start, end int
-			value      string
-		}
-		var replacements []replacement
-		for i := 0; i < len(tokens); i++ {
-			if tokens[i].Kind != actionlint.TokenKindIdent || !strings.EqualFold(tokens[i].Value, "inputs") {
-				continue
-			}
-			// A preceding '.' means this is a property named "inputs" on
-			// another receiver, such as github.event.inputs.<name>, not the
-			// workflow-call inputs context.
-			if i > 0 && tokens[i-1].Kind == actionlint.TokenKindDot {
-				continue
-			}
-			var name string
-			var end, consumedTokens int
-			switch {
-			case i+2 < len(tokens) && tokens[i+1].Kind == actionlint.TokenKindDot && tokens[i+2].Kind == actionlint.TokenKindIdent:
-				name = tokens[i+2].Value
-				end = tokens[i+2].Offset + len(tokens[i+2].Value)
-				consumedTokens = 2
-			case i+3 < len(tokens) && tokens[i+1].Kind == actionlint.TokenKindLeftBracket && tokens[i+2].Kind == actionlint.TokenKindString && tokens[i+3].Kind == actionlint.TokenKindRightBracket:
-				name = strings.ReplaceAll(strings.Trim(tokens[i+2].Value, "'"), "''", "'")
-				end = tokens[i+3].Offset + 1
-				consumedTokens = 3
-			default:
-				continue
-			}
-			value, ok := findCompileInput(inputs, name)
-			if !ok {
-				continue
-			}
-			literal, err := compileInputLiteral(value)
-			if err != nil {
-				return "", err
-			}
-			replacements = append(replacements, replacement{
-				start: tokens[i].Offset,
-				end:   end,
-				value: literal,
-			})
-			i += consumedTokens
-		}
-		for i := len(replacements) - 1; i >= 0; i-- {
-			replacement := replacements[i]
-			expressionSource = expressionSource[:replacement.start] + replacement.value + expressionSource[replacement.end:]
-		}
-		substituted.WriteString(expressionSource)
-		remaining = source[consumed:]
-	}
-}
-
 // SubstituteSecretSelectorInputs resolves secrets[<index>] selectors whose
 // index reads workflow inputs, such as secrets[inputs.name], to literal secret
 // names. Secret inventory requires static names, so this is the only runtime
@@ -395,15 +307,6 @@ func SubstituteSecretSelectorInputs(template string, inputs map[string]any, inpu
 		substituted.WriteString(rewritten.String())
 		remaining = source[consumed:]
 	}
-}
-
-func findCompileInput(inputs map[string]any, target string) (any, bool) {
-	for name, value := range inputs {
-		if strings.EqualFold(name, target) {
-			return value, true
-		}
-	}
-	return nil, false
 }
 
 func compileInputLiteral(value any) (string, error) {

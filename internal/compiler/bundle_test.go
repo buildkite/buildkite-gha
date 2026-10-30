@@ -2524,7 +2524,7 @@ jobs:
   "payload": {"action_ref": "owner/action@1111111111111111111111111111111111111111"}
 }`)
 	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "github.event cannot select an action reference") {
+	if err == nil || !strings.Contains(err.Error(), "uses must be a literal action reference") {
 		t.Fatalf("CompileBundle() error = %v, want static action reference rejection", err)
 	}
 }
