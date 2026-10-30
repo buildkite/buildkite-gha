@@ -1,8 +1,8 @@
 // A compile-time template is a string or value containing literal text and
 // `${{ ... }}` expressions. This file finds those expression regions,
 // evaluates or preserves them according to graph-time availability, prevents
-// replacements from introducing new expression syntax, and substitutes static
-// inputs. compile.go owns expression parsing, validation, and tree evaluation.
+// replacements from introducing new expression syntax, and rewrites
+// input-selected secret names to literals. compile.go owns expression parsing, validation, and tree evaluation.
 
 package expression
 

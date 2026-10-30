@@ -57,8 +57,8 @@ read inputs.
   inputs, so an input read left in a guard stays unknown.
 - Partial reduction keeps `inputs.*` references, including inside expressions
   that also reference `event` or `matrix`.
-- Literal consumers, such as action adapters reading `with`, `uses`
-  resolution, shell and platform checks, and runs-on selection, read a resolved
+- Literal consumers, such as action adapters reading `with`, shell and
+  platform checks, and runs-on selection, read a resolved
   view. That view is never written back into runtime expression source.
 - Input defaults (`ProfileReusableInput`) keep their `github` and `vars`
   restriction.

@@ -185,7 +185,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: shellReadsInputs(job) || matrixContainsExpressions(job.Matrix) || runsOnReadsInputs(job), matrixDetailUnsafe: matrixReadsInputs(job), runsOnDetailUnsafe: runsOnReadsInputs(job)}
+			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: matrixContainsExpressions(job.Matrix) || runsOnReadsInputs(job), matrixDetailUnsafe: matrixReadsInputs(job), runsOnDetailUnsafe: runsOnReadsInputs(job)}
 			workflowJobs[job.ID] = job
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
@@ -304,7 +304,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		if err != nil {
 			return reusableResolution{}, err
 		}
-		blockerDetailUnsafe := shellReadsInputs(job) || matrixContainsExpressions(job.Matrix) || runsOnReadsInputs(job) || job.Reusable != nil && hasInputExpression(job.If)
+		blockerDetailUnsafe := matrixContainsExpressions(job.Matrix) || runsOnReadsInputs(job) || job.Reusable != nil && hasInputExpression(job.If)
 		if parsed.Callable {
 			if err := rejectUnresolvedInputExpressions(path, job, inputs); err != nil {
 				return reusableResolution{}, err
@@ -1287,12 +1287,6 @@ func stepControlError(path string, job workflow.Job, step workflow.Step, control
 		return inputValueFinding(path, job, StageGraph, CodeGraphInvalid, step.Span.Start, fmt.Sprintf("step %s expression cannot be resolved", control)+inputValueHiddenNote)
 	}
 	return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("%s %s expression: %v", action, control, err))
-}
-
-// shellReadsInputs reports a shell that reads inputs. Shell checks evaluate a
-// resolved view, so their blocker detail can quote input values.
-func shellReadsInputs(job workflow.Job) bool {
-	return hasInputExpression(job.DefaultShell) || slices.ContainsFunc(job.Steps, func(step workflow.Step) bool { return hasInputExpression(step.Shell) })
 }
 
 func staticTimeoutMinutes(value any) (float64, bool) {

@@ -843,7 +843,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			unsafe := sourced
 			unsafe.Job, unsafe.path = job, jobPath
 			// An evaluation error can quote the producer output the runs-on
-			// expression read, as well as substituted input values.
+			// expression read, as well as input values.
 			unsafe.runsOnDetailUnsafe = unsafe.runsOnDetailUnsafe || outputBacked
 			e.diagnostics = append(e.diagnostics, runsOnFinding(unsafe, key, runsOnErr))
 			valid = false

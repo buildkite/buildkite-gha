@@ -1259,7 +1259,7 @@ func TestProcessingReportRedactsEventDerivedMatrixKeys(t *testing.T) {
 	}
 }
 
-func TestProcessingReportRedactsInputSubstitutedErrors(t *testing.T) {
+func TestProcessingReportRedactsInputValueErrors(t *testing.T) {
 	const sentinel = "EVENT_SECRET_KEY_8675309"
 	const header = "on:\n  workflow_dispatch:\n    inputs:\n      key:\n        type: string\njobs:\n"
 	root := t.TempDir()
@@ -1310,9 +1310,42 @@ func TestProcessingReportRedactsInputSubstitutedErrors(t *testing.T) {
 	}
 }
 
-// A substituted number input can leave a step control that no longer lexes.
+func TestProcessingReportRejectsInputActionReferenceWithoutValue(t *testing.T) {
+	const sentinel = "EVENT_SECRET_KEY_8675309"
+	root := t.TempDir()
+	workflows := filepath.Join(root, ".github", "workflows")
+	if err := os.MkdirAll(workflows, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	callee := "on:\n  workflow_call:\n    inputs:\n      key:\n        type: string\njobs:\n  inner:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/${{ inputs.key }}@v1\n"
+	caller := "on:\n  workflow_dispatch:\n    inputs:\n      key:\n        type: string\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    with:\n      key: ${{ inputs.key }}\n"
+	if err := os.WriteFile(filepath.Join(workflows, "callee.yml"), []byte(callee), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workflowPath := filepath.Join(workflows, "caller.yml")
+	if err := os.WriteFile(workflowPath, []byte(caller), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join(root, "event.json")
+	event := []byte(`{"provider":"github","event":"workflow_dispatch","repository":{"owner":"owner","name":"repo"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"actor","payload":{"inputs":{"key":"` + sentinel + `"}}}`)
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+		t.Fatalf("report leaked event input value: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "uses must be a literal action reference") {
+		t.Fatalf("report = %s, want literal action reference rejection", stdout.String())
+	}
+}
+
+// A number input can leave a step control that no longer lexes.
 // The lexer error quotes the number, so the report must not repeat it.
-func TestProcessingReportRedactsStepControlSubstitutionErrors(t *testing.T) {
+func TestProcessingReportRedactsStepControlInputErrors(t *testing.T) {
 	const sentinel = "8675309"
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, "input.yml")

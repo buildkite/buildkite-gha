@@ -1717,7 +1717,7 @@ jobs:
 	}
 }
 
-func TestCompilePreservesStatusFunctionsAfterReusableInputSubstitution(t *testing.T) {
+func TestCompilePreservesStatusFunctionsInReusableWorkflows(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -2159,7 +2159,7 @@ jobs:
 	}
 }
 
-func TestApplyStaticInputsPreservesIndexedInputsInStepFields(t *testing.T) {
+func TestResolveInputSelectedFieldsPreservesIndexedInputsInStepFields(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
 	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
 		Span: span,
@@ -2177,7 +2177,7 @@ func TestApplyStaticInputsPreservesIndexedInputsInStepFields(t *testing.T) {
 	}
 }
 
-func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
+func TestResolveInputSelectedFieldsPreservesTypedStepControls(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
 	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
 		Span:                      span,
@@ -2287,7 +2287,7 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 	}
 }
 
-func TestApplyStaticInputsPreservesRuntimeActionInputs(t *testing.T) {
+func TestResolveInputSelectedFieldsPreservesRuntimeActionInputs(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
 	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
 		Span: span,
@@ -4354,11 +4354,10 @@ jobs:
 	}
 }
 
-// TestValidateRecognizesRuntimeMatrixIncludeAfterInputSubstitution covers a
-// called workflow that receives inputs: input substitution clones the matrix
-// and must not turn the absent static include and exclude lists into a
-// reason to reject an otherwise valid needs-derived include matrix.
-func TestValidateRecognizesRuntimeMatrixIncludeAfterInputSubstitution(t *testing.T) {
+// TestValidateRecognizesRuntimeMatrixIncludeInReusableWorkflow covers a
+// called workflow that receives inputs: the absent static include and exclude
+// lists must not reject an otherwise valid needs-derived include matrix.
+func TestValidateRecognizesRuntimeMatrixIncludeInReusableWorkflow(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
