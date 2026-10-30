@@ -1998,40 +1998,6 @@ func TestCompileInputLiteralRepresentations(t *testing.T) {
 	}
 }
 
-func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
-	template := "${{ !inputs.enabled && matrix.run-new && 'inputs.enabled' || inputs['label'] }}"
-	got, err := SubstituteCompileInputs(template, map[string]any{"enabled": false, "label": "it''s ready"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "${{ !false && matrix.run-new && 'inputs.enabled' || 'it''''s ready' }}"
-	if got != want {
-		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
-	}
-}
-
-func TestSubstituteCompileInputsResolvesNestedComputedInputIndex(t *testing.T) {
-	got, err := SubstituteCompileInputs("${{ inputs[inputs.key] }}", map[string]any{"key": "target", "target": "release"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := "${{ 'release' }}"; got != want {
-		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
-	}
-}
-
-func TestSubstituteCompileInputsIgnoresNestedInputsProperties(t *testing.T) {
-	template := "${{ inputs.debug }} ${{ github.event.inputs.debug }} ${{ steps.inputs.name }} ${{ fromJSON(vars.CFG).inputs.name }}"
-	got, err := SubstituteCompileInputs(template, map[string]any{"debug": true, "name": "prod"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "${{ true }} ${{ github.event.inputs.debug }} ${{ steps.inputs.name }} ${{ fromJSON(vars.CFG).inputs.name }}"
-	if got != want {
-		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
-	}
-}
-
 func TestEvaluateAvailableCompileTemplatePreservesRuntimeExpressions(t *testing.T) {
 	got, err := EvaluateAvailableCompileTemplate("echo ${{ 'target' }} ${{ fromJSON('1e20') }} ${{ github.ref }}", CompileContext{})
 	if err != nil {

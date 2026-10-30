@@ -212,8 +212,11 @@ Service credentials keep their input reads, which the runtime evaluates against
 `Job.Inputs`. A needs-derived concurrency group reads the frame's static inputs
 when its continuation resolves the group. Credentials and scheduling groups reject
 input reads that are unknown at compile time, including deferred inputs.
-Step `uses` still substitutes inputs during the
-[input-evaluation migration](plans/reusable-workflow-input-evaluation.md).
+Step `uses` must be a literal action reference, because GitHub resolves
+actions before the job starts. Input values containing `${{` stay rejected
+until the
+[input-evaluation migration](plans/reusable-workflow-input-evaluation.md)
+confirms GitHub treats them as data.
 
 Deferred runner selection supplies verified job outputs only to the `runs-on`
 expression profiles. It does not resolve job conditions or reusable inputs in

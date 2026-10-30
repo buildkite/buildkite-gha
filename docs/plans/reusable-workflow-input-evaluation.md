@@ -3,11 +3,9 @@
 ## Problem
 
 The compiler originally substituted caller input values into callee expression
-source when expanding a `workflow_call`. Only step `uses` still uses this path;
-other fields now use
-[scoped input evaluation](../expression-authority.md#normalized-execution-program).
-[`SubstituteCompileInputs`](../../internal/expression/compile_template.go) is
-called only from [`internal/compiler/reusable.go`](../../internal/compiler/reusable.go).
+source when expanding a `workflow_call`. Every field now uses
+[scoped input evaluation](../expression-authority.md#normalized-execution-program)
+instead. Input-selected secret names are the one remaining rewrite.
 
 ```yaml
 # callee
@@ -44,7 +42,7 @@ from exactly one place:
 The runtime supplies `Job.Inputs` through `WorkflowInputs` and condition
 contexts. Runtime literal consumers, graph fields, service templates and
 credentials, needs-derived concurrency groups, call guards, and authority
-analysis use scoped inputs. Step `uses` is the remaining gap. Dynamic service
+analysis use scoped inputs. Step `uses` must be a literal, as on GitHub. Dynamic service
 maps and needs-derived `max-parallel` accept only `needs` outputs, so they never
 read inputs.
 
@@ -59,8 +57,8 @@ read inputs.
   inputs, so an input read left in a guard stays unknown.
 - Partial reduction keeps `inputs.*` references, including inside expressions
   that also reference `event` or `matrix`.
-- Literal consumers, such as action adapters reading `with`, `uses`
-  resolution, shell and platform checks, and runs-on selection, read a resolved
+- Literal consumers, such as action adapters reading `with`, shell and
+  platform checks, and runs-on selection, read a resolved
   view. That view is never written back into runtime expression source.
 - Input defaults (`ProfileReusableInput`) keep their `github` and `vars`
   restriction.
@@ -114,11 +112,13 @@ substitution.
    Credentials still reject input values that would add expression syntax,
    like other compile-time templates. A computed selector, such as
    `inputs[inputs.key]`, counts as reading every deferred input in its frame.
-5. **Cleanup.** Delete substitution and substitution-only redaction. Accept
-   `${{` in input values as data only after no reparse path remains and a
-   hosted fixture confirms GitHub's nested `workflow_call` behavior. Move
-   lasting decisions into [Expression authority](../expression-authority.md)
-   and remove this plan.
+5. **Cleanup.** Substitution is deleted. Redaction flags now mean that a
+   field reads inputs. Remaining: accept `${{` in input values as data once
+   a hosted GitHub fixture confirms GitHub's nested `workflow_call`
+   behavior, then move lasting decisions into
+   [Expression authority](../expression-authority.md) and remove this plan.
+   Input-selected secret names stay rewritten to quoted literals, because
+   secret inventory needs static names; that proof must cover them.
 
 ## Verification
 

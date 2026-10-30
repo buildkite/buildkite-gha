@@ -487,8 +487,8 @@ func TestReusableStepTimeoutRejectsOutOfRangeStaticInput(t *testing.T) {
 	for _, source := range []string{"${{ inputs.timeout }}", "${{ inputs['timeout'] }}"} {
 		for _, complete := range []bool{true, false} {
 			job.Steps[0].TimeoutMinutesExpression = source
-			if _, err := applyStaticInputs("callee.yml", job, expression.InputScope{Values: map[string]any{"timeout": 0}, Complete: complete}); err == nil || !strings.Contains(err.Error(), "greater than 0 and at most 360") {
-				t.Errorf("applyStaticInputs(%s, complete=%t) error = %v", source, complete, err)
+			if _, err := resolveInputSelectedFields("callee.yml", job, expression.InputScope{Values: map[string]any{"timeout": 0}, Complete: complete}); err == nil || !strings.Contains(err.Error(), "greater than 0 and at most 360") {
+				t.Errorf("resolveInputSelectedFields(%s, complete=%t) error = %v", source, complete, err)
 			}
 		}
 	}
@@ -1008,34 +1008,6 @@ jobs:
 		},
 	}) || !reflect.DeepEqual(plans[3].NeedOutputs, map[string][]plan.NeedOutput{"delegated": {}}) {
 		t.Fatalf("downstream reusable-workflow plan needs = %#v", plans[3].NeedSources)
-	}
-}
-
-func TestBlockerFieldsChangedTracksInputSubstitutionSurfaces(t *testing.T) {
-	base := workflow.Job{
-		If: "true", RunsOn: []string{"ubuntu-latest"}, DefaultShell: "bash",
-		Steps: []workflow.Step{{If: "true", Uses: "owner/action@v1", Shell: "bash", Run: "echo unchanged"}},
-	}
-	tests := []struct {
-		name   string
-		change func(*workflow.Job)
-		want   bool
-	}{
-		{name: "default shell", change: func(job *workflow.Job) { job.DefaultShell = "pwsh" }, want: true},
-		{name: "action", change: func(job *workflow.Job) { job.Steps[0].Uses = "owner/other@v1" }, want: true},
-		{name: "shell", change: func(job *workflow.Job) { job.Steps[0].Shell = "pwsh" }, want: true},
-		{name: "unrelated run command", change: func(job *workflow.Job) { job.Steps[0].Run = "echo changed" }},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			changed := base
-			changed.RunsOn = slices.Clone(base.RunsOn)
-			changed.Steps = slices.Clone(base.Steps)
-			test.change(&changed)
-			if got := blockerFieldsChanged(base, changed); got != test.want {
-				t.Fatalf("blockerFieldsChanged() = %t, want %t", got, test.want)
-			}
-		})
 	}
 }
 
@@ -1745,7 +1717,7 @@ jobs:
 	}
 }
 
-func TestCompilePreservesStatusFunctionsAfterReusableInputSubstitution(t *testing.T) {
+func TestCompilePreservesStatusFunctionsInReusableWorkflows(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -2187,7 +2159,7 @@ jobs:
 	}
 }
 
-func TestApplyStaticInputsPreservesIndexedInputsInStepFields(t *testing.T) {
+func TestResolveInputSelectedFieldsPreservesIndexedInputsInStepFields(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
 	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
 		Span: span,
@@ -2195,7 +2167,7 @@ func TestApplyStaticInputsPreservesIndexedInputsInStepFields(t *testing.T) {
 		Env:  map[string]string{"TARGET": "${{ inputs['target'] }}"},
 		With: map[string]string{"target": "prefix-${{ inputs['target'] }}"},
 	}}}
-	resolved, err := applyStaticInputs("workflow.yml", job, expression.InputScope{Values: map[string]any{"target": "production"}, Complete: true})
+	resolved, err := resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"target": "production"}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2205,14 +2177,14 @@ func TestApplyStaticInputsPreservesIndexedInputsInStepFields(t *testing.T) {
 	}
 }
 
-func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
+func TestResolveInputSelectedFieldsPreservesTypedStepControls(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
 	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
 		Span:                      span,
 		ContinueOnErrorExpression: "${{ inputs.allow }}",
 		TimeoutMinutesExpression:  "${{ inputs.wait }}",
 	}}}
-	resolved, err := applyStaticInputs("workflow.yml", job, expression.InputScope{Values: map[string]any{"allow": true, "wait": 5}, Complete: true})
+	resolved, err := resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"allow": true, "wait": 5}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2235,7 +2207,7 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 
 	job.Steps[0].ContinueOnErrorExpression = "${{ inputs.allow && matrix.experimental }}"
 	job.Steps[0].TimeoutMinutesExpression = "${{ matrix.timeout || inputs.wait }}"
-	resolved, err = applyStaticInputs("workflow.yml", job, expression.InputScope{Values: map[string]any{"allow": true, "wait": 5}, Complete: true})
+	resolved, err = resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"allow": true, "wait": 5}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2245,7 +2217,7 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 
 	job.Steps[0].ContinueOnErrorExpression = "${{ inputs.allow && steps.setup.outcome == 'success' }}"
 	job.Steps[0].TimeoutMinutesExpression = "${{ steps.setup.outputs.timeout || inputs.wait }}"
-	resolved, err = applyStaticInputs("workflow.yml", job, expression.InputScope{Values: map[string]any{"allow": true, "wait": 5}, Complete: true})
+	resolved, err = resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"allow": true, "wait": 5}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2255,7 +2227,7 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 
 	job.Steps[0].ContinueOnErrorExpression = "${{ inputs.allow && hashFiles('go.sum') != '' }}"
 	job.Steps[0].TimeoutMinutesExpression = ""
-	resolved, err = applyStaticInputs("workflow.yml", job, expression.InputScope{Values: map[string]any{"allow": true}, Complete: true})
+	resolved, err = resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"allow": true}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2272,17 +2244,17 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 			} else {
 				step.TimeoutMinutesExpression = source
 			}
-			_, err := applyStaticInputs("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, expression.InputScope{Values: map[string]any{"allow": true}, Complete: true})
+			_, err := resolveInputSelectedFields("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, expression.InputScope{Values: map[string]any{"allow": true}, Complete: true})
 			// Validate hidden branches without exposing input values.
 			if err == nil || !strings.Contains(err.Error(), "step "+field+" expression cannot be resolved") {
-				t.Fatalf("applyStaticInputs() error = %v, want %s rejection", err, field)
+				t.Fatalf("resolveInputSelectedFields() error = %v, want %s rejection", err, field)
 			}
 		})
 	}
 
 	job.Steps[0].ContinueOnErrorExpression = "${{ matrix.experimental && fromJSON(inputs.value) }}"
 	job.Steps[0].TimeoutMinutesExpression = ""
-	resolved, err = applyStaticInputs("workflow.yml", job, expression.InputScope{Values: map[string]any{"value": "invalid"}, Complete: true})
+	resolved, err = resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"value": "invalid"}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2307,15 +2279,15 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 			} else {
 				step.TimeoutMinutesExpression = test.expression
 			}
-			_, err := applyStaticInputs("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, expression.InputScope{Values: test.inputs, Complete: true})
+			_, err := resolveInputSelectedFields("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, expression.InputScope{Values: test.inputs, Complete: true})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("applyStaticInputs() error = %v, want %q", err, test.want)
+				t.Fatalf("resolveInputSelectedFields() error = %v, want %q", err, test.want)
 			}
 		})
 	}
 }
 
-func TestApplyStaticInputsPreservesRuntimeActionInputs(t *testing.T) {
+func TestResolveInputSelectedFieldsPreservesRuntimeActionInputs(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
 	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
 		Span: span,
@@ -2324,7 +2296,7 @@ func TestApplyStaticInputsPreservesRuntimeActionInputs(t *testing.T) {
 		},
 	}}}
 
-	resolved, err := applyStaticInputs("workflow.yml", job, expression.InputScope{Values: map[string]any{"cache": true, "file": "Dockerfile"}, Complete: true})
+	resolved, err := resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"cache": true, "file": "Dockerfile"}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2337,7 +2309,7 @@ func TestApplyStaticInputsPreservesRuntimeActionInputs(t *testing.T) {
 	}
 
 	job.Name = "cache-${{ hashFiles(inputs.file) }}"
-	resolved, err = applyStaticInputs("workflow.yml", job, expression.InputScope{Values: map[string]any{"cache": true, "file": "Dockerfile"}, Complete: true})
+	resolved, err = resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"cache": true, "file": "Dockerfile"}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2354,7 +2326,6 @@ func TestRejectUnresolvedIndexedInputsInCompileTimeFields(t *testing.T) {
 	}{
 		{name: "job name", job: workflow.Job{Name: "${{ inputs['label'] }}"}},
 		{name: "runner label", job: workflow.Job{RunsOn: []string{"${{ inputs['runner'] }}"}}},
-		{name: "action reference", job: workflow.Job{Steps: []workflow.Step{{Uses: "${{ inputs['action'] }}", Span: span}}}},
 		{name: "command", job: workflow.Job{Steps: []workflow.Step{{Run: "echo ${{ inputs['target'] }}", Span: span}}}},
 		{name: "environment", job: workflow.Job{Steps: []workflow.Step{{Env: map[string]string{"TARGET": "${{ inputs['target'] }}"}, Span: span}}}},
 		{name: "action input", job: workflow.Job{Steps: []workflow.Step{{With: map[string]string{"target": "${{ inputs['target'] }}"}, Span: span}}}},
@@ -4383,11 +4354,10 @@ jobs:
 	}
 }
 
-// TestValidateRecognizesRuntimeMatrixIncludeAfterInputSubstitution covers a
-// called workflow that receives inputs: input substitution clones the matrix
-// and must not turn the absent static include and exclude lists into a
-// reason to reject an otherwise valid needs-derived include matrix.
-func TestValidateRecognizesRuntimeMatrixIncludeAfterInputSubstitution(t *testing.T) {
+// TestValidateRecognizesRuntimeMatrixIncludeInReusableWorkflow covers a
+// called workflow that receives inputs: the absent static include and exclude
+// lists must not reject an otherwise valid needs-derived include matrix.
+func TestValidateRecognizesRuntimeMatrixIncludeInReusableWorkflow(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:

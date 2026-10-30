@@ -136,12 +136,11 @@ type deferredAction struct {
 	job, path, workspace, uses string
 	// digest and remote identify the workflow source the way SourceDigest
 	// and RemoteWorkflow identify an expanded instance's.
-	digest              string
-	remote              *RemoteWorkflowSource
-	with                map[string]string
-	step                int
-	position            workflow.Position
-	blockerDetailUnsafe bool
+	digest   string
+	remote   *RemoteWorkflowSource
+	with     map[string]string
+	step     int
+	position workflow.Position
 }
 
 // deferredJobActions lists the `uses` steps of one deferred job.
@@ -154,7 +153,7 @@ func deferredJobActions(sourced sourcedJob) []deferredAction {
 		actions = append(actions, deferredAction{
 			job: sourced.ID, path: sourced.path, workspace: sourced.root, uses: step.Uses, with: step.With, step: i + 1,
 			digest: sourced.digest, remote: cloneRemoteWorkflowSource(sourced.remote),
-			position: step.Span.Start, blockerDetailUnsafe: sourced.blockerDetailUnsafe,
+			position: step.Span.Start,
 		})
 	}
 	return actions
@@ -188,13 +187,9 @@ func resolveContinuationActions(ctx context.Context, ir IR, options Options) (co
 			compiled, err := compileWorkflowActionInvocations(ctx, action.workspace, options.ActionSource, plan.EventServerURL(ir.Event.Provider, ir.Event.ServerURL), []string{action.uses}, []map[string]string{action.with}, action.workflowSourceResolver(options))
 			if err != nil {
 				message, detail, actionName := actionResolutionMessage(action.uses, err)
-				blockerDetail := action.uses
-				if action.blockerDetailUnsafe {
-					blockerDetail = ""
-				}
 				diagnostics = append(diagnostics, &ProcessingFinding{
 					Stage: StageResolution, Code: CodeActionResolution, Category: "action-resolution",
-					Blocker: "action_ref", BlockerDetail: blockerDetail,
+					Blocker: "action_ref", BlockerDetail: action.uses,
 					Path: action.path, Line: action.position.Line, Column: action.position.Column,
 					Job: action.job, Action: actionName, Step: action.step,
 					Message: message, Detail: detail,

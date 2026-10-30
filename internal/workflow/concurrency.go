@@ -308,6 +308,9 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 	if entries["shell"] != nil || entries["working-directory"] != nil {
 		return Step{}, yamlNodeError(path, node, "parallel uses member cannot declare shell or working-directory")
 	}
+	if strings.Contains(uses.Value, "${{") {
+		return Step{}, yamlNodeError(path, uses, usesExpressionReason)
+	}
 	step.Kind = "uses"
 	step.Uses = uses.Value
 	if step.With, err = scalarMap(entries["with"]); err != nil {

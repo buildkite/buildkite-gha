@@ -20,6 +20,10 @@ import (
 
 const missingStepExecutionDiagnostic = "step must run script with \"run\" section or run action with \"uses\" section"
 
+// GitHub resolves every action before the job starts and rejects workflows
+// with expressions in step uses, including parallel members.
+const usesExpressionReason = "uses must be a literal action reference; GitHub Actions rejects expressions in uses"
+
 type expectedActionlintDiagnostic struct {
 	Position Position
 	Prefix   string
@@ -888,6 +892,9 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 					reason = actionsource.UnsupportedContainerActionReason
 				}
 				return Job{}, locatedError(path, step.Pos, in.ID.Value, reason)
+			}
+			if strings.Contains(exec.Uses.Value, "${{") {
+				return Job{}, locatedError(path, exec.Uses.Pos, in.ID.Value, usesExpressionReason)
 			}
 			owned.Kind = "uses"
 			owned.Uses = exec.Uses.Value

@@ -344,14 +344,6 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		case program.SurfaceStepTemplate:
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceRuntimeTemplate:
-			if strings.HasSuffix(site.Location.Field, ".uses") {
-				var referencesEvent bool
-				referencesEvent, reduceErr = siteReferencesEvent(site.Source, profile, expression.ResultString, false)
-				if reduceErr == nil && referencesEvent {
-					reduceErr = fmt.Errorf("github.event cannot select an action reference")
-				}
-				break
-			}
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceServiceTemplate:
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
