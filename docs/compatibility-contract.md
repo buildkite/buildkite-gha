@@ -134,6 +134,24 @@ and [old-path PR run](https://github.com/sj26-testier/gha-e2e-onboarding-r-c8f18
 demonstrate that rename sources participate in filtering. These small fixtures
 do not establish GitHub's file ordering or behavior beyond diff limits.
 
+For a verified, nonforced branch creation with an explicitly empty webhook
+`commits` array, evaluate an empty diff by comparing `after` to itself. Preserve
+repository, workflow, head, and non-shallow checks. A missing array or a nonempty
+array omitting `after` remains an error; do not use `head_commit` paths or the
+head's parent as a substitute. Telemetry records the actual self-comparison base.
+
+The retained October 28, 2026
+[new-ref fixture](https://github.com/sj26-testier/gha-e2e-onboarding-r-21ee3c030334/tree/a956e23a3f13890c5cbec94c5299ec551f4f88c6)
+created `hist-existing` at an already-published side-branch tip. Its webhook had
+zero `before`, `created: true`, `forced: false`, and `commits: []`, although
+`head_commit` listed `existing-only.txt`. Only the
+[unfiltered control](https://github.com/sj26-testier/gha-e2e-onboarding-r-21ee3c030334/actions/runs/40630060360)
+ran; filters for that file, a default-branch-only file, and an unrelated file did
+not. The plugin regression checks empty-diff selection for `paths` and
+`paths-ignore`, the unfiltered control, source rejection, and completion telemetry.
+This evidence does not establish force-push comparison semantics or permit
+missing history to become an empty diff.
+
 ### GitHub server identity
 
 For selected GHES imports, the backend supplies `GITHUB_SERVER_URL`
