@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -3594,14 +3595,15 @@ jobs:
 }
 
 func TestCompileSecretLookupsByImpossibleNames(t *testing.T) {
-	const callee = "on:\n  workflow_call:\n    secrets:\n      access-token:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        env:\n          A: ${{ secrets['a-b'] }}\n          T: ${{ secrets.access-token }}\n"
+	const callee = "on:\n  workflow_call:\n    secrets:\n      access-token:\n      other:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        env:\n          A: ${{ secrets['a-b'] }}\n          T: ${{ secrets.access-token }}\n          O: ${{ secrets.other }}\n"
 	tests := []struct {
 		name, caller string
 		want         []string
+		wantMappings map[string]string
 	}{
 		{name: "root", caller: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        env:\n          A: ${{ secrets['a-b'] }}\n          B: ${{ secrets.CANARY }}\n", want: []string{"CANARY"}},
-		{name: "inherited", caller: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets: inherit\n"},
-		{name: "mapped", caller: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets:\n      access-token: ${{ secrets.MY-SECRET }}\n"},
+		{name: "inherited", caller: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets: inherit\n", want: []string{"OTHER"}},
+		{name: "mapped", caller: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets:\n      access-token: ${{ secrets.MY-SECRET }}\n      other: ${{ secrets.CANARY }}\n", want: []string{"CANARY"}, wantMappings: map[string]string{"OTHER": "CANARY"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -3612,7 +3614,7 @@ func TestCompileSecretLookupsByImpossibleNames(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(plans) != 1 || !slices.Equal(plans[0].RequiredSecrets, test.want) || len(plans[0].SecretMappings) != 0 {
+			if len(plans) != 1 || !slices.Equal(plans[0].RequiredSecrets, test.want) || !maps.Equal(plans[0].SecretMappings, test.wantMappings) {
 				t.Fatalf("required secrets = %v, mappings = %v, want %v", plans[0].RequiredSecrets, plans[0].SecretMappings, test.want)
 			}
 		})
