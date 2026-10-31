@@ -839,8 +839,9 @@ func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, 
 			}
 			continue
 		}
-		if bindings.unrestricted && !plan.ValidSecretName(binding.source) {
-			// An inherited lookup of a name no secret can have is empty.
+		if !plan.ValidSecretName(binding.source) {
+			// A lookup of a name no secret can have is empty, whether the
+			// name is inherited or mapped by a reusable workflow call.
 			continue
 		}
 		sources[binding.source] = struct{}{}

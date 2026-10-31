@@ -218,10 +218,11 @@ actions before the job starts.
 GitHub treats input values as data, including values containing `${{`
 ([evidence](compatibility-contract.md#expression-and-composite-source-evidence)).
 No input value is pasted into expression source, except an input-selected
-secret name, which becomes a quoted string literal. An inherited or
-input-selected name that is not a valid secret name, such as `${{ 'TOKEN' }}`,
-reads as empty. Service and job container images still reject a folded value
-that would introduce `${{`, because the runtime evaluates their partially
+secret name, which becomes a quoted string literal. A secret name no secret
+can have reads as empty, whether it is an input value such as
+`${{ 'TOKEN' }}`, inherited, or mapped by a `workflow_call` from
+`secrets.MY-SECRET`. Service and job container images still reject a folded
+value that would introduce `${{`, because the runtime evaluates their partially
 folded result again. Exact forwarding of a deferred input keeps its original caller capture
 and producer bindings; compound forwarding of deferred parent inputs is
 unsupported. Input defaults keep the `github` and `vars` restriction.
