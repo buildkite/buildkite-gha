@@ -48,6 +48,7 @@ type Runner struct {
 	ToolCache             string
 	Docker                string
 	DockerBuildLoad       bool // see enableDockerBuildLoad
+	RepairHostname        bool // native Namespace hosts only
 	RuntimeExecutable     string
 	Git                   string
 	GitLFS                string

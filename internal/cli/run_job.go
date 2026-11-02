@@ -239,6 +239,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		ToolCache:       runnerToolCache,
 		Docker:          os.Getenv("BUILDKITE_GHA_DOCKER"),
 		DockerBuildLoad: options.dockerBuildLoad,
+		RepairHostname:  options.repairHostname,
 		Git:             os.Getenv("BUILDKITE_GHA_GIT"),
 		Secrets: gharuntime.AgentSecrets{
 			Executable: os.Getenv("BUILDKITE_GHA_AGENT"),
@@ -607,6 +608,7 @@ type runJobOptions struct {
 	resultPath       string
 	hostedToolCache  bool
 	dockerBuildLoad  bool
+	repairHostname   bool
 }
 
 func runJobArgs(args []string) (runJobOptions, error) {
@@ -614,15 +616,18 @@ func runJobArgs(args []string) (runJobOptions, error) {
 	seen := map[string]bool{}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--hosted-tool-cache", "--docker-build-load":
+		case "--hosted-tool-cache", "--docker-build-load", "--repair-hostname":
 			if seen[args[i]] {
 				return runJobOptions{}, fmt.Errorf("%s may only be specified once", args[i])
 			}
 			seen[args[i]] = true
-			if args[i] == "--hosted-tool-cache" {
+			switch args[i] {
+			case "--hosted-tool-cache":
 				options.hostedToolCache = true
-			} else {
+			case "--docker-build-load":
 				options.dockerBuildLoad = true
+			case "--repair-hostname":
+				options.repairHostname = true
 			}
 		case "--plan", "--plan-digest", "--plan-producer", "--artifact-producer", "--result":
 			option := args[i]

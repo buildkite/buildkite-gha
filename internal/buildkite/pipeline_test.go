@@ -1400,6 +1400,27 @@ func TestEmitUsesImmutableRuntimeImageToolCache(t *testing.T) {
 	}
 }
 
+func TestEmitHostnameRepairOnlyForNativeLinux(t *testing.T) {
+	for _, platform := range []string{"linux/amd64", "linux/arm64", "darwin/arm64", "windows/amd64"} {
+		for _, native := range []bool{false, true} {
+			if native && platform != "linux/amd64" && platform != "darwin/arm64" {
+				continue // These platforms do not admit agent tags.
+			}
+			job := Job{Key: "job", Label: "Job", Platform: platform, PlanDigest: testDigest("plan"), DistributionDigest: testDigest("distribution")}
+			if native {
+				job.Agents = map[string]string{"nsc-gha-image": "ubuntu-24.04"}
+			}
+			output, err := Emit(Pipeline{CompilerStep: "importer", Jobs: []Job{job}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(output), "--repair-hostname") != (native && platform == "linux/amd64") {
+				t.Fatalf("hostname repair scope for %s, native=%v:\n%s", platform, native, output)
+			}
+		}
+	}
+}
+
 func TestMiseDataDirUsesManagedRuntimeVersion(t *testing.T) {
 	if got := MiseDataDir(); got != "/cache/bkcache/buildkite-gha/mise/linux-amd64/"+MinimumMiseVersion {
 		t.Fatalf("MiseDataDir() = %q", got)

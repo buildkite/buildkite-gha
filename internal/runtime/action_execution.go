@@ -209,6 +209,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		jobResult.Conclusion = "skipped"
 		return jobResult, nil
 	}
+	r.repairHostname(ctx, processor)
 	r.continueOnError, err = evaluateJobContinueOnError(executionJob.ContinueOnError, eval)
 	if err != nil {
 		return jobResult, fmt.Errorf("evaluate job continue-on-error: %w", err)

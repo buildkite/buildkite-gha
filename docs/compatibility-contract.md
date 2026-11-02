@@ -357,6 +357,28 @@ These records preserve the evidence behind the former combined reference.
 They distinguish reported observations from independently inspectable receipts.
 They are not an exhaustive conformance suite.
 
+### Git email inference on Linux runners
+
+The November 2, 2026 paired [native Ubuntu run](https://github.com/sj26-testier/gha-e2e-onboarding-r-b4f90c10e220/actions/runs/41385914126)
+and [Namespace run](https://buildkite.com/sj26-testier/gha-e2e-onboarding-r-b4f90c10e220/builds/8)
+used the same [immutable fixture](https://github.com/sj26-testier/gha-e2e-onboarding-r-b4f90c10e220/blob/1d923acba22cd86ead81a6e30a0bcd16e953f22d/.github/workflows/identity.yml).
+Neither supplied Git identity configuration or environment, before or after
+checkout. Both had an empty OS user name field. Native Git inferred email from
+the canonical hostname when given `user.name`; Namespace rejected its
+unqualified hostname. Bare commits failed on both. This does not establish
+the cause of any customer's test failure.
+
+Native Namespace Linux host jobs attempt canonical-name repair before workflow
+processes start. Preserve raw hostname, machine ID, self addresses, aliases,
+custom qualified names, and all Git identity settings. Only prepend
+`<hostname>.buildkite.internal` to existing usable self mappings in `/etc/hosts`.
+Use the system resolver, not Go's cgo-disabled DNS implementation. Permission,
+read-only filesystem, missing mapping, and resolution failures warn without
+failing the job. Do not extend this correction to job containers or other
+platforms. [Isolated lifecycle tests](../internal/runtime/hostname_linux_test.go)
+exercise real Git, system resolution, direct writes, noninteractive sudo, and
+failure/no-op cases; they do not establish hosted rollout.
+
 ### Event file paths
 
 Only linked webhooks and explicit snapshots authorize an event file. Preserve
