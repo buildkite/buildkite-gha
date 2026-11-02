@@ -775,6 +775,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 				// /etc/environment, which only PAM logins read. GitHub's runner
 				// starts with that PATH; the agent service never sees it.
 				commands = append(commands, etcEnvironmentPATHCommand)
+				runJob += " --repair-hostname"
 			}
 		}
 		if experimentalRunnerUser {
