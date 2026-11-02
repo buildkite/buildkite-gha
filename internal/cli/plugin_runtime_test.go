@@ -18,7 +18,29 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
+func TestPluginDevCounterpartInjectionIsRequiredAndReleaseRejectsIt(t *testing.T) {
+	linux := runtimeDistribution{contents: []byte("linux"), digest: "sha256:linux"}
+	required := map[compiler.Platform]bool{compiler.PlatformDarwinARM64: true}
+	t.Setenv(pluginDevDarwinRuntimeEnvironment, "")
+	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(t.Context(), required, compiler.PlatformLinuxAMD64, linux); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("dev acquisition error = %v", err)
+	}
+	darwin := runtimeDistribution{contents: []byte("darwin"), digest: "sha256:darwin"}
+	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, compiler.PlatformDarwinARM64, darwin); err == nil || !strings.Contains(err.Error(), pluginDevLinuxRuntimeEnvironment) {
+		t.Fatalf("Darwin-hosted dev acquisition error = %v", err)
+	}
+	t.Setenv(pluginDevDarwinRuntimeEnvironment, filepath.Join(t.TempDir(), "injected"))
+	if _, err := (&pluginRuntimeAcquisition{version: "1.2.3"}).acquire(t.Context(), map[compiler.Platform]bool{}, compiler.PlatformLinuxAMD64, linux); err == nil || !strings.Contains(err.Error(), "rejected") {
+		t.Fatalf("release injection error = %v", err)
+	}
+	deferred := deferredRuntimePlatforms(parsedUploadArgs{importerPlatform: compiler.PlatformLinuxAMD64, pluginAcquisition: &pluginRuntimeAcquisition{version: "dev"}})
+	if len(deferred) != 2 || !deferred[compiler.PlatformDarwinARM64] {
+		t.Fatalf("legacy deferred platforms = %#v", deferred)
+	}
+}
+
 func TestPluginBinaryURLsVerifyBytesAndNeverFallBackToReleases(t *testing.T) {
+	t.Setenv(pluginDevWindowsRuntimeEnvironment, filepath.Join(t.TempDir(), "must-not-use-legacy-runtime"))
 	linux := pluginTestLinuxExecutable(62)
 	host := runtimeDistribution{contents: []byte("running importer"), digest: transport.Digest([]byte("running importer"))}
 	requests := 0
@@ -128,11 +150,12 @@ func TestPluginAcquiresVerifiedLinuxARM64Runtime(t *testing.T) {
 
 func TestPluginWindowsSelectionIsLazy(t *testing.T) {
 	host := runtimeDistribution{contents: []byte("host"), digest: "sha256:host"}
+	t.Setenv(pluginDevWindowsRuntimeEnvironment, "")
 	got, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, compiler.PlatformLinuxAMD64, host)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("Linux-only acquisition = %#v, %v", got, err)
 	}
-	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformWindowsAMD64: true}, compiler.PlatformLinuxAMD64, host); err == nil || !strings.Contains(err.Error(), "configure binary URLs") {
+	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformWindowsAMD64: true}, compiler.PlatformLinuxAMD64, host); err == nil || !strings.Contains(err.Error(), pluginDevWindowsRuntimeEnvironment) {
 		t.Fatalf("Windows dev acquisition error = %v", err)
 	}
 	if pluginRuntimeAsset(compiler.PlatformWindowsAMD64) != pluginWindowsAsset {
@@ -155,6 +178,7 @@ func pluginTestLinuxExecutable(machine uint16) []byte {
 
 func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
 	linux := runtimeDistribution{contents: []byte("running executable"), digest: "sha256:running"}
+	t.Setenv(pluginDevDarwinRuntimeEnvironment, "")
 	got, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, compiler.PlatformLinuxAMD64, linux)
 	if err != nil || got[compiler.PlatformLinuxAMD64].digest != linux.digest {
 		t.Fatalf("Linux-only acquisition = %#v, %v", got, err)

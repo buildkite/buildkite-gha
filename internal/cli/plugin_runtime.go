@@ -23,8 +23,12 @@ import (
 )
 
 const (
-	pluginChecksumLimit = 4 << 20
-	pluginArchiveLimit  = 256 << 20
+	pluginDevDarwinRuntimeEnvironment     = "BUILDKITE_GHA_PLUGIN_DEV_DARWIN_RUNTIME"
+	pluginDevLinuxRuntimeEnvironment      = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_RUNTIME"
+	pluginDevLinuxARM64RuntimeEnvironment = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_ARM64_RUNTIME"
+	pluginDevWindowsRuntimeEnvironment    = "BUILDKITE_GHA_PLUGIN_DEV_WINDOWS_RUNTIME"
+	pluginChecksumLimit                   = 4 << 20
+	pluginArchiveLimit                    = 256 << 20
 )
 
 var releaseVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*)?(\+[0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*)?$`)
@@ -62,6 +66,19 @@ func securePluginHTTPClient() *http.Client {
 
 func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[compiler.Platform]bool, hostPlatform compiler.Platform, host runtimeDistribution) (map[compiler.Platform]runtimeDistribution, error) {
 	distributions := make(map[compiler.Platform]runtimeDistribution, len(required))
+	devPaths := map[compiler.Platform]string{
+		compiler.PlatformLinuxAMD64:   os.Getenv(pluginDevLinuxRuntimeEnvironment),
+		compiler.PlatformLinuxARM64:   os.Getenv(pluginDevLinuxARM64RuntimeEnvironment),
+		compiler.PlatformDarwinARM64:  os.Getenv(pluginDevDarwinRuntimeEnvironment),
+		compiler.PlatformWindowsAMD64: os.Getenv(pluginDevWindowsRuntimeEnvironment),
+	}
+	if a.binaries == nil && a.version != "dev" {
+		for platform, path := range devPaths {
+			if path != "" {
+				return nil, fmt.Errorf("%s is test/dev-only and is rejected by release builds", pluginDevRuntimeEnvironment(platform))
+			}
+		}
+	}
 	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformLinuxARM64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		if !required[platform] {
 			continue
@@ -102,6 +119,18 @@ func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[com
 			distributions[platform] = runtimeDistribution{contents: contents, digest: fmt.Sprintf("sha256:%x", digest)}
 			continue
 		}
+		if a.version == "dev" {
+			path := devPaths[platform]
+			if path == "" {
+				return nil, fmt.Errorf("%s is required for a dev build using %s", pluginDevRuntimeEnvironment(platform), platform)
+			}
+			loaded, err := loadRuntimeDistributions(map[compiler.Platform]string{platform: path})
+			if err != nil {
+				return nil, err
+			}
+			distributions[platform] = loaded[platform]
+			continue
+		}
 		if !releaseVersionPattern.MatchString(a.version) {
 			return nil, fmt.Errorf("running version %q is not a release version; configure binary URLs for other platforms", a.version)
 		}
@@ -112,6 +141,19 @@ func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[com
 		distributions[platform] = distribution
 	}
 	return distributions, nil
+}
+
+func pluginDevRuntimeEnvironment(platform compiler.Platform) string {
+	if platform == compiler.PlatformWindowsAMD64 {
+		return pluginDevWindowsRuntimeEnvironment
+	}
+	if platform == compiler.PlatformDarwinARM64 {
+		return pluginDevDarwinRuntimeEnvironment
+	}
+	if platform == compiler.PlatformLinuxARM64 {
+		return pluginDevLinuxARM64RuntimeEnvironment
+	}
+	return pluginDevLinuxRuntimeEnvironment
 }
 
 func parsePluginBinaryURL(value string) (string, []byte, error) {

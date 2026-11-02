@@ -980,7 +980,7 @@ func deferredRuntimePlatforms(uploadArguments parsedUploadArgs) map[compiler.Pla
 			platforms[platform] = true
 		}
 		if acquisition := uploadArguments.pluginAcquisition; acquisition != nil {
-			if acquisition.binaries[platform] != "" || (acquisition.binaries == nil && releaseVersionPattern.MatchString(acquisition.version)) {
+			if acquisition.binaries[platform] != "" || (acquisition.binaries == nil && (releaseVersionPattern.MatchString(acquisition.version) || os.Getenv(pluginDevRuntimeEnvironment(platform)) != "")) {
 				platforms[platform] = true
 			}
 		}

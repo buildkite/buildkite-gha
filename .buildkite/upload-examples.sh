@@ -108,13 +108,7 @@ steps:
           automatic: false
         cache: "/cache/bkcache/mise"
         plugins:
-          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-              version: "2026.10.17"
-        command: |
-          set -euo pipefail
-          scripts/verify-source-checkout "$commit"
-          distribution_root="\$(mktemp -d "\${TMPDIR:-/tmp}/buildkite-gha-example.XXXXXXXX")"
-          trap 'rm -rf -- "\$distribution_root"' EXIT
-          CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.revision=$commit" -o "\$distribution_root/buildkite-gha" ./cmd/buildkite-gha
-          BUILDKITE_PLUGIN_CONFIGURATION='{"workflow":"$workflow"}' "\$distribution_root/buildkite-gha" plugin
+          - github-actions#latest:
+              workflow: "$workflow"
+              source-ref: "$commit"
 YAML
