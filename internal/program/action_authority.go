@@ -70,9 +70,14 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 		for _, binding := range supplied {
 			provided[strings.ToLower(binding.Name)] = binding
 		}
+		inputs := expression.InputScope{Values: map[string]any{}, Complete: true}
 		definitions := make(map[string]ActionInput, len(action.Inputs))
 		for _, input := range action.Inputs {
-			definitions[strings.ToLower(input.Name)] = input
+			name := strings.ToLower(input.Name)
+			definitions[name] = input
+			if _, supplied := provided[name]; !supplied && input.Default == nil {
+				inputs.Absent = append(inputs.Absent, name)
+			}
 		}
 		known := map[string]any{
 			"github.server_url": options.ServerURL,
@@ -82,7 +87,6 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 		if workflowAuthored {
 			known["strategy"] = options.Strategy
 		}
-		inputs := expression.InputScope{Values: map[string]any{}, Complete: true}
 		for _, binding := range supplied {
 			name := strings.ToLower(binding.Name)
 			input, declared := definitions[name]
@@ -127,7 +131,6 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 				continue
 			}
 			if input.Default == nil {
-				inputs.Absent = append(inputs.Absent, name)
 				continue
 			}
 			analysis, err := engine.Analyze(input.Default.expressionSite(), expression.AbstractValues{References: known, Inputs: inputs})

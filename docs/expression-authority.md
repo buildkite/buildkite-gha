@@ -203,8 +203,11 @@ conservative. Planning distinguishes known individual input properties from a
 complete input object. With deferred inputs, named known reads can still prune
 branches, but computed and whole-object reads remain unknown.
 Known absent action inputs stay separate from the object. Analysis uses the
-runtime profile's missing value: empty string in action templates and defaults,
-null in conditions. Whole-object serialization still omits the property.
+runtime access path's missing value: named reads use empty string in action
+templates and defaults, while conditions and default bracket reads use null.
+Default bracket access follows concrete object evaluation and stays unknown
+when the input object is incomplete. Whole-object serialization still omits
+absent properties.
 
 Event reduction preserves input reads, including mixed event/input expressions.
 Shell checks and native action adapters evaluate a separate literal view without

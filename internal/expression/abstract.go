@@ -163,7 +163,6 @@ func newAbstractEvaluator(surface evaluationSurface) expressionEvaluator[Analysi
 
 func analyzeActionInputDefault(node actionlint.ExprNode, knownReferences map[string]any) (Analysis, error) {
 	evaluator := newAbstractEvaluator(actionInputDefaultSurface)
-	evaluator.policy.resolveStaticIndexedReference = true
 	evaluator.resolve = func(root string, path []string) (Analysis, error) {
 		analysis := Analysis{Effects: abstractReferenceEffects(root, path)}
 		if isRunnerDebugReference(root, path) {

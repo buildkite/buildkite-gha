@@ -1928,6 +1928,7 @@ func TestCompileAndRunCompositeShellToken(t *testing.T) {
 	for _, test := range []struct {
 		name, supplied, permissions, expected string
 		guard, condition                      string
+		tokenDefault                          string
 		wantToken, denied                     bool
 	}{
 		{name: "default", permissions: "{contents: read}", expected: "ghs_composite_scoped", wantToken: true},
@@ -1938,8 +1939,15 @@ func TestCompileAndRunCompositeShellToken(t *testing.T) {
 			condition: `toJSON(inputs.optional) == 'null'`,
 			guard:     `toJSON(inputs.optional) == '""' && inputs.omitted_json == '""' && !contains(toJSON(inputs), '"optional"')`},
 		{name: "omitted input is not null in shell", permissions: "{}", guard: `toJSON(inputs.optional) == 'null'`},
+		{name: "bracket default missing input is null", permissions: "{contents: read}", expected: "ghs_composite_scoped", wantToken: true,
+			tokenDefault: `${{ toJSON(inputs['optional']) == 'null' && github.token || '' }}`, guard: "inputs.token_default != ''"},
+		{name: "bracket default missing input is not empty string", permissions: "{}",
+			tokenDefault: `${{ toJSON(inputs['optional']) == '""' && github.token || '' }}`, guard: "inputs.token_default != ''"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			if test.tokenDefault == "" {
+				test.tokenDefault = "''"
+			}
 			if test.guard == "" {
 				test.guard = "inputs.fallback == 'cargo-binstall'"
 			}
@@ -1960,6 +1968,8 @@ inputs:
   optional: {}
   omitted_json:
     default: ${{ toJSON(inputs.optional) }}
+  token_default:
+    default: `+test.tokenDefault+`
 runs:
   using: composite
   steps:
