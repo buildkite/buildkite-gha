@@ -77,7 +77,8 @@ jobs:
         run: cargo test --release 2>&1 | tee test.log && grep -F 'test tests::greets_by_name ... ok' test.log
 
       - name: Run application
-        run: test "$(target/release/rust-proof)" = "hello, buildkite #1"
+        run: |
+          test "$(target/release/rust-proof)" = "hello, buildkite #1"
 
   rust-cached:
     needs: rust
