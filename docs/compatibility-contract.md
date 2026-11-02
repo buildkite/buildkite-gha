@@ -310,6 +310,20 @@ An implementation convenience must not expand their recipients or lifetimes.
 The [security model](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/security)
 owns the user-facing boundaries.
 
+Workflow subprocesses default to `GIT_TERMINAL_PROMPT=0`, matching the
+[agent's noninteractive Git setup](https://github.com/buildkite/agent/blob/286b70ebfe0850f845bf95e1a6e32f989ba049ac/internal/job/executor.go#L916-L917).
+This is a runtime default, not exact checkout-action parity: upstream
+[checkout scopes its prompt settings to its Git subprocesses](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/src/git-command-manager.ts#L620-L654)
+and [persists credentials for later commands by default](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/README.md#checkout-v6).
+Do not forward agent job credentials to repair an inherited global Git helper.
+A local Linux reproduction with agent v3.129.0 and real `git credential fill`
+showed that the helper reports `Missing job-id` in the restricted workflow
+environment, then Git waits for input through a parent PTY. With the default,
+the same invocation fails with `terminal prompts disabled`. Explicit helper
+credentials still resolve; see [shell regression coverage](../internal/runtime/shell_execution_test.go).
+This proves prompt prevention, not authenticated post-checkout access, native
+GitHub behavior, or the cause of any particular customer build.
+
 Workflow-token requests use the requesting workflow's top-level repository
 permission policy. Job and called-workflow maps do not narrow that token;
 `id-token` narrowing is a different mechanism. Retry the same authorized request

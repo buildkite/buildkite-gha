@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -11,10 +12,45 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
+
+func TestWorkflowGitCredentialFailureIsNoninteractive(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	t.Setenv("BUILDKITE_JOB_ID", "11111111-1111-4111-8111-111111111111")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "must-not-leak")
+	writeFixtureFile(t, home, ".gitconfig", "[credential]\n\thelper = !echo helper-unavailable >&2; exit 1\n")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: Git credentials\n")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{
+		{ID: "missing", Kind: "run", Shell: "sh", ContinueOnError: true, Command: `
+test -z "${BUILDKITE_JOB_ID+x}" && test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}"
+printf 'protocol=https\nhost=example.invalid\n\n' | git credential fill
+`},
+		{ID: "supplied", Kind: "run", Shell: "sh", Command: `
+printf 'protocol=https\nhost=example.invalid\n\n' |
+  git -c credential.helper= -c 'credential.helper=!f() { printf "username=fixture\npassword=%s\n" test-credential; }; f' credential fill > credentials
+grep -qx username=fixture credentials
+grep -qx 'password=test-credential' credentials
+`},
+	})
+	job.Outputs = map[string]string{"missing": "${{ steps.missing.outcome }}", "supplied": "${{ steps.supplied.outcome }}"}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(ctx, job, workspace)
+	if err != nil || result.Outputs["missing"] != "failure" || result.Outputs["supplied"] != "success" {
+		t.Fatalf("Git outcomes = %v, error = %v\n%s", result.Outputs, err, &logs)
+	}
+	if !strings.Contains(logs.String(), "helper-unavailable") || !strings.Contains(logs.String(), "terminal prompts disabled") {
+		t.Fatalf("Git did not fail without prompting after helper failure:\n%s", &logs)
+	}
+}
 
 func TestPowerShellExecution(t *testing.T) {
 	pwsh, err := exec.LookPath("pwsh")
