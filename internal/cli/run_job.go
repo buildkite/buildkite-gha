@@ -34,13 +34,13 @@ func repositoryProviderGitCredentialsEnabled(getenv func(string) string) bool {
 	return getenv(repositoryProviderGitCredentialsEnvironment) == "true" || getenv(legacyGitHubAppGitCredentialsEnvironment) == "true"
 }
 
-func runJob(args []string, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) int {
+func runJob(args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runJobContext(ctx, args, stdout, stderr, version, clientVersion, agent)
+	return runJobContext(ctx, args, stdout, stderr, clientVersion, agent)
 }
 
-func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) (code int) {
+func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) (code int) {
 	ctx, _ = actionsource.WithSourceStats(ctx)
 	started := time.Now()
 	var result gharuntime.JobResult
@@ -94,10 +94,6 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	job, err := plan.Decode(source)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
-		return 1
-	}
-	if job.Compiler.Version != version {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: plan compiler version %q does not match runtime version %q\n", job.Compiler.Version, version)
 		return 1
 	}
 	runtimeDigest, err := executableDigest()
