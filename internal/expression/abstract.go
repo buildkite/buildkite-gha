@@ -9,10 +9,17 @@ import (
 )
 
 // AbstractValue is either one concrete expression value or an unknown runtime
-// value. Unknown is distinct from a known null value.
+// value. Unknown is distinct from a known null value and may still have known
+// truthiness for logical short-circuiting.
 type AbstractValue struct {
-	Known bool
-	Value any
+	Known  bool
+	Value  any
+	Truthy *bool
+}
+
+// IsFalsy reports whether every possible value makes a condition false.
+func (value AbstractValue) IsFalsy() bool {
+	return value.Known && !githubTruthy(value.Value) || value.Truthy != nil && !*value.Truthy
 }
 
 // GitHubTokenEffect records why evaluation can require github.token.
@@ -50,6 +57,12 @@ func unknownAnalysis(values ...Analysis) Analysis {
 	return Analysis{Effects: effects}
 }
 
+func unknownAnalysisWithTruthiness(truthiness bool, values ...Analysis) Analysis {
+	analysis := unknownAnalysis(values...)
+	analysis.Value.Truthy = &truthiness
+	return analysis
+}
+
 func derivedAnalysis(value any, inputs ...Analysis) Analysis {
 	analysis := knownAnalysis(value)
 	for _, input := range inputs {
@@ -68,24 +81,51 @@ func (abstractExpressionDomain) derive(value any, inputs ...Analysis) Analysis {
 func (abstractExpressionDomain) value(analysis Analysis) (any, bool) {
 	return analysis.Value.Value, analysis.Value.Known
 }
+func (abstractExpressionDomain) truthiness(analysis Analysis, truthy func(any) bool) (bool, bool) {
+	if analysis.Value.Known {
+		return truthy(analysis.Value.Value), true
+	}
+	if analysis.Value.Truthy != nil {
+		return *analysis.Value.Truthy, true
+	}
+	return false, false
+}
 func (abstractExpressionDomain) unknown(values ...Analysis) Analysis {
 	return unknownAnalysis(values...)
 }
-func (abstractExpressionDomain) join(values ...Analysis) Analysis {
+func (abstractExpressionDomain) unknownWithTruthiness(truthiness bool, values ...Analysis) Analysis {
+	return unknownAnalysisWithTruthiness(truthiness, values...)
+}
+func (domain abstractExpressionDomain) join(truthy func(any) bool, values ...Analysis) Analysis {
 	if len(values) == 0 {
 		return Analysis{}
 	}
 	result := unknownAnalysis(values...)
 	first := values[0].Value
-	if !first.Known {
-		return result
-	}
-	for _, value := range values[1:] {
-		if !value.Value.Known || !abstractValuesIdentical(value.Value.Value, first.Value) {
+	if first.Known {
+		identical := true
+		for _, value := range values[1:] {
+			if !value.Value.Known || !abstractValuesIdentical(value.Value.Value, first.Value) {
+				identical = false
+				break
+			}
+		}
+		if identical {
+			result.Value = first
 			return result
 		}
 	}
-	result.Value = first
+	firstTruthy, known := domain.truthiness(values[0], truthy)
+	if !known {
+		return result
+	}
+	for _, value := range values[1:] {
+		valueTruthy, known := domain.truthiness(value, truthy)
+		if !known || valueTruthy != firstTruthy {
+			return result
+		}
+	}
+	result.Value.Truthy = &firstTruthy
 	return result
 }
 
@@ -209,7 +249,15 @@ func analyzeRuntimeNode(node actionlint.ExprNode, knownReferences map[string]any
 			return value, err
 		}
 		if strings.EqualFold(node.Callee, "hashFiles") {
-			return Analysis{}, nil
+			arguments := make([]Analysis, 0, len(node.Args))
+			for _, argument := range node.Args {
+				value, err := evaluator.evaluate(argument)
+				if err != nil {
+					return Analysis{}, err
+				}
+				arguments = append(arguments, value)
+			}
+			return unknownAnalysis(arguments...), nil
 		}
 		return Analysis{}, fmt.Errorf("runtime function %q is unsupported", node.Callee)
 	}

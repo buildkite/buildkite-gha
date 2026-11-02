@@ -1617,8 +1617,62 @@ jobs:
     steps:
       - uses: ./.github/actions/token
 `)
-	if err == nil || !strings.Contains(err.Error(), "action input default that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
+	if err == nil || !strings.Contains(err.Error(), "resolved action metadata that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
 		t.Fatalf("compilePlansForTest() error = %v, want empty permission rejection", err)
+	}
+}
+
+func TestCompilePlansCompositeTokenGuards(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "token.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, workspace, ".github/actions/token", `name: token
+inputs:
+  enabled: {}
+runs:
+  using: composite
+  steps:
+    - if: inputs.enabled == 'true'
+      shell: sh
+      env:
+        TOKEN: ${{ github.token }}
+      run: test -n "$TOKEN"
+`)
+	for _, test := range []struct {
+		name, condition, input, permissions string
+		wantToken, wantError                bool
+	}{
+		{name: "enabled", input: "true", permissions: "{contents: read}", wantToken: true},
+		{name: "empty permissions", input: "true", permissions: "{}", wantError: true},
+		{name: "matrix input", input: "${{ matrix.enabled }}", permissions: "{}"},
+		{name: "matrix guard", condition: "matrix.enabled", input: "true", permissions: "{}"},
+		{name: "literal guard", condition: "false", input: "true", permissions: "{}"},
+		{name: "status guard", condition: "success() && false", input: "true", permissions: "{}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.condition == "" {
+				test.condition = "true"
+			}
+			workflow := "on: push\npermissions: " + test.permissions + "\njobs:\n  token:\n    strategy:\n      matrix:\n        enabled: [false]\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/token\n        if: " + test.condition + "\n        with:\n          enabled: " + test.input + "\n"
+			bundle, err := CompileBundleWithOptions(workflowPath, []byte(workflow), pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", defaultOptions())
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "no effective permissions") {
+					t.Fatalf("error = %v, want permission rejection", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.Plans) != 1 || (bundle.Plans[0].Job.GitHubToken != nil) != test.wantToken || (len(bundle.Plans[0].Authorization.GitHubTokenActions) != 0) != test.wantToken {
+				t.Fatalf("unexpected composite token authority: %#v", bundle.Plans)
+			}
+			if test.wantToken && !reflect.DeepEqual(bundle.Plans[0].Job.GitHubToken.Permissions, map[string]string{"contents": "read"}) {
+				t.Fatalf("token permissions = %#v", bundle.Plans[0].Job.GitHubToken)
+			}
+		})
 	}
 }
 

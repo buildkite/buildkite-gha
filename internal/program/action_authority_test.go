@@ -6,7 +6,53 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 )
+
+func TestInventoryCompositeShellAuthorityUsesCallerScope(t *testing.T) {
+	action := Action{Runtime: "composite", Steps: []ActionStep{{
+		Run: &ActionRun{Command: Site{Source: "${{ inputs.b == 'true' && github.token || '' }}"}},
+	}}}
+	bindings := []Binding{
+		{Name: "a", Value: Site{Source: "false", Surface: SurfaceStepTemplate, Result: ResultString, Provenance: ProvenanceWorkflow}},
+		{Name: "b", Value: Site{Source: "${{ inputs.a }}", Surface: SurfaceStepTemplate, Result: ResultString, Provenance: ProvenanceWorkflow}},
+	}
+	authority, err := InventoryActionAuthority(map[string]Action{"root": action}, "root", bindings, ActionAuthorityOptions{
+		WorkflowInputs: expression.InputScope{Values: map[string]any{"a": true}, Complete: true},
+	})
+	if err != nil || !authority.GitHubToken {
+		t.Fatalf("caller input true was shadowed by sibling input false: authority=%#v, error=%v", authority, err)
+	}
+}
+
+func TestInventoryCompositeShellAuthorityPrunesKnownGuards(t *testing.T) {
+	for _, test := range []struct {
+		source, condition string
+		wantToken         bool
+	}{
+		{source: "${{ env.RUNTIME == 'yes' && false && github.token || '' }}"},
+		{source: "${{ true && (env.RUNTIME == 'yes' && false) && github.token || '' }}"},
+		{source: "${{ case(env.SELECT == 'yes', env.RUNTIME == 'yes' && false, false) && github.token || '' }}"},
+		{source: "${{ case(env.RUNTIME == 'yes' && false, github.token, '') }}"},
+		{source: "${{ github.token }}", condition: "success() && false"},
+		{source: "${{ github.token }}", condition: "env.RUNTIME == 'yes' && false"},
+		{source: "${{ env.RUNTIME == 'yes' && github.token || '' }}", wantToken: true},
+		{source: "${{ github.token }}", condition: "success()", wantToken: true},
+		{source: "${{ hashFiles(github.token) }}", wantToken: true},
+		{source: "${{ format('constant', github.token) }}"},
+		{source: "${{ toJSON(github) }}"},
+	} {
+		t.Run(test.source+test.condition, func(t *testing.T) {
+			action := Action{Runtime: "composite", Steps: []ActionStep{{
+				Condition: Site{Source: test.condition}, Run: &ActionRun{Command: Site{Source: test.source}},
+			}}}
+			authority, err := InventoryActionAuthority(map[string]Action{"root": action}, "root", nil, ActionAuthorityOptions{})
+			if err != nil || authority.GitHubToken != test.wantToken {
+				t.Fatalf("authority=%#v, error=%v, want token=%v", authority, err, test.wantToken)
+			}
+		})
+	}
+}
 
 func TestInventoryActionAuthorityDoesNotMutateSharedActions(t *testing.T) {
 	// Leave positional annotations unset, as on wire-format sites. JSON

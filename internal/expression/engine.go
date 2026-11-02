@@ -675,7 +675,7 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 	}
 	if err != nil {
 		if site.Profile == ProfileActionStepTemplate && errors.Is(err, errUnavailableGitHubToken) {
-			err = fmt.Errorf("%w: this job has no available workflow token; this composite expression cannot authorize a token. Declare a token input on the action, pass it from the workflow step with: token: ${{ github.token }}, and use ${{ inputs.token }} inside the composite", err)
+			err = fmt.Errorf("%w: this job has no available workflow token. Declare a token input on the action, pass it from the workflow step with: token: ${{ github.token }}, and use ${{ inputs.token }} inside the composite", err)
 			return nil, siteError(site, err)
 		}
 		return nil, siteError(site, inputEvaluationError(site, err))

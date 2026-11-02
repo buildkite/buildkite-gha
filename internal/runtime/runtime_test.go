@@ -1920,6 +1920,76 @@ printf '%s\n' 'derived-mask-value' >> "$GITHUB_STEP_SUMMARY"`,
 	}
 }
 
+func TestCompileAndRunCompositeShellToken(t *testing.T) {
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, supplied, permissions, expected string
+		wantToken, denied                     bool
+	}{
+		{name: "default", permissions: "{contents: read}", expected: "ghs_composite_scoped", wantToken: true},
+		{name: "explicit authorized input", supplied: "          token: ${{ github.token }}\n", permissions: "{contents: read}", expected: "ghs_composite_scoped", wantToken: true},
+		{name: "fallback disabled", supplied: "          fallback: none\n", permissions: "{}"},
+		{name: "permission denied", permissions: "{}", denied: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflow := "on: push\npermissions: " + test.permissions + "\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/install\n        with:\n          tool: cargo-nextest\n" + test.supplied
+			writeFixtureFile(t, workspace, ".github/workflows/test.yml", workflow)
+			// The guarded environment follows taiki-e/install-action; the shell
+			// checks delivery and masking without installing a tool from the network.
+			writeFixtureFile(t, workspace, ".github/actions/install/action.yml", `name: install token
+inputs:
+  fallback:
+    default: cargo-binstall
+  tool:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        DEFAULT_GITHUB_TOKEN: ${{ inputs.fallback == 'cargo-binstall' && github.token || '' }}
+      run: |
+        test "$DEFAULT_GITHUB_TOKEN" = '`+test.expected+`'
+        printf 'received token: %s\n' "$DEFAULT_GITHUB_TOKEN"
+        echo completed > token-result
+`)
+			jobs, err := compileUntrustedPlans(filepath.Join(workspace, ".github/workflows/test.yml"), []byte(workflow), event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "test")
+			if test.denied {
+				if err == nil || !strings.Contains(err.Error(), "no effective permissions") {
+					t.Fatalf("compile error = %v, want permission rejection", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider := &testWorkflowTokenProvider{token: "ghs_composite_scoped"}
+			var logs bytes.Buffer
+			result, err := (Runner{Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: &testRedactor{}}).runTestJob(t.Context(), jobs[0], workspace)
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("conclusion=%s, error=%v, logs=%s", result.Conclusion, err, logs.String())
+			}
+			if _, err := os.Stat(filepath.Join(workspace, "token-result")); err != nil {
+				t.Fatal(err)
+			}
+			if test.wantToken {
+				if provider.calls != 1 || !reflect.DeepEqual(provider.permissions, map[string]string{"contents": "read"}) {
+					t.Fatalf("token requests=%d, permissions=%v", provider.calls, provider.permissions)
+				}
+			} else if provider.calls != 0 {
+				t.Fatalf("tokenless branch requested %d tokens", provider.calls)
+			}
+			if strings.Contains(logs.String(), "ghs_composite_scoped") {
+				t.Fatal("token leaked to logs")
+			}
+		})
+	}
+}
+
 func TestCompositeMissingTokenExplainsWorkflowInputRemedy(t *testing.T) {
 	for _, test := range []struct {
 		name, action, location string
@@ -1958,7 +2028,7 @@ runs:
 			for _, want := range []string{
 				test.location,
 				`unavailable github value "token"`,
-				"this composite expression cannot authorize a token",
+				"this job has no available workflow token",
 				"with: token: ${{ github.token }}",
 				"use ${{ inputs.token }} inside the composite",
 			} {
@@ -2332,7 +2402,7 @@ func TestCompiledCompositeServerURLCondition(t *testing.T) {
 		{"GHES token body", "github", "false", "https://buildkite-ghe.com", true, false},
 		{"Origin enabled", "cursor-origin", "false", "https://origin.cursor.com", false, false},
 		{"Origin disabled", "cursor-origin", "true", "https://origin.cursor.com", false, false},
-		{"token body cannot authorize token", "github", "false", "https://github.com", true, true},
+		{"GitHub token body", "github", "false", "https://github.com", true, true},
 		{"disabled token body", "github", "true", "https://github.com", true, false},
 		{"Origin token body", "cursor-origin", "false", "https://origin.cursor.com", true, false},
 	} {
@@ -2375,18 +2445,22 @@ runs:
 			if err != nil || len(jobs) != 1 {
 				t.Fatalf("compile composite condition = %#v, %v", jobs, err)
 			}
-			if jobs[0].GitHubToken != nil {
-				t.Fatal("composite condition or body granted token authority")
+			wantToken := test.tokenBody && test.wantRun
+			if (jobs[0].GitHubToken != nil) != wantToken {
+				t.Fatalf("token authority = %#v, want token=%v", jobs[0].GitHubToken, wantToken)
 			}
-			result, err := (Runner{}).RunJob(t.Context(), jobs[0], workspace)
-			if test.tokenBody && test.wantRun {
-				if err == nil || !strings.Contains(err.Error(), "github.token") || result.Conclusion != "failure" {
-					t.Fatalf("RunJob() = %#v, %v; want missing composite token failure", result, err)
-				}
-				return
-			}
+			provider := &testWorkflowTokenProvider{token: "ghs_provider_guard"}
+			result, err := (Runner{WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(t.Context(), jobs[0], workspace)
 			if err != nil || result.Conclusion != "success" {
 				t.Fatalf("RunJob() = %#v, %v", result, err)
+			}
+			if wantToken {
+				data, err := os.ReadFile(filepath.Join(workspace, "conditional-ran"))
+				if err != nil || strings.TrimSpace(string(data)) != provider.token || provider.calls != 1 || !reflect.DeepEqual(provider.permissions, map[string]string{"contents": "read"}) {
+					t.Fatalf("token body result = %q, error=%v, provider=%#v", data, err, provider)
+				}
+			} else if provider.calls != 0 {
+				t.Fatal("tokenless provider branch requested a token")
 			}
 			_, statErr := os.Stat(filepath.Join(workspace, "conditional-ran"))
 			if test.wantRun && statErr != nil || !test.wantRun && !errors.Is(statErr, os.ErrNotExist) {

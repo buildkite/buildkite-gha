@@ -14,6 +14,17 @@ concurrency:
   group: expression-oracle-${{ github.run_id }}
 
 jobs:
+  composite-token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/oracle-composite-token
+      - uses: ./.github/actions/oracle-composite-token
+        with:
+          fallback: none
+
   reusable-defaults:
     uses: ./.github/workflows/expression-oracle-reusable.yml
 

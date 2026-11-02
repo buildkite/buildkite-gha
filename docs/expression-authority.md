@@ -41,7 +41,8 @@ conservative without granting credentials to known-unreachable paths:
 - A known-false or provider-inapplicable branch must not grant token authority.
 - A branch that depends on an unknown runtime value may grant token authority.
 - Action metadata cannot grant ordinary secret authority.
-- Composite step and output metadata cannot grant `github.token` authority.
+- Composite shell `env`, `run`, and `working-directory` templates can require
+  the job-authorized token; other composite metadata cannot add token authority.
 - Workflow-authored `toJSON(github)` and direct `github.token` access retain
   distinct provenance from action-authored access.
 
@@ -113,8 +114,9 @@ with an abstract value domain:
 
 ```go
 type AbstractValue struct {
-	Known bool
-	Value any
+	Known  bool
+	Value  any
+	Truthy *bool
 }
 
 type Analysis struct {
@@ -126,6 +128,10 @@ type Analysis struct {
 Known values preserve normal evaluation. Unknown runtime values join effects
 from every reachable branch. Unknown means a valid runtime dependency, not an
 evaluation or validation failure.
+
+An unknown value can have known truthiness. For example, `unknown && false`
+is always falsy, even though it can return different falsy values. Logical
+operators and `case()` preserve that fact without inventing a concrete value.
 
 The abstract domain must satisfy:
 
@@ -242,7 +248,8 @@ The following boundaries are deliberate:
 - Commands and workflow-command mutations produce unknown planning values.
   Later token authority joins conservatively.
 - Action metadata cannot introduce ordinary secret authority.
-- Composite step and output expressions cannot introduce `github.token` authority.
+- Composite shell token reads retain the workflow's existing permission policy;
+  they do not enable pipeline token issuance or expand scopes.
 - Whole-context `github` serialization is allowed only by profiles that admit
   it and retains its author provenance.
 - Validation inspects unreachable branches for unsupported or prohibited
@@ -261,20 +268,24 @@ This architecture does not broaden expression syntax, allow dynamic secret
 access, make private actions available, or weaken immutable source
 verification.
 
-### Missing composite tokens
+### Composite tokens
 
 Action input defaults have a separate profile: an effective default that reaches
 `github.token` can retain token authority, including on a composite action.
-Composite step and output expressions do not authorize a token. A child action's
-`with` that would grant token authority fails during compilation; a reference in
-a composite step's environment or an output can fail at runtime when the job has
-no token.
+Reachable composite shell `env`, `run`, and `working-directory` templates also
+retain direct token authority. Analysis uses ordered defaults, caller-scoped
+supplied inputs, and the job's matrix. Sibling supplied values never overwrite
+their caller's input scope. Known-false invocation and shell guards prune shell
+authority; unknown runtime guards retain it. Nested input defaults remain
+conservative because preparation can evaluate them before main-step guards.
 
-These diagnostics direct the author to declare a token input, pass
-`${{ github.token }}` from the workflow step's `with`, and use
-`${{ inputs.token }}` inside the composite. They do not suggest pipeline token
-settings: enabling issuance does not change the metadata authority boundary.
-Issuance failures own settings guidance; see the
+Composite outputs and whole-context serialization do not independently request
+a token. Child-action `with` expressions that would grant token authority still
+fail compilation. Those uses can receive a token through a workflow-authorized
+input. JavaScript and Docker lifecycle boundaries are unchanged.
+
+Missing-token diagnostics retain the explicit input remedy, including for older
+tokenless plans. Issuance failures own settings guidance; see the
 [security documentation](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/security).
 
 ## Implemented outcome

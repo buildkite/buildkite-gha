@@ -156,7 +156,7 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 			if err != nil {
 				return err
 			}
-			mayRun := reachable && !(condition.Value.Known && !engine.Truthy(condition.Value.Value))
+			mayRun := reachable && !condition.Value.IsFalsy()
 			if step.Invocation == nil {
 				sites := []Site{step.WorkingDirectory}
 				if step.Run != nil {
