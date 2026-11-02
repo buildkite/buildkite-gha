@@ -146,6 +146,15 @@
       "action_preflight": "none"
     },
     {
+      "id": "rust",
+      "workflow": "testdata/smoke/.github/workflows/rust.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "Validation, compilation, and hosted admission cover the dtolnay/rust-toolchain composite action.",
+      "note": "Run the rust compatibility proof for end-to-end hosted cargo build and test evidence.",
+      "action_preflight": "hosted"
+    },
+    {
       "id": "upload-artifact",
       "workflow": "testdata/smoke/.github/workflows/upload-artifact.yml",
       "event": "testdata/smoke/events/push.json",

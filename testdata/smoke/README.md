@@ -19,6 +19,8 @@ workflow is executable:
    payload in both consumer matrix instances.
 5. `hash-files.yml` verifies matched and empty hashes, ordered exclusions, and
    step condition evaluation against files created by an earlier step.
+6. `rust.yml` installs a pinned Rust toolchain with `dtolnay/rust-toolchain`,
+   then builds, tests, and runs a small Cargo application.
 
 `manifest.json` is the authoritative, ordered compatibility inventory for
 these workflows and the related behavior-oriented proof fixtures. Every

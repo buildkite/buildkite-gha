@@ -1,0 +1,59 @@
+name: Rust proof
+
+on:
+  push:
+
+permissions: {}
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust-app
+    steps:
+      - name: Create Rust application
+        working-directory: .
+        run: |
+          mkdir -p rust-app/src
+          cat > rust-app/Cargo.toml <<'EOF'
+          [package]
+          name = "rust-proof"
+          version = "0.1.0"
+          edition = "2024"
+          EOF
+          cat > rust-app/src/lib.rs <<'EOF'
+          pub fn greeting(name: &str) -> String {
+              format!("hello, {name}")
+          }
+
+          #[cfg(test)]
+          mod tests {
+              #[test]
+              fn greets_by_name() {
+                  assert_eq!(super::greeting("buildkite"), "hello, buildkite");
+              }
+          }
+          EOF
+          cat > rust-app/src/main.rs <<'EOF'
+          fn main() {
+              println!("{}", rust_proof::greeting("buildkite"));
+          }
+          EOF
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99.1"
+
+      - name: Build
+        run: |
+          rustc --version | grep '^rustc 1\.99\.1 '
+          cargo build --release
+
+      - name: Test
+        run: cargo test --release 2>&1 | tee test.log && grep -F 'test tests::greets_by_name ... ok' test.log
+
+      - name: Run application
+        run: test "$(target/release/rust-proof)" = "hello, buildkite"
