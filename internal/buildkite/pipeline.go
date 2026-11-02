@@ -23,6 +23,10 @@ const distributionDirectory = ".buildkite-gha/distributions"
 const stageDirectory = ".buildkite-gha/stages"
 const maxConcurrencyGroupLength = 200
 const runtimeCacheName = "buildkite-gha"
+
+// etcEnvironmentPATHCommand prepends /etc/environment PATH entries that the
+// agent's PATH lacks, so the agent's buildkite-agent and docker still win.
+const etcEnvironmentPATHCommand = `etc_path="$(sed -n 's/^PATH=//p' /etc/environment 2>/dev/null | tail -n 1)"; etc_path="${etc_path#\"}"; etc_path="${etc_path%\"}"; missing_path=''; IFS=: read -r -a etc_entries <<< "$etc_path"; for entry in "${etc_entries[@]}"; do case ":$PATH:$missing_path:" in *":$entry:"*) ;; *) test -z "$entry" || missing_path="$missing_path${missing_path:+:}$entry";; esac; done; if test -n "$missing_path"; then PATH="$missing_path:$PATH"; export PATH; fi`
 const runtimeCacheRoot = "/cache/bkcache/buildkite-gha"
 const darwinRuntimeCacheRoot = "/tmp/bkcache/buildkite-gha"
 
@@ -766,6 +770,12 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		// builder; see runtime.enableDockerBuildLoad.
 		if job.Agents["nsc-gha-image"] != "" {
 			runJob += " --docker-build-load"
+			if strings.HasPrefix(platform, "linux/") {
+				// GitHub runner images put tool paths such as ~/.cargo/bin in
+				// /etc/environment, which only PAM logins read. GitHub's runner
+				// starts with that PATH; the agent service never sees it.
+				commands = append(commands, etcEnvironmentPATHCommand)
+			}
 		}
 		if experimentalRunnerUser {
 			runJob = experimentalRunnerUserCommand(runJob)
