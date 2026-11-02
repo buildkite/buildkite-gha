@@ -725,8 +725,6 @@ func TestParsePluginConfiguration(t *testing.T) {
 	configuration, err := parsePluginConfiguration(`{
   "workflows": [".github/workflows/ci.yml", ".github/workflows/release.yml"],
   "version": "0.8.0",
-  "source-ref": "0123456789abcdef0123456789abcdef01234567",
-  "minimum-release-age": "24h",
   "experimental-runner-user": true,
   "private-reusable-workflows": true,
   "oidc": {
@@ -791,6 +789,8 @@ func TestParsePluginConfiguration(t *testing.T) {
 		{name: "non-string workflow entry", source: `{"workflows":["one.yml",null]}`, want: "workflows entry 1 must be a non-empty string"},
 		{name: "empty workflow entry", source: `{"workflows":["one.yml",""]}`, want: "workflows entry 1 must be a non-empty string"},
 		{name: "unknown top-level field", source: `{"workflow":"ci.yml","runnerss":[]}`, want: "unknown field"},
+		{name: "retired source-ref", source: `{"source-ref":"main"}`, want: "unknown field"},
+		{name: "retired release age", source: `{"minimum-release-age":"1d"}`, want: "unknown field"},
 		{name: "both acquisition modes", source: `{"version":"latest","binary":"https://example.com/bin"}`, want: "mutually exclusive"},
 		{name: "null binary", source: `{"binary":null}`, want: "non-empty platform-to-URL"},
 		{name: "empty binary map", source: `{"binary":{}}`, want: "non-empty platform-to-URL"},
@@ -1237,7 +1237,7 @@ func TestPluginValidatesExplicitRunnerMappingsBeforeUpload(t *testing.T) {
 }
 
 func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
-	for _, mode := range []string{"release", "legacy-source", "binary"} {
+	for _, mode := range []string{"release", "binary"} {
 		t.Run(mode, func(t *testing.T) {
 			testPluginPublishesMixedRuntimeDistributions(t, mode)
 		})
@@ -1291,14 +1291,6 @@ func testPluginPublishesMixedRuntimeDistributions(t *testing.T, mode string) {
 	case "release":
 		version = "1.2.3"
 		configurationFields["version"] = "latest"
-		configurationFields["minimum-release-age"] = "24h"
-	case "legacy-source":
-		configurationFields["source-ref"] = fullCommit
-		darwinPath := filepath.Join(t.TempDir(), "buildkite-gha-darwin")
-		if err := os.WriteFile(darwinPath, darwinContents, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv(pluginDevDarwinRuntimeEnvironment, darwinPath)
 	case "binary":
 		configurationFields["binary"] = map[string]string{
 			"linux/amd64":  binaryServer.URL + "/linux",
