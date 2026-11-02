@@ -566,8 +566,23 @@ support `github` and `inputs` in composite conditions. The pinned
 uses a provider-URL guard. This informed
 [composite `github.server_url` support](https://github.com/buildkite/buildkite-gha/pull/607).
 It is source evidence, not a native execution or whole-action success claim.
-Keep admission scoped to composite conditions and preserve implicit success and
-token-authority rules; see [expression tests](../internal/expression/engine_test.go).
+
+A native GHES 3.22.2 [host/checkout run](https://buildkite-ghe.com/sj26-testier/ghes-source-compare-20261102/actions/runs/6)
+at [fixture commit 8d5eaa8](https://buildkite-ghe.com/sj26-testier/ghes-source-compare-20261102/commit/8d5eaa81db6c6f5e5c16abc18fd17132fe3e5091)
+accepted checkout `github-server-url: ${{ github.server_url }}`, true job/step
+host conditions, and a false github.com branch. Checkout used the GHES mirror's
+v4 commit `34e114876b0b11c390a56381ad16ebd13914f8d5`.
+Job, workflow-step, reusable-call, and composite-step host conditions preserve
+implicit success and token-authority rules; JavaScript lifecycle admission is
+unchanged. Checkout expressions must resolve to the event host or empty value,
+with the same host check at compilation and execution. These fields do not
+authorize another host or change public action source resolution.
+The [expression tests](../internal/expression/engine_test.go) and
+[compiled runtime tests](../internal/runtime/runtime_test.go) cover both hosts,
+false-branch token pruning, and unavailable values. The
+[hosted differential oracle](../.github/workflows/expression-oracle.yml) also
+checks checkout and host guards on github.com. Native GHES evidence does not
+establish hosted Buildkite GHES checkout credentials or pipeline onboarding.
 
 The runner's [composite result handling](https://github.com/actions/runner/blob/5f0b3ddcc6ee9fe9441e00d55e85b94ea4aad798/src/Runner.Worker/Handlers/CompositeActionHandler.cs#L235-L248)
 and [job-status updates](https://github.com/actions/runner/blob/5f0b3ddcc6ee9fe9441e00d55e85b94ea4aad798/src/Runner.Worker/StepsRunner.cs#L273-L285)

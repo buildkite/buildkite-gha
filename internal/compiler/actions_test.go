@@ -1964,6 +1964,43 @@ func TestCheckoutAuthorityFollowsRootReachability(t *testing.T) {
 	}
 }
 
+func TestCheckoutServerURLExpression(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := writeWorkflow(t, workspace, "checkout-host.yml", "")
+	writeAction(t, remote, "", checkoutTestManifest(actionintegration.CheckoutV7Commit))
+	for _, server := range []string{"https://github.com", "https://buildkite-ghe.com"} {
+		for _, input := range []string{"${{ github.server_url }}", "${{ github['server_url'] }}", "https://wrong.example", "${{ github.server_url }}/other"} {
+			t.Run(server+"/"+input, func(t *testing.T) {
+				workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@" + actionintegration.CheckoutV7Commit + "\n        with:\n          github-server-url: " + input + "\n")
+				event := bytes.Replace(pushEvent(t), []byte(`"event":`), []byte(fmt.Sprintf(`"server_url":%q,"event":`, server)), 1)
+				event = bytes.ReplaceAll(event, []byte("https://github.com/"), []byte(server+"/"))
+				bundle, err := CompileBundleWithOptions(workflowPath, workflow, event, "0.0.0-test", testDistributionDigest, "importer", Options{
+					EventTrust:     EventUntrusted,
+					Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+					ResolveActions: true,
+					ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+				})
+				if strings.Contains(input, "wrong.example") || strings.HasSuffix(input, "/other") {
+					if err == nil || !strings.Contains(err.Error(), `explicit input "github-server-url" value is unsupported`) {
+						t.Fatalf("foreign checkout host error = %v", err)
+					}
+					return
+				}
+				if err != nil || len(bundle.Plans) != 1 {
+					t.Fatalf("compile = %#v, %v", bundle.Plans, err)
+				}
+				job := bundle.Plans[0].Job
+				if job.Event.ServerURL != server || !job.HasCapability("provider-token-read") || job.GitHubToken != nil {
+					t.Fatalf("checkout identity or authority = %#v", job)
+				}
+				if got := job.Program.Job.Steps[0].Invocation.With[0].Value.Source; got != input {
+					t.Fatalf("checkout source = %q, want retained expression %q", got, input)
+				}
+			})
+		}
+	}
+}
+
 func TestStaticallySkippedReusableJobDoesNotValidateCheckoutAdapterInputs(t *testing.T) {
 	repository, remote := t.TempDir(), t.TempDir()
 	caller := writeWorkflow(t, repository, "caller.yml", "")

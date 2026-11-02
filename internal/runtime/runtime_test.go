@@ -2416,6 +2416,66 @@ jobs:
 	}
 }
 
+func TestCompiledWorkflowServerURLConditions(t *testing.T) {
+	for _, server := range []string{"https://github.com", "https://buildkite-ghe.com"} {
+		for _, wantRun := range []bool{true, false} {
+			for _, position := range []string{"job", "step", "call"} {
+				t.Run(fmt.Sprintf("%s/%s/match=%t", server, position, wantRun), func(t *testing.T) {
+					workspace := t.TempDir()
+					workflowPath := ".github/workflows/test.yml"
+					host := server
+					if !wantRun {
+						host = "https://wrong.example"
+					}
+					condition := "github.server_url == '" + host + "'"
+					jobCondition, stepCondition := "true", "true"
+					if position == "job" {
+						jobCondition = condition
+					}
+					if position == "step" {
+						stepCondition = condition
+					}
+					workflow := fmt.Sprintf(`on: push
+jobs:
+  test:
+    if: %s
+    runs-on: ubuntu-latest
+    steps:
+      - if: %s
+        run: printf '%%s' '${{ github.token }}' > token-body
+`, jobCondition, stepCondition)
+					if position == "call" {
+						writeFixtureFile(t, workspace, ".github/workflows/called.yml", strings.Replace(workflow, "on: push", "on: workflow_call", 1))
+						workflow = "on: push\njobs:\n  call:\n    if: " + condition + "\n    uses: ./.github/workflows/called.yml\n"
+					}
+					writeFixtureFile(t, workspace, workflowPath, workflow)
+					event := []byte(fmt.Sprintf(`{"provider":"github","server_url":%q,"event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat"}`, server))
+					jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+					if err != nil || len(jobs) != 1 {
+						t.Fatalf("compile = %#v, %v", jobs, err)
+					}
+					if (jobs[0].GitHubToken != nil) != wantRun {
+						t.Fatalf("token authority = %#v, want token=%v", jobs[0].GitHubToken, wantRun)
+					}
+					provider := &testWorkflowTokenProvider{token: "ghs_host_condition"}
+					result, err := (Runner{WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(t.Context(), jobs[0], workspace)
+					wantConclusion := "success"
+					if !wantRun && position != "step" {
+						wantConclusion = "skipped"
+					}
+					if err != nil || result.Conclusion != wantConclusion {
+						t.Fatalf("RunJob() = %#v, %v; want %s", result, err, wantConclusion)
+					}
+					body, err := os.ReadFile(filepath.Join(workspace, "token-body"))
+					if wantRun && (err != nil || string(body) != provider.token) || !wantRun && (!errors.Is(err, os.ErrNotExist) || provider.calls != 0) {
+						t.Fatalf("token body = %q, %v; token calls=%d, want run=%v", body, err, provider.calls, wantRun)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestCompiledCompositeServerURLCondition(t *testing.T) {
 	for _, test := range []struct {
 		name, provider, disabled, server string

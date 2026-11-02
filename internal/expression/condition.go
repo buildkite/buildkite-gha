@@ -276,7 +276,7 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 					return nil
 				}
 			case "server_url":
-				if scope == actionStepCondition {
+				if scope != actionLifecycleCondition {
 					return nil
 				}
 			}
@@ -285,8 +285,8 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 		if scope == StepCondition || scope == actionStepCondition || scope == actionLifecycleCondition {
 			supported += ", plus event_path during execution"
 		}
-		if scope == actionStepCondition {
-			supported += ", plus server_url in composite step conditions"
+		if scope != actionLifecycleCondition {
+			supported += ", plus server_url"
 		}
 		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are %s", reference, supported)
 	case "needs":
