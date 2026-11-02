@@ -1647,7 +1647,7 @@ runs:
 	for _, test := range []struct {
 		name, condition, input, permissions string
 		wantToken, wantError                bool
-		unknownSibling                     bool
+		unknownSibling                      bool
 	}{
 		{name: "enabled", input: "true", permissions: "{contents: read}", wantToken: true},
 		{name: "empty permissions", input: "true", permissions: "{}", wantError: true},
