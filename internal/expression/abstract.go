@@ -179,6 +179,10 @@ func analyzeActionInputDefault(node actionlint.ExprNode, knownReferences map[str
 		}
 		if value, ok := knownReferences[strings.ToLower(referenceName(root, path))]; ok {
 			analysis.Value = AbstractValue{Known: true, Value: value}
+		} else if strings.EqualFold(root, "inputs") || strings.EqualFold(root, "matrix") {
+			if value, found := lookupRuntimeValue(knownReferences[strings.ToLower(root)], path); found {
+				analysis.Value = AbstractValue{Known: true, Value: value}
+			}
 		}
 		return analysis, nil
 	}

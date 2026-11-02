@@ -1628,9 +1628,9 @@ func TestCompilePlansCompositeTokenGuards(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeAction(t, workspace, ".github/actions/token", `name: token
+	action := `name: token
 inputs:
-  enabled: {}
+  enabled:%s
 runs:
   using: composite
   steps:
@@ -1643,9 +1643,10 @@ runs:
       env:
         TOKEN: ${{ inputs.enabled == 'true' && github.token || '' }}
       run: echo guarded
-`)
+`
 	for _, test := range []struct {
 		name, condition, input, permissions string
+		defaultInput                        string
 		wantToken, wantError                bool
 		unknownSibling                      bool
 	}{
@@ -1654,11 +1655,19 @@ runs:
 		{name: "omitted optional input", permissions: "{}"},
 		{name: "omitted optional input with unknown sibling", permissions: "{}", unknownSibling: true},
 		{name: "matrix input", input: "${{ matrix.enabled }}", permissions: "{}"},
+		{name: "matrix default false", defaultInput: "${{ matrix.enabled }}", permissions: "{}"},
+		{name: "matrix default true", defaultInput: "${{ matrix.enabled == false }}", permissions: "{contents: read}", wantToken: true},
+		{name: "runtime default", defaultInput: "${{ env.RUNTIME }}", permissions: "{contents: read}", wantToken: true},
 		{name: "matrix guard", condition: "matrix.enabled", input: "true", permissions: "{}"},
 		{name: "literal guard", condition: "false", input: "true", permissions: "{}"},
 		{name: "status guard", condition: "success() && false", input: "true", permissions: "{}"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			definition := " {}"
+			if test.defaultInput != "" {
+				definition = "\n    default: " + test.defaultInput
+			}
+			writeAction(t, workspace, ".github/actions/token", fmt.Sprintf(action, definition))
 			if test.condition == "" {
 				test.condition = "true"
 			}
