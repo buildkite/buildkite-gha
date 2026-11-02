@@ -979,8 +979,10 @@ func deferredRuntimePlatforms(uploadArguments parsedUploadArgs) map[compiler.Pla
 		if _, configured := uploadArguments.runtimeDistributionPaths[platform]; configured {
 			platforms[platform] = true
 		}
-		if acquisition := uploadArguments.pluginAcquisition; acquisition != nil && (stableVersionPattern.MatchString(acquisition.version) || os.Getenv(pluginDevRuntimeEnvironment(platform)) != "") {
-			platforms[platform] = true
+		if acquisition := uploadArguments.pluginAcquisition; acquisition != nil {
+			if acquisition.binaries[platform] != "" || (acquisition.binaries == nil && (releaseVersionPattern.MatchString(acquisition.version) || os.Getenv(pluginDevRuntimeEnvironment(platform)) != "")) {
+				platforms[platform] = true
+			}
 		}
 	}
 	return platforms
