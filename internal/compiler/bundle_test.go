@@ -830,8 +830,8 @@ func TestCompileBundleCompilesSmokeCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(workflows) != 13 {
-		t.Fatalf("smoke workflows = %d, want 13", len(workflows))
+	if len(workflows) != 14 {
+		t.Fatalf("smoke workflows = %d, want 14", len(workflows))
 	}
 	event := readFile(t, smokePath("events", "push.json"))
 	for _, path := range workflows {
