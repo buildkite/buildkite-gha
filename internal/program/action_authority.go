@@ -127,8 +127,7 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 				continue
 			}
 			if input.Default == nil {
-				// Preserve known absence without adding a property to the input object.
-				known["inputs."+name] = nil
+				inputs.Absent = append(inputs.Absent, name)
 				continue
 			}
 			analysis, err := engine.Analyze(input.Default.expressionSite(), expression.AbstractValues{References: known, Inputs: inputs})

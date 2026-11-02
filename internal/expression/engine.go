@@ -235,6 +235,8 @@ type AbstractValues struct {
 type InputScope struct {
 	Values   map[string]any
 	Complete bool
+	// Absent names are known missing, even when other properties are deferred.
+	Absent []string
 }
 
 type Reduced struct {
@@ -913,6 +915,13 @@ func (engine Engine) Analyze(site Site, values AbstractValues) (Analysis, error)
 	}
 
 	knownReferences := canonicalAbstractReferences(values.References, values.Inputs)
+	for _, name := range values.Inputs.Absent {
+		var missing any
+		if site.Profile == ProfileActionStepTemplate || site.Profile == ProfileActionInputDefault {
+			missing = ""
+		}
+		knownReferences["inputs."+strings.ToLower(name)] = missing
+	}
 	analyzeNode := func(node actionlint.ExprNode) (Analysis, error) {
 		if profile.semantics == semanticsActionInputDefault {
 			return analyzeActionInputDefault(node, knownReferences)

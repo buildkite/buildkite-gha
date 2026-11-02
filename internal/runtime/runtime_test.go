@@ -1927,14 +1927,25 @@ func TestCompileAndRunCompositeShellToken(t *testing.T) {
 	}
 	for _, test := range []struct {
 		name, supplied, permissions, expected string
+		guard, condition                      string
 		wantToken, denied                     bool
 	}{
 		{name: "default", permissions: "{contents: read}", expected: "ghs_composite_scoped", wantToken: true},
 		{name: "explicit authorized input", supplied: "          token: ${{ github.token }}\n", permissions: "{contents: read}", expected: "ghs_composite_scoped", wantToken: true},
 		{name: "fallback disabled", supplied: "          fallback: none\n", permissions: "{}"},
 		{name: "permission denied", permissions: "{}", denied: true},
+		{name: "omitted input type-sensitive guards", permissions: "{contents: read}", expected: "ghs_composite_scoped", wantToken: true,
+			condition: `toJSON(inputs.optional) == 'null'`,
+			guard:     `toJSON(inputs.optional) == '""' && inputs.omitted_json == '""' && !contains(toJSON(inputs), '"optional"')`},
+		{name: "omitted input is not null in shell", permissions: "{}", guard: `toJSON(inputs.optional) == 'null'`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			if test.guard == "" {
+				test.guard = "inputs.fallback == 'cargo-binstall'"
+			}
+			if test.condition == "" {
+				test.condition = "true"
+			}
 			workspace := t.TempDir()
 			workflow := "on: push\npermissions: " + test.permissions + "\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/install\n        with:\n          tool: cargo-nextest\n" + test.supplied
 			writeFixtureFile(t, workspace, ".github/workflows/test.yml", workflow)
@@ -1946,12 +1957,16 @@ inputs:
     default: cargo-binstall
   tool:
     required: true
+  optional: {}
+  omitted_json:
+    default: ${{ toJSON(inputs.optional) }}
 runs:
   using: composite
   steps:
     - shell: sh
+      if: `+test.condition+`
       env:
-        DEFAULT_GITHUB_TOKEN: ${{ inputs.fallback == 'cargo-binstall' && github.token || '' }}
+        DEFAULT_GITHUB_TOKEN: ${{ `+test.guard+` && github.token || '' }}
       run: |
         test "$DEFAULT_GITHUB_TOKEN" = '`+test.expected+`'
         printf 'received token: %s\n' "$DEFAULT_GITHUB_TOKEN"
