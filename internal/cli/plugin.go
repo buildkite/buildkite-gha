@@ -81,7 +81,7 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		oidc:                     configuration.OIDC,
 		experimentalRunnerUser:   configuration.ExperimentalRunnerUser,
 		privateReusableWorkflows: configuration.PrivateReusableWorkflows,
-		pluginAcquisition:        &pluginRuntimeAcquisition{version: version},
+		pluginAcquisition:        &pluginRuntimeAcquisition{version: version, binaries: configuration.binaries},
 		importerPlatform:         importerPlatform,
 		telemetry:                details,
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
@@ -93,6 +93,7 @@ type pluginConfiguration struct {
 	PrivateReusableWorkflows bool
 	OIDC                     *plan.OIDCConfiguration
 	runnerTargets            map[string]compiler.RunnerTarget
+	binaries                 map[compiler.Platform]string
 }
 
 func parsePluginConfiguration(source string) (pluginConfiguration, error) {
@@ -116,9 +117,44 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	for key := range encoded {
 		switch key {
-		case "workflow", "workflows", "runners", "oidc", "version", "source-ref", "minimum-release-age", "experimental-runner-user", "private-reusable-workflows":
+		case "workflow", "workflows", "runners", "oidc", "version", "binary", "experimental-runner-user", "private-reusable-workflows":
 		default:
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
+		}
+	}
+	var binaries map[compiler.Platform]string
+	if value, configured := encoded["binary"]; configured {
+		if _, hasVersion := encoded["version"]; hasVersion {
+			return pluginConfiguration{}, fmt.Errorf("version and binary are mutually exclusive")
+		}
+		host, err := importerPlatform(runtime.GOOS, runtime.GOARCH)
+		if err != nil {
+			return pluginConfiguration{}, err
+		}
+		if source, ok := value.(string); ok {
+			value = map[string]any{host.String(): source}
+		}
+		values, ok := value.(map[string]any)
+		if !ok || len(values) == 0 {
+			return pluginConfiguration{}, fmt.Errorf("binary must be an HTTPS URL or a non-empty platform-to-URL object")
+		}
+		binaries = make(map[compiler.Platform]string, len(values))
+		for name, value := range values {
+			platform, err := compiler.ParsePlatform(name)
+			if err != nil {
+				return pluginConfiguration{}, err
+			}
+			source, ok := value.(string)
+			if !ok {
+				return pluginConfiguration{}, fmt.Errorf("binary URL for %s must be a string", platform)
+			}
+			if _, _, err := parsePluginBinaryURL(source); err != nil {
+				return pluginConfiguration{}, fmt.Errorf("binary URL for %s: %w", platform, err)
+			}
+			binaries[platform] = source
+		}
+		if binaries[host] == "" {
+			return pluginConfiguration{}, fmt.Errorf("binary URL for importer platform %s is required", host)
 		}
 	}
 	experimentalRunnerUser := true
@@ -228,7 +264,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	return pluginConfiguration{
 		Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, PrivateReusableWorkflows: privateReusableWorkflows,
-		OIDC: oidc, runnerTargets: targets,
+		OIDC: oidc, runnerTargets: targets, binaries: binaries,
 	}, nil
 }
 

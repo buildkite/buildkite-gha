@@ -2,8 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -723,8 +725,6 @@ func TestParsePluginConfiguration(t *testing.T) {
 	configuration, err := parsePluginConfiguration(`{
   "workflows": [".github/workflows/ci.yml", ".github/workflows/release.yml"],
   "version": "0.8.0",
-  "source-ref": "0123456789abcdef0123456789abcdef01234567",
-  "minimum-release-age": "24h",
   "experimental-runner-user": true,
   "private-reusable-workflows": true,
   "oidc": {
@@ -764,6 +764,16 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if err != nil || disabled.ExperimentalRunnerUser {
 		t.Fatalf("disabled runner user configuration = %#v, %v", disabled, err)
 	}
+	host, err := importerPlatform(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, binary := range []string{`"https://example.com/buildkite-gha"`, `{"` + host.String() + `":"https://example.com/buildkite-gha#sha256=` + strings.Repeat("aB", 32) + `"}`} {
+		configuration, err := parsePluginConfiguration(`{"binary":` + binary + `}`)
+		if err != nil || len(configuration.binaries) != 1 || configuration.binaries[host] == "" {
+			t.Fatalf("binary configuration = %#v, %v", configuration, err)
+		}
+	}
 
 	for _, test := range []struct {
 		name   string
@@ -779,6 +789,21 @@ func TestParsePluginConfiguration(t *testing.T) {
 		{name: "non-string workflow entry", source: `{"workflows":["one.yml",null]}`, want: "workflows entry 1 must be a non-empty string"},
 		{name: "empty workflow entry", source: `{"workflows":["one.yml",""]}`, want: "workflows entry 1 must be a non-empty string"},
 		{name: "unknown top-level field", source: `{"workflow":"ci.yml","runnerss":[]}`, want: "unknown field"},
+		{name: "retired source-ref", source: `{"source-ref":"main"}`, want: "unknown field"},
+		{name: "retired release age", source: `{"minimum-release-age":"1d"}`, want: "unknown field"},
+		{name: "both acquisition modes", source: `{"version":"latest","binary":"https://example.com/bin"}`, want: "mutually exclusive"},
+		{name: "null binary", source: `{"binary":null}`, want: "non-empty platform-to-URL"},
+		{name: "empty binary map", source: `{"binary":{}}`, want: "non-empty platform-to-URL"},
+		{name: "missing host binary", source: `{"binary":{"windows/amd64":"https://example.com/bin"}}`, want: "importer platform"},
+		{name: "unknown binary platform", source: `{"binary":{"plan9/amd64":"https://example.com/bin"}}`, want: "unsupported runtime platform"},
+		{name: "non-string binary", source: `{"binary":{"linux/amd64":1}}`, want: "must be a string"},
+		{name: "insecure binary", source: `{"binary":"http://example.com/bin"}`, want: "HTTPS"},
+		{name: "hostless binary", source: `{"binary":"https:///bin"}`, want: "HTTPS"},
+		{name: "binary credentials", source: `{"binary":"https://user:secret@example.com/bin"}`, want: "without user credentials"},
+		{name: "unknown binary fragment", source: `{"binary":"https://example.com/bin#sha512=abcd"}`, want: "64 hexadecimal"},
+		{name: "empty binary fragment", source: `{"binary":"https://example.com/bin#"}`, want: "64 hexadecimal"},
+		{name: "short binary checksum", source: `{"binary":"https://example.com/bin#sha256=abcd"}`, want: "64 hexadecimal"},
+		{name: "invalid binary checksum", source: `{"binary":"https://example.com/bin#sha256=` + strings.Repeat("z", 64) + `"}`, want: "64 hexadecimal"},
 		{name: "retired source acquisition field", source: `{"workflow":"ci.yml","buildkite-gha-source-ref":"latest"}`, want: "unknown field"},
 		{name: "string experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":"true"}`, want: "must be a boolean"},
 		{name: "numeric experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":1}`, want: "must be a boolean"},
@@ -1219,10 +1244,6 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	})
 	t.Chdir(repository)
 	workflowPath := filepath.Join(".github", "workflows", "mixed.yml")
-	linuxPath, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	darwinContents := []byte{
 		0xcf, 0xfa, 0xed, 0xfe,
 		0x0c, 0x00, 0x00, 0x01,
@@ -1233,12 +1254,22 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 		0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00,
 	}
-	darwinPath := filepath.Join(t.TempDir(), "buildkite-gha-darwin")
-	if err := os.WriteFile(darwinPath, darwinContents, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	binaryServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/darwin" {
+			t.Errorf("unexpected binary download: %s", r.URL)
+		}
+		_, _ = w.Write(darwinContents)
+	}))
+	defer binaryServer.Close()
+	previousClient := pluginHTTPClient
+	pluginHTTPClient = binaryServer.Client()
+	t.Cleanup(func() { pluginHTTPClient = previousClient })
 	configuration, err := json.Marshal(map[string]any{
 		"workflow": workflowPath,
+		"binary": map[string]string{
+			"linux/amd64":  binaryServer.URL + "/linux",
+			"darwin/arm64": fmt.Sprintf("%s/darwin#sha256=%x", binaryServer.URL, sha256.Sum256(darwinContents)),
+		},
 		"runners": []map[string]any{
 			{"runs-on": "ubuntu-18.04", "queue": "legacy-linux"},
 		},
@@ -1304,8 +1335,6 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	}))
 	defer server.Close()
 	t.Setenv(pluginConfigurationEnvironment, string(configuration))
-	_ = linuxPath // The plugin's Linux runtime is always its running executable.
-	t.Setenv(pluginDevDarwinRuntimeEnvironment, darwinPath)
 	setCLIPluginBuildkiteEnvironment(t, "plugin-mixed")
 	t.Setenv("BUILDKITE_COMMIT", "HEAD")
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")

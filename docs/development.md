@@ -582,7 +582,7 @@ Cross-offering whole-job comparisons remain separate from this check.
 
 ## Test released and native entry points
 
-Run the examples through the released plugin. Linux uses its default mise-based public release resolution. The native macOS proof pins the released Darwin runtime:
+Run the examples through the released plugin. Linux uses its default public release resolution. The native macOS proof pins the released Darwin runtime:
 
 ```sh
 commit=$(git rev-parse HEAD)
@@ -592,6 +592,13 @@ bk build create --pipeline buildkite/buildkite-gha \
 ```
 
 Add `--env DEMO_CACHE=1` to include the optional cache producer and consumer workflow. Every workflow must use a public CLI release; the demo must not fall back to a source build or local binary.
+
+Plugin binary-acquisition tests in `internal/cli/plugin_runtime_test.go` use local
+HTTPS servers. They check optional URL-fragment checksums, platform validation,
+missing-platform failures, and deferred runtime availability. The mixed-platform
+plugin test checks that downloaded bytes and their digests reach generated jobs.
+The plugin repository tests the importer's download and execution boundary;
+these CLI tests do not replace that coverage.
 
 For a side-by-side GitHub Actions and Buildkite UX check, run:
 
