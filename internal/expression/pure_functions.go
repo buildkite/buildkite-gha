@@ -268,8 +268,9 @@ func evaluateCaseFunction[T any](evaluator *expressionEvaluator[T], node *action
 	if err != nil {
 		return zero, err
 	}
-	predicateValue, known := evaluator.domain.value(predicate)
-	if !known {
+	predicateValue, valueKnown := evaluator.domain.value(predicate)
+	predicateTruthy, truthKnown := evaluator.domain.truthiness(predicate, evaluator.truthy)
+	if !valueKnown && !truthKnown {
 		selected, err := evaluator.evaluate(node.Args[index+1])
 		if err != nil {
 			return zero, err
@@ -278,11 +279,15 @@ func evaluateCaseFunction[T any](evaluator *expressionEvaluator[T], node *action
 		if err != nil {
 			return zero, err
 		}
-		return evaluator.result(evaluator.domain.join(selected, remainder), predicate), nil
+		return evaluator.result(evaluator.domain.join(evaluator.truthy, selected, remainder), predicate), nil
 	}
-	selected, ok := predicateValue.(bool)
-	if !ok {
-		return zero, fmt.Errorf("function %q predicate %d resolved to %T, want boolean", node.Callee, index/2+1, predicateValue)
+	selected := predicateTruthy
+	if valueKnown {
+		var ok bool
+		selected, ok = predicateValue.(bool)
+		if !ok {
+			return zero, fmt.Errorf("function %q predicate %d resolved to %T, want boolean", node.Callee, index/2+1, predicateValue)
+		}
 	}
 	if selected {
 		value, err := evaluator.evaluate(node.Args[index+1])

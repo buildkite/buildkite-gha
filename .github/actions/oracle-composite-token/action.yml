@@ -1,0 +1,21 @@
+name: Composite token oracle
+description: Checks direct token access without a caller-supplied token input.
+inputs:
+  fallback:
+    default: cargo-binstall
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        FALLBACK: ${{ inputs.fallback }}
+        DEFAULT_GITHUB_TOKEN: ${{ inputs.fallback == 'cargo-binstall' && github.token || '' }}
+        PRUNED_TOKEN: ${{ case(env.RUNTIME == 'yes', false, '') && github.token || '' }}
+      run: |
+        if [ "$FALLBACK" = cargo-binstall ]; then
+          test -n "$DEFAULT_GITHUB_TOKEN"
+        else
+          test -z "$DEFAULT_GITHUB_TOKEN"
+        fi
+        test -z "$PRUNED_TOKEN"
+        echo "composite token guard passed: $FALLBACK"

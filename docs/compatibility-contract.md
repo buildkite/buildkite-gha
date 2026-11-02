@@ -536,6 +536,16 @@ name lengths.
 
 ### Expression and composite source evidence
 
+GitHub's [automatic token authentication](https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication)
+allows an action to access `github.token` without the caller explicitly passing
+it. The pinned [install-action metadata](https://github.com/taiki-e/install-action/blob/8cc2c8598944076af96ea45e3700725beb172ae5/action.yml)
+uses a guarded composite shell environment read. The
+[compile-and-run regression](../internal/runtime/runtime_test.go) verifies that
+pattern with a real shell and a test token provider, including unchanged
+`contents: read` scope, token redaction, disabled fallback, and empty-permission
+rejection. It does not prove full tool installation or a customer's private
+workflow. Planning boundaries belong to [Expression authority](expression-authority.md#composite-tokens).
+
 The pinned runner's [composite condition schema](https://github.com/actions/runner/blob/7ce71e54a9affe1daae918a3e2350c1543dfa240/src/Runner.Worker/action_yaml.json#L237-L253)
 and [child-context setup](https://github.com/actions/runner/blob/7ce71e54a9affe1daae918a3e2350c1543dfa240/src/Runner.Worker/Handlers/CompositeActionHandler.cs#L138-L161)
 support `github` and `inputs` in composite conditions. The pinned

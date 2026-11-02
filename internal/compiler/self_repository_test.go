@@ -99,7 +99,7 @@ func TestLivePytestSelfRepositoryAction(t *testing.T) {
 	// setup-uv defaults github-token to github.token. Source resolution must
 	// not erase that authority or grant it under pytest's empty root policy.
 	workflowProgram.Actions = compiled.programs
-	if _, _, _, err := builder.authorizePlanSecrets(instance, workflowProgram, &compiled); err == nil || !strings.Contains(err.Error(), "action input default that references github.token but has no effective permissions") {
+	if _, _, _, err := builder.authorizePlanSecrets(instance, workflowProgram, &compiled); err == nil || !strings.Contains(err.Error(), "resolved action metadata that references github.token but has no effective permissions") {
 		t.Fatalf("pytest empty-permissions boundary = %v", err)
 	} else {
 		t.Log(err)

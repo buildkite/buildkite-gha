@@ -235,6 +235,8 @@ type AbstractValues struct {
 type InputScope struct {
 	Values   map[string]any
 	Complete bool
+	// Absent names are known missing, even when other properties are deferred.
+	Absent []string
 }
 
 type Reduced struct {
@@ -675,7 +677,7 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 	}
 	if err != nil {
 		if site.Profile == ProfileActionStepTemplate && errors.Is(err, errUnavailableGitHubToken) {
-			err = fmt.Errorf("%w: this job has no available workflow token; this composite expression cannot authorize a token. Declare a token input on the action, pass it from the workflow step with: token: ${{ github.token }}, and use ${{ inputs.token }} inside the composite", err)
+			err = fmt.Errorf("%w: this job has no available workflow token. Declare a token input on the action, pass it from the workflow step with: token: ${{ github.token }}, and use ${{ inputs.token }} inside the composite", err)
 			return nil, siteError(site, err)
 		}
 		return nil, siteError(site, inputEvaluationError(site, err))
@@ -913,6 +915,13 @@ func (engine Engine) Analyze(site Site, values AbstractValues) (Analysis, error)
 	}
 
 	knownReferences := canonicalAbstractReferences(values.References, values.Inputs)
+	for _, name := range values.Inputs.Absent {
+		var missing any
+		if site.Profile == ProfileActionStepTemplate || site.Profile == ProfileActionInputDefault {
+			missing = ""
+		}
+		knownReferences["inputs."+strings.ToLower(name)] = missing
+	}
 	analyzeNode := func(node actionlint.ExprNode) (Analysis, error) {
 		if profile.semantics == semanticsActionInputDefault {
 			return analyzeActionInputDefault(node, knownReferences)

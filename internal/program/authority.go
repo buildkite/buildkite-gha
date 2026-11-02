@@ -45,7 +45,7 @@ func WorkflowReachability(workflow Program, values expression.AbstractValues) (R
 		return analysis, err
 	}
 	knownFalse := func(analysis expression.Analysis) bool {
-		return analysis.Value.Known && !engine.Truthy(analysis.Value.Value)
+		return analysis.Value.IsFalsy()
 	}
 	// Flattened call guards retain their caller-scoped inputs and needs in the
 	// execution plan, not in Program.Guard. Only use values whose scope is shared

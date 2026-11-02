@@ -1406,7 +1406,7 @@ func TestEngineCompositeTokenGuidanceIsSpecificToMissingCompositeToken(t *testin
 		want    string
 		wantErr string
 	}{
-		{name: "missing composite token", profile: ProfileActionStepTemplate, source: "${{ github['token'] }}", wantErr: "this composite expression cannot authorize a token"},
+		{name: "missing composite token", profile: ProfileActionStepTemplate, source: "${{ github['token'] }}", wantErr: "this job has no available workflow token"},
 		{name: "missing workflow token", profile: ProfileStepTemplate, source: "${{ github.token }}", wantErr: `unavailable github value "token"`},
 		{name: "missing default token", profile: ProfileActionInputDefault, source: "${{ github.token }}", wantErr: `unavailable github value "token"`},
 		{name: "other missing value", profile: ProfileActionStepTemplate, source: "${{ github.actor }}", wantErr: `unavailable github value "actor"`},
