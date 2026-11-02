@@ -1514,6 +1514,7 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, 
 	workflowRef, workflowSHA := workflowRunIdentity(job)
 	env := map[string]string{
 		"CI":                  "true",
+		"GIT_TERMINAL_PROMPT": "0",
 		"GITHUB_ACTIONS":      "true",
 		"GITHUB_ACTOR":        job.Event.Actor,
 		"GITHUB_EVENT_NAME":   job.Event.Name,
