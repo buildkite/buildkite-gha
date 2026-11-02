@@ -1639,13 +1639,20 @@ runs:
       env:
         TOKEN: ${{ github.token }}
       run: test -n "$TOKEN"
+    - shell: sh
+      env:
+        TOKEN: ${{ inputs.enabled == 'true' && github.token || '' }}
+      run: echo guarded
 `)
 	for _, test := range []struct {
 		name, condition, input, permissions string
 		wantToken, wantError                bool
+		unknownSibling                     bool
 	}{
 		{name: "enabled", input: "true", permissions: "{contents: read}", wantToken: true},
 		{name: "empty permissions", input: "true", permissions: "{}", wantError: true},
+		{name: "omitted optional input", permissions: "{}"},
+		{name: "omitted optional input with unknown sibling", permissions: "{}", unknownSibling: true},
 		{name: "matrix input", input: "${{ matrix.enabled }}", permissions: "{}"},
 		{name: "matrix guard", condition: "matrix.enabled", input: "true", permissions: "{}"},
 		{name: "literal guard", condition: "false", input: "true", permissions: "{}"},
@@ -1655,7 +1662,12 @@ runs:
 			if test.condition == "" {
 				test.condition = "true"
 			}
-			workflow := "on: push\npermissions: " + test.permissions + "\njobs:\n  token:\n    strategy:\n      matrix:\n        enabled: [false]\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/token\n        if: " + test.condition + "\n        with:\n          enabled: " + test.input + "\n"
+			workflow := "on: push\npermissions: " + test.permissions + "\njobs:\n  token:\n    strategy:\n      matrix:\n        enabled: [false]\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/token\n        if: " + test.condition + "\n"
+			if test.input != "" {
+				workflow += "        with:\n          enabled: " + test.input + "\n"
+			} else if test.unknownSibling {
+				workflow += "        with:\n          unrelated: ${{ env.RUNTIME }}\n"
+			}
 			bundle, err := CompileBundleWithOptions(workflowPath, []byte(workflow), pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", defaultOptions())
 			if test.wantError {
 				if err == nil || !strings.Contains(err.Error(), "no effective permissions") {
