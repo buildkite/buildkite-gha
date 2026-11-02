@@ -2921,6 +2921,8 @@ func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 		actionintegration.UploadArtifactV1Commit,
 		actionintegration.UploadArtifactV2Commit,
 		actionintegration.UploadArtifactV3Commit,
+		actionintegration.UploadArtifactV322Commit,
+		actionintegration.UploadArtifactV322Node20Commit,
 		"c7d193f32edcb7bfad88892161225aeda64e9392", // v4.0.0
 		actionintegration.UploadArtifactV460Commit,
 		actionintegration.UploadArtifactCommit,
@@ -2966,6 +2968,10 @@ func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 	}
 
 	bundle = compile("      - uses: actions/upload-artifact@c7d193f32edcb7bfad88892161225aeda64e9392\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV322Commit + "\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV322Node20Commit + "\n" +
 		"        with:\n          path: payload\n" +
 		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV460Commit + "\n" +
 		"        with:\n          path: payload\n" +
@@ -3372,8 +3378,11 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if plans, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n          archive: true\n"); err != nil || len(plans) != 1 {
 		t.Fatalf("unknown upload-artifact fallback plans = %#v, error = %v", plans, err)
 	}
-	if _, err := compile("c6a366c94c3e0affe28c06c8df20a878f24da3cf", "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), "does not admit resolved commit") {
-		t.Fatalf("known unsupported upload-artifact commit error = %v", err)
+	for _, commit := range []string{actionintegration.UploadArtifactV322Commit, actionintegration.UploadArtifactV322Node20Commit} {
+		plans, err := compile(commit, "        with:\n          path: payload\n")
+		if err != nil || len(plans) != 1 || len(plans[0].Actions) != 1 || plans[0].Actions[0].Commit != commit {
+			t.Fatalf("GHES upload-artifact plans = %#v, error = %v", plans, err)
+		}
 	}
 
 	matrixWorkflow := []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        mode: [production, test]\n    steps:\n      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV6Commit + "\n        if: matrix.mode == 'test'\n        with:\n          name: ${{ github.sha }}\n          path: ./artifacts.tar.gz\n          retention-days: '0'\n")
