@@ -426,7 +426,11 @@ for supported workflow configuration.
 The compiler writes a normalized execution program into every v2 job plan.
 The runtime rejects plans without that program and executes its typed sites;
 it does not reconstruct expressions from projected plan fields or action
-metadata. Keep compiler and runtime changes to the program schema atomic.
+metadata. Compiler versions identify the producer; they need not match the
+runtime release. Plans still bind an exact runtime executable digest and must
+pass schema, program, capability, and execution-target validation. Ship runtime
+support before producers emit new program features; the v2 label alone does not
+guarantee compatibility across releases.
 The program's positional walker defines each expression site's profile, result
 type, provenance, and authority purpose. Site objects serialize only source
 text and diagnostic location; decoders derive their semantics from position.

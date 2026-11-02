@@ -211,7 +211,7 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	digest := sha256.Sum256(workflowSource)
 	requiresMise := false
 	job := plan.Job{
-		Schema: plan.Schema, Compiler: plan.Compiler{Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("9", 64)},
+		Schema: plan.Schema, Compiler: plan.Compiler{Version: "rails-test-producer", DistributionDigest: "sha256:" + strings.Repeat("9", 64)},
 		Runtime:      &plan.Runtime{DistributionDigest: cliTestRuntimeDigest()},
 		Workflow:     plan.Workflow{Path: "workflow.yml", Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "cli"},
 		Event:        plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
@@ -307,22 +307,6 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	stderr.Reset()
 	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "runtime distribution digest") {
 		t.Fatalf("Run() code = %d, stderr = %q, want runtime digest mismatch", code, stderr.String())
-	}
-	job.Runtime.DistributionDigest = cliTestRuntimeDigest()
-	job.Compiler.Version = "0.0.0-other"
-	encoded, err = plan.Encode(job)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(planPath, encoded, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	planDigest = sha256.Sum256(encoded)
-	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+hex.EncodeToString(planDigest[:]))
-	stdout.Reset()
-	stderr.Reset()
-	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "does not match runtime version") {
-		t.Fatalf("Run() code = %d, stderr = %q, want version mismatch", code, stderr.String())
 	}
 }
 
@@ -856,7 +840,7 @@ func TestRunJobPublishesEveryTerminalResultAfterCancellation(t *testing.T) {
 				ctx = cancelled
 			}
 			var stdout, stderr bytes.Buffer
-			if code := runJobContext(ctx, []string{"--plan", planPath}, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner}); code != test.wantCode {
+			if code := runJobContext(ctx, []string{"--plan", planPath}, &stdout, &stderr, "dev", transport.Agent{Runner: runner}); code != test.wantCode {
 				t.Fatalf("runJobContext() code = %d, stderr = %q, want %d", code, stderr.String(), test.wantCode)
 			}
 			manifest := publishedCLIManifest(t, runner, job, planDigest)
@@ -1100,7 +1084,7 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 				} else {
 					cancel()
 				}
-				code = runJobContext(ctx, []string{"--plan", planPath}, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner})
+				code = runJobContext(ctx, []string{"--plan", planPath}, &stdout, &stderr, "dev", transport.Agent{Runner: runner})
 				for _, contextErr := range runner.contextErrors {
 					if contextErr != nil {
 						t.Fatalf("publication inherited cancelled context: %v", contextErr)
