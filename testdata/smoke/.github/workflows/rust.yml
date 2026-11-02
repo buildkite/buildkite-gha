@@ -5,6 +5,33 @@ on:
 
 permissions: {}
 
+env:
+  APP_CARGO_TOML: |
+    [package]
+    name = "rust-proof"
+    version = "0.1.0"
+    edition = "2024"
+
+    [dependencies]
+    itoa = "=1.0.18"
+  APP_LIB_RS: |
+    pub fn greeting(name: &str, count: u32) -> String {
+        let mut buffer = itoa::Buffer::new();
+        format!("hello, {name} #{}", buffer.format(count))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn greets_by_name() {
+            assert_eq!(super::greeting("buildkite", 1), "hello, buildkite #1");
+        }
+    }
+  APP_MAIN_RS: |
+    fn main() {
+        println!("{}", rust_proof::greeting("buildkite", 1));
+    }
+
 jobs:
   rust:
     runs-on: ubuntu-latest
@@ -17,35 +44,29 @@ jobs:
         working-directory: .
         run: |
           mkdir -p rust-app/src
-          cat > rust-app/Cargo.toml <<'EOF'
-          [package]
-          name = "rust-proof"
-          version = "0.1.0"
-          edition = "2024"
-          EOF
-          cat > rust-app/src/lib.rs <<'EOF'
-          pub fn greeting(name: &str) -> String {
-              format!("hello, {name}")
-          }
-
-          #[cfg(test)]
-          mod tests {
-              #[test]
-              fn greets_by_name() {
-                  assert_eq!(super::greeting("buildkite"), "hello, buildkite");
-              }
-          }
-          EOF
-          cat > rust-app/src/main.rs <<'EOF'
-          fn main() {
-              println!("{}", rust_proof::greeting("buildkite"));
-          }
-          EOF
+          printf '%s' "$APP_CARGO_TOML" > rust-app/Cargo.toml
+          printf '%s' "$APP_LIB_RS" > rust-app/src/lib.rs
+          printf '%s' "$APP_MAIN_RS" > rust-app/src/main.rs
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99.1"
+
+      # A per-run prefix makes this job miss and save, so the next job can
+      # only hit by restoring what this job saved.
+      - name: Cache Rust build
+        id: cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v0-rust-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          shared-key: rust-proof
+          workspaces: rust-app
+
+      - name: Require cache miss
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: test "$CACHE_HIT" = false
 
       - name: Build
         run: |
@@ -56,4 +77,48 @@ jobs:
         run: cargo test --release 2>&1 | tee test.log && grep -F 'test tests::greets_by_name ... ok' test.log
 
       - name: Run application
-        run: test "$(target/release/rust-proof)" = "hello, buildkite"
+        run: test "$(target/release/rust-proof)" = "hello, buildkite #1"
+
+  rust-cached:
+    needs: rust
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust-app
+    steps:
+      - name: Create Rust application
+        working-directory: .
+        run: |
+          mkdir -p rust-app/src
+          printf '%s' "$APP_CARGO_TOML" > rust-app/Cargo.toml
+          printf '%s' "$APP_LIB_RS" > rust-app/src/lib.rs
+          printf '%s' "$APP_MAIN_RS" > rust-app/src/main.rs
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99.1"
+
+      - name: Restore Rust build cache
+        id: cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v0-rust-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          shared-key: rust-proof
+          workspaces: rust-app
+
+      - name: Require restored dependency
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          test "$CACHE_HIT" = true
+          compgen -G "$HOME/.cargo/registry/cache/*/itoa-1.0.18.crate"
+          compgen -G 'target/release/deps/libitoa-*.rlib'
+
+      - name: Build and test from cache
+        run: |
+          cargo build --release --offline 2>&1 | tee build.log
+          if grep -F 'Compiling itoa' build.log; then exit 1; fi
+          cargo test --release --offline
+          test "$(target/release/rust-proof)" = "hello, buildkite #1"
