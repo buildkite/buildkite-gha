@@ -492,7 +492,7 @@ func TestCompileBundlePreservesRuntimeImagePolicy(t *testing.T) {
 	if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Steps) != 1 || document.Steps[0].Image != image || !strings.Contains(document.Steps[0].Command, "--hosted-tool-cache") {
+	if len(document.Steps) != 1 || document.Steps[0].Image != image || !strings.Contains(document.Steps[0].Command, "--hosted-tool-cache") || strings.Contains(document.Steps[0].Command, "/etc/environment") {
 		t.Fatalf("runtime image pipeline = %#v", document.Steps)
 	}
 }
@@ -526,7 +526,7 @@ func TestCompileBundleKeepsNativeHostSeparateFromJobContainer(t *testing.T) {
 		}
 		step := document.Steps[0]
 		wantAgents := map[string]string{"queue": "native-linux", "nsc-gha-image": "ubuntu-24.04", "provider.setting": "opaque: value"}
-		if step.Image != "" || !reflect.DeepEqual(step.Agents, wantAgents) || strings.Contains(step.Command, "--hosted-tool-cache") != toolCache || strings.Contains(step.Command, "/opt/hostedtoolcache") != toolCache {
+		if step.Image != "" || !reflect.DeepEqual(step.Agents, wantAgents) || strings.Contains(step.Command, "--hosted-tool-cache") != toolCache || strings.Contains(step.Command, "/opt/hostedtoolcache") != toolCache || !strings.Contains(step.Command, "/etc/environment") {
 			t.Fatalf("native step = %#v", step)
 		}
 		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.ExecutionJob().Container == nil || bundle.Plans[0].Job.ExecutionJob().Container.Image.Source != "alpine:3.21" {
