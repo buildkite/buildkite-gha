@@ -118,7 +118,7 @@ jobs:
 
       - name: Build and test from cache
         run: |
-          cargo build --release --offline 2>&1 | tee build.log
+          cargo build --release --offline --color never 2>&1 | tee build.log
           if grep -F 'Compiling itoa' build.log; then exit 1; fi
           cargo test --release --offline
           test "$(target/release/rust-proof)" = "hello, buildkite #1"
