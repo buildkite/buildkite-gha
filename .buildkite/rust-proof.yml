@@ -9,7 +9,7 @@ steps:
           version: "2026.10.17"
     command: |
       set -euo pipefail
-      commit="$${COMPATIBILITY_PROOF_COMMIT:?COMPATIBILITY_PROOF_COMMIT is required}"
+      commit="$${COMPATIBILITY_PROOF_COMMIT:-$${BUILDKITE_COMMIT:-}}"
       scripts/verify-source-checkout "$$commit"
       distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-rust.XXXXXXXX")"
       trap 'rm -rf -- "$$distribution_root"' EXIT
