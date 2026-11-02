@@ -281,6 +281,19 @@ with an admitted release, not run under an adapter fallback. Preserve the
 requested and selected identities and their diagnostics. The
 [integration catalog](../internal/action/integration/catalog.go) owns that split.
 
+The GHES `upload-artifact` contracts for
+[v3.2.2](https://github.com/actions/upload-artifact/blob/c6a366c94c3e0affe28c06c8df20a878f24da3cf/action.yml)
+and [v3.2.2-node20](https://github.com/actions/upload-artifact/blob/c6a3b2bd78b3985e4b2f15397fec357f0fd808de/action.yml)
+declare the same inputs and no outputs. Preserve their hidden-file exclusion by
+default and explicit opt-in; do not substitute the v7 fallback or recommend an
+upgrade to a github.com-only release. Their Node runtime and bundled dependency
+changes do not execute in the native adapter. A November 2, 2026
+[native GHES 3.22.2 run](https://buildkite-ghe.com/sj26-testier/ghes-source-compare-20261102/actions/runs/2)
+round-tripped 22 bytes with the node20 pin and `download-artifact` v3-node20.
+That run does not establish hidden-file behavior or hosted Buildkite execution;
+[local runtime tests](../internal/runtime/upload_artifact_test.go) cover archive
+contents and default/opt-in hidden-file handling.
+
 ### Filesystems and artifact extraction
 
 Source archive extraction intentionally omits certain in-repository symlink

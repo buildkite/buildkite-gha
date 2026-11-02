@@ -12,6 +12,8 @@ func TestUploadArtifactCommitContracts(t *testing.T) {
 		"c7d193f32edcb7bfad88892161225aeda64e9392", // v4.0.0
 		"694cdabd8bdb0f10b2cea11669e1bf5453eed0a6", // v4.2.0
 		"50769540e7f4bd5e21e526ee35c689e35e0d6874", // v4.4.0
+		"c6a366c94c3e0affe28c06c8df20a878f24da3cf", // v3.2.2
+		"c6a3b2bd78b3985e4b2f15397fec357f0fd808de", // v3.2.2-node20
 	}
 	for _, commit := range commits {
 		if err := validateUploadArtifactCommit(commit); err != nil {
@@ -27,7 +29,7 @@ func TestUploadArtifactCommitContracts(t *testing.T) {
 			t.Fatalf("known commit %s uses fallback contract", commit)
 		}
 	}
-	for _, commit := range []string{"c6a366c94c3e0affe28c06c8df20a878f24da3cf", "c6a3b2bd78b3985e4b2f15397fec357f0fd808de", "v7", strings.Repeat("A", 40), strings.Repeat("0", 39)} {
+	for _, commit := range []string{"v7", strings.Repeat("A", 40), strings.Repeat("0", 39)} {
 		err := validateUploadArtifactCommit(commit)
 		if err == nil {
 			t.Fatalf("unsupported commit %s accepted", commit)
@@ -120,6 +122,29 @@ func TestUploadArtifactSnapshotPreservesManifestContracts(t *testing.T) {
 	}
 	if !UploadArtifactSupportsOutput(UploadArtifactV460Commit, "artifact-digest") {
 		t.Fatal("v4.6.0 snapshot contract omits artifact-digest")
+	}
+}
+
+func TestUploadArtifactGHESContracts(t *testing.T) {
+	for _, commit := range []string{"c6a366c94c3e0affe28c06c8df20a878f24da3cf", "c6a3b2bd78b3985e4b2f15397fec357f0fd808de"} {
+		t.Run(commit, func(t *testing.T) {
+			if err := ValidateUploadArtifactInputs(commit, map[string]string{"path": "payload", "include-hidden-files": "true", "retention-days": "7"}); err != nil {
+				t.Fatal(err)
+			}
+			if UploadArtifactUsesFallbackContract(commit) || UploadArtifactIncludesHiddenByDefault(commit) {
+				t.Fatal("GHES releases must use their exact contract and exclude hidden files by default")
+			}
+			for _, output := range []string{"artifact-id", "artifact-url", "artifact-digest"} {
+				if UploadArtifactSupportsOutput(commit, output) {
+					t.Errorf("GHES release exposes undeclared output %q", output)
+				}
+			}
+			for input, value := range map[string]string{"compression-level": "6", "overwrite": "false", "archive": "true"} {
+				if err := ValidateUploadArtifactInputs(commit, map[string]string{"path": "payload", input: value}); err == nil {
+					t.Errorf("GHES release accepts later input %q", input)
+				}
+			}
+		})
 	}
 }
 
