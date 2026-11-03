@@ -255,6 +255,8 @@ deferred uploader with `allow_failure: true`. Buildkite
 [extends dependencies on an uploader to its uploaded work](https://buildkite.com/docs/pipelines/configure/dependencies#defining-explicit-dependencies).
 Do not upload another gate pair from a continuation: it would queue behind the
 closing marker that is waiting for that continuation's jobs.
+Reject member jobs sharing the root group before omitting that gate from a
+continuation, including when further matrix stages remain to be expanded.
 
 The inspected backend
 [copies incoming dependencies, including their failure policy](https://github.com/buildkite/buildkite/blob/ac9b91a26e2273f98e457ef3a48c82a7df106746/app/models/build/pipeline_changer.rb#L681-L747).

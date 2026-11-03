@@ -1791,6 +1791,32 @@ func dependencyKeys(step continuePipelineStep) []string {
 	return keys
 }
 
+func TestContinueChainedStagesRejectRootConcurrencyCollision(t *testing.T) {
+	for _, group := range []string{"RELEASE", "other"} {
+		t.Run(group, func(t *testing.T) {
+			source := "concurrency: release\n" + strings.Replace(continueChainedWorkflow, "  build:\n", "  build:\n    concurrency: "+group+"\n", 1)
+			first := firstStage(runContinueInitialUploads(t, source)[0])
+			runner, code, stdout, stderr := first.run(t, "success", `[{"target":"linux","runner":"ubuntu-latest"}]`, continueProducerJobID, nil)
+			if group == "RELEASE" {
+				if code == 0 || !strings.Contains(stderr, "workflow concurrency gate shares group with member job") {
+					t.Fatalf("code = %d, stdout = %q, stderr = %q; want root-group collision rejection", code, stdout, stderr)
+				}
+				if pipelineUploads(runner) != 0 {
+					t.Fatal("uploaded jobs that would deadlock the root concurrency group")
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("disjoint group failed: code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+			}
+			child := first.nextStage(t, runner)
+			if child.initial.artifact.Continuation.Descriptor.Job != "deploy" {
+				t.Fatal("disjoint group did not preserve the later continuation")
+			}
+		})
+	}
+}
+
 // TestContinueChainsStages expands a component whose second matrix comes
 // from a job the first deferred upload compiles. The importer writes one
 // continuation for the component; its step compiles the jobs whose rows

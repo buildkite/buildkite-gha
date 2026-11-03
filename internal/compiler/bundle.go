@@ -620,6 +620,13 @@ func GeneratePlannedWorkflow(bundle Bundle, options Options) (buildkitepipeline.
 			Group: buildkiteConcurrencyGroup(ir.Event.Repository, ir.Workflow.ConcurrencyGroup),
 			Queue: jobs[0].Queue,
 		}
+		// Continuations omit the existing root gate when emitted, so reject
+		// members that would queue behind their own closing marker here.
+		for _, job := range jobs {
+			if job.Concurrency > 0 && job.ConcurrencyGroup == concurrencyGate.Group {
+				return buildkitepipeline.Workflow{}, fmt.Errorf("workflow concurrency gate shares group with member job %q", job.Key)
+			}
+		}
 	}
 	return buildkitepipeline.Workflow{
 		ConcurrencyGate: concurrencyGate,
