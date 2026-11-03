@@ -4,6 +4,6 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v8
         with:
           name: compatibility-gap
