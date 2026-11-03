@@ -911,20 +911,30 @@ runs:
         TOKEN: ${{ github.token }}
       run: echo token
 `)
-	writeAction(t, workspace, "parent", `name: parent
+	for _, test := range []struct {
+		condition string
+		wantToken bool
+	}{
+		{condition: "false"},
+		{condition: "github.run_attempt == '1'", wantToken: true},
+		{condition: "github.run_attempt != '1'", wantToken: true},
+		{condition: "github.run_attempt == '1' && false"},
+	} {
+		writeAction(t, workspace, "parent", `name: parent
 runs:
   using: composite
   steps:
-    - if: false
+    - if: `+test.condition+`
       uses: ./child
 `)
 
-	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if compiled.requiresGitHubToken {
-		t.Fatal("unreachable nested shell requested a GitHub token")
+		compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.wantToken {
+			t.Fatalf("condition %q requires token = %t, want %t", test.condition, compiled.requiresGitHubToken, test.wantToken)
+		}
 	}
 }
 
@@ -1661,6 +1671,10 @@ runs:
 		{name: "matrix guard", condition: "matrix.enabled", input: "true", permissions: "{}"},
 		{name: "literal guard", condition: "false", input: "true", permissions: "{}"},
 		{name: "status guard", condition: "success() && false", input: "true", permissions: "{}"},
+		{name: "first attempt guard", condition: "github.run_attempt == '1'", input: "true", permissions: "{contents: read}", wantToken: true},
+		{name: "retry guard", condition: "github.run_attempt != '1'", input: "true", permissions: "{contents: read}", wantToken: true},
+		{name: "attempt guard empty permissions", condition: "github.run_attempt == '1'", input: "true", permissions: "{}", wantError: true},
+		{name: "false attempt guard", condition: "github.run_attempt == '1' && false", input: "true", permissions: "{}"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			definition := " {}"
@@ -1772,6 +1786,9 @@ func TestCompilePlansPrunesActionTokenAuthorityBehindKnownFalseCallGuard(t *test
 		{name: "caller input", guard: "inputs.enabled", pruned: true},
 		{name: "caller input with needs", guard: "inputs.enabled && needs.prepare.result == 'success'", pruned: true},
 		{name: "callee input name", guard: "inputs.run", pruned: false},
+		{name: "first attempt", guard: "github.run_attempt == '1'", pruned: false},
+		{name: "retry", guard: "github.run_attempt != '1'", pruned: false},
+		{name: "false attempt", guard: "false && github.run_attempt == '1'", pruned: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			repository := t.TempDir()

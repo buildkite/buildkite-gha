@@ -138,3 +138,46 @@ jobs:
             "LAZY_CASE=$LAZY_CASE" \
             "RUN_GROUP=$RUN_GROUP" \
             "REPEATED_RUN_GROUP=$REPEATED_RUN_GROUP"
+
+  first-attempt:
+    if: github.run_attempt == '1'
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "$GITHUB_RUN_ATTEMPT" = 1
+
+  retry-attempt:
+    if: github.run_attempt != '1'
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "$GITHUB_RUN_ATTEMPT" -gt 1
+
+  run-attempt-conditions:
+    if: ${{ !cancelled() }}
+    needs: [first-attempt, retry-attempt]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - id: first
+        if: github.run_attempt == '1'
+        run: echo value=first >> "$GITHUB_OUTPUT"
+      - id: retry
+        if: github.run_attempt != '1'
+        run: echo value=retry >> "$GITHUB_OUTPUT"
+      - id: composite
+        uses: ./.github/actions/oracle-run-attempt
+      - name: Verify job and step selection
+        env:
+          FIRST_JOB: ${{ needs.first-attempt.result }}
+          RETRY_JOB: ${{ needs.retry-attempt.result }}
+          FIRST_STEP: ${{ steps.first.outputs.value }}
+          RETRY_STEP: ${{ steps.retry.outputs.value }}
+          COMPOSITE: ${{ steps.composite.outputs.value }}
+        run: |
+          printf '%s\n' "attempt=$GITHUB_RUN_ATTEMPT first=$FIRST_JOB retry=$RETRY_JOB steps=$FIRST_STEP/$RETRY_STEP composite=$COMPOSITE"
+          if [ "$GITHUB_RUN_ATTEMPT" = 1 ]; then
+            test "$FIRST_JOB/$RETRY_JOB/$FIRST_STEP/$RETRY_STEP/$COMPOSITE" = success/skipped/first//first
+          else
+            test "$FIRST_JOB/$RETRY_JOB/$FIRST_STEP/$RETRY_STEP/$COMPOSITE" = skipped/success//retry/retry
+          fi

@@ -163,6 +163,112 @@ test "$GITHUB_RUN_ATTEMPT" = 2`,
 	}
 }
 
+func TestCompiledRunAttemptConditions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/attempt.yml"
+	workflow := `on: push
+jobs:
+  first:
+    if: github.run_attempt == '1'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo first
+  retry:
+    if: github.run_attempt != '1'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo retry
+  steps:
+    runs-on: ubuntu-latest
+    outputs:
+      first: ${{ steps.first.outputs.value }}
+      retry: ${{ steps.retry.outputs.value }}
+      composite: ${{ steps.composite.outputs.value }}
+    steps:
+      - id: first
+        if: github.run_attempt == '1'
+        run: echo value=first >> "$GITHUB_OUTPUT"
+      - id: retry
+        if: github.run_attempt != '1'
+        run: echo value=retry >> "$GITHUB_OUTPUT"
+      - id: composite
+        uses: ./.github/actions/attempt
+  call-first:
+    if: github.run_attempt == '1'
+    uses: ./.github/workflows/callee.yml
+  call-retry:
+    if: github.run_attempt != '1'
+    uses: ./.github/workflows/callee.yml
+`
+	writeFixtureFile(t, workspace, workflowPath, workflow)
+	writeFixtureFile(t, workspace, ".github/workflows/callee.yml", `on: workflow_call
+jobs:
+  child:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo called
+`)
+	writeFixtureFile(t, workspace, ".github/actions/attempt/action.yml", `name: attempt
+outputs:
+  value:
+    value: ${{ steps.first.outputs.value || steps.retry.outputs.value }}
+runs:
+  using: composite
+  steps:
+    - id: first
+      if: github.run_attempt == '1'
+      shell: bash
+      run: echo value=first >> "$GITHUB_OUTPUT"
+    - id: retry
+      if: github.run_attempt != '1'
+      shell: bash
+      run: echo value=retry >> "$GITHUB_OUTPUT"
+`)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compilePlansForTest(t.Context(), filepath.Join(workspace, workflowPath), []byte(workflow), event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 5 {
+		t.Fatalf("plans = %d, want all five runtime-dependent jobs", len(plans))
+	}
+	for _, retry := range []string{"0", "1", "4", "", "invalid", "-1"} {
+		for _, job := range plans {
+			t.Run(retry+"/"+job.Workflow.LogicalJobID, func(t *testing.T) {
+				var logs bytes.Buffer
+				result, err := (Runner{Stdout: &logs, Stderr: &logs, RunIdentity: RunIdentity{RetryCount: retry}}).runTestJob(t.Context(), job, workspace)
+				if retry == "" || retry == "invalid" || retry == "-1" {
+					if err == nil || !strings.Contains(err.Error(), "unavailable") || !strings.Contains(err.Error(), "run_attempt") {
+						t.Fatalf("error = %v, want unavailable run_attempt", err)
+					}
+					return
+				}
+				want := "success"
+				first := retry == "0"
+				id := job.Workflow.LogicalJobID
+				if (strings.Contains(id, "first") && !first) || (strings.Contains(id, "retry") && first) {
+					want = "skipped"
+				}
+				if err != nil || result.Conclusion != want {
+					t.Fatalf("result = %#v, error = %v; want %s\n%s", result, err, want, logs.String())
+				}
+				if id == "steps" {
+					outputs := map[string]string{"first": "", "retry": "retry", "composite": "retry"}
+					if first {
+						outputs = map[string]string{"first": "first", "retry": "", "composite": "first"}
+					}
+					if !reflect.DeepEqual(result.Outputs, outputs) {
+						t.Fatalf("outputs = %#v, want %#v", result.Outputs, outputs)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestRunJobRejectsRunIdentityExpressionsWithoutIdentity(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/identity.yml"

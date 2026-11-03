@@ -82,7 +82,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		job.Inputs = mergeWorkflowInputs(job.Inputs, job.DeferredInputValues)
 		r.job = job
 	}
-	guardsPass, err := evaluateCallGuards(job)
+	guardsPass, err := evaluateCallGuards(job, r.RunIdentity)
 	if err != nil {
 		return jobResult, err
 	}
@@ -908,12 +908,15 @@ func evaluateJobContinueOnError(control executionprogram.BoolControl, context ex
 	return control.Literal, nil
 }
 
-func evaluateCallGuards(job plan.Job) (bool, error) {
+func evaluateCallGuards(job plan.Job, identity RunIdentity) (bool, error) {
 	executionJob := job.ExecutionJob()
 	if executionJob == nil || len(job.CallGuards) != len(executionJob.Guards) {
 		return false, fmt.Errorf("evaluate reusable-workflow call guards: plan projection does not match normalized program")
 	}
 	github := githubContext(job)
+	for name, value := range identity.githubValues() {
+		github[name] = value
+	}
 	for i, guard := range job.CallGuards {
 		if len(guard.DeferredInputs) != 0 && !deferredInputsHydrated(guard.DeferredInputs, guard.DeferredInputValues) {
 			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: deferred inputs were not hydrated", i+1)
