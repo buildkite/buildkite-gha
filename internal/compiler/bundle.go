@@ -504,6 +504,7 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 		CompilerStep:    compilerStep,
 		GroupLabel:      options.GroupLabel,
 		ConcurrencyGate: generatedWorkflow.ConcurrencyGate,
+		RebuildOnly:     generatedWorkflow.RebuildOnly,
 		ApprovalGates:   generatedWorkflow.ApprovalGates,
 		Jobs:            generatedWorkflow.Jobs,
 	})
@@ -622,6 +623,7 @@ func GeneratePlannedWorkflow(bundle Bundle, options Options) (buildkitepipeline.
 	}
 	return buildkitepipeline.Workflow{
 		ConcurrencyGate: concurrencyGate,
+		RebuildOnly:     ir.Workflow.ConcurrencyGroup != "" && (len(ir.Continuations) != 0 || len(options.RuntimeMatrixRows) != 0),
 		ApprovalGates:   approvalGates,
 		Jobs:            jobs,
 	}, nil

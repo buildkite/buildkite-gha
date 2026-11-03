@@ -264,8 +264,6 @@ func (e *jobGraphExpansion) expandMatrices() {
 			case err != nil:
 			case len(sourced.concurrencyGates) != 0:
 				err = deferredConcurrencyError("reusable-workflow", "a needs-derived matrix", "matrix")
-			case e.workflowConcurrency:
-				err = deferredConcurrencyError("workflow", "a needs-derived matrix", "matrix")
 			}
 			if err != nil {
 				e.rejectRuntimeMatrix(sourced, err)

@@ -238,8 +238,13 @@ type continuePipelineStep struct {
 	Skip             string `yaml:"skip"`
 	Concurrency      int    `yaml:"concurrency"`
 	ConcurrencyGroup string `yaml:"concurrency_group"`
-	Agents           struct{ Queue string }
-	DependsOn        []struct {
+	Retry            struct {
+		Manual struct {
+			Allowed *bool `yaml:"allowed"`
+		} `yaml:"manual"`
+	} `yaml:"retry"`
+	Agents    struct{ Queue string }
+	DependsOn []struct {
 		Step string `yaml:"step"`
 	} `yaml:"depends_on"`
 	Notify []struct {
@@ -286,6 +291,44 @@ func pipelineUploads(runner *cliCaptureRunner) int {
 		}
 	}
 	return uploads
+}
+
+func TestContinueWorkflowConcurrency(t *testing.T) {
+	source := strings.Replace(continueDeferredMatrixWorkflow, "on: push\n", "on: push\nconcurrency: release\n", 1)
+	initial := runContinueInitialUploads(t, source)[0]
+	_, _, initialSteps := decodeContinuePipeline(t, []byte(initial.pipeline))
+	if len(initialSteps) != 5 || initialSteps[0].Concurrency != 1 || initialSteps[1].Concurrency != 1 || initialSteps[0].ConcurrencyGroup != initialSteps[1].ConcurrencyGroup {
+		t.Fatalf("initial upload must contain one ordered gate pair and three jobs: %#v", initialSteps)
+	}
+	var closeNeeds []string
+	for _, dep := range initialSteps[1].DependsOn {
+		closeNeeds = append(closeNeeds, dep.Step)
+	}
+	if !slices.Contains(closeNeeds, initial.artifact.Continuation.StepKey) {
+		t.Fatalf("closing gate must depend on the deferred uploader: %v", closeNeeds)
+	}
+	for _, step := range initialSteps {
+		if step.Retry.Manual.Allowed == nil || *step.Retry.Manual.Allowed {
+			t.Fatalf("individual retry could bypass the gate: %#v", step)
+		}
+	}
+	for _, result := range []string{"success", "failure"} {
+		t.Run(result, func(t *testing.T) {
+			runner := initial.continueRunner(initial.producerManifest(t, result, `[{"target":"x","runner":"ubuntu-latest"}]`))
+			if code, stdout, stderr := runContinue(t, runner, initial.digest); code != 0 {
+				t.Fatalf("continue code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+			}
+			_, _, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
+			if len(steps) != 2 {
+				t.Fatalf("deferred upload must contain build and publish, not another gate pair: %#v", steps)
+			}
+			for _, step := range steps {
+				if step.Concurrency != 0 || (step.Skip == "" && (step.Retry.Manual.Allowed == nil || *step.Retry.Manual.Allowed)) {
+					t.Fatalf("deferred job must retain rebuild-only policy without reacquiring the group: %#v", step)
+				}
+			}
+		})
+	}
 }
 
 // TestContinueExpandsNeedsDerivedMatrix runs the importer's upload and then the
@@ -1754,7 +1797,7 @@ func dependencyKeys(step continuePipelineStep) []string {
 // exist and adds a child step that reads the rows package publishes; the
 // child step compiles the rest against the graph the first stage left.
 func TestContinueChainsStages(t *testing.T) {
-	initials := runContinueInitialUploads(t, continueChainedWorkflow)
+	initials := runContinueInitialUploads(t, "concurrency: release\n"+continueChainedWorkflow)
 	if len(initials) != 1 {
 		t.Fatalf("continuations = %d, want one for the whole component", len(initials))
 	}
@@ -1788,6 +1831,9 @@ func TestContinueChainsStages(t *testing.T) {
 	var childStep continuePipelineStep
 	var buildKeys []string
 	for _, step := range steps {
+		if step.Concurrency != 0 || step.Retry.Manual.Allowed == nil || *step.Retry.Manual.Allowed {
+			t.Fatalf("first stage lost rebuild-only concurrency: %#v", step)
+		}
 		switch {
 		case step.Key == prefix+"deploy-matrix":
 			childStep = step
@@ -1855,6 +1901,9 @@ func TestContinueChainsStages(t *testing.T) {
 	var deployKeys []string
 	var release continuePipelineStep
 	for _, step := range steps {
+		if step.Concurrency != 0 || step.Retry.Manual.Allowed == nil || *step.Retry.Manual.Allowed {
+			t.Fatalf("second stage lost rebuild-only concurrency: %#v", step)
+		}
 		switch {
 		case strings.HasPrefix(step.Key, prefix+"deploy-"):
 			deployKeys = append(deployKeys, step.Key)

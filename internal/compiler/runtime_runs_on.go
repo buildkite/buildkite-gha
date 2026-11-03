@@ -176,8 +176,8 @@ func (e *jobGraphExpansion) rejectRuntimeRunsOnConcurrency(sourced sourcedJob) {
 	e.failedMatrices[sourced.ID] = true
 }
 
-// deferredConcurrencyError explains why a workflow-level concurrency group
-// cannot hold a job that a later pipeline upload adds.
+// deferredConcurrencyError describes combinations whose deferred scheduling
+// and retry policies are not yet supported with workflow-level concurrency.
 func deferredConcurrencyError(scope, feature, static string) error {
-	return fmt.Errorf("%s concurrency cannot be combined with %s: jobs that depend on a job output are uploaded after that job runs, and the %s concurrency group cannot hold jobs uploaded later; move concurrency to the job level, where it holds one job rather than the whole run, or use a static %s", scope, feature, scope, static)
+	return fmt.Errorf("%s concurrency cannot be combined with %s: this combination of deferred jobs and workflow concurrency is not yet supported; move concurrency to the job level, where it holds one job rather than the whole run, or use a static %s", scope, feature, static)
 }

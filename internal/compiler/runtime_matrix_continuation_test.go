@@ -837,19 +837,14 @@ func TestRuntimeMatrixRecordsDeferredJobSources(t *testing.T) {
 	}
 }
 
-// TestRuntimeMatrixRejectsWorkflowConcurrency proves a root workflow with
-// `concurrency` cannot hold a needs-derived matrix. The initial upload's
-// closing marker waits only for the steps it uploads, so the group would be
-// released while the jobs of the deferred upload still run.
-func TestRuntimeMatrixRejectsWorkflowConcurrency(t *testing.T) {
+func TestRuntimeMatrixPreservesWorkflowConcurrency(t *testing.T) {
 	source := strings.Replace(runtimeMatrixWorkflow, "on: push\n", "on: push\nconcurrency:\n  group: release\n  cancel-in-progress: false\n", 1)
 	ir, err := compileRuntimeMatrix(t, source, nil)
-	var finding *ProcessingFinding
-	if !errors.As(err, &finding) || finding.Code != CodeMatrixInvalid || finding.Job != "build" || !strings.Contains(finding.Detail, "workflow concurrency cannot be combined with a needs-derived matrix") || !strings.Contains(finding.Detail, "move concurrency to the job level, where it holds one job rather than the whole run, or use a static matrix") {
-		t.Fatalf("err = %v, want %s for job build", err, CodeMatrixInvalid)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(ir.Continuations) != 0 {
-		t.Fatalf("continuations = %#v, want none", ir.Continuations)
+	if ir.Workflow.ConcurrencyGroup != "release" || len(ir.Continuations) != 1 || !slices.Equal(ir.Continuations[0].Jobs, []string{"build", "publish"}) {
+		t.Fatalf("concurrency group = %q, continuations = %#v", ir.Workflow.ConcurrencyGroup, ir.Continuations)
 	}
 }
 
