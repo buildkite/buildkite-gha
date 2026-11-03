@@ -588,10 +588,11 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 		source := inputs[name]
 		site := compileExpressionSite(source, expression.ProfileStepTemplate, expression.ResultString)
 		readsInputs, err := expression.NewEngine().ReferencesContext(site, "inputs", false)
-		if err != nil || !readsInputs {
+		checkoutHost := descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA && strings.EqualFold(name, "github-server-url")
+		if err != nil || !readsInputs && !checkoutHost {
 			continue
 		}
-		readsInputValues = true
+		readsInputValues = readsInputValues || readsInputs
 		analysis, err := expression.NewEngine().Analyze(site, b.authorityValues(instance))
 		if err != nil {
 			return fmt.Errorf("action input %q: %w", name, err)

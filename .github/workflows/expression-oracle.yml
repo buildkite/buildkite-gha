@@ -15,18 +15,40 @@ concurrency:
 
 jobs:
   composite-token:
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          github-server-url: ${{ github.server_url }}
       - uses: ./.github/actions/oracle-composite-token
+        id: matching-host
+        if: github.server_url == 'https://github.com'
       - uses: ./.github/actions/oracle-composite-token
         with:
           fallback: none
+      - id: other-host
+        if: github.server_url != 'https://github.com'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: exit 1
+      - env:
+          MATCHING_HOST: ${{ steps.matching-host.outcome }}
+          OTHER_HOST: ${{ steps.other-host.outcome }}
+        run: |
+          test "$MATCHING_HOST" = success
+          test "$OTHER_HOST" = skipped
 
   reusable-defaults:
+    if: github.server_url == 'https://github.com'
     uses: ./.github/workflows/expression-oracle-reusable.yml
+
+  other-host:
+    if: github.server_url != 'https://github.com'
+    runs-on: ubuntu-latest
+    steps:
+      - run: exit 1
 
   # format() builds values containing ${{ so the caller passes data, not an
   # expression. A reparsed secret name would select GITHUB_TOKEN. Both calls
@@ -62,8 +84,19 @@ jobs:
           test "$NESTED_OUTPUT" = "$expected"
 
   expressions:
+    needs: [composite-token, reusable-defaults, other-host]
+    if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: Verify host conditions
+        env:
+          MATCHING_JOB: ${{ needs.composite-token.result }}
+          MATCHING_CALL: ${{ needs.reusable-defaults.result }}
+          OTHER_HOST: ${{ needs.other-host.result }}
+        run: |
+          test "$MATCHING_JOB" = success
+          test "$MATCHING_CALL" = success
+          test "$OTHER_HOST" = skipped
       - name: Verify expression semantics
         shell: bash
         env:

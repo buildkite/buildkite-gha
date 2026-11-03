@@ -40,6 +40,8 @@ conservative without granting credentials to known-unreachable paths:
 
 - A known-false or provider-inapplicable branch must not grant token authority.
 - A branch that depends on an unknown runtime value may grant token authority.
+- Runtime skips planning-proven-unreachable steps before evaluating their
+  environment, which may reference a token that planning did not authorize.
 - Action metadata cannot grant ordinary secret authority.
 - Composite shell `env`, `run`, and `working-directory` templates can require
   the job-authorized token; other composite metadata cannot add token authority.

@@ -978,88 +978,95 @@ func FuzzEngineEventPayloadEffectsMatchConcreteReachability(f *testing.F) {
 	})
 }
 
-func TestCompositeConditionServerURL(t *testing.T) {
+func TestConditionServerURL(t *testing.T) {
 	// jetify-com/devbox-install-action@8c6a66ed6273138b1915457069de78cb52fe3bd7/action.yml#L132
 	const guard = "inputs.disable-nix-access-token == 'false' && github.server_url == 'https://github.com'"
 	engine := NewEngine()
-	site := Site{Source: guard, Profile: ProfileActionStepCondition, Result: ResultBoolean}
-	for _, test := range []struct {
-		name, disabled, server string
-		want                   bool
-	}{
-		{"GitHub enabled", "false", "https://github.com", true},
-		{"GitHub disabled", "true", "https://github.com", false},
-		{"Origin enabled", "false", "https://origin.cursor.com", false},
-		{"Origin disabled", "true", "https://origin.cursor.com", false},
-		{"unavailable server", "false", "", false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			values := Values{Condition: ConditionContext{
-				Inputs: map[string]any{"disable-nix-access-token": test.disabled},
-				GitHub: map[string]any{"server_url": test.server},
-			}}
-			got, err := engine.Evaluate(site, values)
-			if err != nil || got != test.want {
-				t.Fatalf("Evaluate() = %v, %v; want %v", got, err, test.want)
-			}
-			analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{
-				"inputs.disable-nix-access-token": test.disabled,
-				"github.server_url":               test.server,
-			}})
-			if err != nil || !analysis.Value.Known || analysis.Value.Value != test.want || analysis.Effects != (Effects{}) {
-				t.Fatalf("known Analyze() = %#v, %v; want %v without effects", analysis, err, test.want)
-			}
-			values.Condition.Unsuccessful = true
-			if got, err := engine.Evaluate(site, values); err != nil || got != false {
-				t.Fatalf("unsuccessful Evaluate() = %v, %v; want implicit success guard", got, err)
-			}
-		})
-	}
-	for _, references := range []map[string]any{
-		nil,
-		{"github.server_url": "https://github.com"},
-		{"inputs.disable-nix-access-token": "false"},
-	} {
-		analysis, err := engine.Analyze(site, AbstractValues{References: references})
-		if err != nil || analysis.Value.Known || analysis.Effects != (Effects{}) {
-			t.Fatalf("unknown Analyze(%v) = %#v, %v", references, analysis, err)
+	for _, profile := range []ProfileID{ProfileActionStepCondition, ProfileJobCondition, ProfileStepCondition, ProfileCallCondition} {
+		site := Site{Source: guard, Profile: profile, Result: ResultBoolean}
+		for _, test := range []struct {
+			name, disabled, server string
+			want                   bool
+		}{
+			{"GitHub enabled", "false", "https://github.com", true},
+			{"GitHub disabled", "true", "https://github.com", false},
+			{"Origin enabled", "false", "https://origin.cursor.com", false},
+			{"Origin disabled", "true", "https://origin.cursor.com", false},
+			{"unavailable server", "false", "", false},
+		} {
+			t.Run(string(profile)+"/"+test.name, func(t *testing.T) {
+				values := Values{Condition: ConditionContext{
+					Inputs: map[string]any{"disable-nix-access-token": test.disabled},
+					GitHub: map[string]any{"server_url": test.server},
+				}}
+				got, err := engine.Evaluate(site, values)
+				if err != nil || got != test.want {
+					t.Fatalf("Evaluate() = %v, %v; want %v", got, err, test.want)
+				}
+				analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{
+					"inputs.disable-nix-access-token": test.disabled,
+					"github.server_url":               test.server,
+				}})
+				if err != nil || !analysis.Value.Known || analysis.Value.Value != test.want || analysis.Effects != (Effects{}) {
+					t.Fatalf("known Analyze() = %#v, %v; want %v without effects", analysis, err, test.want)
+				}
+				values.Condition.Unsuccessful = true
+				if got, err := engine.Evaluate(site, values); err != nil || got != false {
+					t.Fatalf("unsuccessful Evaluate() = %v, %v; want implicit success guard", got, err)
+				}
+			})
 		}
-	}
-	for _, source := range []string{
-		"github['server_url'] == 'https://github.com'",
-		"GITHUB.SERVER_URL == 'https://github.com'",
-	} {
-		site.Source = source
-		if got, err := engine.Evaluate(site, Values{Condition: ConditionContext{GitHub: map[string]any{"server_url": "https://github.com"}}}); err != nil || got != true {
-			t.Errorf("Evaluate(%q) = %v, %v", source, got, err)
+		for _, references := range []map[string]any{
+			nil,
+			{"github.server_url": "https://github.com"},
+			{"inputs.disable-nix-access-token": "false"},
+		} {
+			analysis, err := engine.Analyze(site, AbstractValues{References: references})
+			if err != nil || analysis.Value.Known || analysis.Effects != (Effects{}) {
+				t.Fatalf("unknown Analyze(%v) = %#v, %v", references, analysis, err)
+			}
 		}
-	}
-	for _, source := range []string{
-		"false && github.token",
-		"true || github.unsupported",
-		"github.unsupported || true",
-		"case(true, true, github.token)",
-		"case(false, github.unsupported, true)",
-		"false && github.server_url.extra",
-		"false && github[inputs.property]",
-		"true || toJSON(github)",
-	} {
-		site.Source = source
-		if _, err := engine.Evaluate(site, Values{}); err == nil {
-			t.Errorf("Evaluate admitted unreachable reference in %q", source)
+		for _, source := range []string{
+			"github['server_url'] == 'https://github.com'",
+			"GITHUB.SERVER_URL == 'https://github.com'",
+		} {
+			site.Source = source
+			if got, err := engine.Evaluate(site, Values{Condition: ConditionContext{GitHub: map[string]any{"server_url": "https://github.com"}}}); err != nil || got != true {
+				t.Errorf("Evaluate(%q) = %v, %v", source, got, err)
+			}
 		}
-		if _, err := engine.Analyze(site, AbstractValues{}); err == nil {
-			t.Errorf("Analyze admitted unreachable reference in %q", source)
+		for _, source := range []string{
+			"false && github.token",
+			"true || github.unsupported",
+			"github.unsupported || true",
+			"case(true, true, github.token)",
+			"case(false, github.unsupported, true)",
+			"false && github.server_url.extra",
+			"false && github[inputs.property]",
+			"true || toJSON(github)",
+		} {
+			site.Source = source
+			if _, err := engine.Evaluate(site, Values{}); err == nil {
+				t.Errorf("Evaluate admitted unreachable reference in %q", source)
+			}
+			if _, err := engine.Analyze(site, AbstractValues{}); err == nil {
+				t.Errorf("Analyze admitted unreachable reference in %q", source)
+			}
 		}
 	}
 	for _, profile := range []ProfileID{
 		ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
-		ProfileJobCondition, ProfileStepCondition, ProfileCallCondition, ProfileActionLifecycle,
 	} {
-		site.Profile, site.Source = profile, "false && github.server_url == 'https://github.com'"
-		if _, err := engine.Validate(site); err == nil {
-			t.Errorf("%s admission widened beyond composite conditions", profile)
+		for _, server := range []string{"https://github.com", "https://buildkite-ghe.com"} {
+			site := Site{Profile: profile, Source: "github.server_url == 'https://github.com'", Result: ResultBoolean}
+			got, err := engine.Reduce(site, Values{Compile: CompileContext{GitHub: map[string]any{"server_url": server}}})
+			if err != nil || !got.Known || got.Value != (server == "https://github.com") {
+				t.Errorf("%s Reduce(%s) = %#v, %v", profile, server, got, err)
+			}
 		}
+	}
+	if _, err := engine.Validate(Site{Profile: ProfileActionLifecycle, Source: "false && github.server_url == 'https://github.com'", Result: ResultBoolean}); err == nil {
+		t.Error("admission widened to lifecycle conditions")
 	}
 }
 
