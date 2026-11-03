@@ -137,6 +137,88 @@ func TestEngineEventPathRemainsRuntimeOnly(t *testing.T) {
 	}
 }
 
+func TestEngineRunAttemptConditionsRemainRuntimeOnly(t *testing.T) {
+	engine := NewEngine()
+	for _, profile := range []ProfileID{ProfileCompileJobCondition, ProfileCompileCallCondition, ProfileCompileStepCondition, ProfileJobCondition, ProfileCallCondition, ProfileStepCondition, ProfileActionStepCondition} {
+		site := Site{Source: "github.run_attempt == '1'", Profile: profile, Result: ResultBoolean}
+		reduced, err := engine.Reduce(site, Values{Compile: CompileContext{GitHub: map[string]any{"repository": "PostHog/posthog"}}})
+		if err != nil || reduced.Known || !strings.Contains(reduced.Source, "github.run_attempt") {
+			t.Fatalf("Reduce(%s) = %#v, %v; want runtime attempt", profile, reduced, err)
+		}
+		analysis, err := engine.Analyze(site, AbstractValues{})
+		if err != nil || analysis.Value.Known {
+			t.Fatalf("Analyze(%s) = %#v, %v; want unknown attempt", profile, analysis, err)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileJobCondition, ProfileCallCondition, ProfileStepCondition, ProfileActionStepCondition} {
+		for _, attempt := range []string{"1", "2", "5"} {
+			for _, source := range []string{"github.run_attempt == '1'", "github['run_attempt'] == 1", "github.run_attempt != '1'"} {
+				site := Site{Source: source, Profile: profile, Result: ResultBoolean}
+				want := attempt == "1"
+				if strings.Contains(source, "!=") {
+					want = !want
+				}
+				value, err := engine.Evaluate(site, Values{Condition: ConditionContext{GitHub: map[string]any{"run_attempt": attempt}}})
+				if err != nil || value != want {
+					t.Fatalf("Evaluate(%s, %s, %s) = %v, %v; want %t", profile, source, attempt, value, err, want)
+				}
+				analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{"github.run_attempt": attempt}})
+				if err != nil || !analysis.Value.Known || analysis.Value.Value != want {
+					t.Fatalf("Analyze(%s) = %#v, %v; want %t", profile, analysis, err, want)
+				}
+			}
+		}
+		for _, source := range []string{"github.run_attempt == '1'", "github.run_attempt != '1'"} {
+			_, err := engine.Evaluate(Site{Source: source, Profile: profile, Result: ResultBoolean}, Values{Condition: ConditionContext{GitHub: map[string]any{}}})
+			if err == nil || !strings.Contains(err.Error(), "unavailable") {
+				t.Fatalf("Evaluate(%s) error = %v; want unavailable identity", profile, err)
+			}
+		}
+		for _, source := range []string{"false && github.token != ''", "false && github.run_id != ''", "false && github.run_number != ''"} {
+			if _, err := engine.Validate(Site{Source: source, Profile: profile, Result: ResultBoolean}); err == nil {
+				t.Fatalf("%s admitted %s", profile, source)
+			}
+		}
+	}
+	for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunsOnTemplate, ProfileRunName, ProfileWorkflowConcurrency} {
+		if _, err := engine.Validate(Site{Source: "${{ github.run_attempt }}", Profile: profile, Result: ResultString}); err == nil {
+			t.Fatalf("%s admitted attempt during graph construction", profile)
+		}
+	}
+	if _, err := engine.Validate(Site{Source: "github.run_attempt == '1'", Profile: ProfileActionLifecycle, Result: ResultBoolean}); err == nil {
+		t.Fatal("admitted attempt in unrelated lifecycle profile")
+	}
+}
+
+func TestEnginePostHogFirstAttemptJobCondition(t *testing.T) {
+	// ci-backend.yml at b9a0729f733e6dd170017677bb339608489ec3d2.
+	site := Site{Profile: ProfileJobCondition, Result: ResultBoolean, Source: `!cancelled() && github.run_attempt == '1'
+&& github.actor != 'dependabot[bot]'
+&& github.event.pull_request.head.repo.full_name == 'PostHog/posthog'
+&& needs.select-tests.result == 'success'`}
+	for _, test := range []struct {
+		attempt, actor, repository, result string
+		cancelled, want                    bool
+	}{
+		{"1", "octocat", "PostHog/posthog", "success", false, true},
+		{"2", "octocat", "PostHog/posthog", "success", false, false},
+		{"1", "dependabot[bot]", "PostHog/posthog", "success", false, false},
+		{"1", "octocat", "octocat/posthog", "success", false, false},
+		{"1", "octocat", "PostHog/posthog", "skipped", false, false},
+		{"1", "octocat", "PostHog/posthog", "success", true, false},
+	} {
+		condition := ConditionContext{
+			GitHub: map[string]any{"run_attempt": test.attempt, "actor": test.actor,
+				"event": map[string]any{"pull_request": map[string]any{"head": map[string]any{"repo": map[string]any{"full_name": test.repository}}}}},
+			Needs: map[string]NeedStatus{"select-tests": {Result: test.result}}, Cancelled: test.cancelled,
+		}
+		got, err := NewEngine().Evaluate(site, Values{Condition: condition})
+		if err != nil || got != test.want {
+			t.Errorf("condition(%+v) = %v, %v; want %t", test, got, err, test.want)
+		}
+	}
+}
+
 func TestEngineInputReferences(t *testing.T) {
 	for _, test := range []struct {
 		source  string

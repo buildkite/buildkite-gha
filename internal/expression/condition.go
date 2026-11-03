@@ -275,6 +275,10 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 				if scope == StepCondition || scope == actionStepCondition || scope == actionLifecycleCondition {
 					return nil
 				}
+			case "run_attempt":
+				if scope != actionLifecycleCondition {
+					return nil
+				}
 			case "server_url":
 				if scope != actionLifecycleCondition {
 					return nil
@@ -282,6 +286,9 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			}
 		}
 		supported := "actor, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, sha, workflow_ref, and workflow_sha"
+		if scope != actionLifecycleCondition {
+			supported += ", plus run_attempt"
+		}
 		if scope == StepCondition || scope == actionStepCondition || scope == actionLifecycleCondition {
 			supported += ", plus event_path during execution"
 		}
@@ -660,7 +667,7 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		if value, ok := lookupRuntimeValue(context.GitHub, path); ok {
 			return value, nil
 		}
-		if context.GitHub == nil {
+		if context.GitHub == nil || len(path) == 1 && strings.EqualFold(path[0], "run_attempt") {
 			break
 		}
 		return nil, nil

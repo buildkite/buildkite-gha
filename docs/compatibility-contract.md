@@ -404,6 +404,33 @@ covers writable translated paths without changing the configured host cache.
 These checks do not establish cache-service persistence, preinstalled tool
 availability, or successful execution of the complete PostHog workflow.
 
+### Run-attempt conditions
+
+The pinned [PostHog backend workflow](https://github.com/buildkite/posthog/blob/b9a0729f733e6dd170017677bb339608489ec3d2/.github/workflows/ci-backend.yml#L3690-L3734)
+uses `github.run_attempt == '1'` for telemetry steps and the
+`capture-test-selection` job, alongside actor, event, and prerequisite guards.
+The [November 3 compatibility capture](https://ampcode.com/artifacts/fresh-compatibility-and-performance-comparisons-november-202-3f3daada-c84c-44d4-aab8-c6b688fa1cf1)
+records v0.119.0 rejecting these conditions. These are authored-workflow and
+local-admission observations, not native execution receipts.
+
+Conditions use the existing runtime mapping: `BUILDKITE_RETRY_COUNT + 1`,
+as a string. GitHub counts attempts of a workflow run, including reruns of
+selected jobs. The Buildkite per-job mapping is an approximation, not exact
+parity. Preserve that distinction rather than inventing a workflow attempt
+counter. An absent or invalid retry count leaves the value unavailable and
+condition evaluation fails.
+Import-time restrictions and authority invariants remain in
+[Expression authority](expression-authority.md#expression-profiles).
+
+The [compiled runtime regression](../internal/runtime/runtime_test.go) checks
+first-attempt and retry selection for jobs, reusable calls, workflow steps, and
+composite steps, plus unavailable identity. The
+[expression regression](../internal/expression/engine_test.go) checks residual
+conditions, numeric/string comparisons, abstract refinement, and prohibited
+contexts. The [compiler regression](../internal/compiler/actions_test.go) checks
+conservative token authority and known-false pruning. These local checks do not
+establish a complete PostHog run, native parity, or released availability.
+
 ### Git email inference on Linux runners
 
 The November 2, 2026 paired [native Ubuntu run](https://github.com/sj26-testier/gha-e2e-onboarding-r-b4f90c10e220/actions/runs/41385914126)

@@ -95,6 +95,12 @@ supplies the owning build ID separately from the shared GitHub context, so
 evaluating a group cannot make run identity available to other graph-time
 positions. Offline callers leave that identity unavailable.
 
+`github.run_attempt` stays unknown during compilation and authority planning.
+Job, reusable-call, workflow-step, and composite-step conditions read the same
+retry-derived runtime identity as templates. Missing identity is an error, not
+a first attempt or a retry. This does not admit run identity in graph-time
+fields or action lifecycle conditions.
+
 `github.event_path` remains unknown during compilation and authority planning.
 Runtime supplies it after creating the job's event file, before job environment
 evaluation. Graph-time fields and pre-setup job/call conditions cannot read it.
