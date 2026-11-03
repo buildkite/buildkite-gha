@@ -3713,13 +3713,26 @@ func TestLiveJobContainerPersistsAcrossShellSteps(t *testing.T) {
 func TestLiveJobContainerDefaultNonRootUser(t *testing.T) {
 	d := requireDocker(t)
 	w := t.TempDir()
-	j := jobContainerPlan(t, w, []runtimeTestStep{{ID: "u", Kind: "run", Shell: "sh", Command: `test "$(id -u)" != 0`}})
+	j := jobContainerPlan(t, w, []runtimeTestStep{{ID: "u", Kind: "run", Shell: "sh", Command: `
+test "$(id -u)" != 0
+test '${{ runner.tool_cache }}' = "$RUNNER_TOOL_CACHE"
+test "$RUNNER_TOOL_CACHE" = /__w/_temp/tool-cache
+test ! -e "$RUNNER_TOOL_CACHE/host-only"
+mkdir -p '${{ runner.tool_cache }}/Python/3.13.13'
+echo container-tool > "$RUNNER_TOOL_CACHE/Python/3.13.13/sentinel"
+test "$(cat '${{ runner.tool_cache }}/Python/3.13.13/sentinel')" = container-tool
+`}})
 	j.Container.Image = "nginxinc/nginx-unprivileged:stable-alpine"
+	hostCache := t.TempDir()
+	writeFixtureFile(t, hostCache, "host-only", "host-tool")
 	runtimeExecutable := buildLiveContainerRuntime(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	if _, err := (Runner{Docker: d, RuntimeExecutable: runtimeExecutable}).runTestJob(ctx, j, w); err != nil {
+	if _, err := (Runner{Docker: d, RuntimeExecutable: runtimeExecutable, ToolCache: hostCache}).runTestJob(ctx, j, w); err != nil {
 		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(hostCache); err != nil || len(entries) != 1 || entries[0].Name() != "host-only" {
+		t.Fatalf("container changed the host tool cache: %v, %v", entries, err)
 	}
 }
 func TestLiveJobContainerCancellationKillsProcessTree(t *testing.T) {

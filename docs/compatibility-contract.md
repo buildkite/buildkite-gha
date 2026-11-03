@@ -379,6 +379,31 @@ These records preserve the evidence behind the former combined reference.
 They distinguish reported observations from independently inspectable receipts.
 They are not an exhaustive conformance suite.
 
+### Runner tool-cache paths
+
+The pinned runner [creates the tool cache and sets its context](https://github.com/actions/runner/blob/1ddb758ed014660b5d2220a5dc6b0e9957a9f96b/src/Runner.Worker/JobRunner.cs#L174-L176)
+before action execution. PostHog's pinned
+[Python setup](https://github.com/buildkite/posthog/blob/b9a0729f733e6dd170017677bb339608489ec3d2/.github/actions/setup-python-cached/action.yml#L46)
+and [pnpm setup](https://github.com/buildkite/posthog/blob/b9a0729f733e6dd170017677bb339608489ec3d2/.github/actions/pnpm-install/action.yml#L73)
+pass `runner.tool_cache` subdirectories to cache actions. These are source
+references, not native execution receipts.
+
+Resolve `runner.tool_cache` from the same validated directory as
+`RUNNER_TOOL_CACHE`, never from importer or workflow environment values.
+Keep it unknown during compilation and authority analysis. Setup must supply
+it before action defaults and steps evaluate it; graph-time fields and
+pre-setup conditions remain unavailable.
+
+Job containers use a writable per-job cache inside the existing temp mount,
+with container-translated expressions and environment values. Do not mount
+the configured host tool cache or widen working-directory containment.
+Docker actions retain their separate environment and mount policy.
+[Compiled action-input tests](../internal/runtime/runtime_test.go) cover shared
+setup/consumer paths and cleanup; the [non-root container test](../internal/runtime/containers_test.go)
+covers writable translated paths without changing the configured host cache.
+These checks do not establish cache-service persistence, preinstalled tool
+availability, or successful execution of the complete PostHog workflow.
+
 ### Git email inference on Linux runners
 
 The November 2, 2026 paired [native Ubuntu run](https://github.com/sj26-testier/gha-e2e-onboarding-r-b4f90c10e220/actions/runs/41385914126)

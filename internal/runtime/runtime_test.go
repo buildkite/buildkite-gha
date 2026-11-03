@@ -1582,7 +1582,7 @@ func TestRunnerToolCacheIsPerJobAndReserved(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID:      "tool-cache",
 		Kind:    "run",
-		Command: `test -d "$RUNNER_TOOL_CACHE"; case "$RUNNER_TOOL_CACHE" in "$RUNNER_TEMP"/*) ;; *) exit 9 ;; esac`,
+		Command: `test '${{ runner.tool_cache }}' = "$RUNNER_TOOL_CACHE"; test -d "$RUNNER_TOOL_CACHE"; case "$RUNNER_TOOL_CACHE" in "$RUNNER_TEMP"/*) ;; *) exit 9 ;; esac`,
 	}})
 	job.Env = map[string]string{"RUNNER_TOOL_CACHE": filepath.Join(workspace, "untrusted")}
 	if result, err := (Runner{}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
@@ -1601,11 +1601,84 @@ func TestRunnerUsesConfiguredToolCache(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID:      "tool-cache",
 		Kind:    "run",
-		Command: `test "$RUNNER_TOOL_CACHE" = "$EXPECTED_TOOL_CACHE"`,
+		Command: `test '${{ runner.tool_cache }}' = "$RUNNER_TOOL_CACHE"; test "$RUNNER_TOOL_CACHE" = "$EXPECTED_TOOL_CACHE"`,
 	}})
 	job.Env = map[string]string{"EXPECTED_TOOL_CACHE": toolCache}
 	if result, err := (Runner{ToolCache: toolCache}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestCompiledToolCacheActionInputs(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/actions/setup/action.yml", `name: setup
+inputs:
+  root:
+    default: ${{ runner.tool_cache }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      if: runner.tool_cache == inputs.root
+      run: |
+        test '${{ inputs.root }}' = "$RUNNER_TOOL_CACHE"
+        mkdir -p "$RUNNER_TOOL_CACHE/Python/3.13.13"
+        printf 'installed-tool' > "$RUNNER_TOOL_CACHE/Python/3.13.13/sentinel"
+    - uses: ./.github/actions/cache-reader
+      with:
+        path: ${{ runner.tool_cache }}/Python/3.13.13
+`)
+	writeFixtureFile(t, workspace, ".github/actions/cache-reader/action.yml", `name: cache reader
+inputs:
+  path:
+    required: true
+outputs:
+  path:
+    value: ${{ inputs.path }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: |
+        test '${{ inputs.path }}' = "$RUNNER_TOOL_CACHE/Python/3.13.13"
+        test "$(cat '${{ inputs.path }}/sentinel')" = installed-tool
+`)
+	source := `name: tool cache
+on: push
+jobs:
+  tools:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.13.13']
+    outputs:
+      cache: ${{ steps.read.outputs.path }}
+    steps:
+      - uses: ./.github/actions/setup
+      - id: read
+        uses: ./.github/actions/cache-reader
+        with:
+          path: ${{ runner.tool_cache }}/Python/${{ matrix.python-version }}
+`
+	workflowPath := ".github/workflows/tools.yml"
+	writeFixtureFile(t, workspace, workflowPath, source)
+	event := []byte(`{"provider":"github","event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat"}`)
+	jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(source), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("compile = %#v, %v", jobs, err)
+	}
+	if jobs[0].GitHubToken != nil || len(jobs[0].RequiredSecrets) != 0 {
+		t.Fatal("tool cache must not grant credential authority")
+	}
+	result, err := (Runner{}).RunJob(t.Context(), jobs[0], workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() = %#v, %v", result, err)
+	}
+	if want := filepath.Join(result.Env["RUNNER_TOOL_CACHE"], "Python", "3.13.13"); result.Outputs["cache"] != want {
+		t.Fatalf("cache input = %q, want %q", result.Outputs["cache"], want)
+	}
+	if _, err := os.Stat(result.Env["RUNNER_TOOL_CACHE"]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("per-job cache survived cleanup: %v", err)
 	}
 }
 
