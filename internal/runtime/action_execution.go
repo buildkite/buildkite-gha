@@ -671,6 +671,13 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
 			continue
 		}
+		// Planning may have pruned credentials used by this step's environment.
+		// Use the same reachability decision as action preparation before
+		// evaluating fields on a step that cannot run.
+		if stepIndex < len(r.reachableSteps) && !r.reachableSteps[stepIndex] {
+			eval.Steps[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
+			continue
+		}
 		if runErr != nil || runCtx.Err() != nil {
 			referencesStatus, err := executionprogram.ReferencesStatus(step.Condition)
 			if err != nil {

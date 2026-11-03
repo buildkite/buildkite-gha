@@ -30,6 +30,8 @@ jobs:
           fallback: none
       - id: other-host
         if: github.server_url != 'https://github.com'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: exit 1
       - env:
           MATCHING_HOST: ${{ steps.matching-host.outcome }}

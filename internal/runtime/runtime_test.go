@@ -2440,9 +2440,16 @@ jobs:
   test:
     if: %s
     runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.guarded.outcome }}
     steps:
-      - if: %s
-        run: printf '%%s' '${{ github.token }}' > token-body
+      - id: guarded
+        if: %s
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$GH_TOKEN" = '${{ github.token }}'
+          printf '%%s' "$GH_TOKEN" > token-body
 `, jobCondition, stepCondition)
 					if position == "call" {
 						writeFixtureFile(t, workspace, ".github/workflows/called.yml", strings.Replace(workflow, "on: push", "on: workflow_call", 1))
@@ -2465,6 +2472,9 @@ jobs:
 					}
 					if err != nil || result.Conclusion != wantConclusion {
 						t.Fatalf("RunJob() = %#v, %v; want %s", result, err, wantConclusion)
+					}
+					if position == "step" && !wantRun && result.Outputs["outcome"] != "skipped" {
+						t.Fatalf("skipped step outcome = %q", result.Outputs["outcome"])
 					}
 					body, err := os.ReadFile(filepath.Join(workspace, "token-body"))
 					if wantRun && (err != nil || string(body) != provider.token) || !wantRun && (!errors.Is(err, os.ErrNotExist) || provider.calls != 0) {
