@@ -99,6 +99,11 @@ evaluation. Graph-time fields and pre-setup job/call conditions cannot read it.
 The expression does not grant payload provenance or credential authority; see
 the [event-file contract](compatibility-contract.md#event-file-paths).
 
+`runner.tool_cache` is also unknown during compilation and authority planning.
+Runtime selects its directory before action defaults and steps run. It does
+not become available to graph construction, job environment, or pre-setup
+job/call conditions. See the [tool-cache contract](compatibility-contract.md#runner-tool-cache-paths).
+
 Program sites serialize source text and diagnostic location. Their position in
 the program derives profile, result type, provenance, and purpose after decode.
 This prevents a plan from claiming broader semantics in serialized profile

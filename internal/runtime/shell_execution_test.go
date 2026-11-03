@@ -401,6 +401,7 @@ func TestRemoteCompositeWorkingDirectories(t *testing.T) {
 		{name: "default workspace", want: "workspace"},
 		{name: "relative workspace", directory: "sub", want: "workspace-sub"},
 		{name: "outside absolute", directory: "${{ inputs.outside }}", reject: true},
+		{name: "tool cache is not a working directory root", directory: "${{ runner.tool_cache }}", reject: true},
 		{name: "action traversal", directory: "${{ github.action_path }}/../..", reject: true},
 		{name: "workspace symlink escape", directory: "escape", reject: true},
 		{name: "workflow cannot inherit source root", directory: "${{ github.action_path }}", workflow: true, reject: true},

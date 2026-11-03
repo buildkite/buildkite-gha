@@ -386,10 +386,17 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		}
 	}
 	toolCache := r.ToolCache
-	if toolCache == "" {
+	if toolCache == "" || containerSpec != nil {
+		// Job containers use the existing temp mount, not an unmounted host
+		// tool cache. Do not expose another host directory to the container.
 		toolCache = filepath.Join(runnerTemp, "tool-cache")
 		if err := os.Mkdir(toolCache, 0o755); err != nil {
 			return jobResult, fmt.Errorf("create runner tool cache: %w", err)
+		}
+		if containerSpec != nil {
+			if err := os.Chmod(toolCache, 0o777); err != nil {
+				return jobResult, fmt.Errorf("make container tool cache writable: %w", err)
+			}
 		}
 	} else {
 		if !filepath.IsAbs(toolCache) || filepath.Clean(toolCache) != toolCache {
@@ -492,8 +499,10 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		}()
 	}
 	runnerContext["temp"] = runnerTemp
+	runnerContext["tool_cache"] = toolCache
 	if r.jobContainer != nil {
 		runnerContext["temp"] = r.jobContainer.containerPath(runnerTemp)
+		runnerContext["tool_cache"] = r.jobContainer.containerPath(toolCache)
 	}
 	runtimeEnv := standardEnvironment(job, workspace, runnerTemp, toolCache, r.RunIdentity)
 	if eventPath != "" {

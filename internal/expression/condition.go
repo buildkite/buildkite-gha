@@ -255,14 +255,14 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			if strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") {
 				return nil
 			}
-			if (strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "debug")) && scope != JobCondition && scope != CallCondition {
+			if (strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "tool_cache") || strings.EqualFold(path[0], "debug")) && scope != JobCondition && scope != CallCondition {
 				return nil
 			}
 		}
 		if scope == JobCondition {
 			return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, or runner.environment", reference)
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, runner.environment, runner.temp, or runner.debug", reference)
+		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, runner.environment, runner.temp, runner.tool_cache, or runner.debug", reference)
 	case "github":
 		if len(path) >= 1 && strings.EqualFold(path[0], "event") {
 			return nil

@@ -34,6 +34,60 @@ func TestEngineLiteralPreservesExpressionTypes(t *testing.T) {
 	}
 }
 
+func TestEngineToolCacheRemainsRuntimeOnly(t *testing.T) {
+	engine := NewEngine()
+	for _, profile := range []ProfileID{ProfileStepTemplate, ProfileActionStepTemplate, ProfileActionInputDefault, ProfileJobOutput} {
+		site := Site{Source: "${{ runner.tool_cache }}/Python/3.13.13", Profile: profile, Result: ResultString}
+		reduced, err := engine.Reduce(site, Values{})
+		if err != nil || reduced.Known || !strings.Contains(reduced.Source, "runner.tool_cache") {
+			t.Fatalf("Reduce(%s) = %#v, %v; want runtime tool cache", profile, reduced, err)
+		}
+		got, err := engine.Evaluate(site, Values{Runtime: Context{Runner: map[string]string{"tool_cache": "/tools"}}})
+		if err != nil || got != "/tools/Python/3.13.13" {
+			t.Fatalf("Evaluate(%s) = %#v, %v", profile, got, err)
+		}
+		if _, err := engine.Evaluate(site, Values{}); err == nil {
+			t.Fatalf("%s accepted an unavailable tool cache", profile)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileStepCondition, ProfileActionStepCondition, ProfileActionLifecycle} {
+		site := Site{Source: "runner['tool_cache'] == '/tools'", Profile: profile, Result: ResultBoolean}
+		got, err := engine.Evaluate(site, Values{Condition: ConditionContext{Runner: map[string]string{"tool_cache": "/tools"}}})
+		if err != nil || got != true {
+			t.Fatalf("Evaluate(%s) = %#v, %v", profile, got, err)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunsOnTemplate, ProfileWorkflowConcurrency, ProfileJobEnvironment, ProfileServiceEnvironment, ProfileJobDefault, ProfileRuntimeTemplate} {
+		if _, err := engine.Validate(Site{Source: "${{ runner.tool_cache }}", Profile: profile, Result: ResultString}); err == nil {
+			t.Errorf("%s admitted a tool-cache path before job setup", profile)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileJobCondition, ProfileCallCondition} {
+		if _, err := engine.Validate(Site{Source: "false && runner.tool_cache != ''", Profile: profile, Result: ResultBoolean}); err == nil {
+			t.Errorf("%s admitted a tool-cache path before job setup", profile)
+		}
+	}
+	site := Site{Source: "${{ runner.tool_cache == '/tools' && github.token || 'none' }}", Profile: ProfileStepTemplate, Result: ResultString}
+	unknown, err := engine.Analyze(site, AbstractValues{})
+	if err != nil || unknown.Value.Known || unknown.Effects.GitHubToken != GitHubTokenDirect {
+		t.Fatalf("unknown tool-cache authority = %#v, %v", unknown, err)
+	}
+	for _, path := range []string{"/tools", "/other"} {
+		analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{"runner.tool_cache": path, "github.token": "token"}})
+		want, effect := "none", GitHubTokenEffect(0)
+		if path == "/tools" {
+			want, effect = "token", GitHubTokenDirect
+		}
+		if err != nil || !analysis.Value.Known || analysis.Value.Value != want || analysis.Effects.GitHubToken != effect {
+			t.Fatalf("known tool-cache authority = %#v, %v", analysis, err)
+		}
+		value, err := engine.Evaluate(site, Values{Runtime: Context{Runner: map[string]string{"tool_cache": path}, GitHub: map[string]any{"token": "token"}}})
+		if err != nil || value != want {
+			t.Fatalf("concrete tool-cache branch = %#v, %v; want %q", value, err, want)
+		}
+	}
+}
+
 func TestEngineEventPathRemainsRuntimeOnly(t *testing.T) {
 	engine := NewEngine()
 	for _, profile := range []ProfileID{ProfileJobEnvironment, ProfileJobOutput, ProfileStepTemplate, ProfileActionStepTemplate, ProfileActionInputDefault} {
