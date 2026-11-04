@@ -82,7 +82,7 @@ func (r *Resolver) checkPublicRepository(ctx context.Context, ref Reference) err
 		Private    *bool   `json:"private"`
 		Visibility *string `json:"visibility"`
 	}
-	if err := r.get(ctx, repoParts(ref), &repository); err != nil {
+	if err := r.get(ctx, ref, repoParts(ref), &repository); err != nil {
 		return err
 	}
 	if repository.Private == nil || repository.Visibility == nil {
