@@ -17,6 +17,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/git"
@@ -118,12 +119,11 @@ func (c sourceLinkContext) sourceLink(ctx context.Context, path string, line int
 		}
 		return link
 	}
-	if !git.ValidObjectID(source.Commit) {
+	if !git.ValidObjectID(source.Commit) || actionsource.ValidateServerURL(source.ServerURL) != nil {
 		return ""
 	}
-	// Remote reusable workflows are fetched from GitHub, not the caller's
-	// provider. Never substitute the caller's repository, SHA, or server URL.
-	return (sourceLinkContext{serverURL: "https://github.com", repository: source.Repository, sha: source.Commit}).link(source.Path, line)
+	// Link the fetched source, never the caller's repository, SHA, or host.
+	return (sourceLinkContext{serverURL: actionsource.ServerURL(source.ServerURL), repository: source.Repository, sha: source.Commit}).link(source.Path, line)
 }
 
 func (c sourceLinkContext) verifiedLocalLink(parent context.Context, source compiler.WorkflowSourceReference) string {

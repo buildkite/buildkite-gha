@@ -451,7 +451,7 @@ func hasGitHubActionLocks(locks []plan.ActionLock) bool {
 func cacheServiceRequired(locks []plan.ActionLock) (bool, error) {
 	required := false
 	for _, lock := range locks {
-		identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
+		identity := actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path}
 		descriptor, _ := actionintegration.Lookup(identity)
 		if descriptor.Service == actionintegration.ServiceCache {
 			required = true

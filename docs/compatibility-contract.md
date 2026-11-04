@@ -176,10 +176,27 @@ backend support before this client.
 Local regression tests establish host preservation and fail-closed lookup
 behavior, not live GHES API availability or installation grants.
 
-Public action sources remain on github.com. Never attach GHES workflow tokens
-to public action requests or infer a github.com self-repository identity from
-a GHES event. Private reusable source resolution requires host-bound identity;
-reject it for GHES imports until that contract exists.
+Source references, action locks and reusable-workflow provenance carry their own
+optional canonical `server_url`. An omitted source origin means GitHub.com,
+never the event origin. Preserve it through pinning, nested self sources,
+deferred plans, diagnostics and runtime materialization. Bind memoized sources,
+ref caches, resolution snapshots and tree manifests to that origin. Keep existing
+hostless GitHub.com cache keys; never reinterpret them as GHES.
+
+Source transport and on-disk tree directories remain GitHub.com-only. Reject
+other origins before credentials, exact-SHA shortcuts or tree-cache reads;
+host-separated tree directories are required before enabling GHES downloads.
+Source metadata does not change event context or grant access. Never attach
+GHES workflow tokens to GitHub.com requests or infer a GitHub.com self source
+from a GHES event. Keep hosted GHES source guards until transport and access
+contracts are implemented and proved.
+
+Native integration admission includes the source origin. A same-name GHES
+repository must not receive GitHub.com's native adapter or cache substitution.
+Explicit GitHub.com and omitted origins have the same integration identity.
+Job-plan schema v2 accepts the optional source fields; the prior strict decoder
+rejects them as unknown rather than ignoring their host. No GHES support claim
+follows from these local identity checks.
 
 The [GHES spike](https://ampcode.com/threads/T-01a15c91-9015-754b-a5f3-bebba85e76e8)
 ran a real GHES 3.17.14 repository against an isolated Buildkite backend and a

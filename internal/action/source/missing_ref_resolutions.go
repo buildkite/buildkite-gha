@@ -44,6 +44,7 @@ func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved,
 	// Preserve the exact resource, requested ref, and repository-source authority.
 	// Repository spelling is case-insensitive; refs and paths are not.
 	identity := ref
+	identity.ServerURL = ServerURL(ref.ServerURL)
 	identity.Owner = strings.ToLower(ref.Owner)
 	identity.Repository = strings.ToLower(ref.Repository)
 	identity.Raw = ""

@@ -53,6 +53,8 @@ var (
 // RepositorySource to materialize the complete tree while retaining Path as
 // the exact requested resource for authorization and cache isolation.
 type Reference struct {
+	// ServerURL is source identity, not credential authority. Empty means GitHub.com.
+	ServerURL                         string
 	Owner, Repository, Path, Ref, Raw string
 	RepositoryRoot                    bool
 	authorizationRef                  string
@@ -93,6 +95,38 @@ func (m Materialized) Retain(ctx context.Context) (Materialized, error) {
 	return m.lease.retain(ctx)
 }
 
+// ServerURL returns the source origin. Legacy hostless sources mean GitHub.com,
+// never the event server or the containing action's host.
+func ServerURL(serverURL string) string {
+	if serverURL == "" {
+		return "https://github.com"
+	}
+	return serverURL
+}
+
+// ValidateServerURL accepts an omitted origin or a canonical HTTPS origin.
+// Validating an origin does not authorize access to it.
+func ValidateServerURL(serverURL string) error {
+	serverURL = ServerURL(serverURL)
+	u, err := url.Parse(serverURL)
+	if err != nil || len(serverURL) > 512 || u.Scheme != "https" || u.Hostname() == "" || strings.Contains(u.Host, "*") || u.User != nil || u.Opaque != "" || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.String() != serverURL || u.Host != strings.ToLower(u.Host) {
+		return fmt.Errorf("GitHub server URL must be a canonical HTTPS origin without credentials, path, query, or fragment")
+	}
+	return nil
+}
+
+// Source transport is still GitHub.com-only. Reject other identities before
+// looking in caches, resolving an exact SHA, or provisioning credentials.
+func requireSupportedServer(serverURL string) error {
+	if err := ValidateServerURL(serverURL); err != nil {
+		return err
+	}
+	if ServerURL(serverURL) != "https://github.com" {
+		return fmt.Errorf("repository source downloads from %s are not yet supported", serverURL)
+	}
+	return nil
+}
+
 // Parse parses owner/repository[/path]@ref.
 func Parse(raw string) (Reference, error) {
 	if len(raw) == 0 || len(raw) > 2048 || !utf8.ValidString(raw) || hasControl(raw) {
@@ -127,6 +161,9 @@ func Parse(raw string) (Reference, error) {
 // PinReference replaces a mutable ref with an immutable commit while retaining
 // the originally requested ref for repository-source authorization.
 func PinReference(ref Reference, commit string) (Reference, error) {
+	if err := ValidateServerURL(ref.ServerURL); err != nil {
+		return Reference{}, err
+	}
 	if !git.ValidObjectID(commit) {
 		return Reference{}, fmt.Errorf("commit must be lower-case full SHA")
 	}
@@ -138,6 +175,7 @@ func PinReference(ref Reference, commit string) (Reference, error) {
 	if err != nil {
 		return Reference{}, err
 	}
+	pinned.ServerURL = ref.ServerURL
 	pinned.RepositoryRoot = ref.RepositoryRoot
 	pinned.authorizationRef = ref.Ref
 	if ref.authorizationRef != "" {
@@ -367,11 +405,15 @@ func makeConfig(opts []Option) (config, error) {
 
 // Resolve pins a ref to a commit. Full lowercase SHA pins bypass mutable refs.
 func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error) {
+	if err := requireSupportedServer(ref.ServerURL); err != nil {
+		return Resolved{}, err
+	}
 	ctx = context.WithValue(ctx, sourceRepositoryRootKey{}, ref.RepositoryRoot)
 	parsed, err := Parse(ref.Raw)
 	if err != nil {
 		return Resolved{}, err
 	}
+	parsed.ServerURL = ref.ServerURL
 	parsed.RepositoryRoot = ref.RepositoryRoot
 	parsed.authorizationRef = ref.authorizationRef
 	ref = parsed
@@ -1038,6 +1080,9 @@ func NewStoreContext(ctx context.Context, root string, client *http.Client, opts
 
 // Materialize returns the verified repository and selected source identity.
 func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialized, error) {
+	if err := requireSupportedServer(resolved.Reference.ServerURL); err != nil {
+		return Materialized{}, err
+	}
 	ctx = context.WithValue(ctx, sourceRepositoryRootKey{}, resolved.Reference.RepositoryRoot)
 	recordSourceStat(ctx, "materialization")
 	if !git.ValidObjectID(resolved.Commit) {
@@ -1050,6 +1095,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if err != nil {
 		return Materialized{}, err
 	}
+	parsed.ServerURL = resolved.Reference.ServerURL
 	parsed.RepositoryRoot = resolved.Reference.RepositoryRoot
 	parsed.authorizationRef = resolved.Reference.authorizationRef
 	resolved.Reference = parsed
@@ -1395,6 +1441,7 @@ func validArchiveURL(u *url.URL, allowed map[string]bool) bool {
 
 type manifest struct {
 	Schema        string         `json:"schema"`
+	ServerURL     string         `json:"server_url,omitempty"`
 	Owner         string         `json:"owner"`
 	Repository    string         `json:"repository"`
 	Commit        string         `json:"commit"`
@@ -1456,7 +1503,7 @@ func buildResolvedManifest(root string, c config, ref Reference, resolved Resolv
 }
 
 func buildManifestFiles(root string, c config, ref Reference, commit string, excludeGitMetadata bool, executablePaths []string) (manifest, error) {
-	m := manifest{Schema: "buildkite-gha-action-source/v1", Owner: strings.ToLower(ref.Owner), Repository: strings.ToLower(ref.Repository), Commit: commit}
+	m := manifest{Schema: "buildkite-gha-action-source/v1", ServerURL: ref.ServerURL, Owner: strings.ToLower(ref.Owner), Repository: strings.ToLower(ref.Repository), Commit: commit}
 	info, err := os.Stat(root)
 	if err != nil {
 		return m, fmt.Errorf("stat action source tree: %w", err)
@@ -1549,6 +1596,7 @@ func (s *Store) verify(base string, resolved Resolved) (manifest, error) {
 	}
 	got, e := buildResolvedManifest(filepath.Join(base, "tree"), s.cfg, resolved.Reference, resolved)
 	got.Authenticated = want.Authenticated
+	got.ServerURL, want.ServerURL = ServerURL(got.ServerURL), ServerURL(want.ServerURL)
 	if e != nil || !reflect.DeepEqual(got, want) {
 		return manifest{}, fmt.Errorf("cache verification failed")
 	}

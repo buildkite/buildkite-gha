@@ -12,6 +12,7 @@ type publicRepositoryChecksKey struct{}
 
 type publicRepositoryIdentity struct {
 	resolver   *Resolver
+	serverURL  string
 	repository string
 }
 
@@ -39,7 +40,7 @@ func (r *Resolver) ensurePublic(ctx context.Context, ref Reference) error {
 	if scope == nil {
 		return r.checkPublicRepository(ctx, ref)
 	}
-	key := publicRepositoryIdentity{resolver: r, repository: strings.ToLower(ref.Owner + "/" + ref.Repository)}
+	key := publicRepositoryIdentity{resolver: r, serverURL: ServerURL(ref.ServerURL), repository: strings.ToLower(ref.Owner + "/" + ref.Repository)}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err

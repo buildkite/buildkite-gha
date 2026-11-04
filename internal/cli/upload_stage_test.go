@@ -1167,6 +1167,10 @@ func TestAdvanceRequiresRecordedDeferredSources(t *testing.T) {
 	moved.Commit = strings.Repeat("b", 40)
 	movedPublish := publish
 	movedPublish.RemoteWorkflow = &moved
+	crossHost := *remote
+	crossHost.ServerURL = "https://ghe.example"
+	crossHostPublish := publish
+	crossHostPublish.RemoteWorkflow = &crossHost
 	editedBuild := build
 	editedBuild.SourceDigest = "sha256:" + strings.Repeat("3", 64)
 	unrecorded := instance("extra", "./.github/workflows/build.yml", nil)
@@ -1186,6 +1190,7 @@ func TestAdvanceRequiresRecordedDeferredSources(t *testing.T) {
 	}{
 		{name: "same sources", jobs: []compiler.JobInstance{build, publish}},
 		{name: "remote tag moved", jobs: []compiler.JobInstance{build, movedPublish}, want: `deferred job "gha-call-publish" comes from a different workflow source`},
+		{name: "remote host changed", jobs: []compiler.JobInstance{build, crossHostPublish}, want: `deferred job "gha-call-publish" comes from a different workflow source`},
 		{name: "workflow file edited", jobs: []compiler.JobInstance{editedBuild, publish}, want: `deferred job "gha-build" comes from a different workflow source`},
 		{name: "job not in the initial upload", jobs: []compiler.JobInstance{build, publish, unrecorded}, want: `job "gha-extra" did not exist in the initial upload`},
 	} {
@@ -2244,6 +2249,25 @@ func TestStageRecordRoundTrip(t *testing.T) {
 	sources := artifact.Continuation.Sources
 	if len(sources) != 2 || sources["build"].Path != "./.github/workflows/build.yml" || sources["build"].Remote != nil || sources["publish"] != sources["build"] {
 		t.Fatalf("artifact sources = %+v", sources)
+	}
+	for _, host := range []string{"", "https://github.com", "https://ghe.example:8443", "http://ghe.example", "https://ghe.example/path", "https://user:secret@ghe.example"} {
+		changed := artifact
+		changed.Continuation.Sources = maps.Clone(sources)
+		remote := sources["publish"]
+		remote.Remote = &compiler.RemoteWorkflowSource{ServerURL: host, Repository: "owner/workflows", RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("2", 64)}
+		changed.Continuation.Sources["publish"] = remote
+		data, err := json.Marshal(changed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := decodeStageRecord(data, "dev")
+		if host == "" || host == "https://github.com" || host == "https://ghe.example:8443" {
+			if err != nil || decoded.Continuation.Sources["publish"].Remote.ServerURL != host {
+				t.Fatalf("remote origin %q did not round trip: %v", host, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), "invalid remote source") {
+			t.Fatalf("malformed remote origin %q: %v", host, err)
+		}
 	}
 	var loose map[string]any
 	if err := json.Unmarshal(initial.data, &loose); err != nil {

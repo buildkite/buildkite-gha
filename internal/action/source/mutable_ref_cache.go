@@ -22,6 +22,7 @@ type mutableRefCache struct {
 
 type mutableRefEntry struct {
 	Schema     string    `json:"schema"`
+	ServerURL  string    `json:"server_url,omitempty"`
 	Owner      string    `json:"owner"`
 	Repository string    `json:"repository"`
 	Ref        string    `json:"ref"`
@@ -69,7 +70,7 @@ func (c *mutableRefCache) resolve(ctx context.Context, ref Reference, resolve fu
 		return Resolved{}, err
 	}
 	entry := mutableRefEntry{
-		Schema: "buildkite-gha-action-ref-resolution/v1", Owner: strings.ToLower(ref.Owner),
+		Schema: "buildkite-gha-action-ref-resolution/v1", ServerURL: ref.ServerURL, Owner: strings.ToLower(ref.Owner),
 		Repository: strings.ToLower(ref.Repository), Ref: ref.Ref, Commit: resolved.Commit, ResolvedAt: time.Now().UTC(),
 	}
 	if err := c.store(path, entry); err != nil {
@@ -79,10 +80,18 @@ func (c *mutableRefCache) resolve(ctx context.Context, ref Reference, resolve fu
 }
 
 func (c *mutableRefCache) path(ref Reference) string {
-	identity := strings.ToLower(ref.Owner) + "\x00" + strings.ToLower(ref.Repository) + "\x00" + ref.Ref
-	sum := sha256.Sum256([]byte(identity))
+	sum := sha256.Sum256([]byte(refCacheIdentity(ref)))
 	key := hex.EncodeToString(sum[:])
 	return filepath.Join(c.root, key[:2], key+".json")
+}
+
+func refCacheIdentity(ref Reference) string {
+	identity := strings.ToLower(ref.Owner) + "\x00" + strings.ToLower(ref.Repository) + "\x00" + ref.Ref
+	// Keep existing GitHub.com snapshots pinned to their original entries.
+	if ServerURL(ref.ServerURL) != "https://github.com" {
+		identity = ref.ServerURL + "\x00" + identity
+	}
+	return identity
 }
 
 func (c *mutableRefCache) load(path string, ref Reference, now time.Time) (Resolved, bool) {
@@ -100,6 +109,7 @@ func (c *mutableRefCache) load(path string, ref Reference, now time.Time) (Resol
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&entry) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
 		entry.Schema != "buildkite-gha-action-ref-resolution/v1" ||
+		ServerURL(entry.ServerURL) != ServerURL(ref.ServerURL) ||
 		entry.Owner != strings.ToLower(ref.Owner) || entry.Repository != strings.ToLower(ref.Repository) ||
 		entry.Ref != ref.Ref || !git.ValidObjectID(entry.Commit) || entry.ResolvedAt.After(now) ||
 		now.Sub(entry.ResolvedAt) >= c.freshness {

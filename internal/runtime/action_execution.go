@@ -1804,7 +1804,7 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 			}
 		}
 		if material != nil && actionRuntime != metadata.RuntimeDocker {
-			target := remoteMountTarget(entry.lock.Repository, entry.lock.Commit)
+			target := remoteMountTarget(entry.lock.ServerURL, entry.lock.Repository, entry.lock.Commit)
 			m := containerMount{host: material.RepositoryRoot, target: target, readonly: true, probe: true}
 			if old, ok := byTarget[target]; ok && old.host != m.host {
 				return nil, fmt.Errorf("conflicting verified action roots for %q", target)

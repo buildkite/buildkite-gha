@@ -121,7 +121,7 @@ func TestSelfRepositoryRootVerifiesWorkflowBytesWithoutCheckout(t *testing.T) {
 	writeSelfAction(t, remote, "", "runs:\n  using: composite\n  steps:\n    - run: echo remote\n      shell: bash\n")
 	fake := newFakeReusableRepositorySource(t, map[string]string{"source/repo": remote})
 	options := defaultOptions()
-	options.WorkflowSource = &WorkflowSourceReference{Repository: "source/repo", Commit: strings.Repeat("e", 40)}
+	options.WorkflowSource = &WorkflowSourceReference{ServerURL: "https://github.example", Repository: "source/repo", Commit: strings.Repeat("e", 40)}
 	options.RepositorySource = MemoizeRepositorySource(fake)
 	options.ActionSource, options.ResolveActions = options.RepositorySource, true
 	plans, err := compilePlansForTest(t.Context(), caller, []byte(text), pushEvent(t), "test", testDistributionDigest, options)
@@ -132,12 +132,16 @@ func TestSelfRepositoryRootVerifiesWorkflowBytesWithoutCheckout(t *testing.T) {
 	if job.Workflow.SelfRepository == nil || job.Workflow.SelfRepository.Repository != "source/repo" || job.Actions[0].Commit != strings.Repeat("e", 40) || job.Actions[0].Path != "" || job.Event.Repository == "source/repo" || job.Workflow.Remote != nil {
 		t.Fatalf("root self identity = %#v", job)
 	}
+	if job.Workflow.SelfRepository.ServerURL != "https://github.example" || job.Actions[0].ServerURL != "https://github.example" || job.Event.ServerURL != "" {
+		t.Fatalf("source host lost or substituted for event host: %#v", job)
+	}
 	if job.Program.Job.Steps[0].Invocation.Uses.Source != "$/" {
 		t.Fatal("authored self reference was rewritten")
 	}
 	validateCompiledPlansAgainstSchema(t, plans)
 	for _, mutate := range []func(*plan.Job){
 		func(j *plan.Job) { j.Workflow.SelfRepository = nil },
+		func(j *plan.Job) { j.Actions[0].ServerURL = "" },
 		func(j *plan.Job) { j.Actions[0].Repository = "event/repo" },
 		func(j *plan.Job) { j.Actions[0].Commit = strings.Repeat("f", 40) },
 		func(j *plan.Job) { j.Actions[0].RequestedRef = "release" },
@@ -178,12 +182,18 @@ func TestSelfRepositoryInsideLocalReusableWorkflow(t *testing.T) {
 			writeSelfAction(t, remote, "action", "runs:\n  using: composite\n  steps:\n    - run: echo pinned\n      shell: bash\n")
 			fake := newFakeReusableRepositorySource(t, map[string]string{"source/repo": remote})
 			options := defaultOptions()
-			options.WorkflowSource = &WorkflowSourceReference{Repository: "source/repo", Commit: strings.Repeat("e", 40)}
+			options.WorkflowSource = &WorkflowSourceReference{ServerURL: "https://github.example", Repository: "source/repo", Commit: strings.Repeat("e", 40)}
 			options.RepositorySource = MemoizeRepositorySource(fake)
 			options.ActionSource, options.ResolveActions = options.RepositorySource, true
 			plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "test", testDistributionDigest, options)
 			if err != nil || len(plans) != 1 || plans[0].Actions[0].Repository != "source/repo" {
 				t.Fatalf("local reusable self resolution: plans=%#v err=%v", plans, err)
+			}
+			if plans[0].Actions[0].ServerURL != "https://github.example" {
+				t.Fatalf("nested self source lost host: %#v", plans[0].Actions[0])
+			}
+			if strings.HasSuffix(uses, ".yml") && (plans[0].Workflow.Remote == nil || plans[0].Workflow.Remote.ServerURL != "https://github.example") {
+				t.Fatalf("nested reusable lost host: %#v", plans[0].Workflow)
 			}
 			validateCompiledPlansAgainstSchema(t, plans)
 			writeWorkflow(t, workspace, "local.yml", local+"# modified locally\n")
