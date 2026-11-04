@@ -184,7 +184,7 @@ func resolveContinuationActions(ctx context.Context, ir IR, options Options) (co
 	for i := range continuations {
 		locks := map[string]plan.ActionLock{}
 		for _, action := range ir.deferredActions[continuations[i].Descriptor.Job] {
-			compiled, err := compileWorkflowActionInvocations(ctx, action.workspace, options.ActionSource, plan.EventServerURL(ir.Event.Provider, ir.Event.ServerURL), []string{action.uses}, []map[string]string{action.with}, action.workflowSourceResolver(options))
+			compiled, err := compileWorkflowActionInvocations(ctx, action.workspace, options.ActionSource, plan.EventServerURL(ir.Event.Provider, ir.Event.ServerURL), []string{action.uses}, []map[string]string{action.with}, action.workflowSourceResolver(options), ir.Event.ServerURL)
 			if err != nil {
 				message, detail, actionName := actionResolutionMessage(action.uses, err)
 				diagnostics = append(diagnostics, &ProcessingFinding{

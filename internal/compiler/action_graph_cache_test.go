@@ -17,7 +17,7 @@ func TestActionGraphCacheReusesGraphButNotAuthorityOrResults(t *testing.T) {
 	}
 	instance := JobInstance{RepositoryRoot: workspace, SourcePath: "ci.yml"}
 	refs := []string{"./parent", "./child"}
-	cache := newActionGraphCache(Options{})
+	cache := newActionGraphCache(Options{}, "")
 	inputs := []map[string]string{{"token": ""}, {"token": ""}}
 	want, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", refs, inputs)
 	if err != nil {
@@ -79,7 +79,7 @@ func TestActionGraphCacheReusesGraphButNotAuthorityOrResults(t *testing.T) {
 			t.Fatal("mutating a prior result corrupted the cached graph")
 		}
 	}
-	if _, err := newActionGraphCache(Options{}).compile(t.Context(), instance, "https://github.com", refs, inputs); err == nil {
+	if _, err := newActionGraphCache(Options{}, "").compile(t.Context(), instance, "https://github.com", refs, inputs); err == nil {
 		t.Fatal("a new bundle reused another bundle's graph")
 	}
 }
@@ -91,7 +91,7 @@ func TestActionGraphCacheSeparatesSourceAndOrderedRoots(t *testing.T) {
 	}
 	instance := JobInstance{RepositoryRoot: workspace, SourcePath: "ci.yml", SourceDigest: "original", RemoteWorkflow: &RemoteWorkflowSource{Repository: "owner/repo", RequestedRef: "main", Commit: "original", SourceDigest: "original"}}
 	refs := []string{"./one", "./two"}
-	cache := newActionGraphCache(Options{})
+	cache := newActionGraphCache(Options{}, "")
 	if _, err := cache.compile(t.Context(), instance, "https://github.com", refs, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestActionGraphCacheRetriesFailedConstruction(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./child\n")
 	instance := JobInstance{RepositoryRoot: workspace}
-	cache := newActionGraphCache(Options{})
+	cache := newActionGraphCache(Options{}, "")
 	refs := []string{"./parent"}
 	if _, err := cache.compile(t.Context(), instance, "https://github.com", refs, nil); err == nil {
 		t.Fatal("missing child was accepted")

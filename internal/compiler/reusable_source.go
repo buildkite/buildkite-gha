@@ -234,7 +234,7 @@ func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, pare
 		// repository tree. Keep its identity and the existing cycle/depth checks.
 		return resolver.loadLocalReusableWorkflow(parent, uses)
 	}
-	return resolver.loadRemoteReusableWorkflow(ctx, uses, "")
+	return resolver.loadRemoteReusableWorkflow(ctx, uses, resolver.sourceServerURL)
 }
 
 func (resolver *reusableResolver) loadLocalReusableWorkflow(parent reusableWorkflowSource, uses string) (reusableWorkflowSource, []byte, error) {

@@ -280,7 +280,7 @@ func ValidateWithOptionsContext(ctx context.Context, path string, source []byte,
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options, event.ServerURL)
 	if err := errors.Join(optionsErr, triggerErr, runNameErr, concurrencyErr, cancellationErr, expandErr); err != nil {
 		return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
@@ -335,7 +335,7 @@ func ValidateEventWithOptionsContext(ctx context.Context, path string, source, e
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options, event.ServerURL)
 	if err := errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr); err != nil {
 		return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
@@ -406,7 +406,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options, event.ServerURL)
 	jobGraphComplete := expandErr == nil
 	if jobGraphComplete {
 		expandErr = resolveJobEnvironments(ctx, expanded.instances, event, options)

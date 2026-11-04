@@ -381,7 +381,7 @@ func TestValidateActionResolutionsAttributesMissingCalledWorkflowAction(t *testi
 			Steps:          []workflow.Step{{Kind: "uses", Uses: reference, Span: workflow.Span{Start: workflow.Position{Line: 281, Column: 15}}}},
 		}},
 	}
-	evidence, err := validateActionResolutions(t.Context(), ir, Options{}, newActionGraphCache(Options{}))
+	evidence, err := validateActionResolutions(t.Context(), ir, Options{}, newActionGraphCache(Options{}, ir.Event.ServerURL))
 	if err == nil || len(evidence.Actions) != 1 || evidence.Actions[0].Passed {
 		t.Fatalf("validateActionResolutions() evidence = %#v, error = %v", evidence, err)
 	}
@@ -1342,7 +1342,7 @@ runs:
         token: ${{ inputs.token }}
 `)
 	refs := []string{"./child", "./parent"}
-	graph, err := buildActionGraph(t.Context(), workspace, nil, refs, nil)
+	graph, err := buildActionGraph(t.Context(), workspace, nil, refs, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2004,7 +2004,7 @@ func TestCheckoutAuthorityFollowsRootReachability(t *testing.T) {
 	}
 }
 
-func TestCheckoutServerURLExpression(t *testing.T) {
+func TestCheckoutServerURLExpressionAndSourceHost(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := writeWorkflow(t, workspace, "checkout-host.yml", "")
 	writeAction(t, remote, "", checkoutTestManifest(actionintegration.CheckoutV7Commit))
@@ -2020,7 +2020,10 @@ func TestCheckoutServerURLExpression(t *testing.T) {
 					ResolveActions: true,
 					ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
 				})
-				if strings.Contains(input, "wrong.example") || strings.HasSuffix(input, "/other") {
+				// Only the GitHub.com source receives adapter input checks and
+				// authority. This fake can supply GHES bytes; real transport rejects them.
+				native := server == "https://github.com"
+				if native && (strings.Contains(input, "wrong.example") || strings.HasSuffix(input, "/other")) {
 					if err == nil || !strings.Contains(err.Error(), `explicit input "github-server-url" value is unsupported`) {
 						t.Fatalf("foreign checkout host error = %v", err)
 					}
@@ -2030,7 +2033,7 @@ func TestCheckoutServerURLExpression(t *testing.T) {
 					t.Fatalf("compile = %#v, %v", bundle.Plans, err)
 				}
 				job := bundle.Plans[0].Job
-				if job.Event.ServerURL != server || !job.HasCapability("provider-token-read") || job.GitHubToken != nil {
+				if job.Event.ServerURL != server || len(job.Actions) != 1 || job.Actions[0].ServerURL != server || job.HasCapability("provider-token-read") != native || job.GitHubToken != nil {
 					t.Fatalf("checkout identity or authority = %#v", job)
 				}
 				if got := job.Program.Job.Steps[0].Invocation.With[0].Value.Source; got != input {
