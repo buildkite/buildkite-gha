@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/git"
@@ -797,8 +798,13 @@ func validateContinuationShape(continuation compiler.RuntimeContinuation) error 
 		if !exists || source.Path == "" || !stageDigestPattern.MatchString(source.Digest) {
 			return fmt.Errorf("records no source for deferred job %q", job)
 		}
-		if remote := source.Remote; remote != nil && (remote.Repository == "" || remote.RequestedRef == "" || remote.Commit == "" || !stageDigestPattern.MatchString(remote.SourceDigest)) {
-			return fmt.Errorf("records an incomplete remote source for deferred job %q", job)
+		if remote := source.Remote; remote != nil {
+			if remote.Repository == "" || remote.RequestedRef == "" || remote.Commit == "" || !stageDigestPattern.MatchString(remote.SourceDigest) {
+				return fmt.Errorf("records an incomplete remote source for deferred job %q", job)
+			}
+			if err := actionsource.ValidateServerURL(remote.ServerURL); err != nil {
+				return fmt.Errorf("records an invalid remote source for deferred job %q: %w", job, err)
+			}
 		}
 	}
 	if _, err := plan.ValidateActionLockList(continuation.ActionLocks); err != nil {

@@ -76,6 +76,35 @@ func TestParseExplainsUnsupportedContainerActions(t *testing.T) {
 	}
 }
 
+func TestReferenceSourceServer(t *testing.T) {
+	resolver, err := NewResolver(nil, WithGitHubActionSourceTokenProvider("event/repo", func(context.Context) (string, error) {
+		t.Fatal("unsupported or exact source requested credentials")
+		return "", nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, server := range []string{"", "https://github.com", "https://github.example:8443"} {
+		ref, _ := Parse("owner/repo/action@main")
+		ref.ServerURL = server
+		pinned, err := PinReference(ref, testSHA)
+		if err != nil || pinned.ServerURL != server || pinned.Ref != testSHA || pinned.Path != "action" {
+			t.Fatalf("pin source %q = %#v, %v", server, pinned, err)
+		}
+		resolved, err := resolver.Resolve(t.Context(), pinned)
+		if server == "https://github.example:8443" {
+			if err == nil || !strings.Contains(err.Error(), "not yet supported") {
+				t.Fatalf("unsupported exact source resolved as GitHub.com: %#v, %v", resolved, err)
+			}
+			if _, err := resolver.Resolve(t.Context(), ref); err == nil || !strings.Contains(err.Error(), "not yet supported") {
+				t.Fatalf("unsupported mutable source resolution = %v", err)
+			}
+		} else if err != nil || resolved.Reference.ServerURL != server || resolved.Commit != testSHA {
+			t.Fatalf("resolve source %q = %#v, %v", server, resolved, err)
+		}
+	}
+}
+
 func TestResolverTagPeelingAndHeaders(t *testing.T) {
 	var calls []string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -796,6 +825,21 @@ func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 	}
 	first.Release()
 	second.Release()
+	// Hostless trees are GitHub.com-only, including when the same commit
+	// exists on another server. Explicit GitHub.com still reuses that tree.
+	resolved.Reference.ServerURL = "https://github.com"
+	explicit, err := store.Materialize(t.Context(), resolved)
+	if err != nil || explicit.RepositoryRoot != first.RepositoryRoot {
+		t.Fatalf("explicit GitHub.com cache reuse = %#v, %v", explicit, err)
+	}
+	explicit.Release()
+	resolved.Reference.ServerURL = "https://github.example"
+	if _, err := store.Materialize(t.Context(), resolved); err == nil || !strings.Contains(err.Error(), "not yet supported") {
+		t.Fatalf("GHES source reused GitHub.com tree: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("unsupported host reached GitHub.com transport: %d requests", requests.Load())
+	}
 }
 
 func TestStoreRejectsInvalidUTF8ArchiveMetadataOnEveryMaterialization(t *testing.T) {

@@ -577,7 +577,7 @@ func (b planBuilder) authorityValues(instance JobInstance) expression.AbstractVa
 }
 
 func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, jobReachable, stepReachable bool, built *builtPlanActions) error {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path})
 	if descriptor.Adapter == "" || !jobReachable {
 		return nil
 	}
@@ -863,6 +863,6 @@ func planRemoteWorkflowSource(source *RemoteWorkflowSource) *plan.RemoteWorkflow
 		return nil
 	}
 	return &plan.RemoteWorkflowSource{
-		Repository: source.Repository, RequestedRef: source.RequestedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
+		ServerURL: source.ServerURL, Repository: source.Repository, RequestedRef: source.RequestedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
 	}
 }

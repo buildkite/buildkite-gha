@@ -223,6 +223,7 @@ func TestActionLockResolverBindsProgramAndIntegration(t *testing.T) {
 	program := executionprogram.Action{Name: "planned, not source metadata", Runtime: "node24", Main: "index.js"}
 	for _, test := range []struct {
 		name, repository, path, commit string
+		serverURL                      string
 		omitProgram                    bool
 		want                           actionintegration.Descriptor
 		wantError                      bool
@@ -232,6 +233,10 @@ func TestActionLockResolverBindsProgramAndIntegration(t *testing.T) {
 		{name: "cache client", repository: "actions/setup-node", want: actionintegration.Descriptor{CacheClientCompatibility: true}},
 		{name: "unrecognized subpath", repository: "actions/setup-node", path: "nested"},
 		{name: "native without program", repository: "actions/checkout", commit: actionintegration.CheckoutV4Commit, omitProgram: true, want: actionintegration.Descriptor{Adapter: actionintegration.AdapterCheckoutExactEventSHA}},
+		{name: "explicit github.com native", serverURL: "https://github.com", repository: "actions/checkout", commit: actionintegration.CheckoutV4Commit, omitProgram: true, want: actionintegration.Descriptor{Adapter: actionintegration.AdapterCheckoutExactEventSHA}},
+		{name: "other host checkout executes program", serverURL: "https://ghe.example", repository: "actions/checkout", commit: actionintegration.CheckoutV4Commit},
+		{name: "other host checkout requires program", serverURL: "https://ghe.example", repository: "actions/checkout", commit: actionintegration.CheckoutV4Commit, omitProgram: true, wantError: true},
+		{name: "other host cache client", serverURL: "https://ghe.example", repository: "actions/setup-node"},
 		{name: "ordinary missing program", repository: "owner/action", omitProgram: true, wantError: true},
 		{name: "known non-native missing program", repository: "actions/setup-node", omitProgram: true, wantError: true},
 	} {
@@ -240,7 +245,7 @@ func TestActionLockResolverBindsProgramAndIntegration(t *testing.T) {
 			if commit == "" {
 				commit = strings.Repeat("a", 40)
 			}
-			lock := plan.ActionLock{ID: "selected", Source: "github", Repository: test.repository, Path: test.path, Commit: commit, SourceDigest: digest}
+			lock := plan.ActionLock{ID: "selected", Source: "github", ServerURL: test.serverURL, Repository: test.repository, Path: test.path, Commit: commit, SourceDigest: digest}
 			job := plan.Job{
 				RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock},
 				Program: &executionprogram.Program{Actions: map[string]executionprogram.Action{
@@ -252,6 +257,9 @@ func TestActionLockResolverBindsProgramAndIntegration(t *testing.T) {
 			}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: repo, SourceDigest: digest}}
 			resolved, err := newActionLockResolver(job, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: lock.ID})
+			if materializer.calls != 1 || materializer.resolved.Reference.ServerURL != test.serverURL {
+				t.Fatalf("source host not propagated: calls=%d, reference=%#v", materializer.calls, materializer.resolved.Reference)
+			}
 			if test.wantError {
 				if err == nil || !isHardJobFailure(err) || !strings.Contains(err.Error(), "action program is missing") {
 					t.Fatalf("resolve() error = %v, want hard missing-program failure", err)

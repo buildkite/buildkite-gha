@@ -1414,6 +1414,29 @@ runs:
 	}
 }
 
+func TestMemoizeRepositorySourceSeparatesHosts(t *testing.T) {
+	fake := &fakeActionSource{root: t.TempDir(), calls: map[string]int{}, commit: strings.Repeat("a", 40)}
+	shared := MemoizeRepositorySource(fake)
+	ref, err := source.Parse("owner/action@v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct{ host, commit string }{
+		{"", strings.Repeat("a", 40)},
+		{"https://github.example", strings.Repeat("b", 40)},
+		{"https://github.com", strings.Repeat("a", 40)},
+		{"https://github.example", strings.Repeat("b", 40)},
+	} {
+		ref.ServerURL = tt.host
+		resolved, materialized, err := shared.Fetch(t.Context(), ref)
+		if err != nil || resolved.Commit != tt.commit || source.ServerURL(resolved.Reference.ServerURL) != source.ServerURL(tt.host) {
+			t.Fatalf("source %q = %#v, %v", tt.host, resolved, err)
+		}
+		materialized.Release()
+		fake.commit = strings.Repeat("b", 40)
+	}
+}
+
 func TestMemoizeActionSourceCoalescesConcurrentResolution(t *testing.T) {
 	fake := &blockingActionSource{started: make(chan struct{}), release: make(chan struct{})}
 	shared := MemoizeActionSource(fake)

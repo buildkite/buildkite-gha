@@ -153,6 +153,21 @@ func TestGeneratedFailureLinksFetchedRevisionInsteadOfCallerOrTag(t *testing.T) 
 	if !strings.Contains(annotation, `<a href="`+target+`"><code>`+html.EscapeString(display)+`:35:5</code></a>`) {
 		t.Fatalf("annotation lost remote source link: %s", annotation)
 	}
+	for _, host := range []string{"https://github.com", "https://source.example:8443", "http://source.example", "https://user:secret@source.example", "https://source.example/repo", "https://source.example?token=secret"} {
+		reference := report.Sources[display]
+		reference.ServerURL = host
+		report.Sources[display] = reference
+		_, artifacts = generatedFailure(t.Context(), report, caller)
+		message, annotation := string(artifacts[0].Contents), string(artifacts[1].Contents)
+		if host == "https://github.com" || host == "https://source.example:8443" {
+			want := strings.Replace(target, "https://github.com", host, 1)
+			if !strings.Contains(message, want) || !strings.Contains(annotation, `href="`+want+`"`) {
+				t.Fatalf("source host %q lost its diagnostic link: %q / %s", host, message, annotation)
+			}
+		} else if strings.Contains(message, "\x1b]8;") || strings.Contains(annotation, "href=") {
+			t.Fatalf("invented source link for malformed origin %q: %s", host, artifacts)
+		}
+	}
 	for _, invalid := range []string{"", "v2"} {
 		report.Sources[display] = compiler.WorkflowSourceReference{Repository: "owner/shared", Path: ".github/workflows/build's.yml", Commit: invalid}
 		_, artifacts = generatedFailure(t.Context(), report, caller)
