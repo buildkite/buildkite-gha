@@ -759,6 +759,25 @@ handling, not those server policies. Do not flatten their different fallback
 rules: explicit runner validation and environment resolution fail closed, while
 automatic runner resolution and unavailable variables have their own contracts.
 
+Automatic Ubuntu ARM64 routing is server-owned. For `ubuntu-22.04-arm`,
+`ubuntu-24.04-arm`, `ubuntu-26.04-arm`, their `-arm64` aliases, and recognized
+provider ARM64 labels, select an active hosted Linux ARM64
+`linux-arm64-medium` queue in the job's cluster, without an amd64 image
+or tool-cache bootstrap. Explicit mappings retain precedence and server
+validation, and infer ARM64 for those same labels. A missing ARM64 queue must
+not fall back to amd64. Match complete provider labels and documented sizes,
+not arbitrary prefixes or custom suffixes; retain provider fallback warnings.
+The November 5, 2026 label audit used the
+[GitHub image inventory](https://github.com/actions/runner-images#available-images)
+and the [Depot](https://depot.dev/docs/github-actions/runner-types),
+[Blacksmith](https://docs.blacksmith.sh/blacksmith-runners/overview),
+[WarpBuild](https://www.warpbuild.com/docs/ci/cloud-runners), and
+[Ubicloud](https://www.ubicloud.com/docs/github-actions-integration/runner-types)
+catalogs. WarpBuild's `-xfast` variants still select Linux, not macOS.
+The [CLI upload regression](../internal/cli/runtime_distribution_test.go) checks
+queue selection and ARM64 executable binding using a simulated Agent API;
+it does not establish backend deployment or hosted ARM64 execution.
+
 ## Maintaining the contract
 
 Change the owning implementation and regression tests together. Update this
