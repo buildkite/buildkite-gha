@@ -1,5 +1,16 @@
 # AGENTS.md
 
+## Public repository
+
+This repository is public. Treat every commit, pull request, issue, comment, test fixture, and document as published to the internet.
+
+- Do not link to internal systems, such as issue trackers, chat, internal documents, observability and incident tools, dashboards, Amp threads, or private repositories. `Amp-Thread-ID` commit trailers are fine.
+- Do not include internal identifiers: organization, pipeline, build, cluster, or agent IDs or slugs, ticket numbers, incident IDs, hostnames, or tokens.
+- Do not name customers or prospects, and do not quote their pipelines, workflows, logs, or support conversations. Rewrite reproductions as minimal synthetic examples.
+- Do not name or quote colleagues beyond public GitHub handles already on the change.
+- Describe internal context in public terms, such as "a customer workflow using matrix includes", and keep the details in the internal tracker.
+- Redact command output, logs, and event payloads before pasting them.
+
 ## Documentation
 
 Follow the Buildkite [writing style guide](https://github.com/buildkite/docs/blob/main/styleguides/writing-style.md). Use GitHub-flavored Markdown in this repository.
