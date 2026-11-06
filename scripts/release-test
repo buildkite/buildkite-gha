@@ -312,9 +312,15 @@ class ReleaseTest(unittest.TestCase):
 
     def test_patch_dry_run(self):
         self.decision["bump"] = "patch"
-        self.release("--dry-run")
-        plan = json.loads((self.checkout / ".release/proposal.json").read_text())
-        self.assertEqual(plan["tag"], "v0.9.9")
+        for metadata in ([], [{"type": "thinking", "thinking": "", "signature": "test"}],
+                         [{"type": "redacted_thinking", "data": "test"}]):
+            with self.subTest(metadata=metadata):
+                self.response = {"stop_reason": "end_turn", "content": metadata + [
+                    {"type": "text", "text": json.dumps(self.decision)}]}
+                self.release("--dry-run")
+                plan = json.loads((self.checkout / ".release/proposal.json").read_text())
+                self.assertEqual(plan["tag"], "v0.9.9")
+                self.assertTrue(plan["notes"].startswith(self.decision["notes"]))
         self.assertEqual(self.writes, [])
         self.assertEqual(self.notifications, [])
         self.assertEqual(self.git("ls-remote", "origin", "refs/tags/v0.9.9"), "")
@@ -332,6 +338,15 @@ class ReleaseTest(unittest.TestCase):
         self.response = {"stop_reason": "max_tokens", "content": []}
         with self.assertRaisesRegex(RuntimeError, "incomplete"):
             self.release()
+        self.decision = {"bump": "patch", "reason": "Fix", "notes": "## Highlights\n- Fixed behavior.\n"}
+        for blocks in ([{"type": "thinking", "thinking": ""}],
+                       [{"type": "tool_use", "name": "publish"},
+                        {"type": "text", "text": json.dumps(self.decision)}]):
+            with self.subTest(blocks=blocks):
+                self.response = {"stop_reason": "end_turn", "content": blocks}
+                with self.assertRaises(RuntimeError):
+                    self.release()
+                self.assertEqual(self.writes, [])
 
     def test_malformed_model_response_is_saved_without_publication(self):
         self.response = {"stop_reason": "end_turn", "content": [

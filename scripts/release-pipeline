@@ -207,8 +207,11 @@ def proposal(previous, commit):
     Path(".release/model-response.json").write_text(json.dumps(response, indent=2) + "\n")
     require(response.get("stop_reason") == "end_turn", "model response was incomplete")
     blocks = response.get("content", [])
-    require(blocks and all(block.get("type") == "text" for block in blocks), "expected text-only model response")
-    result = json.loads("".join(block["text"] for block in blocks))
+    require(all(block.get("type") in ("text", "thinking", "redacted_thinking") for block in blocks),
+            "unexpected model response block")
+    text = "".join(block["text"] for block in blocks if block["type"] == "text")
+    require(text, "missing model response text")
+    result = json.loads(text)
     require(isinstance(result, dict) and set(result) == {"bump", "reason", "notes"}
             and all(isinstance(value, str) for value in result.values()), "invalid proposal schema")
     require(result["bump"] in ("minor", "patch", "none", "uncertain"), "invalid version decision")
