@@ -41,8 +41,20 @@ the evidence. Explain the highest-impact reason in one short user-facing sentenc
 notes is concise user-facing Markdown starting with '## Highlights', followed
 by useful bullets. Cover material features, fixes, compatibility, migrations,
 and security. Omit internal CI/test churn. Add '## Upgrade notes' only for required
-actions or important boundaries. Link notable PRs/docs when the evidence supplies
-them. Do not invent URLs, version numbers, or facts. Do not add a comparison link;
+actions or important boundaries.
+Every highlight attributable to a PR must end with its Markdown PR link copied
+EXACTLY from pull_request_links. These canonical links come from merge and squash
+subjects in the supplied commit history. Use that history and the diff to match
+each link to the change it supports. A bullet combining changes from multiple PRs
+must copy each relevant PR link. Do not rewrite labels or URLs, describe PRs as
+siblings, or add words inside link labels. Do not substitute bare PR numbers,
+documentation links, or a separate PR list for links in the relevant bullets.
+Do not infer PR numbers from issue references, diff text, or unrelated history.
+Changes with no identified PR may remain unlinked; never invent a PR.
+Before returning, check each highlight against the commit evidence and add any
+missing PR links. Check every link individually: the number in its [#N] label
+must exactly match the /pull/N URL suffix, including every link in grouped bullets.
+Do not invent URLs, version numbers, or facts. Do not add a comparison link;
 the release script appends it. For none/uncertain, notes must be empty.
 """
 
@@ -172,10 +184,16 @@ def source_state(commit):
 
 def proposal(previous, commit):
     delta = f"{previous}..{commit}"
+    prs = set()
+    for subject in run("git", "log", "--format=%s", delta).splitlines():
+        match = re.search(r"^Merge pull request #(\d+)\b|\(#(\d+)\)$", subject)
+        if match:
+            prs.add(int(match[1] or match[2]))
     evidence = {
         "repository": REPO,
         "previous": previous,
         "commit": commit,
+        "pull_request_links": [f"[#{number}](https://github.com/{REPO}/pull/{number})" for number in sorted(prs)],
         "commits": run("git", "log", "--reverse", "--format=fuller", "--stat", delta),
         "diff": run("git", "diff", "--no-ext-diff", "--no-textconv", "--binary", "--find-renames", delta),
     }
@@ -197,8 +215,11 @@ def proposal(previous, commit):
     Path(".release/model-response.json").write_text(json.dumps(response, indent=2) + "\n")
     require(response.get("stop_reason") == "end_turn", "model response was incomplete")
     blocks = response.get("content", [])
-    require(blocks and all(block.get("type") == "text" for block in blocks), "expected text-only model response")
-    result = json.loads("".join(block["text"] for block in blocks))
+    require(all(block.get("type") in ("text", "thinking", "redacted_thinking") for block in blocks),
+            "unexpected model response block")
+    text = "".join(block["text"] for block in blocks if block["type"] == "text")
+    require(text, "missing model response text")
+    result = json.loads(text)
     require(isinstance(result, dict) and set(result) == {"bump", "reason", "notes"}
             and all(isinstance(value, str) for value in result.values()), "invalid proposal schema")
     require(result["bump"] in ("minor", "patch", "none", "uncertain"), "invalid version decision")
@@ -208,6 +229,8 @@ def proposal(previous, commit):
         return result
     require(result["notes"].startswith("## Highlights\n") and "\n- " in result["notes"],
             "notes must contain Highlights and bullets")
+    for link in re.findall(r"\[[^\]]+\]\(https://github\.com/[^/]+/[^/]+/pull/\d+\)", result["notes"]):
+        require(link in evidence["pull_request_links"], "PR link not in release evidence")
     minor, patch = map(int, STABLE.fullmatch(previous).groups())
     tag = f"v0.{minor + 1}.0" if result["bump"] == "minor" else f"v0.{minor}.{patch + 1}"
     result.update(previous=previous, commit=commit, tag=tag)

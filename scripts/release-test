@@ -97,7 +97,8 @@ class ReleaseTest(unittest.TestCase):
             "BUILDKITE_AGENT_ACCESS_TOKEN": "job-token", "RELEASE_MODEL": "test-model",
             "PATH": os.environ["PATH"], "HOME": str(self.root),
         }
-        self.decision = {"bump": "minor", "reason": "Adds a feature.", "notes": "## Highlights\n\n- New behavior.\n"}
+        self.decision = {"bump": "minor", "reason": "Adds a feature.", "notes":
+                         "## Highlights\n\n- New behavior. ([#12](https://github.com/buildkite/buildkite-gha/pull/12))\n"}
         self.response = None
         self.provider_calls = 0
         self.check_results = ["success"]
@@ -167,6 +168,7 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(evidence["previous"], "v0.9.8")
             self.assertIn("+new behavior", evidence["diff"])
             self.assertIn("Change behavior (#12)", evidence["commits"])
+            self.assertEqual(evidence["pull_request_links"], ["[#12](https://github.com/buildkite/buildkite-gha/pull/12)"])
             if self.advance_main:
                 newer = self.git("commit-tree", "HEAD^{tree}", "-p", self.commit, "-m", "Another merged change")
                 self.git("push", "origin", f"{newer}:refs/heads/main")
@@ -312,9 +314,15 @@ class ReleaseTest(unittest.TestCase):
 
     def test_patch_dry_run(self):
         self.decision["bump"] = "patch"
-        self.release("--dry-run")
-        plan = json.loads((self.checkout / ".release/proposal.json").read_text())
-        self.assertEqual(plan["tag"], "v0.9.9")
+        for metadata in ([], [{"type": "thinking", "thinking": "", "signature": "test"}],
+                         [{"type": "redacted_thinking", "data": "test"}]):
+            with self.subTest(metadata=metadata):
+                self.response = {"stop_reason": "end_turn", "content": metadata + [
+                    {"type": "text", "text": json.dumps(self.decision)}]}
+                self.release("--dry-run")
+                plan = json.loads((self.checkout / ".release/proposal.json").read_text())
+                self.assertEqual(plan["tag"], "v0.9.9")
+                self.assertTrue(plan["notes"].startswith(self.decision["notes"]))
         self.assertEqual(self.writes, [])
         self.assertEqual(self.notifications, [])
         self.assertEqual(self.git("ls-remote", "origin", "refs/tags/v0.9.9"), "")
@@ -332,6 +340,15 @@ class ReleaseTest(unittest.TestCase):
         self.response = {"stop_reason": "max_tokens", "content": []}
         with self.assertRaisesRegex(RuntimeError, "incomplete"):
             self.release()
+        self.decision = {"bump": "patch", "reason": "Fix", "notes": "## Highlights\n- Fixed behavior.\n"}
+        for blocks in ([{"type": "thinking", "thinking": ""}],
+                       [{"type": "tool_use", "name": "publish"},
+                        {"type": "text", "text": json.dumps(self.decision)}]):
+            with self.subTest(blocks=blocks):
+                self.response = {"stop_reason": "end_turn", "content": blocks}
+                with self.assertRaises(RuntimeError):
+                    self.release()
+                self.assertEqual(self.writes, [])
 
     def test_malformed_model_response_is_saved_without_publication(self):
         self.response = {"stop_reason": "end_turn", "content": [
@@ -341,6 +358,16 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(json.loads((self.checkout / ".release/model-response.json").read_text()), self.response)
         self.assertEqual(self.writes, [])
         self.assertEqual(self.notifications, [])
+
+    def test_invalid_pr_link_never_publishes(self):
+        notes = self.decision["notes"]
+        for label, target in (("#12", 13), ("#13", 13), ("#13's sibling PR #12", 12)):
+            with self.subTest(label=label, target=target):
+                self.decision["notes"] = notes + f"- Another change. ([{label}](https://github.com/buildkite/buildkite-gha/pull/{target}))\n"
+                with self.assertRaisesRegex(RuntimeError, "PR link not in release evidence"):
+                    self.release()
+                self.assertEqual(self.writes, [])
+                self.assertEqual(self.notifications, [])
 
     def test_no_release_decision(self):
         self.decision = {"bump": "none", "reason": "Only spelling changes", "notes": ""}
