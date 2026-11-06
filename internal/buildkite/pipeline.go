@@ -131,6 +131,7 @@ type Pipeline struct {
 	ConcurrencyGate    *ConcurrencyGate
 	ApprovalGates      []ApprovalGate
 	DisableRunnerUser  bool
+	RebuildOnly        bool
 	Jobs               []Job
 	Workflows          []Workflow
 	// Deferred marks a stage upload. Grouped workflows carry no GroupKey so
@@ -167,9 +168,12 @@ type Workflow struct {
 	Condition       string
 	SkipReason      string
 	ConcurrencyGate *ConcurrencyGate
-	ApprovalGates   []ApprovalGate
-	Failure         *Failure
-	Jobs            []Job
+	// RebuildOnly prevents individual retries from starting work after the
+	// workflow's closing concurrency marker has already released its group.
+	RebuildOnly   bool
+	ApprovalGates []ApprovalGate
+	Failure       *Failure
+	Jobs          []Job
 }
 
 // ApprovalGate is one manual approval block step emitted before the generated
@@ -316,7 +320,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	}
 	workflows := pipeline.Workflows
 	if aggregate {
-		if len(pipeline.Jobs) != 0 || pipeline.GroupLabel != "" || pipeline.ConcurrencyGate != nil || len(pipeline.ApprovalGates) != 0 {
+		if len(pipeline.Jobs) != 0 || pipeline.GroupLabel != "" || pipeline.ConcurrencyGate != nil || pipeline.RebuildOnly || len(pipeline.ApprovalGates) != 0 {
 			return nil, fmt.Errorf("aggregate pipeline cannot mix legacy workflow fields")
 		}
 		if pipeline.EventProvider != "github" && pipeline.EventProvider != "cursor-origin" {
@@ -326,6 +330,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		workflows = []Workflow{{
 			GroupLabel:      pipeline.GroupLabel,
 			ConcurrencyGate: pipeline.ConcurrencyGate,
+			RebuildOnly:     pipeline.RebuildOnly,
 			ApprovalGates:   pipeline.ApprovalGates,
 			Jobs:            pipeline.Jobs,
 		}}
@@ -453,11 +458,11 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				if job.Concurrency > 0 && job.ConcurrencyGroup == workflow.ConcurrencyGate.Group {
 					return nil, fmt.Errorf("workflow concurrency gate shares group with member job %q", job.Key)
 				}
-				// The closing marker waits for the steps of this upload only.
-				// Jobs a deferred upload adds later would run after the group
-				// is released.
-				if job.Stage != nil {
-					return nil, fmt.Errorf("workflow concurrency gate cannot hold deferred upload step %q", job.Key)
+				// Buildkite extends the closing marker's dependency on the
+				// uploader to its uploaded jobs. A manual retry after release
+				// does not reopen that marker, so require a whole-build rebuild.
+				if job.Stage != nil && !workflow.RebuildOnly {
+					return nil, fmt.Errorf("workflow concurrency gate requires rebuild-only retries for deferred upload step %q", job.Key)
 				}
 			}
 		}
@@ -597,17 +602,17 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if (!workflow.Aggregate || workflow.Ungrouped) && pipeline.CompilerStep != "" {
 			dependencies = append(dependencies, dependency{Step: pipeline.CompilerStep})
 		}
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start workflow concurrency", workflow.GateOpenKey, workflow.ConcurrencyGate, dependencies, condition)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start workflow concurrency", workflow.GateOpenKey, workflow.ConcurrencyGate, dependencies, condition, workflow.RebuildOnly)
 		dependencies = workflowGateCloseDependencies(workflow, pipeline.CompilerStep)
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", workflow.GateCloseKey, workflow.ConcurrencyGate, dependencies, condition)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", workflow.GateCloseKey, workflow.ConcurrencyGate, dependencies, condition, workflow.RebuildOnly)
 	}
 	gateOpenKeys := make(map[string]string, len(workflow.ReusableConcurrencyGates))
 	for _, gate := range workflow.ReusableConcurrencyGates {
 		dependencies := reusableGateOpenDependencies(workflow, gate, gateOpenKeys, pipeline.CompilerStep)
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start reusable-workflow concurrency", gate.OpenKey, &gate.ConcurrencyGate, dependencies, condition)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start reusable-workflow concurrency", gate.OpenKey, &gate.ConcurrencyGate, dependencies, condition, workflow.RebuildOnly)
 		gateOpenKeys[gate.ID] = gate.OpenKey
 		dependencies = reusableGateCloseDependencies(workflow, gate)
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish reusable-workflow concurrency", gate.CloseKey, &gate.ConcurrencyGate, dependencies, condition)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish reusable-workflow concurrency", gate.CloseKey, &gate.ConcurrencyGate, dependencies, condition, workflow.RebuildOnly)
 	}
 	for _, job := range workflow.Jobs {
 		if job.Failure != nil || job.SkipReason != "" {
@@ -725,9 +730,11 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			// The stage step keeps the default checkout: it recompiles the
 			// workflow, and local reusable workflows, from the repository at
 			// the build commit and verifies the workflow digest the importer
-			// recorded. Retries are safe because a replayed upload is
-			// rejected by Buildkite for its duplicate step keys and the step
-			// then confirms the earlier upload instead.
+			// recorded. Without workflow concurrency, retries can confirm an
+			// earlier upload after Buildkite rejects its duplicate step keys.
+			if workflow.RebuildOnly {
+				emitRebuildOnly(out, attributeIndent)
+			}
 			emitJobDependencies(out, attributeIndent, workflow, job, gateOpenKeys, pipeline.CompilerStep)
 			continue
 		}
@@ -797,10 +804,10 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, checkLabel, "", "")
 		}
 		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
-		if job.ApprovalGate != "" {
+		if job.ApprovalGate != "" || workflow.RebuildOnly {
 			// A manual retry would rerun the deployment job without a fresh
-			// approval, so gated jobs cannot be retried.
-			_, _ = fmt.Fprintf(out, "%sretry:\n%s  manual:\n%s    allowed: false\n", attributeIndent, attributeIndent, attributeIndent)
+			// approval, or resume a workflow after its concurrency gate closed.
+			emitRebuildOnly(out, attributeIndent)
 		}
 		cache := mergedCacheVolume(job.Cache, job.RequiresMise && platform != "windows/amd64", platform, experimentalRunnerUser)
 		if cache != nil {
@@ -1046,9 +1053,16 @@ type dependency struct {
 	AllowFailure bool
 }
 
-func emitConcurrencyGateStep(out *bytes.Buffer, stepIndent, attributeIndent, label, key string, gate *ConcurrencyGate, dependencies []dependency, condition string) {
+func emitRebuildOnly(out *bytes.Buffer, indent string) {
+	_, _ = fmt.Fprintf(out, "%sretry:\n%s  manual:\n%s    allowed: false\n", indent, indent, indent)
+}
+
+func emitConcurrencyGateStep(out *bytes.Buffer, stepIndent, attributeIndent, label, key string, gate *ConcurrencyGate, dependencies []dependency, condition string, rebuildOnly bool) {
 	_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(label))
 	_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(key))
+	if rebuildOnly {
+		emitRebuildOnly(out, attributeIndent)
+	}
 	if condition != "" {
 		_, _ = fmt.Fprintf(out, "%sif: %s\n", attributeIndent, yamlScalar(condition))
 	}

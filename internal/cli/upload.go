@@ -845,6 +845,7 @@ func failedExpandedGeneratedWorkflow(ctx context.Context, input workflowInput, e
 	runnable := make(map[string]buildkitepipeline.Job, len(bundle.GeneratedWorkflow.Jobs))
 	if keepRunnable {
 		workflow.ConcurrencyGate = bundle.GeneratedWorkflow.ConcurrencyGate
+		workflow.RebuildOnly = bundle.GeneratedWorkflow.RebuildOnly
 		workflow.ApprovalGates = bundle.GeneratedWorkflow.ApprovalGates
 		for _, job := range bundle.GeneratedWorkflow.Jobs {
 			runnable[job.Key] = job

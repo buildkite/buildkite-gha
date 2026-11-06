@@ -436,6 +436,7 @@ func (r stageRun) deferredPipeline(bundle compiler.Bundle, stage stageResult, sh
 		Workflows: []buildkitepipeline.Workflow{{
 			GroupLabel:    record.Workflow.GroupLabel,
 			Ungrouped:     record.Workflow.Ungrouped,
+			RebuildOnly:   bundle.GeneratedWorkflow.RebuildOnly,
 			CheckName:     record.Workflow.CheckName,
 			Event:         record.Event.Name,
 			ApprovalGates: gates,
