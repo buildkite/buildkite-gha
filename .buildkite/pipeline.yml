@@ -183,7 +183,7 @@ steps:
   - label: ":stopwatch: Runtime regression check"
     key: "runtime-benchmark"
     # Include the existing daily scheduled scan, which skips the CI group.
-    # Tag builds must pass this gate before the release-publishing wait step.
+    # The release pipeline waits for this entire CI build before publishing.
     if: (build.branch == "main" && build.pull_request.id == null) || build.tag != null || build.env("VULNERABILITY_SCAN") == "1" || build.env("RUNTIME_BENCHMARK") == "1"
     timeout_in_minutes: 15
     retry:
@@ -217,15 +217,3 @@ steps:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.10.17"
     command: "mise run vulnerability"
-
-  - wait: ~
-
-  - label: ":rocket: Publish release"
-    key: "publish-release"
-    # Credential isolation is enforced by the external Buildkite Secret policy,
-    # not by this scheduling condition. See docs/development.md.
-    if: build.tag != null
-    plugins:
-      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-          version: "2026.10.17"
-    command: "mise exec -- scripts/ci-buildkite-release"

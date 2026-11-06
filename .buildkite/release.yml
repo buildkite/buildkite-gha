@@ -1,0 +1,48 @@
+env:
+  MISE_JOBS: "1"
+  MISE_LOCKED: "1"
+  RELEASE_PIPELINE: "${RELEASE_PIPELINE}"
+  RELEASE_APP_ID: "${RELEASE_APP_ID}"
+  RELEASE_APP_INSTALLATION_ID: "${RELEASE_APP_INSTALLATION_ID}"
+  RELEASE_APP_PRIVATE_KEY_SECRET: "${RELEASE_APP_PRIVATE_KEY_SECRET}"
+  RELEASE_BUGSNAG_API_KEY_SECRET: "${RELEASE_BUGSNAG_API_KEY_SECRET}"
+  RELEASE_SLACK_CHANNEL: "${RELEASE_SLACK_CHANNEL}"
+  RELEASE_MODEL: "${RELEASE_MODEL}"
+
+steps:
+  - label: ":test_tube: Check release source"
+    key: "release-ci"
+    trigger: "${RELEASE_CI_PIPELINE}"
+    async: false
+    if: build.branch == "main" && build.tag == null && build.pull_request.id == null
+    build:
+      branch: "main"
+      commit: "${BUILDKITE_COMMIT}"
+      message: "Release checks for ${BUILDKITE_COMMIT}"
+
+  - wait: ~
+
+  - label: ":rocket: Prepare, publish, and verify release"
+    key: "publish-release"
+    if: build.branch == "main" && build.tag == null && build.pull_request.id == null
+    concurrency: 1
+    concurrency_group: "${BUILDKITE_PIPELINE_SLUG}"
+    timeout_in_minutes: 45
+    retry:
+      automatic: false
+    agents:
+      queue: "${RELEASE_QUEUE}"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.10.17"
+    command: |
+      case "$${RELEASE_DRY_RUN:-0}" in
+        0) python3 scripts/release-pipeline ;;
+        1) python3 scripts/release-pipeline --dry-run ;;
+        *) echo 'RELEASE_DRY_RUN must be 0 or 1' >&2; exit 1 ;;
+      esac
+    artifact_paths:
+      - ".release/model-response.json"
+      - ".release/proposal.json"
+      - ".release/notes.md"
+      - ".release/verification.json"
