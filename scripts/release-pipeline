@@ -52,7 +52,9 @@ documentation links, or a separate PR list for links in the relevant bullets.
 Do not infer PR numbers from issue references, diff text, or unrelated history.
 Changes with no identified PR may remain unlinked; never invent a PR.
 Before returning, check each highlight against the commit evidence and add any
-missing PR links. Do not invent URLs, version numbers, or facts. Do not add a comparison link;
+missing PR links. Check every link individually: the number in its [#N] label
+must exactly match the /pull/N URL suffix, including every link in grouped bullets.
+Do not invent URLs, version numbers, or facts. Do not add a comparison link;
 the release script appends it. For none/uncertain, notes must be empty.
 """
 
@@ -221,6 +223,8 @@ def proposal(previous, commit):
         return result
     require(result["notes"].startswith("## Highlights\n") and "\n- " in result["notes"],
             "notes must contain Highlights and bullets")
+    for label, target in re.findall(r"\[#(\d+)\]\(https://github\.com/[^/]+/[^/]+/pull/(\d+)\)", result["notes"]):
+        require(label == target, "PR link label differs from target")
     minor, patch = map(int, STABLE.fullmatch(previous).groups())
     tag = f"v0.{minor + 1}.0" if result["bump"] == "minor" else f"v0.{minor}.{patch + 1}"
     result.update(previous=previous, commit=commit, tag=tag)

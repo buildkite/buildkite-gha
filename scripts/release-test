@@ -97,7 +97,8 @@ class ReleaseTest(unittest.TestCase):
             "BUILDKITE_AGENT_ACCESS_TOKEN": "job-token", "RELEASE_MODEL": "test-model",
             "PATH": os.environ["PATH"], "HOME": str(self.root),
         }
-        self.decision = {"bump": "minor", "reason": "Adds a feature.", "notes": "## Highlights\n\n- New behavior.\n"}
+        self.decision = {"bump": "minor", "reason": "Adds a feature.", "notes":
+                         "## Highlights\n\n- New behavior. ([#12](https://github.com/buildkite/buildkite-gha/pull/12))\n"}
         self.response = None
         self.provider_calls = 0
         self.check_results = ["success"]
@@ -354,6 +355,13 @@ class ReleaseTest(unittest.TestCase):
         with self.assertRaises(json.JSONDecodeError):
             self.release()
         self.assertEqual(json.loads((self.checkout / ".release/model-response.json").read_text()), self.response)
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.notifications, [])
+
+    def test_mismatched_pr_link_never_publishes(self):
+        self.decision["notes"] += "- Another change. ([#13](https://github.com/buildkite/buildkite-gha/pull/14))\n"
+        with self.assertRaisesRegex(RuntimeError, "PR link label differs from target"):
+            self.release()
         self.assertEqual(self.writes, [])
         self.assertEqual(self.notifications, [])
 
