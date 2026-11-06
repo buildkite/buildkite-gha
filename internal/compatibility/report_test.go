@@ -97,6 +97,17 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	if err := schema.Validate(document); err != nil {
 		t.Fatalf("processing report does not satisfy schema: %v", err)
 	}
+	decoded.Diagnostics = []Diagnostic{{Level: "error", Code: "E_EXPRESSION_INVALID", Message: "Cluster has no hosted queue.", SetupURL: "https://buildkite.com/queues/new?queue=macos-medium&review=true"}}
+	withSetup, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(withSetup, &document); err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(document); err != nil {
+		t.Fatalf("processing report with queue setup does not satisfy schema: %v", err)
+	}
 	for _, result := range []string{Passed, Failed, NotEvaluated} {
 		if !strings.Contains(encoded.String(), `"result": "`+result+`"`) {
 			t.Fatalf("JSON report does not contain stage result %q: %s", result, encoded.String())
@@ -310,6 +321,22 @@ func TestProcessingReportAggregatesIdenticalMatrixDiagnostics(t *testing.T) {
 	report.Finalize()
 	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Instance != "" || report.Diagnostics[0].Job != "test" {
 		t.Fatalf("aggregated diagnostics = %#v", report.Diagnostics)
+	}
+}
+
+func TestProcessingReportPreservesDistinctQueueSetupURLs(t *testing.T) {
+	report := NewProcessingReport("ci.yml", "hosted")
+	for _, queue := range []string{"macos-medium", "windows-medium"} {
+		for _, instance := range []string{"first", "second"} {
+			report.Diagnostics = append(report.Diagnostics, Diagnostic{
+				Level: "error", Code: "E_EXPRESSION_INVALID", Message: "Cluster has no hosted queue.",
+				Job: "test", Instance: instance, SetupURL: "https://buildkite.com/queues/new?queue=" + queue,
+			})
+		}
+	}
+	report.Finalize()
+	if len(report.Diagnostics) != 2 || report.Diagnostics[0].SetupURL == report.Diagnostics[1].SetupURL || report.Diagnostics[0].Instance != "" || report.Diagnostics[1].Instance != "" {
+		t.Fatalf("matrix compaction lost queue setup URLs: %+v", report.Diagnostics)
 	}
 }
 

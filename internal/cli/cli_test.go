@@ -1995,6 +1995,25 @@ func TestProcessingAnnotationDropsDetailBeforeTruncatingMessage(t *testing.T) {
 	}
 }
 
+func TestProcessingAnnotationBoundsQueueSetupURL(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci.yml", "")
+	report.Diagnostics = []compatibility.Diagnostic{{
+		Level: "error", Code: "E_EXPRESSION_INVALID", Message: "Cluster has no hosted macOS queue.",
+		SetupURL: "https://buildkite.com/queues/new?note=" + strings.Repeat("&", processingAnnotationBodyLimit),
+	}}
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
+	if len(body) > processingAnnotationBodyLimit || !strings.Contains(body, report.Diagnostics[0].Message) || !strings.Contains(body, "Additional diagnostics omitted") || strings.Contains(body, "Set up queue") || strings.Contains(body, "<a ") {
+		t.Fatalf("oversized link must not exceed the limit, truncate its URL, or displace the cause: %s", body)
+	}
+	for _, unsafeURL := range []string{"javascript:alert(1)", "//buildkite.com/queues/new", "https://user@buildkite.com/queues/new"} {
+		report.Diagnostics[0].SetupURL = unsafeURL
+		_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
+		if strings.Contains(body, "Set up queue") || strings.Contains(body, "<a ") {
+			t.Fatalf("renderer accepted unsafe URL %q: %s", unsafeURL, body)
+		}
+	}
+}
+
 func TestProcessingAnnotationUsesRepositoryRelativeWorkflowPath(t *testing.T) {
 	repository := t.TempDir()
 	workflowPath := filepath.Join(repository, ".github", "workflows", "test-image-build.yml")

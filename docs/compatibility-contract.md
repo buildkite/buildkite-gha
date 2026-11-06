@@ -759,6 +759,22 @@ handling, not those server policies. Do not flatten their different fallback
 rules: explicit runner validation and environment resolution fail closed, while
 automatic runner resolution and unavailable variables have their own contracts.
 
+Runner `missing_queue` rejections may include a server-owned `setup_url` to an
+authenticated review page with one recommended queue preselected. Preserve it
+through diagnostics, JSON, logs, and annotations; offer the action only for a
+validated absolute HTTP(S) URL, never from labels or error prose. Other rejection
+codes and older servers without the field retain their existing guidance.
+Requests advertise `supports_queue_setup: true`; the backend emits `setup_url`
+only with that capability. Missing or false preserves older replies within
+older clients' 64 KiB response limit; opted-in clients accept up to 1 MiB.
+Deploy the backend page and response field before releasing the CLI. Queue
+creation does not resume synthetic failed jobs: keep manual retry disabled and
+direct users to trigger a matching workflow event, or rebuild where supported.
+This does not enable native manual runs or rebuilds for GHES pipelines.
+The [runner diagnostic tests](../internal/cli/runner_resolution_test.go)
+and [upload test](../internal/cli/upload_test.go) establish client rendering and
+failure-step behavior, not backend authorization or live queue creation.
+
 Automatic Ubuntu ARM64 routing is server-owned. For `ubuntu-22.04-arm`,
 `ubuntu-24.04-arm`, `ubuntu-26.04-arm`, their `-arm64` aliases, and recognized
 provider ARM64 labels, select an active hosted Linux ARM64

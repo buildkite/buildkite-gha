@@ -28,6 +28,8 @@ type SourceLocation struct {
 	Column int    `json:"column"`
 }
 
+const QueueSetupGuidance = "Create the queue, then run this workflow again with a matching event, or rebuild where supported. GHES workflows require a matching event."
+
 // Diagnostic is one actionable compatibility finding.
 type Diagnostic struct {
 	Level    string                   `json:"level"`
@@ -43,6 +45,7 @@ type Diagnostic struct {
 	reportRunnerLabelDetail string
 	Message                 string          `json:"message"`
 	Detail                  string          `json:"detail,omitempty"`
+	SetupURL                string          `json:"setup_url,omitempty"`
 	Location                *SourceLocation `json:"location,omitempty"`
 	Job                     string          `json:"job,omitempty"`
 	Instance                string          `json:"instance,omitempty"`
@@ -191,7 +194,10 @@ func (r *ProcessingReport) Finalize() {
 		if left.Message != right.Message {
 			return left.Message < right.Message
 		}
-		return left.Detail < right.Detail
+		if left.Detail != right.Detail {
+			return left.Detail < right.Detail
+		}
+		return left.SetupURL < right.SetupURL
 	})
 	r.Diagnostics = compactDiagnostics(r.Diagnostics)
 }
@@ -201,8 +207,8 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 		return diagnostics
 	}
 	type diagnosticKey struct {
-		level, code, category, stage, blocker, blockerDetail, message, detail, job, action, location string
-		step                                                                                         int
+		level, code, category, stage, blocker, blockerDetail, message, detail, setupURL, job, action, location string
+		step                                                                                                   int
 	}
 	type matrixDiagnostic struct {
 		index     int
@@ -214,7 +220,7 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 		key := diagnosticKey{
 			level: diagnostic.Level, code: diagnostic.Code, category: diagnostic.Category,
 			stage: string(diagnostic.Stage), blocker: diagnostic.Blocker, blockerDetail: diagnostic.BlockerDetail,
-			message: diagnostic.Message, detail: diagnostic.Detail, job: diagnostic.Job,
+			message: diagnostic.Message, detail: diagnostic.Detail, setupURL: diagnostic.SetupURL, job: diagnostic.Job,
 			action: diagnostic.Action, step: diagnostic.Step,
 		}
 		if diagnostic.Blocker == "runner_policy" {
@@ -249,7 +255,7 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 }
 
 func sameDiagnostic(left, right Diagnostic) bool {
-	return left.Level == right.Level && left.Code == right.Code && left.Category == right.Category && left.Stage == right.Stage && left.Blocker == right.Blocker && left.BlockerDetail == right.BlockerDetail && left.Message == right.Message && left.Detail == right.Detail && left.Job == right.Job && left.Instance == right.Instance && left.Action == right.Action && left.Step == right.Step && sameLocation(left.Location, right.Location)
+	return left.Level == right.Level && left.Code == right.Code && left.Category == right.Category && left.Stage == right.Stage && left.Blocker == right.Blocker && left.BlockerDetail == right.BlockerDetail && left.Message == right.Message && left.Detail == right.Detail && left.SetupURL == right.SetupURL && left.Job == right.Job && left.Instance == right.Instance && left.Action == right.Action && left.Step == right.Step && sameLocation(left.Location, right.Location)
 }
 
 func sameLocation(left, right *SourceLocation) bool {
@@ -303,6 +309,11 @@ func WriteProcessing(w io.Writer, format string, report ProcessingReport) error 
 			}
 			if _, err := fmt.Fprintf(w, "%s [%s] %s%s%s\n", marker, diagnostic.Code, diagnostic.Message, textLocation(diagnostic.Location), textDiagnosticMetadata(diagnostic)); err != nil {
 				return err
+			}
+			if setupURL := compiler.SafeRunnerSetupURL(diagnostic.SetupURL); setupURL != "" {
+				if _, err := fmt.Fprintf(w, "  Set up queue: %s\n  %s\n", setupURL, QueueSetupGuidance); err != nil {
+					return err
+				}
 			}
 			if diagnostic.Detail != "" {
 				if _, err := fmt.Fprintf(w, "  detail: %s\n", diagnostic.Detail); err != nil {
