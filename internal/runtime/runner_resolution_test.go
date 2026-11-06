@@ -20,6 +20,7 @@ func TestAgentRunnerResolverBatchesRequirementsIgnoresUnknownFieldsAndReturnsSug
 		var body struct {
 			SupportsAgentTags      bool `json:"supports_agent_tags"`
 			SupportsMacOSAgentTags bool `json:"supports_macos_agent_tags"`
+			SupportsQueueSetup     bool `json:"supports_queue_setup"`
 			Requirements           []struct {
 				ID       string `json:"id"`
 				Selector struct {
@@ -35,6 +36,9 @@ func TestAgentRunnerResolverBatchesRequirementsIgnoresUnknownFieldsAndReturnsSug
 		}
 		if !body.SupportsMacOSAgentTags {
 			t.Error("runner request did not opt into macOS agent-tag targets")
+		}
+		if !body.SupportsQueueSetup {
+			t.Error("runner request did not opt into queue setup URLs")
 		}
 		resolutions := make([]map[string]any, len(body.Requirements))
 		for i, requirement := range body.Requirements {
@@ -122,6 +126,11 @@ func TestAgentRunnerResolverRetainsServerRejectionsAndRejectsMalformedErrors(t *
 			name:  "missing queue with unknown fields",
 			error: map[string]any{"code": "missing_queue", "message": "Cluster 'Default' has no hosted macOS queue.", "platform": "darwin/arm64", "required_queues": []string{"macos-medium"}},
 			want:  RunnerRejection{ID: "r1", Code: "missing_queue", Message: "Cluster 'Default' has no hosted macOS queue."},
+		},
+		{
+			name:  "missing queue with setup URL",
+			error: map[string]any{"code": "missing_queue", "message": "Create a queue.", "setup_url": "https://buildkite.com/organizations/acme/clusters/cluster/queues/new?queue=macos-medium&review=true"},
+			want:  RunnerRejection{ID: "r1", Code: "missing_queue", Message: "Create a queue.", SetupURL: "https://buildkite.com/organizations/acme/clusters/cluster/queues/new?queue=macos-medium&review=true"},
 		},
 		{
 			name:  "unknown future code",

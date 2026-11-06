@@ -858,7 +858,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 				if sourced.blockerDetailUnsafe {
 					reportableLabels = nil
 				}
-				message, detail := runnerRejectionDiagnostic(err, reportableLabels, e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
+				message, detail, setupURL := runnerRejectionDiagnostic(err, reportableLabels, e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
 				blocker, blockerDetail := runnerRejectionBlocker(err, reportableLabels)
 				reportRunnerLabelDetail := ""
 				if len(reportableLabels) == 1 {
@@ -869,7 +869,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 					Blocker: blocker, BlockerDetail: blockerDetail,
 					ReportRunnerLabelDetail: reportRunnerLabelDetail,
 					Path:                    jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
-					Job: job.ID, Instance: key, Message: message, Detail: detail,
+					Job: job.ID, Instance: key, Message: message, Detail: detail, SetupURL: setupURL,
 					Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
 				})
 				valid = false

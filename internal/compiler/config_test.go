@@ -610,7 +610,7 @@ func TestRunnerRejectionDiagnosticIsActionableWithoutResolvedLabel(t *testing.T)
 			if err == nil {
 				t.Fatal("resolve() error = nil, want rejection")
 			}
-			message, _ := runnerRejectionDiagnostic(err, nil, []string{"ubuntu-latest"}, policy.UntrustedQueues)
+			message, _, _ := runnerRejectionDiagnostic(err, nil, []string{"ubuntu-latest"}, policy.UntrustedQueues)
 			if !strings.Contains(message, test.want) {
 				t.Fatalf("runnerRejectionDiagnostic() = %q, want %q", message, test.want)
 			}
@@ -624,7 +624,7 @@ func TestRunnerRejectionDiagnosticOmitsIrrelevantAllowlistForDuplicateLabel(t *t
 	if err == nil {
 		t.Fatal("resolve() error = nil, want duplicate-label rejection")
 	}
-	message, detail := runnerRejectionDiagnostic(err, nil, []string{"ubuntu-24.04"}, nil)
+	message, detail, _ := runnerRejectionDiagnostic(err, nil, []string{"ubuntu-24.04"}, nil)
 	if message != "runs-on contains a duplicate runner label. Remove duplicate labels from runs-on." || detail != "" {
 		t.Fatalf("runnerRejectionDiagnostic() = %q, %q", message, detail)
 	}
@@ -735,7 +735,7 @@ func TestWindowsRunnerServerRejectionsPreserveCause(t *testing.T) {
 			if !errors.As(err, &rejection) || rejection.reason != reasonServerRejected {
 				t.Fatalf("Resolve() = %v, want server rejection", err)
 			}
-			message, detail := runnerRejectionDiagnostic(err, nil, []string{"ubuntu-latest"}, nil)
+			message, detail, _ := runnerRejectionDiagnostic(err, nil, []string{"ubuntu-latest"}, nil)
 			if !strings.Contains(message, test.message) || strings.Contains(message, "Windows-Latest") || strings.Contains(message, "aren't currently supported") {
 				t.Fatalf("server cause lost or resolved label leaked: %q", message)
 			}
@@ -749,7 +749,7 @@ func TestWindowsRunnerServerRejectionsPreserveCause(t *testing.T) {
 func TestWindowsServerVariantGuidance(t *testing.T) {
 	for _, labels := range [][]string{{"windows-11-arm"}, {"windows-2025"}, {"depot-windows-2025-16"}, {"self-hosted", "windows-2022", "x64"}} {
 		rejection := RunnerRejection{Labels: labels, Code: RunnerRejectionIncompatibleLabels, Message: "No compatible runner is configured."}
-		message, detail := runnerRejectionDiagnostic(rejectRunnerByServer(rejection), nil, nil, nil)
+		message, detail, _ := runnerRejectionDiagnostic(rejectRunnerByServer(rejection), nil, nil, nil)
 		if !strings.HasPrefix(message, "Buildkite could not resolve the runs-on labels. No compatible runner is configured.") || detail != "" ||
 			!strings.Contains(message, "Use one only if this job is compatible") ||
 			!strings.Contains(message, "Windows 2025 aliases require Agent API resolution") ||
@@ -825,7 +825,7 @@ func TestRunnerRejectionDiagnosticRendersServerRejections(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			message, detail := runnerRejectionDiagnostic(rejectRunnerByServer(test.rejection), test.labels, supported, nil)
+			message, detail, _ := runnerRejectionDiagnostic(rejectRunnerByServer(test.rejection), test.labels, supported, nil)
 			if message != test.wantMessage || detail != test.wantDetail {
 				t.Fatalf("runnerRejectionDiagnostic() = %q, %q\nwant %q, %q", message, detail, test.wantMessage, test.wantDetail)
 			}
@@ -888,7 +888,7 @@ func TestRunnerRejectionBlockerAttribution(t *testing.T) {
 }
 
 func TestRunnerRejectionDiagnosticFallsBackWhenUnclassified(t *testing.T) {
-	message, detail := runnerRejectionDiagnostic(errors.New("boom"), nil, nil, nil)
+	message, detail, _ := runnerRejectionDiagnostic(errors.New("boom"), nil, nil, nil)
 	if message != "Runner target is unsupported. Use a configured runner target compatible with this job." || detail != "" {
 		t.Fatalf("runnerRejectionDiagnostic() = %q, %q", message, detail)
 	}
@@ -921,7 +921,7 @@ func TestRunnerRejectionDiagnosticSeparatesStaticLabelFromAllowlist(t *testing.T
 		if err == nil {
 			t.Fatalf("resolve(%q) error = nil", test.label)
 		}
-		message, detail := runnerRejectionDiagnostic(err, []string{test.label}, supported, nil)
+		message, detail, _ := runnerRejectionDiagnostic(err, []string{test.label}, supported, nil)
 		if message != test.wantMessage || detail != test.wantDetail {
 			t.Fatalf("runnerRejectionDiagnostic(%q) = %q, %q", test.label, message, detail)
 		}

@@ -50,9 +50,10 @@ type RunnerWarning struct {
 // is an open set owned by the server; callers must tolerate codes they do not
 // recognize and render Message, which the server keeps free of runner labels.
 type RunnerRejection struct {
-	ID      string
-	Code    string
-	Message string
+	ID       string
+	Code     string
+	Message  string
+	SetupURL string
 }
 
 type AgentRunnerResolverConfig struct {
@@ -115,7 +116,8 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 		Requirements           []requirement `json:"requirements"`
 		SupportsAgentTags      bool          `json:"supports_agent_tags"`
 		SupportsMacOSAgentTags bool          `json:"supports_macos_agent_tags"`
-	}{Requirements: make([]requirement, len(requirements)), SupportsAgentTags: true, SupportsMacOSAgentTags: true}
+		SupportsQueueSetup     bool          `json:"supports_queue_setup"`
+	}{Requirements: make([]requirement, len(requirements)), SupportsAgentTags: true, SupportsMacOSAgentTags: true, SupportsQueueSetup: true}
 	expected := make(map[string]bool, len(requirements))
 	for i, input := range requirements {
 		if input.ID == "" || expected[input.ID] {
@@ -161,8 +163,9 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 				ToolCache *bool             `json:"tool_cache"`
 			} `json:"target"`
 			Error *struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
+				Code     string `json:"code"`
+				Message  string `json:"message"`
+				SetupURL string `json:"setup_url"`
 			} `json:"error"`
 			Warnings []struct {
 				Code    string `json:"code"`
@@ -207,7 +210,7 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 		if strings.TrimSpace(resolution.Error.Code) == "" || strings.TrimSpace(resolution.Error.Message) == "" {
 			return nil, nil, fmt.Errorf("runner resolution response contains an invalid error")
 		}
-		rejections = append(rejections, RunnerRejection{ID: resolution.ID, Code: resolution.Error.Code, Message: resolution.Error.Message})
+		rejections = append(rejections, RunnerRejection{ID: resolution.ID, Code: resolution.Error.Code, Message: resolution.Error.Message, SetupURL: resolution.Error.SetupURL})
 	}
 	return suggestions, rejections, nil
 }

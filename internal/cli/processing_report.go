@@ -261,6 +261,9 @@ func processingLog(ctx context.Context, report compatibility.ProcessingReport, s
 		if len(explanation) != 0 {
 			message += "\n  " + terminalText(strings.Join(explanation, " "))
 		}
+		if setupURL := compiler.SafeRunnerSetupURL(diagnostic.SetupURL); setupURL != "" {
+			message += "\n  Set up queue: " + terminalText(setupURL) + "\n  " + compatibility.QueueSetupGuidance
+		}
 		var attribution []string
 		if diagnostic.Job != "" {
 			attribution = append(attribution, "job="+terminalText(diagnostic.Job))
@@ -566,6 +569,10 @@ func renderProcessingDiagnosticWithin(ctx context.Context, diagnostic compatibil
 		detail = detail[:end]
 		row = renderProcessingDiagnostic(ctx, diagnostic, sourceLinks)
 	}
+	if len(row) > limit && diagnostic.SetupURL != "" {
+		diagnostic.SetupURL = ""
+		row = renderProcessingDiagnostic(ctx, diagnostic, sourceLinks)
+	}
 	for len(row) > limit && message != "" {
 		end := max(0, len(message)-(len(row)-limit))
 		for end > 0 && !utf8.ValidString(message[:end]) {
@@ -621,6 +628,10 @@ func renderProcessingDiagnostic(ctx context.Context, diagnostic compatibility.Di
 			out.WriteString(detail)
 			out.WriteString("</p>\n")
 		}
+	}
+	if setupURL := compiler.SafeRunnerSetupURL(diagnostic.SetupURL); setupURL != "" {
+		out.WriteString(`<p><a href="` + html.EscapeString(setupURL) + `">Set up queue</a></p>` + "\n")
+		out.WriteString("<p>" + compatibility.QueueSetupGuidance + "</p>\n")
 	}
 	if excerpt := sourceLinks.excerpt(diagnostic); excerpt != "" {
 		out.WriteString("<pre><code>")
