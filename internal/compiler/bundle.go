@@ -97,7 +97,7 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	}
 	ir, reductionErr := reducePlanEventExpressions(ir)
 	options.ActionSource = newPinnedActionSource(options.ActionSource, options.RuntimeMatrixActionLocks)
-	graphs := newActionGraphCache(options)
+	graphs := newActionGraphCache(options, ir.Event.ServerURL)
 	directFailures := failedInstancesFromError(compileErr)
 	for key := range failedInstancesFromError(reductionErr) {
 		directFailures[key] = true

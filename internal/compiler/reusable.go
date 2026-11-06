@@ -130,6 +130,7 @@ type reusableResolution struct {
 
 type reusableResolver struct {
 	workspaceRoot      string
+	sourceServerURL    string
 	repositorySource   RepositorySource
 	workflowSource     *WorkflowSourceReference
 	stack              []reusableSourceIdentity
@@ -155,7 +156,7 @@ type workflowScan struct {
 	sources               map[string]WorkflowSourceReference
 }
 
-func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource, workflowSource *WorkflowSourceReference) ([]sourcedJob, []Warning, workflowScan, error) {
+func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource, workflowSource *WorkflowSourceReference, sourceServerURL string) ([]sourcedJob, []Warning, workflowScan, error) {
 	digest := "sha256:" + sha256Sum(source)
 	scan := workflowScan{runtimeMatrixBoundary: hasRuntimeMatrixBoundary(parsed), referencesVars: workflowReferencesVars(parsed)}
 	if !hasReusableCall(parsed) {
@@ -201,8 +202,8 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 	}
 	rootSource.digest = digest
 	resolver := reusableResolver{
-		workflowSource: workflowSource,
-		workspaceRoot:  rootSource.repositoryRoot, repositorySource: newMemoizedActionSource(repositorySource), stack: []reusableSourceIdentity{rootSource.identity}, context: context,
+		workflowSource: workflowSource, sourceServerURL: sourceServerURL,
+		workspaceRoot: rootSource.repositoryRoot, repositorySource: newMemoizedActionSource(repositorySource), stack: []reusableSourceIdentity{rootSource.identity}, context: context,
 		rootPermissions: effectivePermissions(nil, parsed.Permissions, nil, false), scan: scan,
 		warnedCancellation:            make(map[workflow.Position]bool),
 		warnedGuardedConcurrency:      make(map[workflow.Position]bool),

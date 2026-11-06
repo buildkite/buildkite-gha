@@ -183,20 +183,56 @@ deferred plans, diagnostics and runtime materialization. Bind memoized sources,
 ref caches, resolution snapshots and tree manifests to that origin. Keep existing
 hostless GitHub.com cache keys; never reinterpret them as GHES.
 
-Source transport and on-disk tree directories remain GitHub.com-only. Reject
-other origins before credentials, exact-SHA shortcuts or tree-cache reads;
-host-separated tree directories are required before enabling GHES downloads.
-Source metadata does not change event context or grant access. Never attach
-GHES workflow tokens to GitHub.com requests or infer a GitHub.com self source
-from a GHES event. Keep hosted GHES source guards until transport and access
-contracts are implemented and proved.
+New ordinary remote references select the root event's GitHub source host,
+including nested composites, remote reusable calls and deferred action locks.
+This selection does not reinterpret existing hostless locks. Local reusable
+paths and `$/` references retain their containing source's pinned identity.
+Non-GitHub events keep GitHub.com action sources; event and token context do
+not change with the source host.
+
+On GHES 3.22.2 with runner 2.334.0, the immutable
+[mixed-source fixture](https://buildkite-ghe.com/sj26-testier/gha-mixed-caller-20261104-10f4/commit/681944f43e80289bafd238b33b75f394ee8b07a8)
+used a public checkout mirror, public/private composites, a private-to-public
+child action and a private reusable calling a local nested workflow.
+[Sharing disabled](https://buildkite-ghe.com/sj26-testier/gha-mixed-caller-20261104-10f4/actions/runs/14)
+rejected the reusable before scheduling;
+[sharing enabled](https://buildkite-ghe.com/sj26-testier/gha-mixed-caller-20261104-10f4/actions/runs/16)
+passed both jobs at the same caller commit. A
+[public-only control](https://buildkite-ghe.com/sj26-testier/gha-mixed-caller-20261104-10f4/actions/runs/17)
+passed with sharing disabled. Action archive URLs used the GHES
+`/api/v3/repos/.../tarball/<SHA>` endpoint, including the checkout mirror.
+Anonymous metadata and archive requests to the public fixture returned 401.
+These observations establish same-host selection and sharing admission in this
+lab, not GitHub Connect fallback or Buildkite source-token authorization.
+
+Anonymously readable GHES sources resolve through the selected origin's
+`/api/v3` and download immutable `/repos/<owner>/<repo>/tarball/<SHA>` archives.
+Archive redirects stay on that HTTPS origin. There is no GitHub.com or Connect
+fallback. Keep GitHub.com endpoints, credentials and legacy cache paths unchanged;
+separate GHES tree directories, mutable refs and API rate-limit budgets by origin.
+Tree-cache maintenance must account for every origin without evicting leased trees.
+
+Source identity does not grant access. GitHub.com metadata tokens and reusable
+Git credentials must never authorize GHES sources. Authentication-required GHES
+repositories, including this lab's public repositories, remain unsupported;
+the hosted private-reusable opt-in guard stays in place. Never attach GHES
+workflow tokens to GitHub.com requests or infer a GitHub.com self source from a
+GHES event.
+
+The [source regressions](../internal/action/source/source_test.go) cover host
+collisions, credential isolation, denied requests, redirects and cache eviction.
+The [runtime regression](../internal/runtime/actions_test.go) compiles remote
+and nested reusable workflows, then downloads and executes nested composite
+actions from a cold runtime cache using a local HTTPS GHES-shaped fixture.
+These tests establish the anonymous transport contract, not live authenticated
+GHES imports, webhook delivery or job-bound source-token authorization.
 
 Native integration admission includes the source origin. A same-name GHES
 repository must not receive GitHub.com's native adapter or cache substitution.
 Explicit GitHub.com and omitted origins have the same integration identity.
 Job-plan schema v2 accepts the optional source fields; the prior strict decoder
-rejects them as unknown rather than ignoring their host. No GHES support claim
-follows from these local identity checks.
+rejects them as unknown rather than ignoring their host. These checks do not
+establish authenticated GHES source support.
 
 The [GHES spike](https://ampcode.com/threads/T-01a15c91-9015-754b-a5f3-bebba85e76e8)
 ran a real GHES 3.17.14 repository against an isolated Buildkite backend and a

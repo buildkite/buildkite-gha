@@ -64,6 +64,7 @@ func (s PublicActionSource) Fetch(ctx context.Context, ref source.Reference) (so
 
 type actionLockBuilder struct {
 	workspace             string
+	sourceServerURL       string
 	workflowSource        *RemoteWorkflowSource
 	resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)
 	source                ActionSource
@@ -245,21 +246,21 @@ func unsupportedMetadataFields(reason string) string {
 }
 
 func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
-	return compileWorkflowActionInvocations(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil)
+	return compileWorkflowActionInvocations(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil, "")
 }
 
-func compileWorkflowActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)) (actionCompilation, error) {
+func compileWorkflowActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error), sourceServerURL string) (actionCompilation, error) {
 	if suppliedInputs != nil && len(suppliedInputs) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
 	}
-	graph, err := buildActionGraph(ctx, workspace, actionSource, refs, resolveWorkflowSource)
+	graph, err := buildActionGraph(ctx, workspace, actionSource, refs, resolveWorkflowSource, sourceServerURL)
 	if err != nil {
 		return actionCompilation{}, err
 	}
 	return graph.analyzeInvocations(program.ActionAuthorityOptions{ServerURL: serverURL}, refs, suppliedInputs)
 }
 
-func buildActionGraph(ctx context.Context, workspace string, actionSource ActionSource, refs []string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)) (actionGraph, error) {
+func buildActionGraph(ctx context.Context, workspace string, actionSource ActionSource, refs []string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error), sourceServerURL string) (actionGraph, error) {
 	if workspace == "" {
 		return actionGraph{}, fmt.Errorf("workflow path must identify a repository root")
 	}
@@ -267,7 +268,7 @@ func buildActionGraph(ctx context.Context, workspace string, actionSource Action
 	if err != nil {
 		return actionGraph{}, fmt.Errorf("resolve workspace: %w", err)
 	}
-	b := &actionLockBuilder{workspace: abs, source: actionSource, resolveWorkflowSource: resolveWorkflowSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
+	b := &actionLockBuilder{workspace: abs, sourceServerURL: sourceServerURL, source: actionSource, resolveWorkflowSource: resolveWorkflowSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
 	defer func() {
 		for _, materialized := range b.materialized {
 			materialized.Release()
@@ -544,6 +545,7 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing
 	if err != nil {
 		return "", plan.ActionLock{}, "", "", err
 	}
+	ref.ServerURL = b.sourceServerURL
 	if self {
 		ref.ServerURL = containing.ServerURL
 	}
