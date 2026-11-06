@@ -563,7 +563,7 @@ func GeneratePlannedWorkflow(bundle Bundle, options Options) (buildkitepipeline.
 		}
 		for _, gate := range instance.ConcurrencyGates {
 			jobs[i].ConcurrencyGates = append(jobs[i].ConcurrencyGates, buildkitepipeline.ConcurrencyGate{
-				ID: gate.ID, Group: buildkiteConcurrencyGroup(ir.Event.Repository, gate.Group),
+				ID: gate.ID, Group: buildkiteConcurrencyGroup(ir.Event.Repository, gate.Group), CancelInProgress: gate.CancelInProgress,
 			})
 		}
 		if instance.Platform == PlatformLinuxAMD64 {
@@ -575,6 +575,7 @@ func GeneratePlannedWorkflow(bundle Bundle, options Options) (buildkitepipeline.
 		if instance.ConcurrencyGroup != "" {
 			jobs[i].Concurrency = 1
 			jobs[i].ConcurrencyGroup = buildkiteConcurrencyGroup(ir.Event.Repository, instance.ConcurrencyGroup)
+			jobs[i].CancelInProgress = instance.CancelInProgress
 		} else if instance.MaxParallel != nil {
 			jobs[i].Concurrency = *instance.MaxParallel
 			workflowScope := strings.TrimPrefix(ir.Workflow.Digest, "sha256:")
@@ -616,8 +617,9 @@ func GeneratePlannedWorkflow(bundle Bundle, options Options) (buildkitepipeline.
 	var concurrencyGate *buildkitepipeline.ConcurrencyGate
 	if ir.Workflow.ConcurrencyGroup != "" && len(jobs) != 0 {
 		concurrencyGate = &buildkitepipeline.ConcurrencyGate{
-			Group: buildkiteConcurrencyGroup(ir.Event.Repository, ir.Workflow.ConcurrencyGroup),
-			Queue: jobs[0].Queue,
+			Group:            buildkiteConcurrencyGroup(ir.Event.Repository, ir.Workflow.ConcurrencyGroup),
+			Queue:            jobs[0].Queue,
+			CancelInProgress: ir.Workflow.CancelInProgress,
 		}
 	}
 	return buildkitepipeline.Workflow{

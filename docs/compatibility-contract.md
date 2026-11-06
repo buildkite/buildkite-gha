@@ -772,6 +772,54 @@ The public minimum versions are supported by published notes:
 [JAVA_HOME inheritance in v0.105.2](https://github.com/buildkite/buildkite-gha/releases/tag/v0.105.2)
 and [Windows zstd discovery in v0.105.3](https://github.com/buildkite/buildkite-gha/releases/tag/v0.105.3).
 
+### Concurrency cancellation
+
+Job cancellation maps one expanded job to one Buildkite command step, with
+`concurrency: {limit: 1, group: ..., cancel_in_progress: true}`. False or omitted
+cancellation retains queue-only emission. Evaluate cancellation as a boolean
+with the existing compile expression profile, per concrete matrix instance and
+reusable-workflow input frame. Deferred matrices use the same evaluator after
+expansion, including with a producer-derived group. This does not admit `needs`
+in cancellation expressions or deferred reusable inputs.
+
+The merged [backend cancellation contract](https://github.com/buildkite/buildkite/pull/38010)
+was inspected at [dde6eda](https://github.com/buildkite/buildkite/commit/dde6eda60a6912e424327e00849398d87eab6bfa).
+The [queue processor](https://github.com/buildkite/buildkite/blob/dde6eda60a6912e424327e00849398d87eab6bfa/app/models/concurrency_group/queue_processor.rb)
+enqueues cleanup after an opted-in job transitions from limiting to limited.
+The [canceler](https://github.com/buildkite/buildkite/blob/dde6eda60a6912e424327e00849398d87eab6bfa/app/models/concurrency_group/canceler.rb)
+selects the last opted-in limited request in effective scheduling order. It
+cancels queued predecessors, then occupied blockers, until enough capacity is
+expected to be released. Victims need not opt in. Admission remains asynchronous;
+neither arrival order nor an atomic latest-wins outcome is guaranteed.
+
+Workflow cancellation intentionally uses only the opening gate as requester.
+The adjacent closing gate remains queue-only and waits for member completion.
+An older dependency-waiting closing gate is a cancellation victim: the backend
+[regression](https://github.com/buildkite/buildkite/blob/dde6eda60a6912e424327e00849398d87eab6bfa/spec/workers/pipelines/concurrency_group_cancel_worker_spec.rb)
+explicitly covers waiting predecessors of ordered requests. Canceling that
+marker lets a newer opener advance without waiting for the older workflow's
+members. Those members are outside the workflow group and can continue, including
+jobs not yet started after their opener passed. Workflow executions can overlap.
+Canceling an older opener instead prevents its strictly dependent members from
+starting. Do not opt closing gates in: a close that becomes limited could
+otherwise request cancellation of other work while finishing its own scope.
+
+Retain the existing shared-group and ordered-dependency cycle rejections.
+Nested and matrix-expanded reusable gates keep their own cancellation decision.
+A statically false call has no gate; a runtime-decided false call can still
+request cancellation. Prerequisites must finish before an opener can request,
+although its queue position is reserved at upload. Emit a best-effort warning
+for enabled workflow cancellation rather than promising whole-build cancellation.
+
+The [bundle regressions](../internal/compiler/bundle_test.go) check actual emitted
+requesters and dependencies; [deferred scheduling tests](../internal/compiler/runtime_scheduling_test.go)
+check per-row decisions without reparsing output text. These local tests and the
+backend source inspection do not establish production cancellation or native
+GitHub parity. Sam reported worldwide backend enablement on November 6, 2026;
+live rollout was not independently verified. The public pipeline schema inspected
+that day accepted structured concurrency but lacked `cancel_in_progress` and
+rejected unknown keys; the server schema in the merged backend contains it.
+
 ## Backend contracts and public support
 
 Backend enforcement, publicly supported configurations, and live rollout are

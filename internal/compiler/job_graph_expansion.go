@@ -889,7 +889,8 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, concurrencyErr))
 			valid = false
 		}
-		if cancellationErr := rejectJobCancellation(jobPath, job); cancellationErr != nil {
+		cancelInProgress, cancellationErr := resolveCancellation(jobPath, job.ID, job.Concurrency, instanceContext)
+		if cancellationErr != nil {
 			position := job.Concurrency.CancelInProgressPosition
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, key, "", 0, cancellationErr))
 			valid = false
@@ -915,6 +916,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		instance.ToolCache = target.ToolCache
 		instance.Cache = target.Cache
 		instance.ConcurrencyGroup = concurrencyGroup
+		instance.CancelInProgress = cancelInProgress
 		if e.bindInstanceDependencies(sourced, job, key, &instance) {
 			jobFailed = true
 			continue

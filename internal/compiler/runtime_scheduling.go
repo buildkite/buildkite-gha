@@ -44,9 +44,6 @@ func (e *jobGraphExpansion) validateRuntimeScheduling(sourced sourcedJob, descri
 		}
 		return false, errors.New(message)
 	}
-	if err := rejectJobCancellation(sourced.path, sourced.Job); err != nil {
-		return false, err
-	}
 	for _, job := range e.accepted {
 		if len(job.concurrencyGates) != 0 {
 			return false, errors.New("needs-derived scheduling cannot be combined with reusable-workflow concurrency gates")

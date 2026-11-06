@@ -13,6 +13,7 @@ func schedulingWorkflow() string {
 
 func TestRuntimeSchedulingKeepsContinuationOwnershipAndOutputData(t *testing.T) {
 	source := schedulingWorkflow()
+	source = strings.Replace(source, "    concurrency: ${{ needs.plan.outputs.group }}", "    concurrency:\n      group: ${{ needs.plan.outputs.group }}\n      cancel-in-progress: ${{ matrix.target != 'two' }}", 1)
 	initial, err := compileRuntimeMatrix(t, source, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +34,7 @@ func TestRuntimeSchedulingKeepsContinuationOwnershipAndOutputData(t *testing.T) 
 		t.Fatalf("jobs = %d, continuations = %d", len(ir.Jobs), len(ir.Continuations))
 	}
 	for _, job := range ir.Jobs {
-		if job.LogicalJobID == "build" && (job.ConcurrencyGroup != group || job.MaxParallel == nil || *job.MaxParallel != 2) {
+		if job.LogicalJobID == "build" && (job.ConcurrencyGroup != group || job.MaxParallel == nil || *job.MaxParallel != 2 || job.CancelInProgress != (job.Matrix["target"] != "two")) {
 			t.Fatalf("consumer scheduling = %#v", job)
 		}
 		if job.LogicalJobID == "publish" && len(job.Needs) != 4 {
@@ -96,7 +97,6 @@ func TestRuntimeSchedulingRejectsUnavailableAuthorityAndStages(t *testing.T) {
 		{"token in dead branch", strings.Replace(schedulingWorkflow(), "needs.plan.outputs.group", "needs.plan.outputs.group || (false && github.token)", 1), "github"},
 		{"secret in dead branch", strings.Replace(schedulingWorkflow(), "needs.plan.outputs.group", "needs.plan.outputs.group || (false && secrets.DEPLOY)", 1), "secrets"},
 		{"root gate", "concurrency: root\n" + schedulingWorkflow(), "workflow concurrency cannot be combined"},
-		{"job cancellation", strings.Replace(schedulingWorkflow(), "concurrency: ${{ needs.plan.outputs.group }}", "concurrency:\n      group: ${{ needs.plan.outputs.group }}\n      cancel-in-progress: true", 1), "cancel-in-progress"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := compileRuntimeMatrix(t, test.source, nil)

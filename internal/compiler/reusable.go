@@ -499,7 +499,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				if err != nil {
 					return reusableResolution{}, err
 				}
-				cancelInProgress, err := resolveWorkflowCancellation(calleeSource.displayPath, callee.Concurrency, concurrencyContext)
+				cancelInProgress, err := resolveCancellation(calleeSource.displayPath, "", callee.Concurrency, concurrencyContext)
 				if err != nil {
 					return reusableResolution{}, err
 				}
@@ -507,12 +507,11 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				// workflow, so GitHub never enters its group; the skipped jobs
 				// must not wait for or hold the gate. Every other guard keeps
 				// the gate: Buildkite enters the group before the runtime
-				// evaluates the guard, which is never weaker than GitHub's
-				// mutual exclusion, and a runtime-decided guard warns about
-				// the wait a skipped call may still incur.
+				// evaluates the guard. Warn about the wait and, when enabled,
+				// cancellation a skipped call may still cause.
 				guardKnown, guardValue := staticCallGuardValue(calleeGuards)
 				if !guardKnown || guardValue {
-					calleeConcurrencyGates = append(append([]WorkflowConcurrencyGate(nil), concurrencyGates...), WorkflowConcurrencyGate{ID: callNamespace, Group: group})
+					calleeConcurrencyGates = append(append([]WorkflowConcurrencyGate(nil), concurrencyGates...), WorkflowConcurrencyGate{ID: callNamespace, Group: group, CancelInProgress: cancelInProgress})
 					if len(needs) != 0 && !resolver.warnedPrerequisiteConcurrency[calleeCallPosition] {
 						resolver.warnedPrerequisiteConcurrency[calleeCallPosition] = true
 						warning := prerequisiteReusableConcurrencyWarning(calleeCallPosition)
@@ -1320,6 +1319,9 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, inputs reus
 	// admits its input reads.
 	if job.Concurrency != nil && !usesNeeds(job.Concurrency.Group) {
 		graphValues = append(graphValues, job.Concurrency.Group)
+	}
+	if job.Concurrency != nil && job.Concurrency.CancelInProgressExpression != nil {
+		graphValues = append(graphValues, job.Concurrency.CancelInProgressExpression.Text)
 	}
 	for _, site := range runsOnSites(job) {
 		if readsUndeclaredInput(site.Source, expression.ProfilePartialTemplate, inputs) {

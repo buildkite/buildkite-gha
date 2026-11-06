@@ -1679,13 +1679,13 @@ jobs:
 		t.Fatal(err)
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	wantMessage := "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group."
+	wantMessage := "Workflow cancel-in-progress requests cancellation through the opening concurrency gate only. Older gate steps can be canceled, but jobs that already passed their gate can keep running and overlap with the newer workflow. Cancellation is asynchronous, not atomic latest-wins. A reusable call whose condition is decided at runtime can request cancellation even when that condition is false."
 	assertWarning := func(t *testing.T, command, output string) {
 		t.Helper()
 		for _, want := range []string{
 			"buildkite-gha: " + command + ": warning:",
 			workflowPath + ":4:23:",
-			"[W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED]",
+			"[W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT]",
 			wantMessage,
 		} {
 			if !strings.Contains(output, want) {
@@ -1703,7 +1703,7 @@ jobs:
 			t.Fatalf("stderr = %q, want empty", stderr.String())
 		}
 		for _, want := range []string{
-			"! [W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED]",
+			"! [W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT]",
 			workflowPath + ":4:23:",
 			wantMessage,
 		} {
@@ -1725,7 +1725,7 @@ jobs:
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "warning" || report.Diagnostics[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || report.Diagnostics[0].Message != workflowPath+":4:23: "+wantMessage {
+		if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "warning" || report.Diagnostics[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT" || report.Diagnostics[0].Message != workflowPath+":4:23: "+wantMessage {
 			t.Fatalf("report diagnostics = %#v", report.Diagnostics)
 		}
 	})
@@ -1742,7 +1742,7 @@ jobs:
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "warning" || report.Diagnostics[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || report.Diagnostics[0].Message != workflowPath+":4:23: "+wantMessage {
+		if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "warning" || report.Diagnostics[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT" || report.Diagnostics[0].Message != workflowPath+":4:23: "+wantMessage {
 			t.Fatalf("profile report diagnostics = %#v", report.Diagnostics)
 		}
 	})
@@ -1753,8 +1753,8 @@ jobs:
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
 		assertWarning(t, "compile", stderr.String())
-		if count := strings.Count(stdout.String(), "concurrency_group:"); count != 2 {
-			t.Fatalf("pipeline concurrency gates = %d, want 2\n%s", count, stdout.String())
+		if strings.Count(stdout.String(), "concurrency_group:") != 1 || strings.Count(stdout.String(), "cancel_in_progress: true") != 1 {
+			t.Fatalf("want one requesting opener and one queue-only closer:\n%s", stdout.String())
 		}
 	})
 
@@ -1787,8 +1787,8 @@ jobs:
 			t.Fatalf("uploaded commands = %#v", runner.commands)
 		}
 		pipeline := string(runner.commands[len(runner.commands)-1].stdin)
-		if strings.Count(pipeline, "concurrency_group:") != 2 || strings.Contains(pipeline, "agents:") {
-			t.Fatalf("uploaded commands = %#v", runner.commands)
+		if strings.Count(pipeline, "concurrency_group:") != 1 || strings.Count(pipeline, "cancel_in_progress: true") != 1 || strings.Contains(pipeline, "agents:") {
+			t.Fatalf("uploaded pipeline = %s", pipeline)
 		}
 	})
 }
