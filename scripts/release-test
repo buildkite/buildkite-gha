@@ -168,6 +168,7 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(evidence["previous"], "v0.9.8")
             self.assertIn("+new behavior", evidence["diff"])
             self.assertIn("Change behavior (#12)", evidence["commits"])
+            self.assertEqual(evidence["pull_request_links"], ["[#12](https://github.com/buildkite/buildkite-gha/pull/12)"])
             if self.advance_main:
                 newer = self.git("commit-tree", "HEAD^{tree}", "-p", self.commit, "-m", "Another merged change")
                 self.git("push", "origin", f"{newer}:refs/heads/main")
@@ -358,12 +359,15 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(self.writes, [])
         self.assertEqual(self.notifications, [])
 
-    def test_mismatched_pr_link_never_publishes(self):
-        self.decision["notes"] += "- Another change. ([#13](https://github.com/buildkite/buildkite-gha/pull/14))\n"
-        with self.assertRaisesRegex(RuntimeError, "PR link label differs from target"):
-            self.release()
-        self.assertEqual(self.writes, [])
-        self.assertEqual(self.notifications, [])
+    def test_invalid_pr_link_never_publishes(self):
+        notes = self.decision["notes"]
+        for label, target in (("#12", 13), ("#13", 13), ("#13's sibling PR #12", 12)):
+            with self.subTest(label=label, target=target):
+                self.decision["notes"] = notes + f"- Another change. ([{label}](https://github.com/buildkite/buildkite-gha/pull/{target}))\n"
+                with self.assertRaisesRegex(RuntimeError, "PR link not in release evidence"):
+                    self.release()
+                self.assertEqual(self.writes, [])
+                self.assertEqual(self.notifications, [])
 
     def test_no_release_decision(self):
         self.decision = {"bump": "none", "reason": "Only spelling changes", "notes": ""}

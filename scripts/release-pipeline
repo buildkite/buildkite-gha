@@ -42,12 +42,12 @@ notes is concise user-facing Markdown starting with '## Highlights', followed
 by useful bullets. Cover material features, fixes, compatibility, migrations,
 and security. Omit internal CI/test churn. Add '## Upgrade notes' only for required
 actions or important boundaries.
-Every highlight attributable to a PR must end with its Markdown PR link, using
-the supplied repository: ([#123](https://github.com/OWNER/REPO/pull/123)).
-Identify PR numbers from merge subjects ('Merge pull request #123') and squash
-subjects ('Change description (#123)'); these are enough evidence to construct
-the URL. Match each link to the change it supports. A bullet combining changes
-from multiple PRs must link each relevant PR. Do not substitute bare PR numbers,
+Every highlight attributable to a PR must end with its Markdown PR link copied
+EXACTLY from pull_request_links. These canonical links come from merge and squash
+subjects in the supplied commit history. Use that history and the diff to match
+each link to the change it supports. A bullet combining changes from multiple PRs
+must copy each relevant PR link. Do not rewrite labels or URLs, describe PRs as
+siblings, or add words inside link labels. Do not substitute bare PR numbers,
 documentation links, or a separate PR list for links in the relevant bullets.
 Do not infer PR numbers from issue references, diff text, or unrelated history.
 Changes with no identified PR may remain unlinked; never invent a PR.
@@ -184,10 +184,16 @@ def source_state(commit):
 
 def proposal(previous, commit):
     delta = f"{previous}..{commit}"
+    prs = set()
+    for subject in run("git", "log", "--format=%s", delta).splitlines():
+        match = re.search(r"^Merge pull request #(\d+)\b|\(#(\d+)\)$", subject)
+        if match:
+            prs.add(int(match[1] or match[2]))
     evidence = {
         "repository": REPO,
         "previous": previous,
         "commit": commit,
+        "pull_request_links": [f"[#{number}](https://github.com/{REPO}/pull/{number})" for number in sorted(prs)],
         "commits": run("git", "log", "--reverse", "--format=fuller", "--stat", delta),
         "diff": run("git", "diff", "--no-ext-diff", "--no-textconv", "--binary", "--find-renames", delta),
     }
@@ -223,8 +229,8 @@ def proposal(previous, commit):
         return result
     require(result["notes"].startswith("## Highlights\n") and "\n- " in result["notes"],
             "notes must contain Highlights and bullets")
-    for label, target in re.findall(r"\[#(\d+)\]\(https://github\.com/[^/]+/[^/]+/pull/(\d+)\)", result["notes"]):
-        require(label == target, "PR link label differs from target")
+    for link in re.findall(r"\[[^\]]+\]\(https://github\.com/[^/]+/[^/]+/pull/\d+\)", result["notes"]):
+        require(link in evidence["pull_request_links"], "PR link not in release evidence")
     minor, patch = map(int, STABLE.fullmatch(previous).groups())
     tag = f"v0.{minor + 1}.0" if result["bump"] == "minor" else f"v0.{minor}.{patch + 1}"
     result.update(previous=previous, commit=commit, tag=tag)
