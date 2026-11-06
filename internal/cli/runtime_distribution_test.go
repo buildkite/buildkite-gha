@@ -55,6 +55,46 @@ func TestLinuxARM64RuntimeDistributionValidatesELFArchitecture(t *testing.T) {
 	if err := validateRuntimeDistributionBinary(compiler.PlatformLinuxAMD64, contents); err == nil || !strings.Contains(err.Error(), "linux/amd64") {
 		t.Fatalf("Linux AMD64 accepted ARM64 executable: %v", err)
 	}
+
+	for _, label := range []string{"ubuntu-24.04-arm", "ubuntu-26.04-arm", "depot-ubuntu-22.04-arm-64", "BLACKSMITH-32VCPU-UBUNTU-2604-ARM", "warp-ubuntu-latest-arm64-8x", "warp-ubuntu-2604-arm64-12x-xfast", "ubicloud-standard-30-arm-ubuntu-2604", "ubicloud-arm"} {
+		for _, queue := range []string{"linux-arm64-medium", "custom-arm"} {
+			t.Run(label+" upload "+queue, func(t *testing.T) {
+				requireImporterHost(t)
+				explicit := queue == "custom-arm"
+				setRunnerResolutionVerdicts(t, map[string]map[string]any{
+					label: {"validated": explicit, "target": map[string]string{"queue": queue, "platform": "linux/arm64"}},
+				})
+				workflow := filepath.Join(t.TempDir(), "arm.yml")
+				if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  arm:\n    runs-on: "+label+"\n    steps: [{run: uname -m}]\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("BUILDKITE", "true")
+				t.Setenv("BUILDKITE_STEP_KEY", "arm-importer")
+				runner := &cliCaptureRunner{}
+				var stdout, stderr bytes.Buffer
+				args := []string{"upload", "--event-path", "../../testdata/smoke/events/push.json",
+					"--runtime-distribution", "linux/arm64=" + path}
+				if explicit {
+					args = append(args, "--runner-queue", label+"="+queue)
+				}
+				if code := run(append(args, workflow), &stdout, &stderr, "dev", runner); code != 0 {
+					t.Fatalf("upload = %d: %s", code, stderr.String())
+				}
+				jobs := uploadedPlans(t, runner)["arm"]
+				digest := distributions[compiler.PlatformLinuxARM64].digest
+				if len(jobs) != 1 || jobs[0].Target.Queue != queue || jobs[0].RuntimeDistributionDigest() != digest {
+					t.Fatalf("ARM64 plans = %#v", jobs)
+				}
+				artifactPath, err := buildkitepipeline.DistributionPath(digest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if transport.Digest(runner.uploaded[artifactPath]) != digest {
+					t.Fatal("ARM64 executable was not uploaded intact")
+				}
+			})
+		}
+	}
 }
 
 func TestWindowsRuntimeDistributionValidatesPEAndNeedsNoUnixExecuteBit(t *testing.T) {
