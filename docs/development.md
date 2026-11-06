@@ -614,23 +614,28 @@ The branch must be pushed, and its remote commit must match `HEAD`. Use `--githu
 
 ## Publish a release
 
-Releases run through a configured Buildkite pipeline. Set `RELEASE_PIPELINE`
-to its organization and pipeline slug. With the
-[Buildkite CLI](https://buildkite.com/docs/platform/cli) authenticated, start a
-release of the current remote main commit:
+Configured main CI builds automatically trigger the release pipeline after all
+gates pass, including native macOS tests, runtime proofs, and the runtime
+regression gate. A declarative asynchronous trigger passes the exact source SHA.
+PR, tag, and specialized test builds do not trigger releases.
+
+The release pipeline trusts CI and branch protection. It does not run tests,
+poll checks (including the separate Windows workflow), trigger CI, or download CI
+artifacts. One serialized job chooses the version, creates the tag, and runs
+GoReleaser to build and publish versioned binaries. Release builds have no cache
+volume and do not use artifacts or caches from branch builds.
+
+To start a standalone release, set `RELEASE_PIPELINE` to its organization and
+pipeline slug. With the [Buildkite CLI](https://buildkite.com/docs/platform/cli)
+authenticated, release the current remote main commit:
 
 ```sh
 mise run release
 ```
 
 Starting this build authorizes publication; there is no separate approval step.
-Local changes and local tags are not released. [The release pipeline](../.buildkite/release.yml)
-synchronously triggers the existing CI pipeline for the exact source SHA,
-including native macOS tests, runtime proofs, and the runtime regression gate.
-The serialized publisher runs only after that build passes. It also waits up
-to 15 minutes for GitHub commit statuses and checks, including the native
-`windows` job in `.github/workflows/windows-runtime.yml`. Failed checks block
-publication. Ordinary CI and tag builds do not publish releases.
+Local changes and local tags are not released. Standalone runs also trust main;
+the operator must choose a commit whose required checks have passed.
 
 The job passes every commit's metadata and the complete aggregate diff since
 the highest reachable stable pre-1.0 tag to the
@@ -645,22 +650,23 @@ The version policy is minor for additive compatibility, features, or breaking
 changes, and patch for fixes and internal-only changes. The script computes the
 next version; the model cannot supply an arbitrary tag. No changes, or a decision
 that no release is warranted, finish without publication. Ambiguity fails for
-human review. A changed main commit or previous release requires a new build.
+human review. A queued run keeps its source SHA if main advances; a commit already
+covered by a newer release is skipped. Existing tags and incomplete releases are
+never overwritten.
 
 GoReleaser retains the exact drafted notes and publishes the Linux/amd64,
 Linux/arm64, Darwin/arm64, and Windows/amd64 archives plus `checksums.txt`.
-The script downloads the published assets, verifies their names, checksums,
-archive members, release body, and tag target, and executes the Linux amd64
-binary to check its version. Other platforms receive archive/checksum checks,
-not native execution. Only then does it post deduplicated release comments on
-PRs merged into main within the release delta and queue a Buildkite Slack
+Final archives are built once the model chooses the version, since each binary
+embeds that version. Packaging checks belong to CI's `mise run release:check`,
+not the publisher. After GoReleaser succeeds, the job posts deduplicated comments on
+PRs merged into main within the release delta and queues a Buildkite Slack
 notification to the configured destination if the build passes. The message
 contains the version, a single-line highlight capped at 180 characters, and a
 release link. It uses Buildkite's Slack bot, not a personal identity or token.
 Dry runs, no-release decisions, and failed builds send no release notification.
-The build retains the proposal, exact notes, and verification receipt as artifacts.
+The build retains the proposal, exact notes, and publication result as artifacts.
 
-To exercise the same gates and model call without publishing or notifying
+To exercise the model call without publishing or notifying
 anyone, run:
 
 ```sh
@@ -673,12 +679,12 @@ Dry runs still create Buildkite annotations and artifacts.
 ### Configure the release pipeline
 
 Keep deployment-specific values in private pipeline configuration, not this
-repository. Supply these variables to the job that uploads `.buildkite/release.yml`:
+repository. Run `buildkite-agent pipeline upload .buildkite/release.yml` in the release
+pipeline's bootstrap job with these variables:
 
 | Variable | Value |
 | --- | --- |
 | `RELEASE_PIPELINE` | Release pipeline in `organization/pipeline` form; also required by the local launcher |
-| `RELEASE_CI_PIPELINE` | Pipeline slug to trigger for source checks |
 | `RELEASE_QUEUE` | Linux amd64 agent queue |
 | `RELEASE_MODEL` | Model identifier available through the Anthropic provider |
 | `RELEASE_APP_ID`, `RELEASE_APP_INSTALLATION_ID` | GitHub App and repository installation identifiers |
@@ -686,19 +692,25 @@ repository. Supply these variables to the job that uploads `.buildkite/release.y
 | `RELEASE_BUGSNAG_API_KEY_SECRET` | Buildkite Secret name holding the ingestion key |
 | `RELEASE_SLACK_CHANNEL` | Destination supported by the configured Buildkite Slack integration |
 
+In the main CI bootstrap, set `RELEASE_PIPELINE_SLUG` to the release pipeline slug to
+enable the automatic handoff. It defaults to publication; set `RELEASE_DRY_RUN=1`
+in that private configuration while validating the handoff. CI does not need
+the release pipeline's GitHub App credential, model settings, or Slack destination.
+
 The pipeline requires Python 3, OpenSSL, Git, and the Buildkite agent; mise
-supplies Go and GoReleaser. Permit it to trigger the CI pipeline. Restrict
-execution to main, disable PR/fork/tag triggers, and disable its commit-status
-publishing so the release check does not wait on itself.
+supplies Go and GoReleaser. Permit main CI to trigger release, not the reverse. Restrict release
+execution to main, disable its direct webhook/PR/fork/tag triggers, and disable
+its commit-status publishing so release results do not replace CI results.
+Required tests must be enforced by CI or branch protection, not release jobs.
 
 Limit the GitHub App installation to this repository, with Contents and Pull
-requests write access and Checks and Commit statuses read access. Installation
+requests write access. Installation
 tokens are repository-scoped, registered for log redaction, and revoked on exit.
 Store credential values only in secret storage. Restrict secret access and
 pipeline editing to trusted release jobs and maintainers; script guards alone
 do not isolate credentials.
 
-Before enabling automatic builds, run a dry run and verify the checks, proposal,
+Before enabling publication, run an automatic dry run and verify the handoff, proposal,
 and provider access. Confirm Slack delivery after the first verified release.
 
 ### Recover a failed release
@@ -708,7 +720,7 @@ assets. A failed API request can have succeeded remotely. Inspect the tag,
 draft, assets, and build artifacts before taking action; do not blindly retry.
 The script does not automatically resume a partial release. An existing draft
 or tag blocks publication, including after a failed GoReleaser run. If only
-post-publication verification or PR comments failed, verify the existing release
+PR comments or notifications failed, verify the existing release
 and complete missing comments without republishing. Obtain separate approval
 for any recovery that changes remote state.
 
