@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -72,9 +73,10 @@ def request(url, token, payload=None, method=None):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
     if "/ai/anthropic/" in url:
         headers = {"x-api-key": token, "anthropic-version": "2023-06-01"}
-    headers["Content-Type"] = "application/json"
+    headers["Content-Type"] = "application/octet-stream" if isinstance(payload, bytes) else "application/json"
+    data = payload if isinstance(payload, bytes) else None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(
-        url, data=None if payload is None else json.dumps(payload).encode(), headers=headers, method=method
+        url, data=data, headers=headers, method=method
     )
     try:
         with urllib.request.urlopen(req, timeout=180) as response:
@@ -88,8 +90,8 @@ def request(url, token, payload=None, method=None):
         raise RuntimeError(f"API request failed: HTTP {error.code}: {detail} ({url})") from None
 
 
-def github(path, token, payload=None):
-    return request(f"https://api.github.com/repos/{REPO}/{path}", token, payload)
+def github(path, token, payload=None, method=None):
+    return request(f"https://api.github.com/repos/{REPO}/{path}", token, payload, method)
 
 
 def pages(path, token, key=None):
@@ -105,8 +107,8 @@ def pages(path, token, key=None):
 
 
 def wait_for_checks(commit, token):
-    # The synchronous CI trigger covers Buildkite. GitHub's native Windows job
-    # runs independently on main pushes, so it can still be running afterwards.
+    # An asynchronous handoff lets the source CI build finish before this gate.
+    # GitHub's native Windows job also runs independently on main pushes.
     deadline = time.monotonic() + 15 * 60
     while True:
         status = github(f"commits/{commit}/status", token)
@@ -166,13 +168,16 @@ def remote_tag(tag):
     return values.get(f"refs/tags/{tag}^{{}}", values.get(f"refs/tags/{tag}"))
 
 
-def source_state(commit):
+def source_state(commit, current_main=True):
     if run("git", "rev-parse", "--is-shallow-repository") == "true":
         run("git", "fetch", "--unshallow", "origin")
     # Never force-update tags, including in the local checkout.
     run("git", "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main", "--tags")
     require(run("git", "rev-parse", "HEAD") == commit, "checkout differs from build commit")
-    require(run("git", "rev-parse", "origin/main") == commit, "main advanced; start a new build")
+    if current_main:
+        require(run("git", "rev-parse", "origin/main") == commit, "main advanced; start a new build")
+    else:
+        run("git", "merge-base", "--is-ancestor", commit, "origin/main")
     require(not run("git", "status", "--porcelain", "--untracked-files=all"), "checkout is dirty")
     tags = run("git", "tag", "--merged", commit, "--list", "v0.*", "--sort=-version:refname")
     previous = next((tag for tag in tags.splitlines() if STABLE.fullmatch(tag)), None)
@@ -241,6 +246,89 @@ def proposal(previous, commit):
     return result
 
 
+def verify_assets(root, tag):
+    checksums = {}
+    for line in (root / "checksums.txt").read_text().splitlines():
+        digest, name = line.split()
+        require(name not in checksums and re.fullmatch(r"[0-9a-f]{64}", digest), "invalid checksum entry")
+        checksums[name] = digest
+    require(set(checksums) == ASSETS - {"checksums.txt"}, "checksum file has unexpected members")
+    with tempfile.TemporaryDirectory() as directory:
+        executable = Path(directory) / "buildkite-gha"
+        for name, digest in checksums.items():
+            require(hashlib.sha256((root / name).read_bytes()).hexdigest() == digest, f"checksum mismatch: {name}")
+            binary = "buildkite-gha.exe" if "Windows" in name else "buildkite-gha"
+            with tarfile.open(root / name) as archive:
+                members = archive.getmembers()
+                require(len(members) == 2 and {m.name for m in members} == {"LICENSE", binary}
+                        and all(m.isfile() for m in members), f"unexpected archive members: {name}")
+                if name == "buildkite-gha_Linux_x86_64.tar.gz":
+                    executable.write_bytes(archive.extractfile(binary).read())
+                    executable.chmod(0o755)
+        require(run(str(executable), "--version") == f"buildkite-gha {tag[1:]}",
+                "binary reports the wrong version")
+
+
+def build_artifacts(commit):
+    # Packaging an earlier main commit is safe; only publication requires the tip.
+    previous = source_state(commit, current_main=False)
+    root = Path(".release/candidates")
+    root.mkdir(parents=True, exist_ok=True)
+    # The model decides later. Both permitted versions can be built without
+    # exposing publication credentials or making a model call in ordinary CI.
+    minor, patch = map(int, STABLE.fullmatch(previous).groups())
+    tags = [f"v0.{minor}.{patch + 1}", f"v0.{minor + 1}.0"]
+    env = dict(os.environ, BUGSNAG_API_KEY=secret(os.environ["RELEASE_BUGSNAG_API_KEY_SECRET"]))
+    for tag in tags:
+        subprocess.run(["goreleaser", "release", "--snapshot", "--clean"],
+                       env=dict(env, RELEASE_VERSION=tag[1:]), check=True)
+        destination = root / tag
+        destination.mkdir(exist_ok=True)
+        for name in ASSETS:
+            shutil.copyfile(Path("dist") / name, destination / name)
+        verify_assets(destination, tag)
+    source = {"commit": commit, "previous": previous, "tags": tags,
+              "build_id": os.environ["BUILDKITE_BUILD_ID"],
+              "pipeline": os.environ["BUILDKITE_PIPELINE_SLUG"], "branch": "main"}
+    (root / "source.json").write_text(json.dumps(source, indent=2) + "\n")
+    run("buildkite-agent", "artifact", "upload", ".release/candidates/**/*")
+    parent_job = os.environ.get("RELEASE_REQUEST_JOB_ID")
+    if parent_job:
+        # Return the fallback build ID to the waiting release without REST API credentials.
+        run("buildkite-agent", "meta-data", "set", "release-source-build", source["build_id"], "--job", parent_job)
+    else:
+        target = os.environ["RELEASE_PIPELINE"].split("/")
+        require(len(target) == 2 and target[0] == os.environ["BUILDKITE_ORGANIZATION_SLUG"],
+                "release pipeline must be in this organization")
+        dry_run = os.environ.get("RELEASE_DRY_RUN", "1")
+        require(dry_run in ("0", "1"), "RELEASE_DRY_RUN must be 0 or 1")
+        trigger = {"trigger": target[1], "async": True, "label": ":rocket: Release checked artifacts",
+                   "build": {"branch": "main", "commit": commit, "env": {
+                       "RELEASE_SOURCE_BUILD_ID": source["build_id"], "RELEASE_DRY_RUN": dry_run}}}
+        subprocess.run(["buildkite-agent", "pipeline", "upload", "--no-interpolation"],
+                       input=json.dumps({"steps": [trigger]}), text=True, check=True)
+
+
+def download_artifacts(plan):
+    source_id = os.environ.get("RELEASE_SOURCE_BUILD_ID") or run(
+        "buildkite-agent", "meta-data", "get", "release-source-build")
+    root = Path(".release/candidates")
+    # A build/step-scoped download cannot silently pick another build's files.
+    run("buildkite-agent", "artifact", "download", ".release/candidates/source.json", ".",
+        "--build", source_id, "--step", "release-artifacts")
+    source = json.loads((root / "source.json").read_text())
+    require(source["build_id"] == source_id and source["commit"] == plan["commit"]
+            and source["previous"] == plan["previous"] and plan["tag"] in source["tags"]
+            and source["pipeline"] == os.environ["RELEASE_CI_PIPELINE"] and source["branch"] == "main",
+            "release artifacts do not match the checked source and version")
+    assets = root / plan["tag"]
+    run("buildkite-agent", "artifact", "download", f"{assets}/*", ".",
+        "--build", source_id, "--step", "release-artifacts")
+    require({p.name for p in assets.iterdir()} == ASSETS, "unexpected candidate assets")
+    verify_assets(assets, plan["tag"])
+    return assets, source_id
+
+
 def verify_release(plan, token):
     tag, commit = plan["tag"], plan["commit"]
     release = github(f"releases/tags/{tag}", token)
@@ -256,25 +344,7 @@ def verify_release(plan, token):
             # This public repository's release downloads need no credential.
             with urllib.request.urlopen(asset["browser_download_url"], timeout=180) as response:
                 (root / asset["name"]).write_bytes(response.read())
-        checksums = {}
-        for line in (root / "checksums.txt").read_text().splitlines():
-            digest, name = line.split()
-            require(name not in checksums and re.fullmatch(r"[0-9a-f]{64}", digest), "invalid checksum entry")
-            checksums[name] = digest
-        require(set(checksums) == ASSETS - {"checksums.txt"}, "checksum file has unexpected members")
-        for name, digest in checksums.items():
-            require(hashlib.sha256((root / name).read_bytes()).hexdigest() == digest, f"checksum mismatch: {name}")
-            binary = "buildkite-gha.exe" if "Windows" in name else "buildkite-gha"
-            with tarfile.open(root / name) as archive:
-                members = archive.getmembers()
-                require(len(members) == 2 and {m.name for m in members} == {"LICENSE", binary}
-                        and all(m.isfile() for m in members), f"unexpected archive members: {name}")
-                if name == "buildkite-gha_Linux_x86_64.tar.gz":
-                    executable = root / binary
-                    executable.write_bytes(archive.extractfile(binary).read())
-                    executable.chmod(0o755)
-        require(run(str(root / "buildkite-gha"), "--version") == f"buildkite-gha {tag[1:]}",
-                "published binary reports the wrong version")
+        verify_assets(root, tag)
     return {"url": release["html_url"], "tag": tag, "commit": commit,
             "notes_match": True, "assets": sorted(ASSETS), "checksums_match": True,
             "linux_amd64_version": tag[1:], "other_platforms": "checksums and archive members only"}
@@ -298,15 +368,26 @@ def comment_on_prs(plan, token):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true", help="propose only; do not tag, publish, or comment")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="verify candidates; do not tag, publish, or comment")
+    mode.add_argument("--build-artifacts", action="store_true", help="build both candidate versions in CI")
+    mode.add_argument("--upload", action="store_true", help="load release steps, reusing the triggering CI build")
     args = parser.parse_args()
     os.chdir(Path(__file__).resolve().parent.parent)
-    for name in ("RELEASE_PIPELINE", "RELEASE_APP_ID", "RELEASE_APP_INSTALLATION_ID",
-                 "RELEASE_APP_PRIVATE_KEY_SECRET", "RELEASE_BUGSNAG_API_KEY_SECRET",
-                 "RELEASE_SLACK_CHANNEL", "RELEASE_MODEL"):
+    required = ["RELEASE_PIPELINE", "RELEASE_CI_PIPELINE"]
+    if args.build_artifacts:
+        required.append("RELEASE_BUGSNAG_API_KEY_SECRET")
+    elif not args.upload:
+        required += ["RELEASE_APP_ID", "RELEASE_APP_INSTALLATION_ID", "RELEASE_APP_PRIVATE_KEY_SECRET",
+                     "RELEASE_SLACK_CHANNEL", "RELEASE_MODEL"]
+    for name in required:
         require(os.environ.get(name), f"{name} is required")
     pipeline = f"{os.environ.get('BUILDKITE_ORGANIZATION_SLUG')}/{os.environ.get('BUILDKITE_PIPELINE_SLUG')}"
-    require(pipeline == os.environ["RELEASE_PIPELINE"], "requires the release pipeline")
+    if args.build_artifacts:
+        require(os.environ.get("BUILDKITE_PIPELINE_SLUG") == os.environ["RELEASE_CI_PIPELINE"],
+                "requires the CI pipeline")
+    else:
+        require(pipeline == os.environ["RELEASE_PIPELINE"], "requires the release pipeline")
     require(os.environ.get("BUILDKITE_BRANCH") == "main" and not os.environ.get("BUILDKITE_TAG")
             and os.environ.get("BUILDKITE_PULL_REQUEST", "false") == "false", "requires a main branch build")
     require(not any(os.environ.get(name) for name in
@@ -314,6 +395,20 @@ def main():
             "release builds cannot skip or replace CI gates")
     commit = os.environ.get("BUILDKITE_COMMIT", "")
     require(re.fullmatch(r"[0-9a-f]{40}", commit), "requires a full build commit")
+    if args.upload:
+        if os.environ.get("BUILDKITE_TRIGGERED_FROM_BUILD_PIPELINE_SLUG") == os.environ["RELEASE_CI_PIPELINE"]:
+            source_id = os.environ["BUILDKITE_TRIGGERED_FROM_BUILD_ID"]
+            require(os.environ.get("RELEASE_SOURCE_BUILD_ID", source_id) == source_id,
+                    "source build differs from triggering CI build")
+            os.environ["RELEASE_SOURCE_BUILD_ID"] = source_id
+        source_id = os.environ.get("RELEASE_SOURCE_BUILD_ID", "")
+        require(not source_id or re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", source_id),
+                "RELEASE_SOURCE_BUILD_ID must be a build UUID")
+        subprocess.run(["buildkite-agent", "pipeline", "upload", ".buildkite/release.yml"], check=True)
+        return
+    if args.build_artifacts:
+        build_artifacts(commit)
+        return
     with github_token() as token:
         release(commit, token, args.dry_run)
 
@@ -345,22 +440,28 @@ def release(commit, token, dry_run):
     # Unlike lookup by tag, listing with push access includes unpublished drafts.
     require(not any(release["tag_name"] == tag for release in pages("releases", token)),
             "next release already exists")
+    assets, source_id = download_artifacts(plan)
+    (output / "artifact-source.json").write_text(json.dumps({
+        "build_id": source_id, "commit": commit, "tag": tag, "assets": sorted(ASSETS),
+        "checksums_match": True, "linux_amd64_version": tag[1:],
+    }, indent=2) + "\n")
     if dry_run:
-        print("Dry run: no tag, release, or PR comments created.")
+        print("Dry run: CI artifacts verified; no rebuild, tag, release, PR comments, or Slack notification.")
         return
-    # Retrieve all required credentials before the first irreversible operation.
-    env = dict(os.environ, GITHUB_TOKEN=token,
-               BUGSNAG_API_KEY=secret(os.environ["RELEASE_BUGSNAG_API_KEY_SECRET"]),
-               GORELEASER_CURRENT_TAG=tag, GORELEASER_PREVIOUS_TAG=previous)
+    require(source_state(commit) == previous, "another release appeared; start a new build")
     github("git/refs", token, {"ref": f"refs/tags/{tag}", "sha": commit})
-    github("releases", token, {"tag_name": tag, "name": tag,
-                              "draft": True, "prerelease": False, "body": plan["notes"]})
+    draft = github("releases", token, {"tag_name": tag, "name": tag,
+                                      "draft": True, "prerelease": False, "body": plan["notes"]})
     run("git", "fetch", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
     require(remote_tag(tag) == commit and run("git", "rev-parse", f"{tag}^{{commit}}") == commit,
             "new tag does not match the checked commit")
-    # GoReleaser owns packaging/publication. Existing drafts retain the exact notes.
-    subprocess.run(["goreleaser", "release", "--clean"], env=env, check=True)
+    # Upload precisely the archives verified above; never rebuild for publication.
+    for name in sorted(ASSETS):
+        request(f"https://uploads.github.com/repos/{REPO}/releases/{draft['id']}/assets?name={name}",
+                token, (assets / name).read_bytes())
+    github(f"releases/{draft['id']}", token, {"draft": False, "make_latest": "true"}, method="PATCH")
     receipt = verify_release(plan, token)
+    receipt["source_build_id"] = source_id
     receipt["pull_requests"] = comment_on_prs(plan, token)
     (output / "verification.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, indent=2))

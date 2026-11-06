@@ -1,5 +1,8 @@
 version: 2
 
+snapshot:
+  version_template: '{{ envOrDefault "RELEASE_VERSION" (printf "%s-SNAPSHOT" .Version) }}'
+
 builds:
   - id: buildkite-gha-linux
     main: ./cmd/buildkite-gha

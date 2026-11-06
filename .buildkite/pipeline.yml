@@ -217,3 +217,19 @@ steps:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.10.17"
     command: "mise run vulnerability"
+
+  - wait: ~
+
+  - label: ":package: Build release candidates and hand off"
+    key: "release-artifacts"
+    if: build.branch == "main" && build.tag == null && build.pull_request.id == null && build.env("RELEASE_PIPELINE") != null && build.env("VULNERABILITY_SCAN") == null && build.env("DEMO_SUITE") == null && build.env("COMPATIBILITY_PROOF") == null && build.env("SMOKE_PROBE") == null
+    timeout_in_minutes: 20
+    retry:
+      automatic: false
+    cache: ".buildkite/cache-volume"
+    plugins:
+      - setup-go#v0.1.0:
+          mise-version: "2026.10.17"
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.10.17"
+    command: "python3 scripts/release-pipeline --build-artifacts"

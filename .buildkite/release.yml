@@ -7,11 +7,13 @@ steps:
     key: "release-ci"
     trigger: "${RELEASE_CI_PIPELINE}"
     async: false
-    if: build.branch == "main" && build.tag == null && build.pull_request.id == null
+    if: 'build.branch == "main" && build.tag == null && build.pull_request.id == null && "${RELEASE_SOURCE_BUILD_ID:-}" == ""'
     build:
       branch: "main"
       commit: "${BUILDKITE_COMMIT}"
       message: "Release checks for ${BUILDKITE_COMMIT}"
+      env:
+        RELEASE_REQUEST_JOB_ID: "${BUILDKITE_JOB_ID}"
 
   - wait: ~
 
@@ -29,6 +31,7 @@ steps:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.10.17"
     command: |
+      export RELEASE_SOURCE_BUILD_ID="${RELEASE_SOURCE_BUILD_ID:-}"
       case "$${RELEASE_DRY_RUN:-0}" in
         0) python3 scripts/release-pipeline ;;
         1) python3 scripts/release-pipeline --dry-run ;;
@@ -38,4 +41,5 @@ steps:
       - ".release/model-response.json"
       - ".release/proposal.json"
       - ".release/notes.md"
+      - ".release/artifact-source.json"
       - ".release/verification.json"
