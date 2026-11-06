@@ -8,10 +8,11 @@ description: Starts and verifies Buildkite-managed buildkite-gha releases. Use f
 Read [the release runbook](../../../docs/development.md#publish-a-release).
 Buildkite owns orchestration. Do not tag, draft, or publish outside the
 configured pipeline. Only the Buildkite model-provider call chooses the
-bump and writes notes; deterministic code performs publication and verification.
+bump and writes notes; GoReleaser builds and publishes.
 
 ## Start
 
+- Main CI triggers releases automatically. Do not start a duplicate build.
 - A release request authorizes `mise run release`. It starts the dedicated
   pipeline for the current remote main SHA; it does not release local work.
 - Obtain `RELEASE_PIPELINE` and deployment configuration from private settings;
@@ -19,21 +20,20 @@ bump and writes notes; deterministic code performs publication and verification.
 - For a proposal or notes-only request, start that pipeline with
   `RELEASE_DRY_RUN=1` and the full current main SHA. Never publish for a draft request.
 - Confirm the runbook's configuration requirements before the first run.
-- Do not bypass failing gates or automatically retry a partial publication.
+- Release trusts CI and main; it does not rerun or poll checks. For manual runs,
+  confirm the selected commit passed CI. Never automatically retry partial publication.
 
 ## Observe
 
 Use Buildkite events to follow the build. Inspect its proposal and exact notes
-artifacts. If the decision is ambiguous or main advances, report the failure;
+artifacts. If the decision is ambiguous, report the failure;
 do not substitute a manually chosen version.
 
-Report success only after the `publish-release` job passes and its
-`.release/verification.json` artifact confirms the tag/commit, exact notes,
-assets, checksums, archive members, Linux amd64 version, and included PR comments.
+Report success only after the `publish-release` job passes with a
+`.release/result.json` artifact identifying the release, commit, and included PRs.
 Link the release. Share build links only in authorized private contexts.
-State that other platform binaries received archive
-and checksum checks, not native execution. No-change and dry-run builds did not
-publish. Do not post to Slack unless explicitly requested.
+No-change and dry-run builds did not publish. Do not claim release binaries were
+executed or independently verified. Do not post to Slack unless explicitly requested.
 
 ## Recovery and historical notes
 

@@ -3,21 +3,7 @@ env:
   MISE_LOCKED: "1"
 
 steps:
-  - label: ":test_tube: Check release source"
-    key: "release-ci"
-    trigger: "${RELEASE_CI_PIPELINE}"
-    async: false
-    if: 'build.branch == "main" && build.tag == null && build.pull_request.id == null && "${RELEASE_SOURCE_BUILD_ID:-}" == ""'
-    build:
-      branch: "main"
-      commit: "${BUILDKITE_COMMIT}"
-      message: "Release checks for ${BUILDKITE_COMMIT}"
-      env:
-        RELEASE_REQUESTED: "1"
-
-  - wait: ~
-
-  - label: ":rocket: Prepare, publish, and verify release"
+  - label: ":rocket: Decide, tag, build, and publish"
     key: "publish-release"
     if: build.branch == "main" && build.tag == null && build.pull_request.id == null
     concurrency: 1
@@ -27,14 +13,12 @@ steps:
       automatic: false
     agents:
       queue: "${RELEASE_QUEUE}"
-    cache: ".buildkite/cache-volume"
     plugins:
       - setup-go#v0.1.0:
           mise-version: "2026.10.17"
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.10.17"
     command: |
-      export RELEASE_SOURCE_BUILD_ID="${RELEASE_SOURCE_BUILD_ID:-}"
       case "$${RELEASE_DRY_RUN:-0}" in
         0) python3 scripts/release-pipeline ;;
         1) python3 scripts/release-pipeline --dry-run ;;
@@ -44,4 +28,4 @@ steps:
       - ".release/model-response.json"
       - ".release/proposal.json"
       - ".release/notes.md"
-      - ".release/verification.json"
+      - ".release/result.json"

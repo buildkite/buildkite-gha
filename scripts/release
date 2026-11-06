@@ -14,13 +14,6 @@ esac
 : "${RELEASE_PIPELINE:?Set RELEASE_PIPELINE to the configured organization/pipeline}"
 commit="$(git ls-remote --exit-code https://github.com/buildkite/buildkite-gha refs/heads/main | cut -f1)"
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
-source_args=()
-if [[ -n "${RELEASE_SOURCE_BUILD_ID:-}" ]]; then
-  [[ "$RELEASE_SOURCE_BUILD_ID" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || {
-    echo 'RELEASE_SOURCE_BUILD_ID must be a build UUID' >&2; exit 1;
-  }
-  source_args=(--env "RELEASE_SOURCE_BUILD_ID=$RELEASE_SOURCE_BUILD_ID")
-fi
 exec bk build create --pipeline "$RELEASE_PIPELINE" \
   --branch main --commit "$commit" --message 'Release buildkite-gha' \
-  --env "RELEASE_DRY_RUN=${RELEASE_DRY_RUN:-0}" "${source_args[@]}" --yes
+  --env "RELEASE_DRY_RUN=${RELEASE_DRY_RUN:-0}" --yes

@@ -3,7 +3,6 @@
 
 from contextlib import redirect_stdout
 import base64
-import hashlib
 import io
 import json
 import os
@@ -12,7 +11,6 @@ import runpy
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -32,7 +30,6 @@ class ReleaseLauncherTest(unittest.TestCase):
                 (root / name).chmod(0o755)
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", RELEASE_PIPELINE="example/releases")
             env.pop("RELEASE_DRY_RUN", None)
-            env.pop("RELEASE_SOURCE_BUILD_ID", None)
             for value in (None, "0", "1", "true"):
                 with self.subTest(value=value):
                     current = dict(env)
@@ -49,11 +46,6 @@ class ReleaseLauncherTest(unittest.TestCase):
                         args = result.stdout.splitlines()
                         self.assertEqual(args[args.index("--pipeline") + 1], "example/releases")
                         self.assertEqual(args[args.index("--env") + 1], f"RELEASE_DRY_RUN={value or '0'}")
-            source = "00000000-0000-0000-0000-000000000001"
-            env["RELEASE_SOURCE_BUILD_ID"] = source
-            result = subprocess.run([str(SCRIPT.with_name("release"))], env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(f"RELEASE_SOURCE_BUILD_ID={source}", result.stdout.splitlines())
 
 
 class ReleaseTest(unittest.TestCase):
@@ -94,7 +86,6 @@ class ReleaseTest(unittest.TestCase):
         self.env = {
             "BUILDKITE_ORGANIZATION_SLUG": "example", "BUILDKITE_PIPELINE_SLUG": "releases",
             "RELEASE_PIPELINE": "example/releases",
-            "RELEASE_CI_PIPELINE": "ci", "BUILDKITE_BUILD_ID": "00000000-0000-0000-0000-000000000001",
             "RELEASE_APP_ID": "123", "RELEASE_APP_INSTALLATION_ID": "456",
             "RELEASE_APP_PRIVATE_KEY_SECRET": "test-app-key",
             "RELEASE_BUGSNAG_API_KEY_SECRET": "test-ingestion-key",
@@ -108,20 +99,14 @@ class ReleaseTest(unittest.TestCase):
                          "## Highlights\n\n- New behavior. ([#12](https://github.com/buildkite/buildkite-gha/pull/12))\n"}
         self.response = None
         self.provider_calls = 0
-        self.check_results = ["success"]
-        self.statuses = [{"context": "buildkite/ci", "state": "success"}]
         self.advance_main = False
         self.api_failure = None
         self.bugsnag_key = "bugsnag-test"
-        self.corrupt_asset = False
-        self.wrong_notes = False
         self.fail_publish = False
         self.releases = {"v0.9.8": {"tag_name": "v0.9.8", "draft": False, "prerelease": False}}
         self.writes = []
         self.comments = {12: [], 13: []}
-        self.artifacts = {}
         self.notifications = []
-        self.triggers = []
         self.token_active = False
         self.token_redacted = False
         self.main = runpy.run_path(str(self.checkout / "scripts/release-pipeline"))["main"]
@@ -138,9 +123,7 @@ class ReleaseTest(unittest.TestCase):
         return self.real_output(args, **kwargs)
 
     def http(self, req, **kwargs):
-        url = req if isinstance(req, str) else req.full_url
-        if url.startswith("https://downloads.test/"):
-            return io.BytesIO(self.artifacts[url.rsplit("/", 1)[1]])
+        url = req.full_url
         body = json.loads(req.data) if req.data else None
         if url == "https://api.github.com/app/installations/456/access_tokens":
             header, claims, signature = req.get_header("Authorization").removeprefix("Bearer ").split(".")
@@ -153,7 +136,7 @@ class ReleaseTest(unittest.TestCase):
             self.real_run(["openssl", "dgst", "-sha256", "-verify", str(public), "-signature", str(signed)],
                           input=f"{header}.{claims}".encode(), check=True, stdout=subprocess.DEVNULL)
             self.assertEqual(body, {"repositories": ["buildkite-gha"], "permissions": {
-                "contents": "write", "pull_requests": "write", "checks": "read", "statuses": "read"}})
+                "contents": "write", "pull_requests": "write"}})
             self.token_active = True
             return io.BytesIO(b'{"token":"github-test"}')
         if url == "https://api.github.com/installation/token":
@@ -195,28 +178,13 @@ class ReleaseTest(unittest.TestCase):
                 self.writes.append((path, body))
             if path.startswith("releases?"):
                 result = list(self.releases.values())
-            elif path.startswith("releases/tags/"):
-                result = self.releases.get(path.removeprefix("releases/tags/"))
-                if result is None or result["draft"]:
-                    raise urllib.error.HTTPError(url, 404, "absent", {}, None)
             elif path == "git/refs":
                 self.git("--git-dir", str(self.origin), "update-ref", body["ref"], body["sha"])
                 result = {}
             elif path == "releases":
                 result = dict(body, id=1, html_url="https://github.com/buildkite/buildkite-gha/releases/tag/" + body["tag_name"])
                 self.releases[body["tag_name"]] = result
-            elif path.startswith("releases/1/assets?"):
-                result = [{"name": name, "browser_download_url": "https://downloads.test/" + name} for name in self.artifacts]
-            elif path == f"commits/{self.commit}/status":
-                result = {"state": "success", "statuses": self.statuses}
-            elif path.startswith(f"commits/{self.commit}/check-runs?"):
-                conclusion = self.check_results[0]
-                if len(self.check_results) > 1:
-                    self.check_results.pop(0)
-                result = [{"name": "windows", "app": {"slug": "github-actions"},
-                           "conclusion": None if conclusion == "pending" else conclusion,
-                           "status": "in_progress" if conclusion == "pending" else "completed"}]
-            elif path.startswith("commits/"):
+            elif path.startswith("commits/") and "/pulls?" in path:
                 result = [dict(number=number, merged_at="today", merge_commit_sha=sha,
                                base={"ref": "main", "repo": {"full_name": "buildkite/buildkite-gha"}})
                           for number, sha in ((12, self.commit), (13, self.previous))]
@@ -230,8 +198,6 @@ class ReleaseTest(unittest.TestCase):
             if "?per_page=100&page=" in path:
                 page = int(path.rsplit("=", 1)[1])
                 result = result[(page - 1) * 100:page * 100]
-            if "/check-runs?" in path:
-                result = {"check_runs": result}
         return io.BytesIO(json.dumps(result).encode())
 
     def publish(self, args, **kwargs):
@@ -240,13 +206,10 @@ class ReleaseTest(unittest.TestCase):
             self.token_redacted = True
             return subprocess.CompletedProcess(args, 0)
         if args[:3] == ["buildkite-agent", "pipeline", "upload"]:
-            if "--upload" in sys.argv:
-                self.upload_source = os.environ.get("RELEASE_SOURCE_BUILD_ID")
-                return subprocess.CompletedProcess(args, 0)
             self.assertIn("--no-interpolation", args)
             pipeline = json.loads(kwargs["input"])
             self.notifications.extend(pipeline.get("notify", []))
-            self.triggers.extend(pipeline.get("steps", []))
+            self.assertEqual(pipeline["steps"], [])
             return subprocess.CompletedProcess(args, 0)
         if args[0] != "goreleaser":
             return self.real_run(args, **kwargs)
@@ -258,24 +221,6 @@ class ReleaseTest(unittest.TestCase):
         release = self.releases[kwargs["env"]["GORELEASER_CURRENT_TAG"]]
         self.assertEqual(kwargs["env"]["GORELEASER_PREVIOUS_TAG"], "v0.9.8")
         release["draft"] = False
-        if self.wrong_notes:
-            release["body"] = "wrong notes"
-        checksums = []
-        for platform in ("Linux_x86_64", "Linux_arm64", "Darwin_arm64", "Windows_x86_64"):
-            name = f"buildkite-gha_{platform}.tar.gz"
-            binary = "buildkite-gha.exe" if platform.startswith("Windows") else "buildkite-gha"
-            stream = io.BytesIO()
-            with tarfile.open(fileobj=stream, mode="w:gz") as archive:
-                for member, data in (("LICENSE", b"license"), (binary, f"#!/bin/sh\necho 'buildkite-gha {release['tag_name'][1:]}'\n".encode())):
-                    info = tarfile.TarInfo(member)
-                    info.size = len(data)
-                    archive.addfile(info, io.BytesIO(data))
-            data = stream.getvalue()
-            checksums.append(f"{hashlib.sha256(data).hexdigest()}  {name}\n")
-            self.artifacts[name] = data
-        self.artifacts["checksums.txt"] = "".join(checksums).encode()
-        if self.corrupt_asset:
-            self.artifacts["buildkite-gha_Darwin_arm64.tar.gz"] += b"corruption"
         return subprocess.CompletedProcess(args, 0)
 
     def release(self, *args):
@@ -297,7 +242,7 @@ class ReleaseTest(unittest.TestCase):
 
     def test_minor_release_and_repeat(self):
         self.release()
-        receipt = json.loads((self.checkout / ".release/verification.json").read_text())
+        receipt = json.loads((self.checkout / ".release/result.json").read_text())
         self.assertEqual(receipt["tag"], "v0.10.0")
         self.assertEqual(receipt["commit"], self.commit)
         self.assertEqual(receipt["pull_requests"], [12])
@@ -391,20 +336,15 @@ class ReleaseTest(unittest.TestCase):
 
     def test_main_moves_during_generation(self):
         self.advance_main = True
-        with self.assertRaisesRegex(RuntimeError, "main advanced"):
-            self.release()
-        self.assertEqual(self.writes, [])
+        self.release()
+        self.assertEqual(self.git("ls-remote", "origin", "refs/tags/v0.10.0").split()[0], self.commit)
 
-    def test_waits_for_native_github_checks(self):
-        self.check_results = ["pending", "success"]
-        with patch("time.sleep"):
-            self.release()
-        self.assertEqual(len(self.comments[12]), 1)
-
-    def test_failed_github_checks_block_release(self):
-        self.check_results = ["failure"]
-        with self.assertRaisesRegex(RuntimeError, "GitHub check failed"):
-            self.release()
+    def test_already_released_newer_commit_skips_old_build(self):
+        newer = self.git("commit-tree", "HEAD^{tree}", "-p", self.commit, "-m", "Another merged change")
+        self.git("tag", "v0.10.0", newer)
+        self.git("push", "origin", f"{newer}:refs/heads/main", "refs/tags/v0.10.0")
+        self.releases["v0.10.0"] = {"tag_name": "v0.10.0", "draft": False, "prerelease": False}
+        self.assertIn("already covers this commit", self.release())
         self.assertEqual(self.writes, [])
         self.assertEqual(self.provider_calls, 0)
 
@@ -418,7 +358,7 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(self.writes, [])
 
     def test_missing_deployment_configuration_never_publishes(self):
-        for name in ("RELEASE_PIPELINE", "RELEASE_CI_PIPELINE", "RELEASE_APP_ID", "RELEASE_APP_INSTALLATION_ID",
+        for name in ("RELEASE_PIPELINE", "RELEASE_APP_ID", "RELEASE_APP_INSTALLATION_ID",
                      "RELEASE_APP_PRIVATE_KEY_SECRET", "RELEASE_BUGSNAG_API_KEY_SECRET",
                      "RELEASE_SLACK_CHANNEL", "RELEASE_MODEL"):
             with self.subTest(name=name), patch.dict(self.env, {name: ""}):
@@ -469,69 +409,13 @@ class ReleaseTest(unittest.TestCase):
             self.release()
         self.assertEqual(self.writes, writes)
         self.assertEqual(self.comments[12], [])
-
-    def test_bad_publication_never_announces_success(self):
-        self.corrupt_asset = True
-        with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
-            self.release()
-        self.assertFalse((self.checkout / ".release/verification.json").exists())
-        self.assertEqual(self.comments[12], [])
         self.assertEqual(self.notifications, [])
-
-    def test_changed_notes_never_announces_success(self):
-        self.wrong_notes = True
-        with self.assertRaisesRegex(RuntimeError, "notes differ"):
-            self.release()
-        self.assertEqual(self.comments[12], [])
 
     def test_existing_release_comment_is_not_duplicated(self):
         self.comments[12] = [{"body": "Earlier discussion"}] * 100 + [
             {"body": "Released in [v0.10.0](https://github.com/buildkite/buildkite-gha/releases/tag/v0.10.0)"}]
         self.release()
         self.assertEqual(len(self.comments[12]), 101)
-
-    def test_ci_handoff_defaults_to_publication_and_fallback_does_not_loop(self):
-        self.env["BUILDKITE_PIPELINE_SLUG"] = "ci"
-        for key in ("RELEASE_APP_ID", "RELEASE_APP_INSTALLATION_ID", "RELEASE_APP_PRIVATE_KEY_SECRET",
-                    "RELEASE_BUGSNAG_API_KEY_SECRET", "RELEASE_SLACK_CHANNEL", "RELEASE_MODEL"):
-            del self.env[key]
-        self.release("--trigger")
-        self.assertEqual(self.triggers, [{"trigger": "releases", "async": True,
-            "label": ":rocket: Release checked main", "build": {
-                "branch": "main", "commit": self.commit, "env": {
-                    "RELEASE_SOURCE_BUILD_ID": self.env["BUILDKITE_BUILD_ID"], "RELEASE_DRY_RUN": "0"}}}])
-        self.triggers.clear()
-        self.env["RELEASE_DRY_RUN"] = "1"
-        self.release("--trigger")
-        self.assertEqual(self.triggers[0]["build"]["env"]["RELEASE_DRY_RUN"], "1")
-        self.triggers.clear()
-        self.env["RELEASE_REQUESTED"] = "1"
-        self.release("--trigger")
-        self.assertEqual(self.triggers, [])
-        self.assertEqual(self.provider_calls, 0)
-        self.assertEqual(self.writes, [])
-
-    def test_bootstrap_defaults_to_triggering_ci_and_rejects_conflicting_source(self):
-        self.env["BUILDKITE_TRIGGERED_FROM_BUILD_PIPELINE_SLUG"] = "ci"
-        source = "00000000-0000-0000-0000-000000000001"
-        self.env["BUILDKITE_TRIGGERED_FROM_BUILD_ID"] = source
-        self.release("--upload")
-        self.assertEqual(self.upload_source, source)
-        self.env["RELEASE_SOURCE_BUILD_ID"] = "00000000-0000-0000-0000-000000000002"
-        with self.assertRaisesRegex(RuntimeError, "differs from triggering"):
-            self.release("--upload")
-        self.assertEqual(self.provider_calls, 0)
-        self.assertEqual(self.writes, [])
-
-    def test_handoff_cannot_bypass_expected_ci_status(self):
-        self.env["RELEASE_SOURCE_BUILD_ID"] = self.env["BUILDKITE_BUILD_ID"]
-        self.statuses = [{"context": "buildkite/other", "state": "success"}]
-        with patch("time.monotonic", side_effect=[0, 901]):
-            with self.assertRaisesRegex(RuntimeError, "timed out waiting for GitHub checks"):
-                self.release()
-        self.assertEqual(self.writes, [])
-        self.assertEqual(self.provider_calls, 0)
-
 
 if __name__ == "__main__":
     unittest.main()

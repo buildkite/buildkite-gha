@@ -183,7 +183,7 @@ steps:
   - label: ":stopwatch: Runtime regression check"
     key: "runtime-benchmark"
     # Include the existing daily scheduled scan, which skips the CI group.
-    # The release pipeline waits for this entire CI build before publishing.
+    # The release trigger waits for this gate along with the CI group.
     if: (build.branch == "main" && build.pull_request.id == null) || build.tag != null || build.env("VULNERABILITY_SCAN") == "1" || build.env("RUNTIME_BENCHMARK") == "1"
     timeout_in_minutes: 15
     retry:
@@ -222,8 +222,12 @@ steps:
 
   - label: ":rocket: Hand off checked main to release"
     key: "release-handoff"
-    if: build.branch == "main" && build.tag == null && build.pull_request.id == null && build.env("RELEASE_PIPELINE") != null && build.env("RELEASE_REQUESTED") != "1" && build.env("VULNERABILITY_SCAN") == null && build.env("DEMO_SUITE") == null && build.env("COMPATIBILITY_PROOF") == null && build.env("SMOKE_PROBE") == null
-    timeout_in_minutes: 5
-    retry:
-      automatic: false
-    command: "python3 scripts/release-pipeline --trigger"
+    if: build.branch == "main" && build.tag == null && build.pull_request.id == null && build.env("RELEASE_PIPELINE_SLUG") != null && build.env("VULNERABILITY_SCAN") == null && build.env("DEMO_SUITE") == null && build.env("COMPATIBILITY_PROOF") == null && build.env("SMOKE_PROBE") == null
+    trigger: "${RELEASE_PIPELINE_SLUG:-unconfigured-release}"
+    async: true
+    build:
+      branch: "main"
+      commit: "${BUILDKITE_COMMIT}"
+      message: "Release ${BUILDKITE_COMMIT}"
+      env:
+        RELEASE_DRY_RUN: "${RELEASE_DRY_RUN:-0}"
