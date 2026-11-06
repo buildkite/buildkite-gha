@@ -41,8 +41,18 @@ the evidence. Explain the highest-impact reason in one short user-facing sentenc
 notes is concise user-facing Markdown starting with '## Highlights', followed
 by useful bullets. Cover material features, fixes, compatibility, migrations,
 and security. Omit internal CI/test churn. Add '## Upgrade notes' only for required
-actions or important boundaries. Link notable PRs/docs when the evidence supplies
-them. Do not invent URLs, version numbers, or facts. Do not add a comparison link;
+actions or important boundaries.
+Every highlight attributable to a PR must end with its Markdown PR link, using
+the supplied repository: ([#123](https://github.com/OWNER/REPO/pull/123)).
+Identify PR numbers from merge subjects ('Merge pull request #123') and squash
+subjects ('Change description (#123)'); these are enough evidence to construct
+the URL. Match each link to the change it supports. A bullet combining changes
+from multiple PRs must link each relevant PR. Do not substitute bare PR numbers,
+documentation links, or a separate PR list for links in the relevant bullets.
+Do not infer PR numbers from issue references, diff text, or unrelated history.
+Changes with no identified PR may remain unlinked; never invent a PR.
+Before returning, check each highlight against the commit evidence and add any
+missing PR links. Do not invent URLs, version numbers, or facts. Do not add a comparison link;
 the release script appends it. For none/uncertain, notes must be empty.
 """
 
