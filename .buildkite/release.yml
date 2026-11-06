@@ -13,7 +13,7 @@ steps:
       commit: "${BUILDKITE_COMMIT}"
       message: "Release checks for ${BUILDKITE_COMMIT}"
       env:
-        RELEASE_REQUEST_JOB_ID: "${BUILDKITE_JOB_ID}"
+        RELEASE_REQUESTED: "1"
 
   - wait: ~
 
@@ -27,7 +27,10 @@ steps:
       automatic: false
     agents:
       queue: "${RELEASE_QUEUE}"
+    cache: ".buildkite/cache-volume"
     plugins:
+      - setup-go#v0.1.0:
+          mise-version: "2026.10.17"
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.10.17"
     command: |
@@ -41,5 +44,4 @@ steps:
       - ".release/model-response.json"
       - ".release/proposal.json"
       - ".release/notes.md"
-      - ".release/artifact-source.json"
       - ".release/verification.json"
