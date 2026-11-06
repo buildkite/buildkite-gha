@@ -79,7 +79,8 @@ class ReleaseTest(unittest.TestCase):
         self.previous = self.git("rev-parse", "HEAD")
         self.git("tag", "-a", "v0.9.8", "-m", "previous")
         (self.checkout / "feature").write_text("new behavior\n")
-        self.git("commit", "-am", "Change behavior (#12)")
+        # Rebase merges retain subjects without a PR number.
+        self.git("commit", "-am", "Change behavior")
         self.commit = self.git("rev-parse", "HEAD")
         self.git("tag", "v0.10.0-rc.1")
         self.git("push", "origin", "main", "--tags")
@@ -159,7 +160,7 @@ class ReleaseTest(unittest.TestCase):
             evidence = json.loads(body["messages"][0]["content"])
             self.assertEqual(evidence["previous"], "v0.9.8")
             self.assertIn("+new behavior", evidence["diff"])
-            self.assertIn("Change behavior (#12)", evidence["commits"])
+            self.assertIn("Change behavior", evidence["commits"])
             self.assertEqual(evidence["pull_request_links"], ["[#12](https://github.com/buildkite/buildkite-gha/pull/12)"])
             if self.advance_main:
                 newer = self.git("commit-tree", "HEAD^{tree}", "-p", self.commit, "-m", "Another merged change")
@@ -185,7 +186,7 @@ class ReleaseTest(unittest.TestCase):
                 result = dict(body, id=1, html_url="https://github.com/buildkite/buildkite-gha/releases/tag/" + body["tag_name"])
                 self.releases[body["tag_name"]] = result
             elif path.startswith("commits/") and "/pulls?" in path:
-                result = [dict(number=number, merged_at="today", merge_commit_sha=sha,
+                result = [dict(number=number, title="Change behavior", merged_at="today", merge_commit_sha=sha,
                                base={"ref": "main", "repo": {"full_name": "buildkite/buildkite-gha"}})
                           for number, sha in ((12, self.commit), (13, self.previous))]
             elif path.startswith("issues/"):

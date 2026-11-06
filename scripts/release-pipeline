@@ -34,8 +34,9 @@ by useful bullets. Cover material features, fixes, compatibility, migrations,
 and security. Omit internal CI/test churn. Add '## Upgrade notes' only for required
 actions or important boundaries.
 Every highlight attributable to a PR must end with its Markdown PR link copied
-EXACTLY from pull_request_links. These canonical links come from merge and squash
-subjects in the supplied commit history. Use that history and the diff to match
+EXACTLY from pull_request_links. These canonical links come from GitHub's merged
+PR associations, including rebase merges with no PR number in commit subjects.
+Use pull_requests, the commit history, and the diff to match
 each link to the change it supports. A bullet combining changes from multiple PRs
 must copy each relevant PR link. Do not rewrite labels or URLs, describe PRs as
 siblings, or add words inside link labels. Do not substitute bare PR numbers,
@@ -152,17 +153,13 @@ def source_state(commit):
     return previous
 
 
-def proposal(previous, commit):
+def proposal(previous, commit, prs):
     delta = f"{previous}..{commit}"
-    prs = set()
-    for subject in run("git", "log", "--format=%s", delta).splitlines():
-        match = re.search(r"^Merge pull request #(\d+)\b|\(#(\d+)\)$", subject)
-        if match:
-            prs.add(int(match[1] or match[2]))
     evidence = {
         "repository": REPO,
         "previous": previous,
         "commit": commit,
+        "pull_requests": prs,
         "pull_request_links": [f"[#{number}](https://github.com/{REPO}/pull/{number})" for number in sorted(prs)],
         "commits": run("git", "log", "--reverse", "--format=fuller", "--stat", delta),
         "diff": run("git", "diff", "--no-ext-diff", "--no-textconv", "--binary", "--find-renames", delta),
@@ -211,14 +208,18 @@ def proposal(previous, commit):
     return result
 
 
-def comment_on_prs(plan, token):
-    commits = set(run("git", "rev-list", f"{plan['previous']}..{plan['commit']}").splitlines())
-    prs = set()
+def release_prs(previous, commit, token):
+    commits = set(run("git", "rev-list", f"{previous}..{commit}").splitlines())
+    prs = {}
     for commit in sorted(commits):
         for pr in pages(f"commits/{commit}/pulls", token):
             if (pr.get("merged_at") and pr["merge_commit_sha"] in commits
                     and pr["base"]["repo"]["full_name"] == REPO and pr["base"]["ref"] == "main"):
-                prs.add(pr["number"])
+                prs[pr["number"]] = {"title": pr["title"], "merge_commit_sha": pr["merge_commit_sha"]}
+    return prs
+
+
+def comment_on_prs(plan, prs, token):
     message = f"Released in [{plan['tag']}](https://github.com/{REPO}/releases/tag/{plan['tag']})"
     for number in sorted(prs):
         comments = pages(f"issues/{number}/comments", token)
@@ -258,7 +259,8 @@ def release(commit, token, dry_run):
     if subprocess.run(["git", "merge-base", "--is-ancestor", commit, previous]).returncode == 0:
         print(f"No changes: {previous} already covers this commit.")
         return
-    plan = proposal(previous, commit)
+    prs = release_prs(previous, commit, token)
+    plan = proposal(previous, commit, prs)
     (output / "proposal.json").write_text(json.dumps(plan, indent=2) + "\n")
     print(json.dumps(plan, indent=2), flush=True)
     require(plan["bump"] != "uncertain", "version decision is ambiguous; review the proposal")
@@ -290,7 +292,7 @@ def release(commit, token, dry_run):
     # GoReleaser owns packaging/publication. Existing drafts retain the exact notes.
     subprocess.run(["goreleaser", "release", "--clean"], env=env, check=True)
     receipt = {"url": f"https://github.com/{REPO}/releases/tag/{tag}", "tag": tag, "commit": commit}
-    receipt["pull_requests"] = comment_on_prs(plan, token)
+    receipt["pull_requests"] = comment_on_prs(plan, prs, token)
     (output / "result.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, indent=2))
     run("buildkite-agent", "annotate", "--context", "release-result", "--style", "success",

@@ -640,6 +640,9 @@ the operator must choose a commit whose required checks have passed.
 The job passes every commit's metadata and the complete aggregate diff since
 the highest reachable stable pre-1.0 tag to the
 [Buildkite Anthropic model provider](https://buildkite.com/docs/apis/model-providers/anthropic).
+GitHub's merged-PR associations supply titles and canonical links, including for
+rebase merges whose commit subjects contain no PR number. The same PR set drives
+release comments.
 It authenticates with the job token. The model
 can return only a bump decision, rationale, and release notes; it cannot run
 tools. The request uses schema-constrained JSON; the script also validates the
