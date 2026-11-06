@@ -782,6 +782,11 @@ reusable-workflow input frame. Deferred matrices use the same evaluator after
 expansion, including with a producer-derived group. This does not admit `needs`
 in cancellation expressions or deferred reusable inputs.
 
+Suppress job cancellation when the existing condition reduction proves the job
+or an inherited call guard false. Keep evaluating cancellation expressions for
+diagnostics even in that case. Conditions left for runtime cannot suppress a
+request: Buildkite enforces concurrency before `run-job` evaluates them.
+
 The merged [backend cancellation contract](https://github.com/buildkite/buildkite/pull/38010)
 was inspected at [dde6eda](https://github.com/buildkite/buildkite/commit/dde6eda60a6912e424327e00849398d87eab6bfa).
 The [queue processor](https://github.com/buildkite/buildkite/blob/dde6eda60a6912e424327e00849398d87eab6bfa/app/models/concurrency_group/queue_processor.rb)

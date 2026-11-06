@@ -1171,6 +1171,74 @@ jobs:
 	}
 }
 
+func TestCompileBundleCancellationRespectsKnownSkippedJobsAndCalls(t *testing.T) {
+	for _, test := range []struct {
+		name, condition string
+		wantCancel      bool
+	}{
+		{"known false", "github.ref == 'refs/heads/release'", false},
+		{"known true", "github.ref == 'refs/heads/main'", true},
+		{"runtime decided", "vars.RUN == 'true'", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			writeWorkflow(t, repository, "leaf.yml", `on: workflow_call
+jobs:
+  deploy:
+    if: always()
+    runs-on: ubuntu-latest
+    concurrency:
+      group: called-deploy
+      cancel-in-progress: true
+    steps: [{run: true}]
+`)
+			writeWorkflow(t, repository, "middle.yml", `on: workflow_call
+jobs:
+  call:
+    if: always()
+    uses: ./.github/workflows/leaf.yml
+`)
+			caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  deploy:
+    if: `+test.condition+`
+    runs-on: ubuntu-latest
+    concurrency:
+      group: direct-deploy
+      cancel-in-progress: true
+    steps: [{run: true}]
+  call:
+    if: `+test.condition+`
+    uses: ./.github/workflows/middle.yml
+`)
+			bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document struct {
+				Steps []struct {
+					Concurrency any `yaml:"concurrency"`
+				} `yaml:"steps"`
+			}
+			if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
+				t.Fatal(err)
+			}
+			if len(document.Steps) != 2 {
+				t.Fatalf("steps = %d, want direct and nested jobs", len(document.Steps))
+			}
+			for _, step := range document.Steps {
+				if request, ok := step.Concurrency.(map[string]any); ok {
+					if !test.wantCancel || request["cancel_in_progress"] != true {
+						t.Fatalf("cancellation request = %#v, want cancellation %t", request, test.wantCancel)
+					}
+				} else if test.wantCancel || step.Concurrency != 1 {
+					t.Fatalf("concurrency = %#v, want cancellation %t", step.Concurrency, test.wantCancel)
+				}
+			}
+		})
+	}
+}
+
 func TestCompileBundleResolvesKafkaWorkflowConcurrency(t *testing.T) {
 	source := []byte(`name: CI
 on: pull_request

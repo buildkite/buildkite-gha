@@ -916,7 +916,9 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		instance.ToolCache = target.ToolCache
 		instance.Cache = target.Cache
 		instance.ConcurrencyGroup = concurrencyGroup
-		instance.CancelInProgress = cancelInProgress
+		guardKnown, guardValue := staticCallGuardValue(sourced.callGuards)
+		// Buildkite enforces concurrency before run-job can skip this job.
+		instance.CancelInProgress = cancelInProgress && instanceJob.If != "false" && (!guardKnown || guardValue)
 		if e.bindInstanceDependencies(sourced, job, key, &instance) {
 			jobFailed = true
 			continue
