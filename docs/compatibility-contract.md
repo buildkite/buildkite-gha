@@ -300,6 +300,58 @@ verified receipts. Query, download, verification, and ambiguous-state failures
 remain errors; see [terminal-result tests](../internal/transport/terminal_results_test.go).
 Recovery must not change the producer's Buildkite failure or dependency scheduling.
 
+### Workflow concurrency across deferred matrices
+
+Keep the root workflow's opening and closing markers adjacent in the ordered
+concurrency queue. The closing marker must depend on every initial job and
+deferred uploader with `allow_failure: true`. Buildkite
+[extends dependencies on an uploader to its uploaded work](https://buildkite.com/docs/pipelines/configure/dependencies#defining-explicit-dependencies).
+Do not upload another gate pair from a continuation: it would queue behind the
+closing marker that is waiting for that continuation's jobs.
+Reject member jobs sharing the root group before omitting that gate from a
+continuation, including when further matrix stages remain to be expanded.
+
+The inspected backend [adds implicit uploader dependencies](https://github.com/buildkite/buildkite/blob/0e2616ba728b4bdb0afa237c4963d8afce870bc7/app/models/build/pipeline_changer.rb#L630-L663)
+only to top-level steps without dependencies or an explicit `depends_on`.
+[An explicit empty list also suppresses that default](https://github.com/buildkite/buildkite/blob/0e2616ba728b4bdb0afa237c4963d8afce870bc7/app/models/build/pipeline_config.rb#L423-L465).
+Separately, the uploader [extends incoming dependencies to uploaded work](https://github.com/buildkite/buildkite/blob/0e2616ba728b4bdb0afa237c4963d8afce870bc7/app/models/build/pipeline_changer.rb#L681-L747),
+excluding implicit `UPLOAD` dependencies and copying the failure policy.
+The closing marker's explicit dependency therefore follows every chained
+upload, even when uploaded jobs have their own explicit dependencies. Preserve
+the existing graph; no additional ordering dependencies are needed.
+Its [ordered queue](https://github.com/buildkite/buildkite/blob/ac9b91a26e2273f98e457ef3a48c82a7df106746/app/models/concurrency_group/queue_processor.rb#L175-L231)
+counts waiting markers ahead of competing runs. Dependencies
+[wait for automatic retries](https://github.com/buildkite/buildkite/blob/ac9b91a26e2273f98e457ef3a48c82a7df106746/app/models/step/dependency/state.rb#L92-L119),
+but [finished markers are not reopened](https://github.com/buildkite/buildkite/blob/ac9b91a26e2273f98e457ef3a48c82a7df106746/app/models/job/state/resolver.rb#L66-L72)
+when an individual job is retried later.
+
+On November 3, 2026, [run A](https://buildkite.com/sj26-testier/pb-4387-deferred-concurrency-contract/builds/1)
+held its group until its deferred jobs and automatic retry finished. Competing
+[run B](https://buildkite.com/sj26-testier/pb-4387-deferred-concurrency-contract/builds/2)
+started at 04:20:35.952 UTC, after A's closing marker finished at 04:20:31.072.
+Manually retrying A's failed member then ran it from 04:20:57.718 to
+04:21:27.949, overlapping B. Dynamic upload itself does not cause early release;
+individual retries after release do.
+
+[Grouped chained uploads](https://buildkite.com/sj26-testier/pb-4387-deferred-concurrency-contract/builds/3)
+kept their marker waiting until the last descendant finished at 04:24:34.025 UTC;
+the [competitor](https://buildkite.com/sj26-testier/pb-4387-deferred-concurrency-contract/builds/4)
+entered at 04:24:45.902. A [failed uploader](https://buildkite.com/sj26-testier/pb-4387-deferred-concurrency-contract/builds/5)
+released its group before [the next run](https://buildkite.com/sj26-testier/pb-4387-deferred-concurrency-contract/builds/6)
+entered.
+
+Keep ordinary manual and automatic retry behavior. As with the existing
+static-only marker translation, concurrency is best-effort for manual retries
+after the closing marker finishes: retried jobs can overlap a later run.
+Do not reject the workflow or prohibit retries for this case. Preserve the
+gate across every chained stage without changing plan authority or producer
+identity; see
+[CLI regressions](../internal/cli/upload_stage_test.go).
+Static-only workflow retries, called-workflow gates, output-derived runner
+selection, output-derived scheduling, and cancel-in-progress are not broadened.
+These scheduler probes and local CLI tests do not prove native GitHub parity or
+successful execution of the complete PostHog workflow.
+
 ### Action sources and native adapters
 
 Resolve mutable action refs to commits and lock the extracted source tree.

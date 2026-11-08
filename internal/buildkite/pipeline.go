@@ -455,12 +455,6 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				if job.Concurrency > 0 && job.ConcurrencyGroup == workflow.ConcurrencyGate.Group {
 					return nil, fmt.Errorf("workflow concurrency gate shares group with member job %q", job.Key)
 				}
-				// The closing marker waits for the steps of this upload only.
-				// Jobs a deferred upload adds later would run after the group
-				// is released.
-				if job.Stage != nil {
-					return nil, fmt.Errorf("workflow concurrency gate cannot hold deferred upload step %q", job.Key)
-				}
 			}
 		}
 		prepared[i] = preparedWorkflow{Workflow: workflow, Jobs: jobs, Grouped: !workflow.Ungrouped && (aggregate || workflow.GroupLabel != ""), Aggregate: aggregate}
