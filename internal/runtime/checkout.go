@@ -520,7 +520,9 @@ func checkoutFetchArgs(inputs map[string]string, sha string) []string {
 			"+refs/tags/*:refs/tags/*",
 		)
 		revision, branch := checkoutSelectedRevision(inputs, sha)
-		if !branch {
+		if !branch && strings.HasPrefix(revision, "refs/pull/") {
+			args = append(args, checkoutFetchRevision(inputs, sha))
+		} else if !branch {
 			namespace := "selected"
 			if revision == sha {
 				namespace = "event"
@@ -548,6 +550,9 @@ func checkoutFilter(inputs map[string]string) string {
 
 func checkoutFetchRevision(inputs map[string]string, sha string) string {
 	revision, branch := checkoutSelectedRevision(inputs, sha)
+	if pull, ok := strings.CutPrefix(revision, "refs/pull/"); ok && !branch {
+		return "+" + revision + ":refs/remotes/pull/" + pull
+	}
 	if !branch {
 		return revision
 	}
@@ -556,6 +561,9 @@ func checkoutFetchRevision(inputs map[string]string, sha string) string {
 
 func checkoutRevision(inputs map[string]string, sha string) string {
 	revision, branch := checkoutSelectedRevision(inputs, sha)
+	if pull, ok := strings.CutPrefix(revision, "refs/pull/"); ok && !branch {
+		return "refs/remotes/pull/" + pull
+	}
 	if !branch {
 		return revision
 	}
@@ -567,7 +575,7 @@ func checkoutSelectedRevision(inputs map[string]string, sha string) (revision st
 	if ref == "" || ref == sha {
 		return sha, false
 	}
-	if gitutil.ValidObjectID(ref) {
+	if gitutil.ValidObjectID(ref) || strings.HasPrefix(ref, "refs/pull/") {
 		return ref, false
 	}
 	return strings.TrimPrefix(ref, "refs/heads/"), true
