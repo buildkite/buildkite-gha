@@ -1575,11 +1575,11 @@ func TestEmitStageStepAndDeferredUpload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The closing concurrency marker can wait only for the steps of the
-	// initial upload, so a gated workflow cannot hold a deferred upload step.
+	// Buildkite extends the closing gate's dependency on the uploader to
+	// its uploaded jobs without changing ordinary retry behavior.
 	workflows[0].ConcurrencyGate = &ConcurrencyGate{Group: "buildkite-gha/concurrency/ci"}
-	if _, err := Emit(Pipeline{ArtifactProducer: importer, DistributionDigest: testDigest("distribution"), EventProvider: "github", Workflows: workflows}); err == nil || !strings.Contains(err.Error(), `cannot hold deferred upload step "gha-build-matrix"`) {
-		t.Fatalf("concurrency gate accepted a deferred upload step: %v", err)
+	if _, err := Emit(Pipeline{ArtifactProducer: importer, DistributionDigest: testDigest("distribution"), EventProvider: "github", Workflows: workflows}); err != nil {
+		t.Fatalf("concurrency gate rejected a deferred upload step: %v", err)
 	}
 	type dependency struct {
 		Step         string `yaml:"step"`
