@@ -794,9 +794,10 @@ exec ` + shellTestQuote(git) + " -c " + shellTestQuote("url.file://"+filepath.To
 				t.Fatalf("checkout = %#v, %v; want commit %s\n%s", result, err, wantSHA, &logs)
 			}
 			wantRef := test.inputs["ref"]
-			if wantRef == "" {
+			switch wantRef {
+			case "":
 				wantRef = job.Event.Ref
-			} else if wantRef == commits[0] {
+			case commits[0]:
 				wantRef = ""
 			}
 			if result.Outputs["ref"] != wantRef {
