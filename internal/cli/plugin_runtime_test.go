@@ -1,11 +1,10 @@
 package cli
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -94,57 +93,69 @@ func TestPluginBinaryURLsVerifyBytesAndNeverFallBackToReleases(t *testing.T) {
 
 func TestPluginAcquiresVerifiedLinuxRuntimeForDarwinHost(t *testing.T) {
 	linux := pluginTestLinuxExecutable(62)
-	archive := pluginTestArchive(t, linux, false)
-	archiveDigest := sha256.Sum256(archive)
+	arm64 := pluginTestLinuxExecutable(183)
 	version := "1.2.3-rc.1+build.2"
+	var release pluginRelease
+	metadataRequests := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.Header.Get("User-Agent") != "buildkite-gha/"+version || !strings.HasPrefix(request.URL.Path, "/v"+version+"/") {
+		if request.Header.Get("User-Agent") != "buildkite-gha/"+version {
 			t.Errorf("release request = %s, User-Agent = %q", request.URL, request.Header.Get("User-Agent"))
 		}
-		switch filepath.Base(request.URL.Path) {
-		case "checksums.txt":
-			_, _ = fmt.Fprintf(response, "%x  %s\n", archiveDigest, pluginLinuxAsset)
-		case pluginLinuxAsset:
-			_, _ = response.Write(archive)
+		switch request.URL.Path {
+		case "/tags/v" + version:
+			metadataRequests++
+			_ = json.NewEncoder(response).Encode(release)
+		case "/download/amd64":
+			_, _ = response.Write(linux)
+		case "/download/arm64":
+			_, _ = response.Write(arm64)
 		default:
+			t.Errorf("unexpected download (host, checksum, archive or latest): %s", request.URL)
 			http.NotFound(response, request)
 		}
 	}))
 	defer server.Close()
-	previousClient, previousBase := pluginHTTPClient, pluginReleaseBaseURL
-	pluginHTTPClient, pluginReleaseBaseURL = server.Client(), server.URL
-	t.Cleanup(func() { pluginHTTPClient, pluginReleaseBaseURL = previousClient, previousBase })
-	distributions, err := (&pluginRuntimeAcquisition{version: version}).acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, compiler.PlatformDarwinARM64, runtimeDistribution{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	distribution := distributions[compiler.PlatformLinuxAMD64]
-	if distribution.digest != transport.Digest(linux) || !bytes.Equal(distribution.contents, linux) {
-		t.Fatalf("Linux distribution = %q, %d bytes", distribution.digest, len(distribution.contents))
-	}
-}
-
-func TestPluginAcquiresVerifiedLinuxARM64Runtime(t *testing.T) {
-	linux := pluginTestLinuxExecutable(183)
-	archive := pluginTestArchive(t, linux, false)
-	archiveDigest := sha256.Sum256(archive)
-	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		switch filepath.Base(request.URL.Path) {
-		case "checksums.txt":
-			_, _ = fmt.Fprintf(response, "%x  %s\n", archiveDigest, pluginLinuxARM64Asset)
-		case pluginLinuxARM64Asset:
-			_, _ = response.Write(archive)
-		default:
-			http.NotFound(response, request)
-		}
-	}))
-	defer server.Close()
-	distribution, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformLinuxARM64, server.Client(), server.URL, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if distribution.digest != transport.Digest(linux) || !bytes.Equal(distribution.contents, linux) {
-		t.Fatalf("Linux ARM64 distribution = %q, %d bytes", distribution.digest, len(distribution.contents))
+	release = pluginRelease{TagName: "v" + version, Assets: []pluginReleaseAsset{
+		{Name: "buildkite-gha_linux_x86_64", URL: server.URL + "/download/amd64", Digest: transport.Digest(linux)},
+		{Name: "buildkite-gha_linux_arm64", URL: server.URL + "/download/arm64", Digest: transport.Digest(arm64)},
+	}}
+	previousClient, previousAPI := pluginHTTPClient, pluginReleaseAPIURL
+	pluginHTTPClient, pluginReleaseAPIURL = server.Client(), server.URL+"/tags/"
+	t.Cleanup(func() { pluginHTTPClient, pluginReleaseAPIURL = previousClient, previousAPI })
+	t.Setenv("MISE_DATA_DIR", "")
+	for _, handoff := range []bool{false, true} {
+		t.Run(fmt.Sprintf("handoff=%t", handoff), func(t *testing.T) {
+			metadataRequests = 0
+			t.Setenv(pluginReleaseEnvironment, string(mustJSON(t, release)))
+			if !handoff {
+				if err := os.Unsetenv(pluginReleaseEnvironment); err != nil {
+					t.Fatal(err)
+				}
+			}
+			host := runtimeDistribution{contents: []byte("running host"), digest: transport.Digest([]byte("running host"))}
+			acquisition := &pluginRuntimeAcquisition{version: version}
+			got, err := acquisition.acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformDarwinARM64: true}, compiler.PlatformDarwinARM64, host)
+			if err != nil || got[compiler.PlatformDarwinARM64].digest != host.digest || metadataRequests != 0 {
+				t.Fatalf("host-only acquisition = %v, %v, requests=%d", got, err, metadataRequests)
+			}
+			required := map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true, compiler.PlatformLinuxARM64: true, compiler.PlatformDarwinARM64: true}
+			got, err = acquisition.acquire(t.Context(), required, compiler.PlatformDarwinARM64, host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for platform, contents := range map[compiler.Platform][]byte{compiler.PlatformLinuxAMD64: linux, compiler.PlatformLinuxARM64: arm64, compiler.PlatformDarwinARM64: host.contents} {
+				if !bytes.Equal(got[platform].contents, contents) || got[platform].digest != transport.Digest(contents) {
+					t.Fatalf("%s distribution changed: %+v", platform, got[platform])
+				}
+			}
+			wantRequests := 1
+			if handoff {
+				wantRequests = 0
+			}
+			if metadataRequests != wantRequests {
+				t.Fatalf("metadata requests = %d, want %d", metadataRequests, wantRequests)
+			}
+		})
 	}
 }
 
@@ -185,23 +196,22 @@ func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
 	}
 
 	darwin := []byte{0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	archive := pluginTestArchive(t, darwin, false)
-	archiveDigest := sha256.Sum256(archive)
 	requests := map[string]int{}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requests[request.URL.Path]++
 		switch filepath.Base(request.URL.Path) {
-		case "checksums.txt":
-			_, _ = fmt.Fprintf(response, "%x  %s\n", archiveDigest, pluginDarwinAsset)
-		case pluginDarwinAsset:
-			_, _ = response.Write(archive)
+		case "buildkite-gha_darwin_arm64":
+			_, _ = response.Write(darwin)
 		default:
 			http.NotFound(response, request)
 		}
 	}))
 	defer server.Close()
+	release := pluginRelease{TagName: "v1.2.3", Assets: []pluginReleaseAsset{
+		{Name: "buildkite-gha_darwin_arm64", URL: server.URL + "/v1.2.3/buildkite-gha_darwin_arm64", Digest: transport.Digest(darwin)},
+	}}
 	cache := filepath.Join(canonicalTempDir(t), pluginDarwinAsset)
-	distribution, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, cache)
+	distribution, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), release, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,77 +219,66 @@ func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
 	if distribution.digest != wantDigest || !bytes.Equal(distribution.contents, darwin) {
 		t.Fatalf("Darwin distribution = %q, %x", distribution.digest, distribution.contents)
 	}
-	if _, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, cache); err != nil {
+	if _, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), release, cache); err != nil {
 		t.Fatal(err)
 	}
-	if requests["/v1.2.3/checksums.txt"] != 2 || requests["/v1.2.3/"+pluginDarwinAsset] != 1 {
-		t.Fatalf("requests = %#v; verified cache did not avoid an archive download", requests)
+	if requests["/v1.2.3/"+pluginDarwinAsset] != 1 {
+		t.Fatalf("requests = %#v; verified cache did not avoid a binary download", requests)
 	}
 	if err := os.WriteFile(cache, []byte("untrusted cache"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, cache); err != nil {
+	if _, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), release, cache); err != nil {
 		t.Fatal(err)
 	}
-	if requests["/v1.2.3/checksums.txt"] != 3 || requests["/v1.2.3/"+pluginDarwinAsset] != 2 {
-		t.Fatalf("requests = %#v; cache was trusted without live checksum or invalid cache was used", requests)
+	if requests["/v1.2.3/"+pluginDarwinAsset] != 2 {
+		t.Fatalf("requests = %#v; invalid cache was used", requests)
 	}
 }
 
-func TestPluginDarwinRejectsChecksumArchiveAndBinaryFailures(t *testing.T) {
+func TestPluginRejectsInvalidReleaseMetadataAndBytes(t *testing.T) {
 	validBinary := []byte{0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	archive := pluginTestArchive(t, validBinary, false)
-	digest := sha256.Sum256(archive)
-	if _, err := pluginAssetChecksum(fmt.Appendf(nil, "%x  %s\n%x  %s\n", digest, pluginDarwinAsset, digest, pluginDarwinAsset), pluginDarwinAsset); err == nil || !strings.Contains(err.Error(), "exactly one") {
-		t.Fatalf("duplicate checksum error = %v", err)
-	}
-	if _, err := extractPluginRuntime(pluginTestArchive(t, validBinary, true), compiler.PlatformDarwinARM64); err == nil || !strings.Contains(err.Error(), "unexpected member") {
-		t.Fatalf("unsafe archive error = %v", err)
-	}
-	wrong := pluginTestArchive(t, []byte("not Mach-O"), false)
-	wrongDigest := sha256.Sum256(wrong)
-	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if filepath.Base(request.URL.Path) == "checksums.txt" {
-			_, _ = fmt.Fprintf(response, "%x  %s\n", wrongDigest, pluginDarwinAsset)
-			return
-		}
-		_, _ = response.Write(wrong)
-	}))
-	defer server.Close()
-	if _, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, ""); err == nil || !strings.Contains(err.Error(), "Mach-O") {
-		t.Fatalf("wrong binary error = %v", err)
-	}
-}
-
-func pluginTestArchive(t *testing.T, executable []byte, extra bool) []byte {
-	t.Helper()
-	var output bytes.Buffer
-	gzipWriter := gzip.NewWriter(&output)
-	tarWriter := tar.NewWriter(gzipWriter)
-	for _, member := range []struct {
+	for _, test := range []struct {
 		name string
-		mode int64
+		edit func(*pluginRelease)
 		body []byte
-	}{{"buildkite-gha", 0o755, executable}, {"LICENSE", 0o644, []byte("license")}} {
-		if err := tarWriter.WriteHeader(&tar.Header{Name: member.name, Mode: member.mode, Size: int64(len(member.body)), Typeflag: tar.TypeReg}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := tarWriter.Write(member.body); err != nil {
-			t.Fatal(err)
-		}
+		want string
+	}{
+		{"corrupted download", nil, []byte("changed"), "checksum verification failed"},
+		{"missing digest", func(r *pluginRelease) { r.Assets[0].Digest = "" }, validBinary, "SHA-256 digest"},
+		{"malformed digest", func(r *pluginRelease) { r.Assets[0].Digest = "sha256:nope" }, validBinary, "SHA-256 digest"},
+		{"wrong algorithm", func(r *pluginRelease) { r.Assets[0].Digest = "sha512:" + strings.Repeat("0", 64) }, validBinary, "SHA-256 digest"},
+		{"duplicate asset", func(r *pluginRelease) { r.Assets = append(r.Assets, r.Assets[0]) }, validBinary, "exactly one raw asset"},
+		{"archive-only release", func(r *pluginRelease) { r.Assets[0].Name += ".tar.gz" }, validBinary, "exactly one raw asset"},
+		{"wrong tag", func(r *pluginRelease) { r.TagName = "v9.9.9" }, validBinary, "does not match running version"},
+		{"HTTP asset", func(r *pluginRelease) { r.Assets[0].URL = "http://example.com/binary" }, validBinary, "HTTPS URL"},
+		{"wrong platform", func(r *pluginRelease) { r.Assets[0].Digest = transport.Digest(pluginTestLinuxExecutable(62)) }, pluginTestLinuxExecutable(62), "Mach-O"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("MISE_DATA_DIR", "")
+			server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				switch filepath.Base(request.URL.Path) {
+				case "buildkite-gha_darwin_arm64":
+					_, _ = response.Write(test.body)
+				default:
+					t.Errorf("unexpected release fallback request: %s", request.URL)
+					http.NotFound(response, request)
+				}
+			}))
+			defer server.Close()
+			release := pluginRelease{TagName: "v1.2.3", Assets: []pluginReleaseAsset{
+				{Name: "buildkite-gha_darwin_arm64", URL: server.URL + "/buildkite-gha_darwin_arm64", Digest: transport.Digest(validBinary)},
+			}}
+			if test.edit != nil {
+				test.edit(&release)
+			}
+			t.Setenv(pluginReleaseEnvironment, string(mustJSON(t, release)))
+			previousClient, previousAPI := pluginHTTPClient, pluginReleaseAPIURL
+			pluginHTTPClient, pluginReleaseAPIURL = server.Client(), server.URL+"/must-not-refetch/"
+			t.Cleanup(func() { pluginHTTPClient, pluginReleaseAPIURL = previousClient, previousAPI })
+			if _, err := (&pluginRuntimeAcquisition{version: "1.2.3"}).acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformDarwinARM64: true}, compiler.PlatformLinuxAMD64, runtimeDistribution{}); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("acquisition error = %v, want %s", err, test.want)
+			}
+		})
 	}
-	if extra {
-		body := []byte("extra")
-		if err := tarWriter.WriteHeader(&tar.Header{Name: "../extra", Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
-			t.Fatal(err)
-		}
-		_, _ = tarWriter.Write(body)
-	}
-	if err := tarWriter.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := gzipWriter.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return output.Bytes()
 }

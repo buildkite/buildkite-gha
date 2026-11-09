@@ -1263,23 +1263,23 @@ func testPluginPublishesMixedRuntimeDistributions(t *testing.T, mode string) {
 		0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00,
 	}
-	archive := pluginTestArchive(t, darwinContents, false)
 	binaryServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/darwin":
 			_, _ = w.Write(darwinContents)
-		case "/v1.2.3/checksums.txt":
-			_, _ = fmt.Fprintf(w, "%x  %s\n", sha256.Sum256(archive), pluginDarwinAsset)
 		case "/v1.2.3/" + pluginDarwinAsset:
-			_, _ = w.Write(archive)
+			_, _ = w.Write(darwinContents)
 		default:
 			t.Errorf("unexpected binary download: %s", r.URL)
 		}
 	}))
 	defer binaryServer.Close()
-	previousClient, previousBase := pluginHTTPClient, pluginReleaseBaseURL
-	pluginHTTPClient, pluginReleaseBaseURL = binaryServer.Client(), binaryServer.URL
-	t.Cleanup(func() { pluginHTTPClient, pluginReleaseBaseURL = previousClient, previousBase })
+	previousClient := pluginHTTPClient
+	pluginHTTPClient = binaryServer.Client()
+	t.Cleanup(func() { pluginHTTPClient = previousClient })
+	t.Setenv(pluginReleaseEnvironment, string(mustJSON(t, pluginRelease{TagName: "v1.2.3", Assets: []pluginReleaseAsset{
+		{Name: "buildkite-gha_darwin_arm64", URL: binaryServer.URL + "/v1.2.3/" + pluginDarwinAsset, Digest: transport.Digest(darwinContents)},
+	}})))
 	configurationFields := map[string]any{
 		"workflow": workflowPath,
 		"runners": []map[string]any{

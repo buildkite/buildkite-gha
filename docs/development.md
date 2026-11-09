@@ -658,8 +658,25 @@ covered by a newer release is skipped. Existing tags and incomplete releases are
 never overwritten.
 
 GoReleaser retains the exact drafted notes and publishes the Linux/amd64,
-Linux/arm64, Darwin/arm64, and Windows/amd64 archives plus `checksums.txt`.
-Final archives are built once the model chooses the version, since each binary
+Linux/arm64, Darwin/arm64, and Windows/amd64 raw executables plus `checksums.txt`.
+Assets are named `buildkite-gha_linux_x86_64`, `buildkite-gha_linux_arm64`,
+`buildkite-gha_darwin_arm64`, and `buildkite-gha_windows_x86_64.exe`. Lowercase OS
+names let mise install the executable as `buildkite-gha`. Checksums
+cover the executable bytes. New releases do not publish archives; historical
+releases remain unchanged.
+
+Release counterpart acquisition uses the running CLI's exact version and each
+asset's GitHub API `browser_download_url` and SHA-256 `digest`, not `checksums.txt`.
+The plugin can pass its selected response in `BUILDKITE_GHA_PLUGIN_RELEASE` as
+`{tag_name,assets:[{name,browser_download_url,digest}]}`. Without that handoff,
+the CLI fetches exact-tag metadata once when counterparts are needed. It rejects
+wrong tags, missing or duplicate assets, invalid digests, and non-HTTPS URLs.
+There is no archive or checksum-file fallback. Same-platform reuse, custom URLs,
+and local binaries keep their existing behavior. Archive-only historical tags
+require their existing consumers; archive-only installers cannot select new
+releases. Check consumer compatibility before publishing this format change.
+
+Final binaries are built once the model chooses the version, since each binary
 embeds that version. Packaging checks belong to CI's `mise run release:check`,
 not the publisher. After GoReleaser succeeds, the job posts deduplicated comments on
 PRs merged into main within the release delta and queues a Buildkite Slack

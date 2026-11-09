@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,6 +112,26 @@ func TestWindowsRuntimeDistributionValidatesPEAndNeedsNoUnixExecuteBit(t *testin
 	if err != nil || len(distributions) != 1 {
 		t.Fatalf("load Windows distribution = %#v, %v", distributions, err)
 	}
+	t.Run("raw release acquisition", func(t *testing.T) {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/windows" {
+				t.Errorf("unexpected download: %s", r.URL)
+			}
+			_, _ = w.Write(contents)
+		}))
+		defer server.Close()
+		release := pluginRelease{TagName: "v1.2.3", Assets: []pluginReleaseAsset{
+			{Name: "buildkite-gha_windows_x86_64.exe", URL: server.URL + "/windows", Digest: transport.Digest(contents)},
+		}}
+		got, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformWindowsAMD64, server.Client(), release, "")
+		if err != nil || got.digest != transport.Digest(contents) || !bytes.Equal(got.contents, contents) {
+			t.Fatalf("Windows release acquisition: digest=%s err=%v", got.digest, err)
+		}
+	})
 	t.Run("mixed upload", func(t *testing.T) {
 		requireImporterHost(t)
 		setRunnerResolutionVerdicts(t, map[string]map[string]any{
