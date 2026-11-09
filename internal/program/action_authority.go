@@ -17,10 +17,11 @@ type ActionAuthority struct {
 }
 
 type ActionAuthorityOptions struct {
-	ServerURL      string
-	Strategy       map[string]any
-	Matrix         map[string]any
-	WorkflowInputs expression.InputScope
+	ServerURL         string
+	GitHubIdentityIDs map[string]any
+	Strategy          map[string]any
+	Matrix            map[string]any
+	WorkflowInputs    expression.InputScope
 }
 
 // InventoryActionAuthority interprets action input resolution and nested
@@ -83,6 +84,9 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 			"github.server_url": options.ServerURL,
 			"job.check_run_id":  "",
 			"matrix":            options.Matrix,
+		}
+		for name, value := range options.GitHubIdentityIDs {
+			known["github."+name] = value
 		}
 		if workflowAuthored {
 			known["strategy"] = options.Strategy
@@ -200,6 +204,9 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 	caller := expression.AbstractValues{
 		References: map[string]any{"github.server_url": options.ServerURL, "job.check_run_id": "", "strategy": options.Strategy, "matrix": options.Matrix},
 		Inputs:     options.WorkflowInputs,
+	}
+	for name, value := range options.GitHubIdentityIDs {
+		caller.References["github."+name] = value
 	}
 	if err := inspect(root, supplied, true, true, caller); err != nil {
 		return ActionAuthority{}, err

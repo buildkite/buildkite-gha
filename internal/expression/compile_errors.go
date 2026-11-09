@@ -12,7 +12,7 @@ var ErrRunValueUnavailable = errors.New("run identity is unavailable in this imp
 
 // importGitHubValues lists the github properties a compile-time expression may
 // read. It mirrors the compile-time validator allowlist.
-const importGitHubValues = "actor, base_ref, event.<property>, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, sha, workflow"
+const importGitHubValues = "actor, actor_id, base_ref, event.<property>, event_name, head_ref, ref, ref_name, ref_type, repository, repository_id, repository_owner, repository_owner_id, sha, workflow"
 
 // authoredError marks an error whose text quotes only workflow-authored
 // expression text, such as context, function, and reference names, and never

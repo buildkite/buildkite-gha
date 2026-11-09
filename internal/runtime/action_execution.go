@@ -1496,6 +1496,9 @@ func githubContext(job plan.Job) map[string]any {
 		"workflow_sha":      workflowSHA,
 		"job":               job.Workflow.LogicalJobID,
 	}
+	for name, value := range plan.EventIdentityIDs(job.Event.Provider, job.Event.Repository, job.Event.Actor, event) {
+		github[name] = value
+	}
 	if rest, graphql := plan.EventAPIURLs(job.Event.Provider, job.Event.ServerURL); rest != "" {
 		github["api_url"], github["graphql_url"] = rest, graphql
 	}

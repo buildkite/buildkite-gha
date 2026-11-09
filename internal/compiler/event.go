@@ -526,7 +526,7 @@ func compileContext(event Event, vars map[string]string, workflowPath, workflowN
 	if workflowName == "" {
 		workflowName = canonicalWorkflowName(workflowPath)
 	}
-	return expression.CompileContext{
+	context := expression.CompileContext{
 		GitHub: map[string]any{
 			"event_name":       event.Event,
 			"event":            event.Payload,
@@ -545,6 +545,10 @@ func compileContext(event Event, vars map[string]string, workflowPath, workflowN
 		Vars:           vars,
 		InputsComplete: true,
 	}
+	for name, value := range plan.EventIdentityIDs(event.Provider, repository, event.Actor, event.Payload) {
+		context.GitHub[name] = value
+	}
+	return context
 }
 
 func workflowDispatchInputs(parsed *workflow.Workflow, event Event) map[string]any {

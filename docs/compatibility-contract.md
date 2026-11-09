@@ -510,6 +510,33 @@ reusable input controls, and expression-valued max-parallel on reusable workflow
 invocations remain unsupported. Matrix fail-fast is separate. These local checks
 do not establish native parity, hosted execution, or released availability.
 
+### GitHub identity IDs
+
+The [GitHub context reference](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#github-context)
+defines actor, repository, and repository-owner IDs as strings. Derive them only
+from positive integer IDs in the GitHub event's `sender`, `repository`, and
+`repository.owner` objects. Require their login/full-name fields to match the
+selected event actor and repository, case-insensitively. Preserve integer
+precision; never resolve names through another provider or substitute Buildkite
+identities. Missing or mismatched data leaves the field unavailable, and an
+evaluated read fails rather than returning a fabricated or empty ID.
+
+Compilation, action authority planning, and runtime use the same extraction.
+Retain the digest-bound event payload when an ID read remains at runtime;
+this does not authorize an event file or credentials. Known-false ID guards
+must prune token authority, including composite shell guards. Unknown guards
+remain conservative. IDs do not broaden a position's allowed contexts.
+
+The [compiled regression](../internal/runtime/runtime_test.go) exercises graph
+fields, job and reusable-call conditions, job environment and outputs, composite
+defaults, conditions, and shell execution with distinct IDs, including
+`9007199254740993`. [Source checks](../internal/plan/plan_test.go) reject missing,
+malformed, mismatched, and other-provider identities;
+[expression checks](../internal/expression/engine_test.go) cover unavailable
+values, static indexing, payload retention, and token effects. These are local
+implementation checks against documented fields, not native execution or
+backend delivery evidence for every event, manual build, or retry path.
+
 ### Runner tool-cache paths
 
 The pinned runner [creates the tool cache and sets its context](https://github.com/actions/runner/blob/1ddb758ed014660b5d2220a5dc6b0e9957a9f96b/src/Runner.Worker/JobRunner.cs#L174-L176)

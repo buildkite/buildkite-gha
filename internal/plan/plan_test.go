@@ -20,6 +20,40 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
+func TestEventIdentityIDs(t *testing.T) {
+	const source = `{"sender":{"login":"Octocat","id":9007199254740993},"repository":{"full_name":"Acme/Widgets","id":42,"owner":{"login":"Acme","id":73}}}`
+	for _, test := range []struct {
+		name, provider, old, replacement string
+		want                             map[string]any
+	}{
+		{"original", "github", "", "", map[string]any{"actor_id": "9007199254740993", "repository_id": "42", "repository_owner_id": "73"}},
+		{"other provider", "cursor-origin", "", "", map[string]any{}},
+		{"no payload", "github", source, `{}`, map[string]any{}},
+		{"different sender", "github", `"Octocat"`, `"someone-else"`, map[string]any{"repository_id": "42", "repository_owner_id": "73"}},
+		{"different repository", "github", `"Acme/Widgets"`, `"other/Widgets"`, map[string]any{"actor_id": "9007199254740993"}},
+		{"different owner", "github", `"Acme"`, `"other"`, map[string]any{"actor_id": "9007199254740993", "repository_id": "42"}},
+		{"zero ID", "github", `9007199254740993`, `0`, map[string]any{"repository_id": "42", "repository_owner_id": "73"}},
+		{"negative ID", "github", `9007199254740993`, `-1`, map[string]any{"repository_id": "42", "repository_owner_id": "73"}},
+		{"fractional ID", "github", `9007199254740993`, `1.5`, map[string]any{"repository_id": "42", "repository_owner_id": "73"}},
+		{"string ID", "github", `9007199254740993`, `"123"`, map[string]any{"repository_id": "42", "repository_owner_id": "73"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := source
+			if test.old != "" {
+				data = strings.Replace(data, test.old, test.replacement, 1)
+			}
+			payload, err := DecodeEventPayload([]byte(data), fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(data))))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := EventIdentityIDs(test.provider, "acme/widgets", "octocat", payload)
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("EventIdentityIDs() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestGitHubServerPlanBoundary(t *testing.T) {
 	if err := ValidateGitHubServerURL(""); err == nil {
 		t.Fatal("explicit event origin validator accepted an empty origin")

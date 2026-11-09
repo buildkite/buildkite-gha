@@ -29,7 +29,7 @@ func newActionGraphCache(options Options, sourceServerURL string) *actionGraphCa
 	return &actionGraphCache{options: options, sourceServerURL: sourceServerURL, graphs: make(map[actionGraphKey]actionGraph)}
 }
 
-func (cache *actionGraphCache) compile(ctx context.Context, instance JobInstance, serverURL string, refs []string, inputs []map[string]string) (actionCompilation, error) {
+func (cache *actionGraphCache) compile(ctx context.Context, instance JobInstance, serverURL string, identityIDs map[string]any, refs []string, inputs []map[string]string) (actionCompilation, error) {
 	if inputs != nil && len(inputs) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
 	}
@@ -50,7 +50,7 @@ func (cache *actionGraphCache) compile(ctx context.Context, instance JobInstance
 	}
 	compiled, err := graph.analyzeInvocations(program.ActionAuthorityOptions{
 		ServerURL: serverURL, Strategy: instance.Strategy, Matrix: instance.Matrix,
-		WorkflowInputs: instance.inputScope(),
+		GitHubIdentityIDs: identityIDs, WorkflowInputs: instance.inputScope(),
 	}, refs, inputs)
 	if err != nil {
 		return actionCompilation{}, err

@@ -90,6 +90,12 @@ An expression site selects a closed semantic profile. The profile owns:
 The same engine validates and evaluates a profile. Adding a context or function
 to one field does not implicitly add it to another field.
 
+Event-derived GitHub identity IDs share extraction between compilation and
+runtime. Authority planning receives only validated IDs; residual reads retain
+payload effects even when a known ID prunes a token branch. Missing IDs remain
+unknown to planning and unavailable at execution. See the
+[identity contract](compatibility-contract.md#github-identity-ids).
+
 Workflow concurrency has its own compile-time profile. The hosted adapter
 supplies the owning build ID separately from the shared GitHub context, so
 evaluating a group cannot make run identity available to other graph-time
