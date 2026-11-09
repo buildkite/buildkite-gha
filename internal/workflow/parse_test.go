@@ -1048,8 +1048,11 @@ func TestParseRejectsExpressionValuedExecutionScalars(t *testing.T) {
 		want    string
 	}{
 		{name: "fail fast", snippet: "    strategy:\n      fail-fast: ${{ inputs.flag }}\n      matrix:\n        os: [ubuntu-latest]\n    steps:\n      - run: true\n", want: "expression-valued matrix fail-fast is unsupported"},
-		{name: "max parallel", snippet: "    strategy:\n      max-parallel: ${{ inputs.count }}\n      matrix:\n        os: [ubuntu-latest]\n    steps:\n      - run: true\n", want: "expression-valued matrix max-parallel is unsupported"},
-		{name: "job timeout", snippet: "    timeout-minutes: ${{ inputs.timeout }}\n    steps:\n      - run: true\n", want: "expression-valued job timeout-minutes is unsupported"},
+		{name: "max parallel matrix", snippet: "    strategy:\n      max-parallel: ${{ matrix.count }}\n      matrix:\n        count: [2]\n    steps:\n      - run: true\n", want: "matrix"},
+		{name: "max parallel strategy", snippet: "    strategy:\n      max-parallel: ${{ strategy.job-total }}\n    steps:\n      - run: true\n", want: "strategy"},
+		{name: "job timeout env", snippet: "    timeout-minutes: ${{ 5 || env.TIMEOUT }}\n    steps:\n      - run: true\n", want: "env"},
+		{name: "job timeout token", snippet: "    timeout-minutes: ${{ 5 || github.token }}\n    steps:\n      - run: true\n", want: "token"},
+		{name: "job timeout function", snippet: "    timeout-minutes: ${{ 5 || hashFiles('file') }}\n    steps:\n      - run: true\n", want: "hashFiles"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1057,6 +1060,21 @@ func TestParseRejectsExpressionValuedExecutionScalars(t *testing.T) {
 			_, err := Parse("expressions.yml", []byte(source))
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestParseRetainsExpressionValuedJobControls(t *testing.T) {
+	for _, source := range []string{"${{ 5 }}", "${{ inputs.limit }}", "${{ fromJSON(vars.LIMIT) }}", "${{ fromJSON(needs.plan.outputs.limit) }}"} {
+		t.Run(source, func(t *testing.T) {
+			parsed, err := Parse("expressions.yml", []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: "+source+"\n    strategy:\n      max-parallel: "+source+"\n    steps: [{run: true}]\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := parsed.Jobs[0]
+			if job.TimeoutMinutesExpression == nil || job.TimeoutMinutesExpression.Text != source || job.TimeoutMinutesExpression.Span.Start.Line != 5 || job.MaxParallelExpression == nil || job.MaxParallelExpression.Text != source || job.MaxParallelExpression.Span.Start.Line != 7 {
+				t.Fatalf("job expressions not retained: %#v", job)
 			}
 		})
 	}

@@ -1409,9 +1409,15 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: true}]
 `)
-	_, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
-	if err == nil || !strings.Contains(err.Error(), "strategy.max-parallel on a reusable-workflow matrix cannot be preserved") {
-		t.Fatalf("Compile() error = %v, want reusable max-parallel rejection", err)
+	for _, test := range []struct{ limit, want string }{
+		{"1", "strategy.max-parallel on a reusable-workflow matrix cannot be preserved"},
+		{"${{ 1 }}", "expression-valued max-parallel on a reusable-workflow call is unsupported"},
+	} {
+		source := strings.Replace(string(readFile(t, callerPath)), "max-parallel: 1", "max-parallel: "+test.limit, 1)
+		_, err := Compile(callerPath, []byte(source), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("Compile() error = %v, want reusable max-parallel rejection %q", err, test.want)
+		}
 	}
 }
 

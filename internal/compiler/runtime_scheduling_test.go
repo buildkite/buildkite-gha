@@ -163,6 +163,36 @@ func TestRuntimeSchedulingValidatesOutputLimits(t *testing.T) {
 	}
 }
 
+func TestRuntimeMatrixKeepsCompileKnownJobControls(t *testing.T) {
+	source := strings.Replace(runtimeMatrixWorkflow, "    strategy:\n", "    timeout-minutes: ${{ matrix.minutes }}\n    strategy:\n      max-parallel: ${{ 2 }}\n", 1)
+	initial, err := compileRuntimeMatrix(t, source, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(initial.Continuations) != 1 || initial.Continuations[0].Scheduling {
+		t.Fatalf("static max-parallel incorrectly requires scheduling outputs: %#v", initial.Continuations)
+	}
+	options := defaultOptions()
+	options.RuntimeMatrixRows = map[string][]map[string]any{"build": {{"runner": "ubuntu-latest", "minutes": 7}, {"runner": "ubuntu-latest", "minutes": 13}}}
+	bundle, err := CompileBundleWithOptions("runtime.yml", []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumers := 0
+	for i, artifact := range bundle.Plans {
+		if artifact.Job.Workflow.LogicalJobID != "build" {
+			continue
+		}
+		if got := artifact.Job.ExecutionJob().TimeoutMinutes; got != []float64{7, 13}[consumers] || bundle.GeneratedWorkflow.Jobs[i].Concurrency != 2 {
+			t.Fatalf("deferred consumer timeout/parallel = %v/%d", got, bundle.GeneratedWorkflow.Jobs[i].Concurrency)
+		}
+		consumers++
+	}
+	if consumers != 2 {
+		t.Fatalf("consumers = %d, want 2", consumers)
+	}
+}
+
 func TestRuntimeSchedulingRejectsSiblingWorkflowGates(t *testing.T) {
 	repository := t.TempDir()
 	writeWorkflow(t, repository, "gated.yml", `on: workflow_call

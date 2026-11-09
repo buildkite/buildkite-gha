@@ -31,6 +31,7 @@ const (
 	ProfileRunName                  ProfileID = "run-name"
 	ProfileJobCondition             ProfileID = "job-condition"
 	ProfileJobControl               ProfileID = "job-control"
+	ProfileStrategyParallel         ProfileID = "strategy-parallel"
 	ProfileStepCondition            ProfileID = "step-condition"
 	ProfileActionStepCondition      ProfileID = "action-step-condition"
 	ProfileActionStepTemplate       ProfileID = "action-step-template"
@@ -147,6 +148,7 @@ var profiles = map[ProfileID]Profile{
 	ProfileRunName:                  {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"github", "inputs", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsRunName},
 	ProfileJobCondition:             {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "runner", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: JobCondition},
 	ProfileJobControl:               {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobControl},
+	ProfileStrategyParallel:         {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"github", "inputs", "needs", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobControl},
 	ProfileStepCondition:            {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "strategy", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "hashFiles", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: StepCondition},
 	ProfileActionStepCondition:      {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "hashFiles", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: actionStepCondition},
 	ProfileActionStepTemplate:       {Form: FormTemplate, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions("hashFiles"), Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsStepTemplate},
