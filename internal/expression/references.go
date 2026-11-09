@@ -501,7 +501,7 @@ func nodeReferencesCompileGitHubEvent(node actionlint.ExprNode) bool {
 			return false
 		}
 		switch strings.ToLower(path[0]) {
-		case "base_ref", "ref_name", "ref_type":
+		case "actor_id", "repository_id", "repository_owner_id", "base_ref", "ref_name", "ref_type":
 			return len(path) == 1
 		case "event":
 			return true
@@ -512,9 +512,21 @@ func nodeReferencesCompileGitHubEvent(node actionlint.ExprNode) bool {
 }
 
 func nodeReferencesGitHubEventPayload(node actionlint.ExprNode) bool {
-	return nodeReferencesGitHub(node, func(path []string) bool {
-		return len(path) != 0 && strings.EqualFold(path[0], "event")
-	})
+	return nodeReferencesGitHub(node, githubReferenceNeedsPayload)
+}
+
+func githubReferenceNeedsPayload(path []string) bool {
+	if len(path) == 0 {
+		return false
+	}
+	switch strings.ToLower(path[0]) {
+	case "event":
+		return true
+	case "actor_id", "repository_id", "repository_owner_id":
+		return len(path) == 1
+	default:
+		return false
+	}
 }
 
 func nodeReferencesGitHub(node actionlint.ExprNode, matches func([]string) bool) bool {

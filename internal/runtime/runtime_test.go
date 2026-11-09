@@ -163,6 +163,112 @@ test "$GITHUB_RUN_ATTEMPT" = 2`,
 	}
 }
 
+func TestCompiledRunAttemptConditions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/attempt.yml"
+	workflow := `on: push
+jobs:
+  first:
+    if: github.run_attempt == '1'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo first
+  retry:
+    if: github.run_attempt != '1'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo retry
+  steps:
+    runs-on: ubuntu-latest
+    outputs:
+      first: ${{ steps.first.outputs.value }}
+      retry: ${{ steps.retry.outputs.value }}
+      composite: ${{ steps.composite.outputs.value }}
+    steps:
+      - id: first
+        if: github.run_attempt == '1'
+        run: echo value=first >> "$GITHUB_OUTPUT"
+      - id: retry
+        if: github.run_attempt != '1'
+        run: echo value=retry >> "$GITHUB_OUTPUT"
+      - id: composite
+        uses: ./.github/actions/attempt
+  call-first:
+    if: github.run_attempt == '1'
+    uses: ./.github/workflows/callee.yml
+  call-retry:
+    if: github.run_attempt != '1'
+    uses: ./.github/workflows/callee.yml
+`
+	writeFixtureFile(t, workspace, workflowPath, workflow)
+	writeFixtureFile(t, workspace, ".github/workflows/callee.yml", `on: workflow_call
+jobs:
+  child:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo called
+`)
+	writeFixtureFile(t, workspace, ".github/actions/attempt/action.yml", `name: attempt
+outputs:
+  value:
+    value: ${{ steps.first.outputs.value || steps.retry.outputs.value }}
+runs:
+  using: composite
+  steps:
+    - id: first
+      if: github.run_attempt == '1'
+      shell: bash
+      run: echo value=first >> "$GITHUB_OUTPUT"
+    - id: retry
+      if: github.run_attempt != '1'
+      shell: bash
+      run: echo value=retry >> "$GITHUB_OUTPUT"
+`)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compilePlansForTest(t.Context(), filepath.Join(workspace, workflowPath), []byte(workflow), event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 5 {
+		t.Fatalf("plans = %d, want all five runtime-dependent jobs", len(plans))
+	}
+	for _, retry := range []string{"0", "1", "4", "", "invalid", "-1"} {
+		for _, job := range plans {
+			t.Run(retry+"/"+job.Workflow.LogicalJobID, func(t *testing.T) {
+				var logs bytes.Buffer
+				result, err := (Runner{Stdout: &logs, Stderr: &logs, RunIdentity: RunIdentity{RetryCount: retry}}).runTestJob(t.Context(), job, workspace)
+				if retry == "" || retry == "invalid" || retry == "-1" {
+					if err == nil || !strings.Contains(err.Error(), "unavailable") || !strings.Contains(err.Error(), "run_attempt") {
+						t.Fatalf("error = %v, want unavailable run_attempt", err)
+					}
+					return
+				}
+				want := "success"
+				first := retry == "0"
+				id := job.Workflow.LogicalJobID
+				if (strings.Contains(id, "first") && !first) || (strings.Contains(id, "retry") && first) {
+					want = "skipped"
+				}
+				if err != nil || result.Conclusion != want {
+					t.Fatalf("result = %#v, error = %v; want %s\n%s", result, err, want, logs.String())
+				}
+				if id == "steps" {
+					outputs := map[string]string{"first": "", "retry": "retry", "composite": "retry"}
+					if first {
+						outputs = map[string]string{"first": "first", "retry": "", "composite": "first"}
+					}
+					if !reflect.DeepEqual(result.Outputs, outputs) {
+						t.Fatalf("outputs = %#v, want %#v", result.Outputs, outputs)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestRunJobRejectsRunIdentityExpressionsWithoutIdentity(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/identity.yml"
@@ -1582,7 +1688,7 @@ func TestRunnerToolCacheIsPerJobAndReserved(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID:      "tool-cache",
 		Kind:    "run",
-		Command: `test -d "$RUNNER_TOOL_CACHE"; case "$RUNNER_TOOL_CACHE" in "$RUNNER_TEMP"/*) ;; *) exit 9 ;; esac`,
+		Command: `test '${{ runner.tool_cache }}' = "$RUNNER_TOOL_CACHE"; test -d "$RUNNER_TOOL_CACHE"; case "$RUNNER_TOOL_CACHE" in "$RUNNER_TEMP"/*) ;; *) exit 9 ;; esac`,
 	}})
 	job.Env = map[string]string{"RUNNER_TOOL_CACHE": filepath.Join(workspace, "untrusted")}
 	if result, err := (Runner{}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
@@ -1601,11 +1707,84 @@ func TestRunnerUsesConfiguredToolCache(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID:      "tool-cache",
 		Kind:    "run",
-		Command: `test "$RUNNER_TOOL_CACHE" = "$EXPECTED_TOOL_CACHE"`,
+		Command: `test '${{ runner.tool_cache }}' = "$RUNNER_TOOL_CACHE"; test "$RUNNER_TOOL_CACHE" = "$EXPECTED_TOOL_CACHE"`,
 	}})
 	job.Env = map[string]string{"EXPECTED_TOOL_CACHE": toolCache}
 	if result, err := (Runner{ToolCache: toolCache}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestCompiledToolCacheActionInputs(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/actions/setup/action.yml", `name: setup
+inputs:
+  root:
+    default: ${{ runner.tool_cache }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      if: runner.tool_cache == inputs.root
+      run: |
+        test '${{ inputs.root }}' = "$RUNNER_TOOL_CACHE"
+        mkdir -p "$RUNNER_TOOL_CACHE/Python/3.13.13"
+        printf 'installed-tool' > "$RUNNER_TOOL_CACHE/Python/3.13.13/sentinel"
+    - uses: ./.github/actions/cache-reader
+      with:
+        path: ${{ runner.tool_cache }}/Python/3.13.13
+`)
+	writeFixtureFile(t, workspace, ".github/actions/cache-reader/action.yml", `name: cache reader
+inputs:
+  path:
+    required: true
+outputs:
+  path:
+    value: ${{ inputs.path }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: |
+        test '${{ inputs.path }}' = "$RUNNER_TOOL_CACHE/Python/3.13.13"
+        test "$(cat '${{ inputs.path }}/sentinel')" = installed-tool
+`)
+	source := `name: tool cache
+on: push
+jobs:
+  tools:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.13.13']
+    outputs:
+      cache: ${{ steps.read.outputs.path }}
+    steps:
+      - uses: ./.github/actions/setup
+      - id: read
+        uses: ./.github/actions/cache-reader
+        with:
+          path: ${{ runner.tool_cache }}/Python/${{ matrix.python-version }}
+`
+	workflowPath := ".github/workflows/tools.yml"
+	writeFixtureFile(t, workspace, workflowPath, source)
+	event := []byte(`{"provider":"github","event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat"}`)
+	jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(source), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("compile = %#v, %v", jobs, err)
+	}
+	if jobs[0].GitHubToken != nil || len(jobs[0].RequiredSecrets) != 0 {
+		t.Fatal("tool cache must not grant credential authority")
+	}
+	result, err := (Runner{}).RunJob(t.Context(), jobs[0], workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() = %#v, %v", result, err)
+	}
+	if want := filepath.Join(result.Env["RUNNER_TOOL_CACHE"], "Python", "3.13.13"); result.Outputs["cache"] != want {
+		t.Fatalf("cache input = %q, want %q", result.Outputs["cache"], want)
+	}
+	if _, err := os.Stat(result.Env["RUNNER_TOOL_CACHE"]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("per-job cache survived cleanup: %v", err)
 	}
 }
 
@@ -2375,6 +2554,106 @@ test '${{ inputs.enabled }}' = "$WORKFLOW_ENABLED"`},
 	}
 }
 
+func TestCompiledGitHubIdentityIDs(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/identity.yml"
+	workflow := `on: push
+run-name: Repository ${{ github.repository_id }}
+jobs:
+  test:
+    if: github.actor_id == '9007199254740993'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        owner: ["${{ github.repository_owner_id }}"]
+    env:
+      REPOSITORY_ID: ${{ github.repository_id }}
+    outputs:
+      identity: ${{ steps.identity.outputs.value }}
+    steps:
+      - if: github.repository_owner_id != '73'
+        run: exit 99
+      - id: identity
+        uses: ./.github/actions/identity
+        with:
+          owner: ${{ matrix.owner }}
+  call:
+    if: github.repository_id == '42'
+    uses: ./.github/workflows/called.yml
+    with:
+      actor: ${{ github.actor_id }}
+`
+	writeFixtureFile(t, workspace, workflowPath, workflow)
+	writeFixtureFile(t, workspace, ".github/workflows/called.yml", `on:
+  workflow_call:
+    inputs:
+      actor:
+        type: string
+jobs:
+  called:
+    runs-on: ubuntu-latest
+    outputs:
+      identity: ${{ github.actor_id }}:${{ github.repository_id }}:${{ github.repository_owner_id }}
+    steps:
+      - run: test '${{ inputs.actor }}' = '9007199254740993'
+`)
+	writeFixtureFile(t, workspace, ".github/actions/identity/action.yml", `name: identity
+inputs:
+  owner:
+    required: true
+  actor:
+    default: ${{ github.actor_id }}
+outputs:
+  value:
+    value: ${{ steps.check.outputs.value }}
+runs:
+  using: composite
+  steps:
+    - id: check
+      if: github['repository_id'] == '42' && github.actor_id == inputs.actor
+      shell: sh
+      run: |
+        test '${{ inputs.owner }}' = '73'
+        test "$REPOSITORY_ID" = '42'
+        test '${{ github.actor_id }}' = '9007199254740993'
+        test '${{ github.repository_owner_id }}' = '73'
+        echo 'value=${{ inputs.actor }}:${{ github.repository_id }}:${{ inputs.owner }}' >> "$GITHUB_OUTPUT"
+    - if: github.actor_id != '9007199254740993'
+      shell: sh
+      env:
+        TOKEN: ${{ github.token }}
+      run: exit 99
+`)
+	event := []byte(`{"provider":"github","event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat","payload":{"sender":{"login":"Octocat","id":9007199254740993},"repository":{"full_name":"Acme/Widgets","id":42,"owner":{"login":"Acme","id":73}}}}`)
+	bundle, err := compiler.CompileBundle(filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("got %d plans, want direct and reusable jobs", len(bundle.Plans))
+	}
+	for _, artifact := range bundle.Plans {
+		job, err := plan.Decode(artifact.Contents)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.Event.PayloadFile || job.GitHubToken != nil || len(job.RequiredSecrets) != 0 {
+			t.Fatal("identity reads must not grant file or credential authority")
+		}
+		if job.Event.PayloadArtifact {
+			payload, err := plan.DecodeEventPayload(bundle.EventArtifact.Contents, job.Event.PayloadDigest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job.Event.Payload = &payload
+		}
+		result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+		if err != nil || result.Conclusion != "success" || result.Outputs["identity"] != "9007199254740993:42:73" {
+			t.Fatalf("RunJob(%s) = %#v, %v", job.Workflow.LogicalJobID, result, err)
+		}
+	}
+}
+
 func TestCompiledGitHubServerURLs(t *testing.T) {
 	for _, test := range []struct {
 		server, rest, graphql string
@@ -2413,6 +2692,76 @@ jobs:
 				t.Fatalf("RunJob() = %#v, %v", result, err)
 			}
 		})
+	}
+}
+
+func TestCompiledWorkflowServerURLConditions(t *testing.T) {
+	for _, server := range []string{"https://github.com", "https://buildkite-ghe.com"} {
+		for _, wantRun := range []bool{true, false} {
+			for _, position := range []string{"job", "step", "call"} {
+				t.Run(fmt.Sprintf("%s/%s/match=%t", server, position, wantRun), func(t *testing.T) {
+					workspace := t.TempDir()
+					workflowPath := ".github/workflows/test.yml"
+					host := server
+					if !wantRun {
+						host = "https://wrong.example"
+					}
+					condition := "github.server_url == '" + host + "'"
+					jobCondition, stepCondition := "true", "true"
+					if position == "job" {
+						jobCondition = condition
+					}
+					if position == "step" {
+						stepCondition = condition
+					}
+					workflow := fmt.Sprintf(`on: push
+jobs:
+  test:
+    if: %s
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.guarded.outcome }}
+    steps:
+      - id: guarded
+        if: %s
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$GH_TOKEN" = '${{ github.token }}'
+          printf '%%s' "$GH_TOKEN" > token-body
+`, jobCondition, stepCondition)
+					if position == "call" {
+						writeFixtureFile(t, workspace, ".github/workflows/called.yml", strings.Replace(workflow, "on: push", "on: workflow_call", 1))
+						workflow = "on: push\njobs:\n  call:\n    if: " + condition + "\n    uses: ./.github/workflows/called.yml\n"
+					}
+					writeFixtureFile(t, workspace, workflowPath, workflow)
+					event := []byte(fmt.Sprintf(`{"provider":"github","server_url":%q,"event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat"}`, server))
+					jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+					if err != nil || len(jobs) != 1 {
+						t.Fatalf("compile = %#v, %v", jobs, err)
+					}
+					if (jobs[0].GitHubToken != nil) != wantRun {
+						t.Fatalf("token authority = %#v, want token=%v", jobs[0].GitHubToken, wantRun)
+					}
+					provider := &testWorkflowTokenProvider{token: "ghs_host_condition"}
+					result, err := (Runner{WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(t.Context(), jobs[0], workspace)
+					wantConclusion := "success"
+					if !wantRun && position != "step" {
+						wantConclusion = "skipped"
+					}
+					if err != nil || result.Conclusion != wantConclusion {
+						t.Fatalf("RunJob() = %#v, %v; want %s", result, err, wantConclusion)
+					}
+					if position == "step" && !wantRun && result.Outputs["outcome"] != "skipped" {
+						t.Fatalf("skipped step outcome = %q", result.Outputs["outcome"])
+					}
+					body, err := os.ReadFile(filepath.Join(workspace, "token-body"))
+					if wantRun && (err != nil || string(body) != provider.token) || !wantRun && (!errors.Is(err, os.ErrNotExist) || provider.calls != 0) {
+						t.Fatalf("token body = %q, %v; token calls=%d, want run=%v", body, err, provider.calls, wantRun)
+					}
+				})
+			}
+		}
 	}
 }
 

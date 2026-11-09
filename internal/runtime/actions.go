@@ -141,7 +141,7 @@ func newActionLockResolver(job plan.Job, workspace string, materializer ActionMa
 }
 
 func usesCheckoutAdapter(lock plan.ActionLock) bool {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path})
 	return descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA
 }
 
@@ -149,7 +149,7 @@ func validateJobCheckoutAdapters(job plan.Job) (bool, error) {
 	locks := make(map[string]plan.ActionLock, len(job.Actions))
 	for _, lock := range job.Actions {
 		if usesCheckoutAdapter(lock) {
-			if _, _, err := actionintegration.Admit(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit); err != nil {
+			if _, _, err := actionintegration.Admit(actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path}, lock.Commit); err != nil {
 				return false, err
 			}
 		}
@@ -168,22 +168,22 @@ func validateJobCheckoutAdapters(job plan.Job) (bool, error) {
 }
 
 func usesUploadArtifactAdapter(lock plan.ActionLock) bool {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path})
 	return descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite
 }
 
 func usesDownloadArtifactAdapter(lock plan.ActionLock) bool {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path})
 	return descriptor.Adapter == actionintegration.AdapterDownloadArtifactBuildkite
 }
 
 func usesNativeAdapter(lock plan.ActionLock) bool {
-	_, admitted, err := actionintegration.AdmitNativeAdapter(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
+	_, admitted, err := actionintegration.AdmitNativeAdapter(actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
 	return err == nil && admitted
 }
 
 func usesCacheService(lock plan.ActionLock) bool {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path})
 	return descriptor.Service == actionintegration.ServiceCache
 }
 
@@ -230,7 +230,7 @@ func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSe
 	if err != nil {
 		return resolvedAction{}, err
 	}
-	descriptor, _, err := actionintegration.Admit(actionintegration.Identity{Source: entry.lock.Source, Repository: entry.lock.Repository, Path: entry.lock.Path}, entry.lock.Commit)
+	descriptor, _, err := actionintegration.Admit(actionintegration.Identity{Source: entry.lock.Source, ServerURL: entry.lock.ServerURL, Repository: entry.lock.Repository, Path: entry.lock.Path}, entry.lock.Commit)
 	if err != nil {
 		return resolvedAction{}, err
 	}
@@ -295,6 +295,10 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 	if err != nil || ref.Owner+"/"+ref.Repository != lock.Repository || ref.Path != lock.Path || ref.Ref != lock.Commit {
 		return metadata.Metadata{}, fmt.Errorf("malformed canonical GitHub repository or exact commit")
 	}
+	if err := source.ValidateServerURL(lock.ServerURL); err != nil {
+		return metadata.Metadata{}, err
+	}
+	ref.ServerURL = lock.ServerURL
 	// Parsing also enforces commit-like reference syntax only structurally, so
 	// insist on a lower-case full SHA independently of RequestedRef.
 	if !git.ValidObjectID(lock.Commit) {

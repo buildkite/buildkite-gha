@@ -176,10 +176,63 @@ backend support before this client.
 Local regression tests establish host preservation and fail-closed lookup
 behavior, not live GHES API availability or installation grants.
 
-Public action sources remain on github.com. Never attach GHES workflow tokens
-to public action requests or infer a github.com self-repository identity from
-a GHES event. Private reusable source resolution requires host-bound identity;
-reject it for GHES imports until that contract exists.
+Source references, action locks and reusable-workflow provenance carry their own
+optional canonical `server_url`. An omitted source origin means GitHub.com,
+never the event origin. Preserve it through pinning, nested self sources,
+deferred plans, diagnostics and runtime materialization. Bind memoized sources,
+ref caches, resolution snapshots and tree manifests to that origin. Keep existing
+hostless GitHub.com cache keys; never reinterpret them as GHES.
+
+New ordinary remote references select the root event's GitHub source host,
+including nested composites, remote reusable calls and deferred action locks.
+This selection does not reinterpret existing hostless locks. Local reusable
+paths and `$/` references retain their containing source's pinned identity.
+Non-GitHub events keep GitHub.com action sources; event and token context do
+not change with the source host.
+
+On GHES 3.22.2 with runner 2.334.0, the immutable
+[mixed-source fixture](https://buildkite-ghe.com/sj26-testier/gha-mixed-caller-20261104-10f4/commit/681944f43e80289bafd238b33b75f394ee8b07a8)
+used a public checkout mirror, public/private composites, a private-to-public
+child action and a private reusable calling a local nested workflow.
+[Sharing disabled](https://buildkite-ghe.com/sj26-testier/gha-mixed-caller-20261104-10f4/actions/runs/14)
+rejected the reusable before scheduling;
+[sharing enabled](https://buildkite-ghe.com/sj26-testier/gha-mixed-caller-20261104-10f4/actions/runs/16)
+passed both jobs at the same caller commit. A
+[public-only control](https://buildkite-ghe.com/sj26-testier/gha-mixed-caller-20261104-10f4/actions/runs/17)
+passed with sharing disabled. Action archive URLs used the GHES
+`/api/v3/repos/.../tarball/<SHA>` endpoint, including the checkout mirror.
+Anonymous metadata and archive requests to the public fixture returned 401.
+These observations establish same-host selection and sharing admission in this
+lab, not GitHub Connect fallback or Buildkite source-token authorization.
+
+Anonymously readable GHES sources resolve through the selected origin's
+`/api/v3` and download immutable `/repos/<owner>/<repo>/tarball/<SHA>` archives.
+Archive redirects stay on that HTTPS origin. There is no GitHub.com or Connect
+fallback. Keep GitHub.com endpoints, credentials and legacy cache paths unchanged;
+separate GHES tree directories, mutable refs and API rate-limit budgets by origin.
+Tree-cache maintenance must account for every origin without evicting leased trees.
+
+Source identity does not grant access. GitHub.com metadata tokens and reusable
+Git credentials must never authorize GHES sources. Authentication-required GHES
+repositories, including this lab's public repositories, remain unsupported;
+the hosted private-reusable opt-in guard stays in place. Never attach GHES
+workflow tokens to GitHub.com requests or infer a GitHub.com self source from a
+GHES event.
+
+The [source regressions](../internal/action/source/source_test.go) cover host
+collisions, credential isolation, denied requests, redirects and cache eviction.
+The [runtime regression](../internal/runtime/actions_test.go) compiles remote
+and nested reusable workflows, then downloads and executes nested composite
+actions from a cold runtime cache using a local HTTPS GHES-shaped fixture.
+These tests establish the anonymous transport contract, not live authenticated
+GHES imports, webhook delivery or job-bound source-token authorization.
+
+Native integration admission includes the source origin. A same-name GHES
+repository must not receive GitHub.com's native adapter or cache substitution.
+Explicit GitHub.com and omitted origins have the same integration identity.
+Job-plan schema v2 accepts the optional source fields; the prior strict decoder
+rejects them as unknown rather than ignoring their host. These checks do not
+establish authenticated GHES source support.
 
 The [GHES spike](https://ampcode.com/threads/T-01a15c91-9015-754b-a5f3-bebba85e76e8)
 ran a real GHES 3.17.14 repository against an isolated Buildkite backend and a
@@ -247,6 +300,58 @@ verified receipts. Query, download, verification, and ambiguous-state failures
 remain errors; see [terminal-result tests](../internal/transport/terminal_results_test.go).
 Recovery must not change the producer's Buildkite failure or dependency scheduling.
 
+### Workflow concurrency across deferred matrices
+
+Keep the root workflow's opening and closing markers adjacent in the ordered
+concurrency queue. The closing marker must depend on every initial job and
+deferred uploader with `allow_failure: true`. Buildkite
+[extends dependencies on an uploader to its uploaded work](https://buildkite.com/docs/pipelines/configure/dependencies#defining-explicit-dependencies).
+Do not upload another gate pair from a continuation: it would queue behind the
+closing marker that is waiting for that continuation's jobs.
+Reject member jobs sharing the root group before omitting that gate from a
+continuation, including when further matrix stages remain to be expanded.
+
+The inspected backend [adds implicit uploader dependencies](https://github.com/buildkite/buildkite/blob/0e2616ba728b4bdb0afa237c4963d8afce870bc7/app/models/build/pipeline_changer.rb#L630-L663)
+only to top-level steps without dependencies or an explicit `depends_on`.
+[An explicit empty list also suppresses that default](https://github.com/buildkite/buildkite/blob/0e2616ba728b4bdb0afa237c4963d8afce870bc7/app/models/build/pipeline_config.rb#L423-L465).
+Separately, the uploader [extends incoming dependencies to uploaded work](https://github.com/buildkite/buildkite/blob/0e2616ba728b4bdb0afa237c4963d8afce870bc7/app/models/build/pipeline_changer.rb#L681-L747),
+excluding implicit `UPLOAD` dependencies and copying the failure policy.
+The closing marker's explicit dependency therefore follows every chained
+upload, even when uploaded jobs have their own explicit dependencies. Preserve
+the existing graph; no additional ordering dependencies are needed.
+Its [ordered queue](https://github.com/buildkite/buildkite/blob/ac9b91a26e2273f98e457ef3a48c82a7df106746/app/models/concurrency_group/queue_processor.rb#L175-L231)
+counts waiting markers ahead of competing runs. Dependencies
+[wait for automatic retries](https://github.com/buildkite/buildkite/blob/ac9b91a26e2273f98e457ef3a48c82a7df106746/app/models/step/dependency/state.rb#L92-L119),
+but [finished markers are not reopened](https://github.com/buildkite/buildkite/blob/ac9b91a26e2273f98e457ef3a48c82a7df106746/app/models/job/state/resolver.rb#L66-L72)
+when an individual job is retried later.
+
+On November 3, 2026, [run A](https://buildkite.com/sj26-testier/pb-4387-deferred-concurrency-contract/builds/1)
+held its group until its deferred jobs and automatic retry finished. Competing
+[run B](https://buildkite.com/sj26-testier/pb-4387-deferred-concurrency-contract/builds/2)
+started at 04:20:35.952 UTC, after A's closing marker finished at 04:20:31.072.
+Manually retrying A's failed member then ran it from 04:20:57.718 to
+04:21:27.949, overlapping B. Dynamic upload itself does not cause early release;
+individual retries after release do.
+
+[Grouped chained uploads](https://buildkite.com/sj26-testier/pb-4387-deferred-concurrency-contract/builds/3)
+kept their marker waiting until the last descendant finished at 04:24:34.025 UTC;
+the [competitor](https://buildkite.com/sj26-testier/pb-4387-deferred-concurrency-contract/builds/4)
+entered at 04:24:45.902. A [failed uploader](https://buildkite.com/sj26-testier/pb-4387-deferred-concurrency-contract/builds/5)
+released its group before [the next run](https://buildkite.com/sj26-testier/pb-4387-deferred-concurrency-contract/builds/6)
+entered.
+
+Keep ordinary manual and automatic retry behavior. As with the existing
+static-only marker translation, concurrency is best-effort for manual retries
+after the closing marker finishes: retried jobs can overlap a later run.
+Do not reject the workflow or prohibit retries for this case. Preserve the
+gate across every chained stage without changing plan authority or producer
+identity; see
+[CLI regressions](../internal/cli/upload_stage_test.go).
+Static-only workflow retries, called-workflow gates, output-derived runner
+selection, output-derived scheduling, and cancel-in-progress are not broadened.
+These scheduler probes and local CLI tests do not prove native GitHub parity or
+successful execution of the complete PostHog workflow.
+
 ### Action sources and native adapters
 
 Resolve mutable action refs to commits and lock the extracted source tree.
@@ -280,6 +385,28 @@ upstream bundles with cache credentials. An unknown cache commit is substituted
 with an admitted release, not run under an adapter fallback. Preserve the
 requested and selected identities and their diagnostics. The
 [integration catalog](../internal/action/integration/catalog.go) owns that split.
+
+Skip native adapter input validation only when the whole job is proven false
+after reusable inputs and matrix values resolve. Retain its skipped plan and
+action locks. Reachable jobs, runtime-dependent job conditions, and false
+individual steps still require adapter validation. The
+[compiler regression](../internal/compiler/actions_test.go) covers checkout and
+both artifact adapters, including an unreachable download to
+`${{ runner.temp }}/digests`. This is local compilation evidence, not native
+GitHub or hosted execution evidence.
+
+The GHES `upload-artifact` contracts for
+[v3.2.2](https://github.com/actions/upload-artifact/blob/c6a366c94c3e0affe28c06c8df20a878f24da3cf/action.yml)
+and [v3.2.2-node20](https://github.com/actions/upload-artifact/blob/c6a3b2bd78b3985e4b2f15397fec357f0fd808de/action.yml)
+declare the same inputs and no outputs. Preserve their hidden-file exclusion by
+default and explicit opt-in; do not substitute the v7 fallback or recommend an
+upgrade to a github.com-only release. Their Node runtime and bundled dependency
+changes do not execute in the native adapter. A November 2, 2026
+[native GHES 3.22.2 run](https://buildkite-ghe.com/sj26-testier/ghes-source-compare-20261102/actions/runs/2)
+round-tripped 22 bytes with the node20 pin and `download-artifact` v3-node20.
+That run does not establish hidden-file behavior or hosted Buildkite execution;
+[local runtime tests](../internal/runtime/upload_artifact_test.go) cover archive
+contents and default/opt-in hidden-file handling.
 
 ### Filesystems and artifact extraction
 
@@ -356,6 +483,114 @@ runner account. See [cache lifecycle tests](../internal/runtime/cache_service_te
 These records preserve the evidence behind the former combined reference.
 They distinguish reported observations from independently inspectable receipts.
 They are not an exhaustive conformance suite.
+
+### Compile-known job controls
+
+The [GitHub context-availability table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability)
+admits `github`, `needs`, `vars`, and `inputs` in `strategy`, with `matrix` and
+`strategy` additionally available to job `timeout-minutes`. Neither position
+admits step status functions, `hashFiles`, `env`, or secrets. This is documentation
+evidence, not a native execution receipt.
+
+Preserve those positional boundaries when evaluating compile-known controls.
+Timeout expressions must produce a finite number greater than zero and at most
+360; retain fractional minutes. Max-parallel expressions must produce a positive
+integer representable by the existing integer field; do not apply the deferred
+path's 256 limit to static values. Reject numeric strings without explicit
+conversion, booleans, null, collections, and unresolved values. Input values are
+data, never new expression source, and evaluation diagnostics must not quote them.
+
+The [compiler and generated-pipeline regressions](../internal/compiler/job_controls_test.go)
+cover constants, event/variable values, dispatch inputs, nested reusable inputs,
+per-row timeout, and invalid controls. The
+[deferred regressions](../internal/compiler/runtime_scheduling_test.go) retain
+the existing needs-derived max-parallel contract and evaluate matrix-backed
+timeout only once rows are available. Direct needs-derived timeout, deferred
+reusable input controls, and expression-valued max-parallel on reusable workflow
+invocations remain unsupported. Matrix fail-fast is separate. These local checks
+do not establish native parity, hosted execution, or released availability.
+
+### GitHub identity IDs
+
+The [GitHub context reference](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#github-context)
+defines actor, repository, and repository-owner IDs as strings. Derive them only
+from positive integer IDs in the GitHub event's `sender`, `repository`, and
+`repository.owner` objects. Require their login/full-name fields to match the
+selected event actor and repository, case-insensitively. Preserve integer
+precision; never resolve names through another provider or substitute Buildkite
+identities. Missing or mismatched data leaves the field unavailable, and an
+evaluated read fails rather than returning a fabricated or empty ID.
+
+Compilation, action authority planning, and runtime use the same extraction.
+Retain the digest-bound event payload when an ID read remains at runtime;
+this does not authorize an event file or credentials. Known-false ID guards
+must prune token authority, including composite shell guards. Unknown guards
+remain conservative. IDs do not broaden a position's allowed contexts.
+
+The [compiled regression](../internal/runtime/runtime_test.go) exercises graph
+fields, job and reusable-call conditions, job environment and outputs, composite
+defaults, conditions, and shell execution with distinct IDs, including
+`9007199254740993`. [Source checks](../internal/plan/plan_test.go) reject missing,
+malformed, mismatched, and other-provider identities;
+[expression checks](../internal/expression/engine_test.go) cover unavailable
+values, static indexing, payload retention, and token effects.
+[Deferred-matrix checks](../internal/compiler/runtime_matrix_continuation_test.go)
+require the same ID guards in action preflight and expanded jobs, rejecting
+reachable or unknown composite child-input token branches. These are local
+implementation checks against documented fields, not native execution or
+backend delivery evidence for every event, manual build, or retry path.
+
+### Runner tool-cache paths
+
+The pinned runner [creates the tool cache and sets its context](https://github.com/actions/runner/blob/1ddb758ed014660b5d2220a5dc6b0e9957a9f96b/src/Runner.Worker/JobRunner.cs#L174-L176)
+before action execution. PostHog's pinned
+[Python setup](https://github.com/buildkite/posthog/blob/b9a0729f733e6dd170017677bb339608489ec3d2/.github/actions/setup-python-cached/action.yml#L46)
+and [pnpm setup](https://github.com/buildkite/posthog/blob/b9a0729f733e6dd170017677bb339608489ec3d2/.github/actions/pnpm-install/action.yml#L73)
+pass `runner.tool_cache` subdirectories to cache actions. These are source
+references, not native execution receipts.
+
+Resolve `runner.tool_cache` from the same validated directory as
+`RUNNER_TOOL_CACHE`, never from importer or workflow environment values.
+Keep it unknown during compilation and authority analysis. Setup must supply
+it before action defaults and steps evaluate it; graph-time fields and
+pre-setup conditions remain unavailable.
+
+Job containers use a writable per-job cache inside the existing temp mount,
+with container-translated expressions and environment values. Do not mount
+the configured host tool cache or widen working-directory containment.
+Docker actions retain their separate environment and mount policy.
+[Compiled action-input tests](../internal/runtime/runtime_test.go) cover shared
+setup/consumer paths and cleanup; the [non-root container test](../internal/runtime/containers_test.go)
+covers writable translated paths without changing the configured host cache.
+These checks do not establish cache-service persistence, preinstalled tool
+availability, or successful execution of the complete PostHog workflow.
+
+### Run-attempt conditions
+
+The pinned [PostHog backend workflow](https://github.com/buildkite/posthog/blob/b9a0729f733e6dd170017677bb339608489ec3d2/.github/workflows/ci-backend.yml#L3690-L3734)
+uses `github.run_attempt == '1'` for telemetry steps and the
+`capture-test-selection` job, alongside actor, event, and prerequisite guards.
+The [November 3 compatibility capture](https://ampcode.com/artifacts/fresh-compatibility-and-performance-comparisons-november-202-3f3daada-c84c-44d4-aab8-c6b688fa1cf1)
+records v0.119.0 rejecting these conditions. These are authored-workflow and
+local-admission observations, not native execution receipts.
+
+Conditions use the existing runtime mapping: `BUILDKITE_RETRY_COUNT + 1`,
+as a string. GitHub counts attempts of a workflow run, including reruns of
+selected jobs. The Buildkite per-job mapping is an approximation, not exact
+parity. Preserve that distinction rather than inventing a workflow attempt
+counter. An absent or invalid retry count leaves the value unavailable and
+condition evaluation fails.
+Import-time restrictions and authority invariants remain in
+[Expression authority](expression-authority.md#expression-profiles).
+
+The [compiled runtime regression](../internal/runtime/runtime_test.go) checks
+first-attempt and retry selection for jobs, reusable calls, workflow steps, and
+composite steps, plus unavailable identity. The
+[expression regression](../internal/expression/engine_test.go) checks residual
+conditions, numeric/string comparisons, abstract refinement, and prohibited
+contexts. The [compiler regression](../internal/compiler/actions_test.go) checks
+conservative token authority and known-false pruning. These local checks do not
+establish a complete PostHog run, native parity, or released availability.
 
 ### Git email inference on Linux runners
 
@@ -553,8 +788,23 @@ support `github` and `inputs` in composite conditions. The pinned
 uses a provider-URL guard. This informed
 [composite `github.server_url` support](https://github.com/buildkite/buildkite-gha/pull/607).
 It is source evidence, not a native execution or whole-action success claim.
-Keep admission scoped to composite conditions and preserve implicit success and
-token-authority rules; see [expression tests](../internal/expression/engine_test.go).
+
+A native GHES 3.22.2 [host/checkout run](https://buildkite-ghe.com/sj26-testier/ghes-source-compare-20261102/actions/runs/6)
+at [fixture commit 8d5eaa8](https://buildkite-ghe.com/sj26-testier/ghes-source-compare-20261102/commit/8d5eaa81db6c6f5e5c16abc18fd17132fe3e5091)
+accepted checkout `github-server-url: ${{ github.server_url }}`, true job/step
+host conditions, and a false github.com branch. Checkout used the GHES mirror's
+v4 commit `34e114876b0b11c390a56381ad16ebd13914f8d5`.
+Job, workflow-step, reusable-call, and composite-step host conditions preserve
+implicit success and token-authority rules; JavaScript lifecycle admission is
+unchanged. Checkout expressions must resolve to the event host or empty value,
+with the same host check at compilation and execution. These fields do not
+authorize another host or change public action source resolution.
+The [expression tests](../internal/expression/engine_test.go) and
+[compiled runtime tests](../internal/runtime/runtime_test.go) cover both hosts,
+false-branch token pruning, and unavailable values. The
+[hosted differential oracle](../.github/workflows/expression-oracle.yml) also
+checks checkout and host guards on github.com. Native GHES evidence does not
+establish hosted Buildkite GHES checkout credentials or pipeline onboarding.
 
 The runner's [composite result handling](https://github.com/actions/runner/blob/5f0b3ddcc6ee9fe9441e00d55e85b94ea4aad798/src/Runner.Worker/Handlers/CompositeActionHandler.cs#L235-L248)
 and [job-status updates](https://github.com/actions/runner/blob/5f0b3ddcc6ee9fe9441e00d55e85b94ea4aad798/src/Runner.Worker/StepsRunner.cs#L273-L285)
@@ -630,6 +880,59 @@ The public minimum versions are supported by published notes:
 [JAVA_HOME inheritance in v0.105.2](https://github.com/buildkite/buildkite-gha/releases/tag/v0.105.2)
 and [Windows zstd discovery in v0.105.3](https://github.com/buildkite/buildkite-gha/releases/tag/v0.105.3).
 
+### Concurrency cancellation
+
+Job cancellation maps one expanded job to one Buildkite command step, with
+`concurrency: {limit: 1, group: ..., cancel_in_progress: true}`. False or omitted
+cancellation retains queue-only emission. Evaluate cancellation as a boolean
+with the existing compile expression profile, per concrete matrix instance and
+reusable-workflow input frame. Deferred matrices use the same evaluator after
+expansion, including with a producer-derived group. This does not admit `needs`
+in cancellation expressions or deferred reusable inputs.
+
+Suppress job cancellation when the existing condition reduction proves the job
+or an inherited call guard false. Keep evaluating cancellation expressions for
+diagnostics even in that case. Conditions left for runtime cannot suppress a
+request: Buildkite enforces concurrency before `run-job` evaluates them.
+
+The merged [backend cancellation contract](https://github.com/buildkite/buildkite/pull/38010)
+was inspected at [dde6eda](https://github.com/buildkite/buildkite/commit/dde6eda60a6912e424327e00849398d87eab6bfa).
+The [queue processor](https://github.com/buildkite/buildkite/blob/dde6eda60a6912e424327e00849398d87eab6bfa/app/models/concurrency_group/queue_processor.rb)
+enqueues cleanup after an opted-in job transitions from limiting to limited.
+The [canceler](https://github.com/buildkite/buildkite/blob/dde6eda60a6912e424327e00849398d87eab6bfa/app/models/concurrency_group/canceler.rb)
+selects the last opted-in limited request in effective scheduling order. It
+cancels queued predecessors, then occupied blockers, until enough capacity is
+expected to be released. Victims need not opt in. Admission remains asynchronous;
+neither arrival order nor an atomic latest-wins outcome is guaranteed.
+
+Workflow cancellation intentionally uses only the opening gate as requester.
+The adjacent closing gate remains queue-only and waits for member completion.
+An older dependency-waiting closing gate is a cancellation victim: the backend
+[regression](https://github.com/buildkite/buildkite/blob/dde6eda60a6912e424327e00849398d87eab6bfa/spec/workers/pipelines/concurrency_group_cancel_worker_spec.rb)
+explicitly covers waiting predecessors of ordered requests. Canceling that
+marker lets a newer opener advance without waiting for the older workflow's
+members. Those members are outside the workflow group and can continue, including
+jobs not yet started after their opener passed. Workflow executions can overlap.
+Canceling an older opener instead prevents its strictly dependent members from
+starting. Do not opt closing gates in: a close that becomes limited could
+otherwise request cancellation of other work while finishing its own scope.
+
+Retain the existing shared-group and ordered-dependency cycle rejections.
+Nested and matrix-expanded reusable gates keep their own cancellation decision.
+A statically false call has no gate; a runtime-decided false call can still
+request cancellation. Prerequisites must finish before an opener can request,
+although its queue position is reserved at upload. Emit a best-effort warning
+for enabled workflow cancellation rather than promising whole-build cancellation.
+
+The [bundle regressions](../internal/compiler/bundle_test.go) check actual emitted
+requesters and dependencies; [deferred scheduling tests](../internal/compiler/runtime_scheduling_test.go)
+check per-row decisions without reparsing output text. These local tests and the
+backend source inspection do not establish production cancellation or native
+GitHub parity. Sam reported worldwide backend enablement on November 6, 2026;
+live rollout was not independently verified. The public pipeline schema inspected
+that day accepted structured concurrency but lacked `cancel_in_progress` and
+rejected unknown keys; the server schema in the merged backend contains it.
+
 ## Backend contracts and public support
 
 Backend enforcement, publicly supported configurations, and live rollout are
@@ -652,6 +955,41 @@ backend or operational evidence. Fake Agent API tests prove client response
 handling, not those server policies. Do not flatten their different fallback
 rules: explicit runner validation and environment resolution fail closed, while
 automatic runner resolution and unavailable variables have their own contracts.
+
+Runner `missing_queue` rejections may include a server-owned `setup_url` to an
+authenticated review page with one recommended queue preselected. Preserve it
+through diagnostics, JSON, logs, and annotations; offer the action only for a
+validated absolute HTTP(S) URL, never from labels or error prose. Other rejection
+codes and older servers without the field retain their existing guidance.
+Requests advertise `supports_queue_setup: true`; the backend emits `setup_url`
+only with that capability. Missing or false preserves older replies within
+older clients' 64 KiB response limit; opted-in clients accept up to 1 MiB.
+Deploy the backend page and response field before releasing the CLI. Queue
+creation does not resume synthetic failed jobs: keep manual retry disabled and
+direct users to trigger a matching workflow event, or rebuild where supported.
+This does not enable native manual runs or rebuilds for GHES pipelines.
+The [runner diagnostic tests](../internal/cli/runner_resolution_test.go)
+and [upload test](../internal/cli/upload_test.go) establish client rendering and
+failure-step behavior, not backend authorization or live queue creation.
+
+Automatic Ubuntu ARM64 routing is server-owned. For `ubuntu-22.04-arm`,
+`ubuntu-24.04-arm`, `ubuntu-26.04-arm`, their `-arm64` aliases, and recognized
+provider ARM64 labels, select an active hosted Linux ARM64
+`linux-arm64-medium` queue in the job's cluster, without an amd64 image
+or tool-cache bootstrap. Explicit mappings retain precedence and server
+validation, and infer ARM64 for those same labels. A missing ARM64 queue must
+not fall back to amd64. Match complete provider labels and documented sizes,
+not arbitrary prefixes or custom suffixes; retain provider fallback warnings.
+The November 5, 2026 label audit used the
+[GitHub image inventory](https://github.com/actions/runner-images#available-images)
+and the [Depot](https://depot.dev/docs/github-actions/runner-types),
+[Blacksmith](https://docs.blacksmith.sh/blacksmith-runners/overview),
+[WarpBuild](https://www.warpbuild.com/docs/ci/cloud-runners), and
+[Ubicloud](https://www.ubicloud.com/docs/github-actions-integration/runner-types)
+catalogs. WarpBuild's `-xfast` variants still select Linux, not macOS.
+The [CLI upload regression](../internal/cli/runtime_distribution_test.go) checks
+queue selection and ARM64 executable binding using a simulated Agent API;
+it does not establish backend deployment or hosted ARM64 execution.
 
 ## Maintaining the contract
 

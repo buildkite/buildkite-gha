@@ -743,9 +743,17 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 	}
 	if in.TimeoutMinutes != nil {
 		if in.TimeoutMinutes.Expression != nil {
-			return Job{}, locatedError(path, in.TimeoutMinutes.Expression.Pos, in.ID.Value, "expression-valued job timeout-minutes is unsupported")
+			expr, err := adaptExpression(in.TimeoutMinutes.Expression)
+			if err != nil {
+				return Job{}, err
+			}
+			if err := validateExpressionSite(expr.Text, expression.ProfileJobControl, expression.ResultNumber); err != nil {
+				return Job{}, locatedError(path, in.TimeoutMinutes.Expression.Pos, in.ID.Value, err.Error())
+			}
+			out.TimeoutMinutesExpression = &expr
+		} else {
+			out.TimeoutMinutes = in.TimeoutMinutes.Value
 		}
-		out.TimeoutMinutes = in.TimeoutMinutes.Value
 	}
 	if in.Env != nil && in.Env.Expression != nil {
 		return Job{}, locatedError(path, in.Env.Expression.Pos, in.ID.Value, "expression-valued job env is unsupported")
@@ -803,8 +811,8 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 				if err != nil {
 					return Job{}, err
 				}
-				if _, err := expression.RuntimeMatrixOutput(expr); err != nil {
-					return Job{}, locatedError(path, in.Strategy.MaxParallel.Expression.Pos, in.ID.Value, "expression-valued matrix max-parallel is unsupported except fromJSON(needs.<job>.outputs.<name>) on a needs-derived matrix")
+				if err := validateExpressionSite(expr.Text, expression.ProfileStrategyParallel, expression.ResultNumber); err != nil {
+					return Job{}, locatedError(path, in.Strategy.MaxParallel.Expression.Pos, in.ID.Value, err.Error())
 				}
 				out.MaxParallelExpression = &expr
 			} else {

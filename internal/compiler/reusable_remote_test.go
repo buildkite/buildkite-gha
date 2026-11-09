@@ -74,6 +74,96 @@ func (s *fakeReusableRepositorySource) references() []actionsource.Reference {
 	return append([]actionsource.Reference(nil), s.calls...)
 }
 
+func TestCompileSelectsEventHostForNewRemoteSources(t *testing.T) {
+	callerRoot, workflowRoot, otherRoot, parentRoot, childRoot := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	caller := writeWorkflow(t, callerRoot, "caller.yml", `on: push
+jobs:
+  direct:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.prepare.outputs.matrix }}
+    steps:
+      - uses: owner/parent@v1
+      - id: prepare
+        run: echo 'matrix={"item":["one"]}' >> "$GITHUB_OUTPUT"
+  deferred:
+    needs: direct
+    strategy:
+      matrix: ${{ fromJSON(needs.direct.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: owner/parent@v1
+  reusable:
+    uses: owner/workflows/.github/workflows/outer.yml@v1
+`)
+	writeWorkflow(t, workflowRoot, "outer.yml", "on: workflow_call\njobs:\n  local:\n    uses: ./.github/workflows/inner.yml\n  remote:\n    uses: owner/more/.github/workflows/inner.yml@v2\n")
+	for _, root := range []string{workflowRoot, otherRoot} {
+		writeWorkflow(t, root, "inner.yml", "on: workflow_call\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/parent@v1\n")
+	}
+	writeAction(t, parentRoot, "", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: owner/child@v2\n")
+	writeAction(t, childRoot, "", "name: child\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo child\n")
+	for _, server := range []string{"", "https://ghe.example"} {
+		t.Run(actionsource.ServerURL(server), func(t *testing.T) {
+			var event map[string]any
+			if err := json.Unmarshal(pushEvent(t), &event); err != nil {
+				t.Fatal(err)
+			}
+			event["server_url"] = server
+			repository := event["repository"].(map[string]any)
+			repository["clone_url"] = actionsource.ServerURL(server) + "/" + repository["owner"].(string) + "/" + repository["name"].(string) + ".git"
+			eventJSON, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := defaultOptions()
+			options.ResolveActions = true
+			options.RepositorySource = newFakeReusableRepositorySource(t, map[string]string{
+				"owner/workflows": workflowRoot, "owner/more": otherRoot, "owner/parent": parentRoot, "owner/child": childRoot,
+			})
+			options.ActionSource = options.RepositorySource
+			report, err := ValidateEventWithOptionsContext(t.Context(), caller, readFile(t, caller), eventJSON, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, source := range report.Sources {
+				if source.Repository != "" && source.ServerURL != server {
+					t.Fatalf("validation selected another host: %#v", source)
+				}
+			}
+			bundle, err := CompileBundlePlansContext(t.Context(), caller, readFile(t, caller), eventJSON, "test", testDistributionDigest, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.Plans) != 3 || len(bundle.IR.Continuations) != 1 {
+				t.Fatalf("plans=%d continuations=%d", len(bundle.Plans), len(bundle.IR.Continuations))
+			}
+			for _, artifact := range bundle.Plans {
+				job := artifact.Job
+				if job.Event.ServerURL != server || len(job.Actions) != 2 {
+					t.Fatalf("caller context or nested actions changed: %#v", job)
+				}
+				if remote := job.Workflow.Remote; remote != nil && remote.ServerURL != server {
+					t.Fatalf("reusable source selected another host: %#v", remote)
+				}
+				for _, lock := range job.Actions {
+					if lock.ServerURL != server {
+						t.Fatalf("action selected another host: %#v", lock)
+					}
+				}
+			}
+			locks := bundle.IR.Continuations[0].ActionLocks
+			if len(locks) != 2 {
+				t.Fatalf("deferred locks = %#v", locks)
+			}
+			for _, lock := range locks {
+				if lock.ServerURL != server {
+					t.Fatalf("deferred action selected another host: %#v", lock)
+				}
+			}
+		})
+	}
+}
+
 func TestLocalDiagnosticSourcesSurviveNestedWorkflowFailure(t *testing.T) {
 	root := t.TempDir()
 	caller := writeWorkflow(t, root, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/broken.yml\n")

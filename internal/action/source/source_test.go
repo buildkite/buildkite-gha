@@ -76,6 +76,133 @@ func TestParseExplainsUnsupportedContainerActions(t *testing.T) {
 	}
 }
 
+func TestReferenceSourceServer(t *testing.T) {
+	resolver, err := NewResolver(nil, WithGitHubActionSourceTokenProvider("event/repo", func(context.Context) (string, error) {
+		t.Fatal("exact source requested credentials")
+		return "", nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, server := range []string{"", "https://github.com", "https://github.example:8443"} {
+		ref, _ := Parse("owner/repo/action@main")
+		ref.ServerURL = server
+		pinned, err := PinReference(ref, testSHA)
+		if err != nil || pinned.ServerURL != server || pinned.Ref != testSHA || pinned.Path != "action" {
+			t.Fatalf("pin source %q = %#v, %v", server, pinned, err)
+		}
+		resolved, err := resolver.Resolve(t.Context(), pinned)
+		if err != nil || resolved.Reference.ServerURL != server || resolved.Commit != testSHA {
+			t.Fatalf("resolve source %q = %#v, %v", server, resolved, err)
+		}
+	}
+}
+
+func TestGHESResolutionKeepsHostsCredentialsAndBudgetsSeparate(t *testing.T) {
+	enterpriseSHA := strings.Repeat("e", 40)
+	var provisions atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enterprise := strings.HasPrefix(r.URL.Path, "/api/v3/")
+		wantToken := ""
+		if !enterprise && strings.HasPrefix(r.URL.Path, "/repos/o/other") {
+			wantToken = "Bearer github-com-only"
+		}
+		if r.Header.Get("Authorization") != wantToken || r.Header.Get("Cookie") != "" {
+			t.Error("wrong credentials for source host and repository")
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/limited"):
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+		case r.URL.Path == "/repos/o/r" || r.URL.Path == "/repos/o/other":
+			_, _ = fmt.Fprint(w, `{"private":false,"visibility":"public"}`)
+		case strings.Contains(r.URL.Path, "/git/ref/tags/"):
+			sha := testSHA
+			if enterprise {
+				sha = enterpriseSHA
+			}
+			_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, sha)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), WithGitHubActionSourceTokenProvider("o/r", func(context.Context) (string, error) {
+		provisions.Add(1)
+		return "github-com-only", nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver.cfg.mutableRefs, err = newMutableRefCache(t.TempDir(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r@v1")
+	ref.ServerURL = server.URL
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != enterpriseSHA || provisions.Load() != 0 {
+		t.Fatalf("GHES resolution = %#v, %v; provisions=%d", resolved, err, provisions.Load())
+	}
+	limited, _ := Parse("o/r@limited")
+	limited.ServerURL = server.URL
+	var rate *RateLimitError
+	if _, err := resolver.Resolve(t.Context(), limited); !errors.As(err, &rate) {
+		t.Fatalf("GHES rate limit = %v", err)
+	}
+	ref.ServerURL = ""
+	resolved, err = resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != testSHA || provisions.Load() != 1 {
+		t.Fatalf("GitHub.com resolution = %#v, %v; provisions=%d", resolved, err, provisions.Load())
+	}
+	other, _ := Parse("o/other@v1")
+	if resolved, err := resolver.Resolve(t.Context(), other); err != nil || resolved.Commit != testSHA {
+		t.Fatalf("authenticated GitHub.com resolution = %#v, %v", resolved, err)
+	}
+	ref.ServerURL = server.URL
+	resolved, err = resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != enterpriseSHA {
+		t.Fatalf("GHES ref cache = %#v, %v", resolved, err)
+	}
+}
+
+func TestGHESDenialsDoNotFallBackToGitHubCredentialsOrGit(t *testing.T) {
+	git, _, remote, commit := configureGitRepositorySource(t, map[string]string{"action.yml": "name: private\n"})
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasPrefix(r.URL.Path, "/api/v3/repos/o/r/") || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+					t.Error("wrong host path or credentials")
+				}
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			options := []Option{WithTestEndpoints(server.URL, server.URL), withGitFixtureSource(git, remote), WithGitHubAPITokenProvider(func(context.Context) (string, error) {
+				t.Error("GHES requested GitHub.com credentials")
+				return "github-com-only", nil
+			})}
+			resolver, err := NewResolver(server.Client(), options...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := NewStore(t.TempDir(), server.Client(), options...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref, _ := Parse("o/r@main")
+			ref.ServerURL, ref.RepositoryRoot = server.URL, true
+			var denied *NotPublicError
+			if _, err := resolver.Resolve(t.Context(), ref); !errors.As(err, &denied) {
+				t.Fatalf("GHES resolution denial = %v", err)
+			}
+			if _, err := store.Materialize(t.Context(), Resolved{Reference: ref, Commit: commit}); !errors.As(err, &denied) {
+				t.Fatalf("GHES archive denial = %v", err)
+			}
+		})
+	}
+}
+
 func TestResolverTagPeelingAndHeaders(t *testing.T) {
 	var calls []string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -762,16 +889,25 @@ func tgz(t *testing.T, entries []tar.Header) []byte {
 
 func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 	archive := tgz(t, []tar.Header{{Name: "repo-root/", Typeflag: tar.TypeDir}, {Name: "repo-root/action/", Typeflag: tar.TypeDir}, {Name: "repo-root/action/action.yml", Typeflag: tar.TypeReg, Size: 2, Mode: 0o755}})
+	enterpriseArchive := tgz(t, []tar.Header{{Name: "repo-root/", Typeflag: tar.TypeDir}, {Name: "repo-root/action/", Typeflag: tar.TypeDir}, {Name: "repo-root/action/enterprise", Typeflag: tar.TypeReg, Size: 3, Mode: 0o644}})
 	var requests atomic.Int32
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if r.URL.Path != "/Owner/Repo/tar.gz/"+testSHA {
-			t.Errorf("URL = %s", r.URL.Path)
-		}
 		if r.Header.Get("User-Agent") != "buildkite-gha/1.2.3" {
 			t.Errorf("User-Agent = %q", r.Header.Get("User-Agent"))
 		}
-		_, _ = w.Write(archive)
+		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+			t.Error("archive received credentials")
+		}
+		switch r.URL.Path {
+		case "/Owner/Repo/tar.gz/" + testSHA:
+			_, _ = w.Write(archive)
+		case "/api/v3/repos/Owner/Repo/tarball/" + testSHA:
+			_, _ = w.Write(enterpriseArchive)
+		default:
+			t.Errorf("URL = %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
 	}))
 	defer ts.Close()
 	store, err := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, ts.URL), WithUserAgentVersion("1.2.3"))
@@ -796,6 +932,37 @@ func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 	}
 	first.Release()
 	second.Release()
+	// Hostless trees are GitHub.com-only, including when the same commit
+	// exists on another server. Explicit GitHub.com still reuses that tree.
+	resolved.Reference.ServerURL = "https://github.com"
+	explicit, err := store.Materialize(t.Context(), resolved)
+	if err != nil || explicit.RepositoryRoot != first.RepositoryRoot {
+		t.Fatalf("explicit GitHub.com cache reuse = %#v, %v", explicit, err)
+	}
+	explicit.Release()
+	resolved.Reference.ServerURL = ts.URL
+	enterprise, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enterprise.RepositoryRoot == first.RepositoryRoot || enterprise.SourceDigest == first.SourceDigest {
+		t.Fatal("GHES source reused GitHub.com tree")
+	}
+	if data, err := os.ReadFile(filepath.Join(enterprise.ActionRoot, "enterprise")); err != nil || len(data) != 3 {
+		t.Fatalf("GHES content = %q, %v", data, err)
+	}
+	enterprise.Release()
+	for range 2 {
+		cached, err := store.Materialize(t.Context(), resolved)
+		if err != nil || cached.SourceDigest != enterprise.SourceDigest || requests.Load() != 2 {
+			t.Fatalf("GHES cache reuse = %#v, %v; requests=%d", cached, err, requests.Load())
+		}
+		cached.Release()
+	}
+	resolved.SourceDigest = first.SourceDigest
+	if _, err := store.Materialize(t.Context(), resolved); err == nil {
+		t.Fatal("GHES source accepted GitHub.com digest")
+	}
 }
 
 func TestStoreRejectsInvalidUTF8ArchiveMetadataOnEveryMaterialization(t *testing.T) {
@@ -2039,11 +2206,17 @@ func TestStoreCodeloadRedirectPolicy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.Materialize(t.Context(), resolved); err != nil {
-			t.Fatal(err)
+		for _, origin := range []string{"", server.URL} {
+			resolved := resolved
+			resolved.Reference.ServerURL = origin
+			materialized, err := store.Materialize(t.Context(), resolved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			materialized.Release()
 		}
-		if requests != 2 {
-			t.Fatalf("requests = %d, want 2", requests)
+		if requests != 4 {
+			t.Fatalf("requests = %d, want 4", requests)
 		}
 	})
 	t.Run("cross host denied before request", func(t *testing.T) {
@@ -2060,8 +2233,12 @@ func TestStoreCodeloadRedirectPolicy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.Materialize(t.Context(), resolved); err == nil || !strings.Contains(err.Error(), "archive redirect denied") {
-			t.Fatalf("Materialize() error = %v, want denied redirect", err)
+		for _, origin := range []string{"", server.URL} {
+			resolved := resolved
+			resolved.Reference.ServerURL = origin
+			if _, err := store.Materialize(t.Context(), resolved); err == nil || !strings.Contains(err.Error(), "archive redirect denied") {
+				t.Fatalf("Materialize() error = %v, want denied redirect", err)
+			}
 		}
 		if deniedRequests != 0 {
 			t.Fatalf("denied host requests = %d, want 0", deniedRequests)
@@ -2181,34 +2358,37 @@ func TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref, _ := Parse("o/r@v1")
-	materialized, err := store.Materialize(t.Context(), Resolved{Reference: ref, Commit: testSHA})
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := filepath.Dir(materialized.RepositoryRoot)
-	if err := store.maintain(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(base); err != nil {
-		t.Fatalf("leased entry was evicted: %v", err)
-	}
-	retained, err := materialized.Retain(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	materialized.Release()
-	if err := store.maintain(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(base); err != nil {
-		t.Fatalf("retained entry was evicted: %v", err)
-	}
-	retained.Release()
-	if err := store.maintain(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(base); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("released entry still exists: %v", err)
+	for _, origin := range []string{"", ts.URL} {
+		ref.ServerURL = origin
+		materialized, err := store.Materialize(t.Context(), Resolved{Reference: ref, Commit: testSHA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := filepath.Dir(materialized.RepositoryRoot)
+		if err := store.maintain(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(base); err != nil {
+			t.Fatalf("leased entry was evicted: %v", err)
+		}
+		retained, err := materialized.Retain(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		materialized.Release()
+		if err := store.maintain(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(base); err != nil {
+			t.Fatalf("retained entry was evicted: %v", err)
+		}
+		retained.Release()
+		if err := store.maintain(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(base); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("released entry still exists: %v", err)
+		}
 	}
 }
 

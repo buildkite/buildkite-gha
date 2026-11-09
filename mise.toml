@@ -43,7 +43,7 @@ run = "echo '--- Lint Go'; golangci-lint run"
 
 [tasks."lint:shell"]
 description = "Lint shell scripts"
-run = "echo '--- Lint shell'; shellcheck -x .buildkite/upload-examples.sh scripts/ci-buildkite-release scripts/compare-example scripts/compatibility-gaps scripts/starter-workflows-corpus scripts/validate-public-workflow-corpus scripts/verify-source-checkout scripts/hosted-docker-probe scripts/container-runtime-probe scripts/verify-summary-annotation scripts/verify-workflow-annotations scripts/verify-upload-artifact scripts/verify-artifact-roundtrip scripts/release scripts/release-test scripts/release-artifacts-test scripts/smoke-local testdata/actions/docker/entrypoint.sh testdata/container-runtime/.github/actions/docker/entrypoint.sh"
+run = "echo '--- Lint shell'; shellcheck -x .buildkite/upload-examples.sh scripts/compare-example scripts/compatibility-gaps scripts/starter-workflows-corpus scripts/validate-public-workflow-corpus scripts/verify-source-checkout scripts/hosted-docker-probe scripts/container-runtime-probe scripts/verify-summary-annotation scripts/verify-workflow-annotations scripts/verify-upload-artifact scripts/verify-artifact-roundtrip scripts/release scripts/release-artifacts-test scripts/smoke-local testdata/actions/docker/entrypoint.sh testdata/container-runtime/.github/actions/docker/entrypoint.sh"
 
 [tasks.lint]
 description = "Lint Go code and shell scripts"
@@ -70,13 +70,12 @@ description = "Cross-build all Go commands for native Linux arm64"
 run = "echo '--- Build Linux arm64'; GOOS=linux GOARCH=arm64 go build ./..."
 
 [tasks.release]
-description = "Tag and push the next pre-1.0 release"
-depends = ["check"]
+description = "Start the Buildkite release pipeline for current main (requires bk)"
 run = "scripts/release"
 
 [tasks."release:check"]
 description = "Validate the release configuration"
-run = "echo '--- Check release configuration'; goreleaser check && scripts/release-test && scripts/release-artifacts-test"
+run = "echo '--- Check release configuration'; goreleaser check && python3 scripts/release-test && scripts/release-artifacts-test"
 
 [tasks."smoke:local"]
 description = "Validate and deterministically compile the local smoke inventory"

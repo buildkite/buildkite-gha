@@ -45,6 +45,7 @@ type actionResolutionSnapshotCurrent struct {
 
 type actionResolutionSnapshotEntry struct {
 	Schema     string    `json:"schema"`
+	ServerURL  string    `json:"server_url,omitempty"`
 	Owner      string    `json:"owner"`
 	Repository string    `json:"repository"`
 	Ref        string    `json:"ref"`
@@ -227,7 +228,7 @@ func (s *actionResolutionSnapshot) resolve(ctx context.Context, ref Reference, r
 	}
 	resolved, err := resolve(ctx, ref)
 	entry := actionResolutionSnapshotEntry{
-		Schema: actionResolutionSnapshotSchema, Owner: strings.ToLower(ref.Owner),
+		Schema: actionResolutionSnapshotSchema, ServerURL: ref.ServerURL, Owner: strings.ToLower(ref.Owner),
 		Repository: strings.ToLower(ref.Repository), Ref: ref.Ref, ResolvedAt: time.Now().UTC(),
 	}
 	if err == nil {
@@ -281,8 +282,7 @@ func storeActionResolutionSnapshotClaim(path string) error {
 }
 
 func (s *actionResolutionSnapshot) entryPath(ref Reference) string {
-	identity := strings.ToLower(ref.Owner) + "\x00" + strings.ToLower(ref.Repository) + "\x00" + ref.Ref
-	sum := sha256.Sum256([]byte(identity))
+	sum := sha256.Sum256([]byte(refCacheIdentity(ref)))
 	key := hex.EncodeToString(sum[:])
 	return filepath.Join(s.root, "generations", s.generation, key[:2], key+".json")
 }
@@ -298,6 +298,7 @@ func loadActionResolutionSnapshotEntry(path string, ref Reference) (Resolved, er
 	defer func() { _ = file.Close() }()
 	var entry actionResolutionSnapshotEntry
 	if !decodeActionResolutionJSON(file, &entry) || entry.Schema != actionResolutionSnapshotSchema ||
+		ServerURL(entry.ServerURL) != ServerURL(ref.ServerURL) ||
 		entry.Owner != strings.ToLower(ref.Owner) || entry.Repository != strings.ToLower(ref.Repository) || entry.Ref != ref.Ref ||
 		(entry.Missing == (entry.Commit != "")) || entry.Commit != "" && !git.ValidObjectID(entry.Commit) {
 		return Resolved{}, fmt.Errorf("action resolution snapshot entry is invalid"), true

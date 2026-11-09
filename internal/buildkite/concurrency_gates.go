@@ -30,10 +30,10 @@ func prepareReusableConcurrencyGates(jobs []Job) ([]preparedConcurrencyGate, err
 				index = len(gates)
 				indexes[declared.ID] = index
 				gates = append(gates, preparedConcurrencyGate{
-					ConcurrencyGate: ConcurrencyGate{ID: declared.ID, Group: declared.Group, Queue: job.Queue},
+					ConcurrencyGate: ConcurrencyGate{ID: declared.ID, Group: declared.Group, Queue: job.Queue, CancelInProgress: declared.CancelInProgress},
 					ParentID:        parentID,
 				})
-			} else if gates[index].Group != declared.Group || gates[index].ParentID != parentID {
+			} else if gates[index].Group != declared.Group || gates[index].ParentID != parentID || gates[index].CancelInProgress != declared.CancelInProgress {
 				return nil, fmt.Errorf("reusable-workflow concurrency gate %q has inconsistent membership", declared.ID)
 			}
 			gates[index].Members = append(gates[index].Members, job.Key)

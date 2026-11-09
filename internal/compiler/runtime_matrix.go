@@ -18,6 +18,7 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
@@ -180,11 +181,16 @@ func resolveContinuationActions(ctx context.Context, ir IR, options Options) (co
 		return ir.Continuations, false, nil
 	}
 	continuations = slices.Clone(ir.Continuations)
+	event := ir.Event
+	authority := program.ActionAuthorityOptions{
+		ServerURL:         plan.EventServerURL(event.Provider, event.ServerURL),
+		GitHubIdentityIDs: plan.EventIdentityIDs(event.Provider, event.Repository.Owner+"/"+event.Repository.Name, event.Actor, event.Payload),
+	}
 	var diagnostics []error
 	for i := range continuations {
 		locks := map[string]plan.ActionLock{}
 		for _, action := range ir.deferredActions[continuations[i].Descriptor.Job] {
-			compiled, err := compileWorkflowActionInvocations(ctx, action.workspace, options.ActionSource, plan.EventServerURL(ir.Event.Provider, ir.Event.ServerURL), []string{action.uses}, []map[string]string{action.with}, action.workflowSourceResolver(options))
+			compiled, err := compileWorkflowActionInvocations(ctx, action.workspace, options.ActionSource, authority, []string{action.uses}, []map[string]string{action.with}, action.workflowSourceResolver(options), event.ServerURL)
 			if err != nil {
 				message, detail, actionName := actionResolutionMessage(action.uses, err)
 				diagnostics = append(diagnostics, &ProcessingFinding{

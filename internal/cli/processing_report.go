@@ -17,6 +17,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/git"
@@ -118,12 +119,11 @@ func (c sourceLinkContext) sourceLink(ctx context.Context, path string, line int
 		}
 		return link
 	}
-	if !git.ValidObjectID(source.Commit) {
+	if !git.ValidObjectID(source.Commit) || actionsource.ValidateServerURL(source.ServerURL) != nil {
 		return ""
 	}
-	// Remote reusable workflows are fetched from GitHub, not the caller's
-	// provider. Never substitute the caller's repository, SHA, or server URL.
-	return (sourceLinkContext{serverURL: "https://github.com", repository: source.Repository, sha: source.Commit}).link(source.Path, line)
+	// Link the fetched source, never the caller's repository, SHA, or host.
+	return (sourceLinkContext{serverURL: actionsource.ServerURL(source.ServerURL), repository: source.Repository, sha: source.Commit}).link(source.Path, line)
 }
 
 func (c sourceLinkContext) verifiedLocalLink(parent context.Context, source compiler.WorkflowSourceReference) string {
@@ -260,6 +260,9 @@ func processingLog(ctx context.Context, report compatibility.ProcessingReport, s
 		message := colour + severity + terminalText(heading) + "\x1b[0m"
 		if len(explanation) != 0 {
 			message += "\n  " + terminalText(strings.Join(explanation, " "))
+		}
+		if setupURL := compiler.SafeRunnerSetupURL(diagnostic.SetupURL); setupURL != "" {
+			message += "\n  Set up queue: " + terminalText(setupURL) + "\n  " + compatibility.QueueSetupGuidance
 		}
 		var attribution []string
 		if diagnostic.Job != "" {
@@ -566,6 +569,10 @@ func renderProcessingDiagnosticWithin(ctx context.Context, diagnostic compatibil
 		detail = detail[:end]
 		row = renderProcessingDiagnostic(ctx, diagnostic, sourceLinks)
 	}
+	if len(row) > limit && diagnostic.SetupURL != "" {
+		diagnostic.SetupURL = ""
+		row = renderProcessingDiagnostic(ctx, diagnostic, sourceLinks)
+	}
 	for len(row) > limit && message != "" {
 		end := max(0, len(message)-(len(row)-limit))
 		for end > 0 && !utf8.ValidString(message[:end]) {
@@ -621,6 +628,10 @@ func renderProcessingDiagnostic(ctx context.Context, diagnostic compatibility.Di
 			out.WriteString(detail)
 			out.WriteString("</p>\n")
 		}
+	}
+	if setupURL := compiler.SafeRunnerSetupURL(diagnostic.SetupURL); setupURL != "" {
+		out.WriteString(`<p><a href="` + html.EscapeString(setupURL) + `">Set up queue</a></p>` + "\n")
+		out.WriteString("<p>" + compatibility.QueueSetupGuidance + "</p>\n")
 	}
 	if excerpt := sourceLinks.excerpt(diagnostic); excerpt != "" {
 		out.WriteString("<pre><code>")

@@ -40,6 +40,8 @@ conservative without granting credentials to known-unreachable paths:
 
 - A known-false or provider-inapplicable branch must not grant token authority.
 - A branch that depends on an unknown runtime value may grant token authority.
+- Runtime skips planning-proven-unreachable steps before evaluating their
+  environment, which may reference a token that planning did not authorize.
 - Action metadata cannot grant ordinary secret authority.
 - Composite shell `env`, `run`, and `working-directory` templates can require
   the job-authorized token; other composite metadata cannot add token authority.
@@ -88,16 +90,33 @@ An expression site selects a closed semantic profile. The profile owns:
 The same engine validates and evaluates a profile. Adding a context or function
 to one field does not implicitly add it to another field.
 
+Event-derived GitHub identity IDs share extraction between compilation and
+runtime. Authority planning receives only validated IDs; residual reads retain
+payload effects even when a known ID prunes a token branch. Missing IDs remain
+unknown to planning and unavailable at execution. See the
+[identity contract](compatibility-contract.md#github-identity-ids).
+
 Workflow concurrency has its own compile-time profile. The hosted adapter
 supplies the owning build ID separately from the shared GitHub context, so
 evaluating a group cannot make run identity available to other graph-time
 positions. Offline callers leave that identity unavailable.
+
+`github.run_attempt` stays unknown during compilation and authority planning.
+Job, reusable-call, workflow-step, and composite-step conditions read the same
+retry-derived runtime identity as templates. Missing identity is an error, not
+a first attempt or a retry. This does not admit run identity in graph-time
+fields or action lifecycle conditions.
 
 `github.event_path` remains unknown during compilation and authority planning.
 Runtime supplies it after creating the job's event file, before job environment
 evaluation. Graph-time fields and pre-setup job/call conditions cannot read it.
 The expression does not grant payload provenance or credential authority; see
 the [event-file contract](compatibility-contract.md#event-file-paths).
+
+`runner.tool_cache` is also unknown during compilation and authority planning.
+Runtime selects its directory before action defaults and steps run. It does
+not become available to graph construction, job environment, or pre-setup
+job/call conditions. See the [tool-cache contract](compatibility-contract.md#runner-tool-cache-paths).
 
 Program sites serialize source text and diagnostic location. Their position in
 the program derives profile, result type, provenance, and purpose after decode.
@@ -219,7 +238,15 @@ choose which secret a credential reads. Evaluator
 diagnostics must not quote input-derived values. Graph fields, such as labels, matrices,
 `runs-on`, and concurrency, evaluate against the workflow frame's own inputs.
 So do service templates, which compile to literals or `needs`-only residuals.
-Dynamic service maps and needs-derived `max-parallel` read only `needs` outputs.
+Job `timeout-minutes` resolves to a number per expanded instance using the job
+control profile and compile-known values. `strategy.max-parallel` resolves before
+matrix expansion using its own profile, which excludes `matrix` and `strategy`.
+Both use the declaring workflow's typed inputs without source substitution;
+unresolved controls fail rather than entering the runtime program. Their
+`vars` reads use import-time repository/organization values, not environment
+values supplied after graph construction.
+The separate needs-derived `max-parallel` path and dynamic service maps read
+only `needs` outputs.
 Service credentials keep their input reads, which the runtime evaluates against
 `Job.Inputs`. A needs-derived concurrency group reads the frame's static inputs
 when its continuation resolves the group. Credentials and scheduling groups reject

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,7 @@ import (
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
@@ -223,6 +225,7 @@ func TestActionLockResolverBindsProgramAndIntegration(t *testing.T) {
 	program := executionprogram.Action{Name: "planned, not source metadata", Runtime: "node24", Main: "index.js"}
 	for _, test := range []struct {
 		name, repository, path, commit string
+		serverURL                      string
 		omitProgram                    bool
 		want                           actionintegration.Descriptor
 		wantError                      bool
@@ -232,6 +235,10 @@ func TestActionLockResolverBindsProgramAndIntegration(t *testing.T) {
 		{name: "cache client", repository: "actions/setup-node", want: actionintegration.Descriptor{CacheClientCompatibility: true}},
 		{name: "unrecognized subpath", repository: "actions/setup-node", path: "nested"},
 		{name: "native without program", repository: "actions/checkout", commit: actionintegration.CheckoutV4Commit, omitProgram: true, want: actionintegration.Descriptor{Adapter: actionintegration.AdapterCheckoutExactEventSHA}},
+		{name: "explicit github.com native", serverURL: "https://github.com", repository: "actions/checkout", commit: actionintegration.CheckoutV4Commit, omitProgram: true, want: actionintegration.Descriptor{Adapter: actionintegration.AdapterCheckoutExactEventSHA}},
+		{name: "other host checkout executes program", serverURL: "https://ghe.example", repository: "actions/checkout", commit: actionintegration.CheckoutV4Commit},
+		{name: "other host checkout requires program", serverURL: "https://ghe.example", repository: "actions/checkout", commit: actionintegration.CheckoutV4Commit, omitProgram: true, wantError: true},
+		{name: "other host cache client", serverURL: "https://ghe.example", repository: "actions/setup-node"},
 		{name: "ordinary missing program", repository: "owner/action", omitProgram: true, wantError: true},
 		{name: "known non-native missing program", repository: "actions/setup-node", omitProgram: true, wantError: true},
 	} {
@@ -240,7 +247,7 @@ func TestActionLockResolverBindsProgramAndIntegration(t *testing.T) {
 			if commit == "" {
 				commit = strings.Repeat("a", 40)
 			}
-			lock := plan.ActionLock{ID: "selected", Source: "github", Repository: test.repository, Path: test.path, Commit: commit, SourceDigest: digest}
+			lock := plan.ActionLock{ID: "selected", Source: "github", ServerURL: test.serverURL, Repository: test.repository, Path: test.path, Commit: commit, SourceDigest: digest}
 			job := plan.Job{
 				RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock},
 				Program: &executionprogram.Program{Actions: map[string]executionprogram.Action{
@@ -252,6 +259,9 @@ func TestActionLockResolverBindsProgramAndIntegration(t *testing.T) {
 			}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: repo, SourceDigest: digest}}
 			resolved, err := newActionLockResolver(job, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: lock.ID})
+			if materializer.calls != 1 || materializer.resolved.Reference.ServerURL != test.serverURL {
+				t.Fatalf("source host not propagated: calls=%d, reference=%#v", materializer.calls, materializer.resolved.Reference)
+			}
 			if test.wantError {
 				if err == nil || !isHardJobFailure(err) || !strings.Contains(err.Error(), "action program is missing") {
 					t.Fatalf("resolve() error = %v, want hard missing-program failure", err)
@@ -372,6 +382,121 @@ func TestActionLockResolverDownloadsExactCommitDirectlyFromCodeload(t *testing.T
 	}
 	if apiRequests != 0 || archiveRequests != 1 || tokenProvisions != 0 {
 		t.Fatalf("API/archive/token-provision requests = %d / %d / %d, want 0 / 1 / 0", apiRequests, archiveRequests, tokenProvisions)
+	}
+}
+
+func TestGHESPublicReusableAndNestedActionsCompileAndRun(t *testing.T) {
+	const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	files := map[string]string{
+		".github/workflows/reuse.yml": "on: workflow_call\njobs:\n  call:\n    uses: ./.github/workflows/nested.yml\n",
+		".github/workflows/nested.yml": `on: workflow_call
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    outputs:
+      marker: ${{ steps.parent.outputs.marker }}
+    steps:
+      - id: parent
+        uses: o/r/parent@v1
+`,
+		"parent/action.yml": `name: Parent
+outputs:
+  marker:
+    value: ${{ steps.child.outputs.marker }}
+runs:
+  using: composite
+  steps:
+    - id: child
+      uses: o/r/child@` + commit + "\n",
+		"child/action.yml": `name: Child
+outputs:
+  marker:
+    value: ${{ steps.write.outputs.marker }}
+runs:
+  using: composite
+  steps:
+    - id: write
+      shell: bash
+      run: echo 'marker=enterprise-source' >> "$GITHUB_OUTPUT"
+`,
+	}
+	var archive bytes.Buffer
+	gz := gzip.NewWriter(&archive)
+	tw := tar.NewWriter(gz)
+	for name, body := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: "root/" + name, Mode: 0o644, Size: int64(len(body))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var archives int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+			t.Error("GHES received credentials")
+		}
+		switch r.URL.Path {
+		case "/api/v3/repos/o/r/git/ref/tags/v1":
+			_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, commit)
+		case "/api/v3/repos/o/r/tarball/" + commit:
+			archives++
+			_, _ = w.Write(archive.Bytes())
+		default:
+			t.Errorf("unexpected GHES request: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	resolver, err := source.NewResolver(server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := source.NewStore(t.TempDir(), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositorySource := compiler.MemoizeRepositorySource(compiler.PublicActionSource{Resolver: resolver, Store: store})
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/caller.yml"
+	workflow := "on: push\njobs:\n  reuse:\n    uses: o/r/.github/workflows/reuse.yml@v1\n"
+	writeFixtureFile(t, workspace, workflowPath, workflow)
+	event := []byte(fmt.Sprintf(`{"provider":"github","server_url":%q,"event":"push","repository":{"owner":"caller","name":"project","default_branch":"main"},"ref":"refs/heads/main","sha":%q,"actor":"test"}`, server.URL, commit))
+	bundle, err := compiler.CompileBundlePlansContext(t.Context(), filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("1", 64), compiler.Options{
+		EventTrust:     compiler.EventUntrusted,
+		Runners:        compiler.RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+		ResolveActions: true, ActionSource: repositorySource, RepositorySource: repositorySource,
+	})
+	if err != nil || len(bundle.Plans) != 1 {
+		t.Fatalf("compile: %v; plans=%d", err, len(bundle.Plans))
+	}
+	job := bundle.Plans[0].Job
+	if len(job.Actions) != 2 {
+		t.Fatalf("action locks = %#v", job.Actions)
+	}
+	for _, lock := range job.Actions {
+		if lock.ServerURL != server.URL || lock.Commit != commit || lock.SourceDigest == "" {
+			t.Fatalf("lost immutable source identity: %#v", lock)
+		}
+	}
+	// Runtime starts with a cold cache, as it does on another hosted agent.
+	runtimeStore, err := source.NewStore(t.TempDir(), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	result, err := (Runner{Actions: runtimeStore, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Outputs["marker"] != "enterprise-source" {
+		t.Fatalf("run: %v; result=%#v\n%s", err, result, logs.String())
+	}
+	if archives != 2 {
+		t.Fatalf("archive downloads = %d, want compile and cold runtime", archives)
 	}
 }
 

@@ -117,7 +117,8 @@ checksum:
 
 release:
   name_template: "{{ .Tag }}"
-  target_commitish: "{{ .Commit }}"
+  # The publisher creates and verifies the tag first. A historical target here
+  # can require Workflows write permission even though the tag already exists.
   use_existing_draft: true
 
 changelog:

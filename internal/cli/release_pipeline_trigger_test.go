@@ -17,7 +17,7 @@ import (
 func TestPluginReleasePipelineTriggerDiagnosticLinks(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"release.yml": "name: Release\non: {release: {types: [published]}}\njobs:\n  marker:\n    runs-on: ubuntu-latest\n    concurrency:\n      group: release\n      cancel-in-progress: true\n    steps: [{run: true}]\n",
+		"release.yml": "name: Release\non: {release: {types: [published]}}\njobs:\n  marker:\n    runs-on: ubuntu-latest\n    concurrency:\n      group: release\n      cancel-in-progress: ${{ 'true' }}\n    steps: [{run: true}]\n",
 	})
 	t.Chdir(repository)
 	t.Setenv(pluginConfigurationEnvironment, `{"experimental-runner-user":false}`)
@@ -38,7 +38,7 @@ func TestPluginReleasePipelineTriggerDiagnosticLinks(t *testing.T) {
 	}
 	for _, data := range runner.uploaded {
 		if bytes.Contains(data, []byte(`href="https://github.com/buildkite/buildkite-gha/blob/`+sha+`/.github/workflows/release.yml#L`)) &&
-			bytes.Contains(data, []byte("cancel-in-progress is unsupported")) {
+			bytes.Contains(data, []byte("cancel-in-progress resolved to string, want boolean")) {
 			return
 		}
 	}

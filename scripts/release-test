@@ -1,118 +1,422 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python3
+"""Exercise the release entry point with real Git and offline service fixtures."""
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/release
-source "$root/scripts/release"
+from contextlib import redirect_stdout
+import base64
+import io
+import json
+import os
+from pathlib import Path
+import runpy
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+import urllib.error
 
-run_success() {
-  local current="$1" bump="$2" expected="$3" actual
-  actual="$(next_release_version "$current" "$bump")"
-  [[ "$actual" == "$expected" ]] || die "unexpected result: $actual"
-}
 
-run_failure() {
-  local current="$1" bump="$2" expected_error="$3" output
-  if output="$(next_release_version "$current" "$bump" 2>&1)"; then
-    die "expected failure for $current $bump"
-  fi
-  [[ "$output" == *"$expected_error"* ]] || die "unexpected failure: $output"
-}
+SCRIPT = Path(__file__).with_name("release-pipeline").resolve()
 
-run_success v0.13.15 minor v0.14.0
-run_success v0.13.15 patch v0.13.16
-run_success v0.9.9 minor v0.10.0
-run_failure 0.13.15 patch 'invalid current pre-1.0 version'
-run_failure v0.13.15 major 'invalid bump'
 
-git() {
-  [[ "$1" == rev-parse ]]
-  if [[ "$2" == HEAD ]]; then
-    printf '%s\n' "$TEST_HEAD"
-  else
-    printf '%s\n' "$TEST_TAG"
-  fi
-}
+class ReleaseLauncherTest(unittest.TestCase):
+    def test_forwards_dry_run_and_rejects_invalid_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "git").write_text("#!/bin/sh\nprintf '%040d\\trefs/heads/main\\n' 1\n")
+            (root / "bk").write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            for name in ("git", "bk"):
+                (root / name).chmod(0o755)
+            env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", RELEASE_PIPELINE="example/releases")
+            env.pop("RELEASE_DRY_RUN", None)
+            for value in (None, "0", "1", "true"):
+                with self.subTest(value=value):
+                    current = dict(env)
+                    if value is not None:
+                        current["RELEASE_DRY_RUN"] = value
+                    result = subprocess.run([str(SCRIPT.with_name("release"))], env=current,
+                                            capture_output=True, text=True)
+                    if value == "true":
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("RELEASE_DRY_RUN must be 0 or 1", result.stderr)
+                        self.assertEqual(result.stdout, "")
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        args = result.stdout.splitlines()
+                        self.assertEqual(args[args.index("--pipeline") + 1], "example/releases")
+                        self.assertEqual(args[args.index("--env") + 1], f"RELEASE_DRY_RUN={value or '0'}")
 
-TEST_HEAD=head TEST_TAG=tag require_release_changes v0.13.15
-if output="$(TEST_HEAD=same TEST_TAG=same require_release_changes v0.13.15 2>&1)"; then
-  die 'expected failure when the current release points at HEAD'
-fi
-[[ "$output" == *'no changes since v0.13.15'* ]] || die "unexpected failure: $output"
 
-ci_calls="$(mktemp)"
-trap 'rm -f "$ci_calls"' EXIT
-export TEST_CI_CALLS="$ci_calls"
-export TEST_TAG=1111111111111111111111111111111111111111
-export TEST_HEAD="$TEST_TAG"
-export BUILDKITE_COMMIT="$TEST_TAG"
-export TEST_BUGSNAG_KEY=0123456789abcdef0123456789abcdef
-unset GITHUB_TOKEN BUGSNAG_API_KEY
+class ReleaseTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.private_key = subprocess.check_output(
+            ["openssl", "genrsa", "2048"], stderr=subprocess.DEVNULL).decode()
+        cls.public_key = subprocess.check_output(
+            ["openssl", "rsa", "-pubout"], input=cls.private_key, text=True, stderr=subprocess.DEVNULL)
 
-# Run the real CI release script, replacing every external side effect.
-git() {
-  case "$1" in
-    fetch) ;;
-    ls-remote) printf '%s\trefs/tags/v0.100.0\n' "$TEST_TAG" ;;
-    rev-list) printf '%s\n' "$TEST_TAG" ;;
-    rev-parse) printf '%s\n' "$TEST_HEAD" ;;
-    *) return 1 ;;
-  esac
-}
-buildkite-agent() {
-  [[ "$1 $2" == 'secret get' ]] || return 1
-  printf '%s\n' "$3" >> "$TEST_CI_CALLS"
-  case "$3" in
-    GHA_GITHUB_RELEASE_TOKEN) printf '%s\n' 'fake-github-token' ;;
-    GHA_BUGSNAG_API_KEY)
-      printf '%s\n' "$TEST_BUGSNAG_KEY"
-      [[ "${TEST_SECRET_FAILURE:-}" != true ]]
-      ;;
-    *) return 1 ;;
-  esac
-}
-goreleaser() {
-  [[ "$*" == 'release --clean' ]] || return 1
-  bash -c '[[ "${GITHUB_TOKEN:-}" == "fake-github-token" && "${BUGSNAG_API_KEY:-}" == "$TEST_BUGSNAG_KEY" ]]' || return 1
-  printf '%s\n' goreleaser >> "$TEST_CI_CALLS"
-}
-export -f git buildkite-agent goreleaser
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.checkout = self.root / "checkout"
+        self.checkout.mkdir()
+        self.origin = self.root / "origin.git"
+        self.real_run = subprocess.run
+        self.real_output = subprocess.check_output
+        self.git("init", "--bare", str(self.origin))
+        self.git("init", "-b", "main")
+        self.git("config", "user.name", "Release test")
+        self.git("config", "user.email", "test@example.com")
+        self.git("remote", "add", "origin", str(self.origin))
+        (self.checkout / "scripts").mkdir()
+        shutil.copyfile(SCRIPT, self.checkout / "scripts/release-pipeline")
+        (self.checkout / ".gitignore").write_text(".release/\n")
+        (self.checkout / "feature").write_text("old behavior\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "Initial release")
+        self.previous = self.git("rev-parse", "HEAD")
+        self.git("tag", "-a", "v0.9.8", "-m", "previous")
+        (self.checkout / "feature").write_text("new behavior\n")
+        # Rebase merges retain subjects without a PR number.
+        self.git("commit", "-am", "Change behavior")
+        self.commit = self.git("rev-parse", "HEAD")
+        self.git("tag", "v0.10.0-rc.1")
+        self.git("push", "origin", "main", "--tags")
+        self.env = {
+            "BUILDKITE_ORGANIZATION_SLUG": "example", "BUILDKITE_PIPELINE_SLUG": "releases",
+            "RELEASE_PIPELINE": "example/releases",
+            "RELEASE_APP_ID": "123", "RELEASE_APP_INSTALLATION_ID": "456",
+            "RELEASE_APP_PRIVATE_KEY_SECRET": "test-app-key",
+            "RELEASE_BUGSNAG_API_KEY_SECRET": "test-ingestion-key",
+            "RELEASE_SLACK_CHANNEL": "example#releases",
+            "BUILDKITE_BRANCH": "main", "BUILDKITE_COMMIT": self.commit,
+            "BUILDKITE_PULL_REQUEST": "false", "BUILDKITE_AGENT_ENDPOINT": "https://agent.test/v3",
+            "BUILDKITE_AGENT_ACCESS_TOKEN": "job-token", "RELEASE_MODEL": "test-model",
+            "PATH": os.environ["PATH"], "HOME": str(self.root),
+        }
+        self.decision = {"bump": "minor", "reason": "Adds a feature.", "notes":
+                         "## Highlights\n\n- New behavior. ([#12](https://github.com/buildkite/buildkite-gha/pull/12))\n"}
+        self.response = None
+        self.provider_calls = 0
+        self.advance_main = False
+        self.api_failure = None
+        self.bugsnag_key = "bugsnag-test"
+        self.fail_publish = False
+        self.releases = {"v0.9.8": {"tag_name": "v0.9.8", "draft": False, "prerelease": False}}
+        self.writes = []
+        self.comments = {12: [], 13: []}
+        self.notifications = []
+        self.token_active = False
+        self.token_redacted = False
+        self.main = runpy.run_path(str(self.checkout / "scripts/release-pipeline"))["main"]
 
-for tag in '' main v1.0.0 v0.01.0; do
-  : > "$ci_calls"
-  if output="$(BUILDKITE_TAG="$tag" bash "$root/scripts/ci-buildkite-release" 2>&1)"; then
-    die "CI release accepted non-release tag: $tag"
-  fi
-  [[ ! -s "$ci_calls" ]] || die 'invalid tag retrieved secrets or published a release'
-done
+    def git(self, *args):
+        return self.real_output(["git", *args], cwd=self.checkout, text=True, stderr=subprocess.DEVNULL).strip()
 
-: > "$ci_calls"
-if output="$(BUILDKITE_TAG=v0.100.0 TEST_HEAD=2222222222222222222222222222222222222222 bash "$root/scripts/ci-buildkite-release" 2>&1)"; then
-  die 'CI release accepted a mismatched checkout'
-fi
-[[ "$output" == *'checked-out HEAD does not match'* && ! -s "$ci_calls" ]] \
-  || die 'mismatched checkout reached secret retrieval'
+    def output(self, args, **kwargs):
+        if args[0] == "buildkite-agent":
+            if args[1] == "annotate":
+                return ""
+            self.assertEqual(args[1:3], ("secret", "get"))
+            return {"test-app-key": self.private_key, "test-ingestion-key": self.bugsnag_key}[args[3]]
+        return self.real_output(args, **kwargs)
 
-: > "$ci_calls"
-if output="$(BUILDKITE_TAG=v0.100.0 TEST_BUGSNAG_KEY='' bash "$root/scripts/ci-buildkite-release" 2>&1)"; then
-  die 'CI release accepted an empty Bugsnag key'
-fi
-[[ "$output" == *'GHA_BUGSNAG_API_KEY is empty'* ]] || die "unexpected failure: $output"
-[[ "$(cat "$ci_calls")" == $'GHA_GITHUB_RELEASE_TOKEN\nGHA_BUGSNAG_API_KEY' ]] \
-  || die 'CI release published without a Bugsnag key'
+    def http(self, req, **kwargs):
+        url = req.full_url
+        body = json.loads(req.data) if req.data else None
+        if url == "https://api.github.com/app/installations/456/access_tokens":
+            header, claims, signature = req.get_header("Authorization").removeprefix("Bearer ").split(".")
+            self.assertEqual(json.loads(base64.urlsafe_b64decode(header + "=="))["alg"], "RS256")
+            self.assertEqual(json.loads(base64.urlsafe_b64decode(claims + "=="))["iss"], "123")
+            public = self.root / "app.pub"
+            public.write_text(self.public_key)
+            signed = self.root / "signature"
+            signed.write_bytes(base64.urlsafe_b64decode(signature + "=="))
+            self.real_run(["openssl", "dgst", "-sha256", "-verify", str(public), "-signature", str(signed)],
+                          input=f"{header}.{claims}".encode(), check=True, stdout=subprocess.DEVNULL)
+            self.assertEqual(body, {"repositories": ["buildkite-gha"], "permissions": {
+                "contents": "write", "pull_requests": "write"}})
+            self.token_active = True
+            return io.BytesIO(b'{"token":"github-test"}')
+        if url == "https://api.github.com/installation/token":
+            self.assertEqual(req.get_method(), "DELETE")
+            self.assertEqual(req.get_header("Authorization"), "Bearer github-test")
+            self.token_active = False
+            return io.BytesIO(b"")
+        if url == "https://agent.test/v3/ai/anthropic/v1/messages":
+            self.provider_calls += 1
+            self.assertEqual(req.get_header("X-api-key"), "job-token")
+            self.assertNotIn("tools", body)
+            self.assertEqual(body["output_config"]["format"], {
+                "type": "json_schema", "schema": {
+                    "type": "object", "properties": {
+                        "bump": {"type": "string", "enum": ["minor", "patch", "none", "uncertain"]},
+                        "reason": {"type": "string"}, "notes": {"type": "string"},
+                    }, "required": ["bump", "reason", "notes"], "additionalProperties": False,
+                },
+            })
+            evidence = json.loads(body["messages"][0]["content"])
+            self.assertEqual(evidence["previous"], "v0.9.8")
+            self.assertIn("+new behavior", evidence["diff"])
+            self.assertIn("Change behavior", evidence["commits"])
+            self.assertEqual(evidence["pull_request_links"], ["[#12](https://github.com/buildkite/buildkite-gha/pull/12)"])
+            if self.advance_main:
+                newer = self.git("commit-tree", "HEAD^{tree}", "-p", self.commit, "-m", "Another merged change")
+                self.git("push", "origin", f"{newer}:refs/heads/main")
+            result = self.response or {"stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps(self.decision)}]}
+        else:
+            self.assertEqual(req.get_header("Authorization"), "Bearer github-test")
+            self.assertTrue(self.token_active and self.token_redacted)
+            prefix = "https://api.github.com/repos/buildkite/buildkite-gha/"
+            self.assertTrue(url.startswith(prefix))
+            path = url.removeprefix(prefix)
+            if self.api_failure and path.startswith("releases?") and self.provider_calls:
+                raise urllib.error.HTTPError(url, self.api_failure, "fixture", {},
+                                             io.BytesIO(b'{"message":"Resource not accessible by integration"}'))
+            if body is not None:
+                self.writes.append((path, body))
+            if path.startswith("releases?"):
+                result = list(self.releases.values())
+            elif path == "git/refs":
+                self.git("--git-dir", str(self.origin), "update-ref", body["ref"], body["sha"])
+                result = {}
+            elif path == "releases":
+                result = dict(body, id=1, html_url="https://github.com/buildkite/buildkite-gha/releases/tag/" + body["tag_name"])
+                self.releases[body["tag_name"]] = result
+            elif path.startswith("commits/") and "/pulls?" in path:
+                result = [dict(number=number, title="Change behavior", merged_at="today", merge_commit_sha=sha,
+                               base={"ref": "main", "repo": {"full_name": "buildkite/buildkite-gha"}})
+                          for number, sha in ((12, self.commit), (13, self.previous))]
+            elif path.startswith("issues/"):
+                number = int(path.split("/")[1])
+                if body:
+                    self.comments[number].append(body)
+                result = self.comments[number]
+            else:
+                self.fail(f"unexpected API call: {path}")
+            if "?per_page=100&page=" in path:
+                page = int(path.rsplit("=", 1)[1])
+                result = result[(page - 1) * 100:page * 100]
+        return io.BytesIO(json.dumps(result).encode())
 
-: > "$ci_calls"
-if output="$(BUILDKITE_TAG=v0.100.0 TEST_SECRET_FAILURE=true bash "$root/scripts/ci-buildkite-release" 2>&1)"; then
-  die 'CI release ignored a failed secret retrieval'
-fi
-[[ "$(cat "$ci_calls")" == $'GHA_GITHUB_RELEASE_TOKEN\nGHA_BUGSNAG_API_KEY' ]] \
-  || die 'CI release published after a failed secret retrieval'
+    def publish(self, args, **kwargs):
+        if args == ["buildkite-agent", "redactor", "add"]:
+            self.assertEqual(kwargs["input"], "github-test")
+            self.token_redacted = True
+            return subprocess.CompletedProcess(args, 0)
+        if args[:3] == ["buildkite-agent", "pipeline", "upload"]:
+            self.assertIn("--no-interpolation", args)
+            pipeline = json.loads(kwargs["input"])
+            self.notifications.extend(pipeline.get("notify", []))
+            self.assertEqual(pipeline["steps"], [])
+            return subprocess.CompletedProcess(args, 0)
+        if args[0] != "goreleaser":
+            return self.real_run(args, **kwargs)
+        self.assertEqual(args, ["goreleaser", "release", "--clean"])
+        self.assertEqual(kwargs["env"]["BUGSNAG_API_KEY"], "bugsnag-test")
+        self.assertEqual(kwargs["env"]["GITHUB_TOKEN"], "github-test")
+        if self.fail_publish:
+            raise subprocess.CalledProcessError(1, args)
+        release = self.releases[kwargs["env"]["GORELEASER_CURRENT_TAG"]]
+        self.assertEqual(kwargs["env"]["GORELEASER_PREVIOUS_TAG"], "v0.9.8")
+        release["draft"] = False
+        return subprocess.CompletedProcess(args, 0)
 
-: > "$ci_calls"
-output="$(BUILDKITE_TAG=v0.100.0 bash -x "$root/scripts/ci-buildkite-release" 2>&1)"
-[[ "$(cat "$ci_calls")" == $'GHA_GITHUB_RELEASE_TOKEN\nGHA_BUGSNAG_API_KEY\ngoreleaser' ]] \
-  || die 'CI release did not retrieve both secrets before building'
-[[ "$output" != *"$TEST_BUGSNAG_KEY"* && "$output" != *'fake-github-token'* ]] \
-  || die 'CI release exposed a secret through shell tracing'
+    def release(self, *args):
+        cwd = Path.cwd()
+        log = io.StringIO()
+        try:
+            with patch.dict(os.environ, self.env, clear=True), patch.object(sys, "argv", [str(SCRIPT), *args]), \
+                 patch("subprocess.check_output", side_effect=self.output), \
+                 patch("subprocess.run", side_effect=self.publish), \
+                 patch("urllib.request.urlopen", side_effect=self.http), redirect_stdout(log):
+                self.main()
+        finally:
+            os.chdir(cwd)
+            self.assertFalse(self.token_active, "installation token was not revoked")
+        self.assertNotIn("github-test", log.getvalue())
+        self.assertNotIn(self.private_key, log.getvalue())
+        self.assertNotIn("job-token", log.getvalue())
+        return log.getvalue()
 
-printf '%s\n' 'release tests passed'
+    def test_minor_release_and_repeat(self):
+        self.release()
+        receipt = json.loads((self.checkout / ".release/result.json").read_text())
+        self.assertEqual(receipt["tag"], "v0.10.0")
+        self.assertEqual(receipt["commit"], self.commit)
+        self.assertEqual(receipt["pull_requests"], [12])
+        self.assertEqual(len(self.comments[12]), 1)
+        self.assertEqual(self.comments[13], [])
+        self.assertEqual(self.git("ls-remote", "origin", "refs/tags/v0.10.0").split()[0], self.commit)
+        self.assertIn("/compare/v0.9.8...v0.10.0", self.releases["v0.10.0"]["body"])
+        self.assertEqual(self.notifications, [{
+            "slack": {"channels": ["example#releases"],
+                      "message": "Released v0.10.0 — Adds a feature. "
+                                 "<https://github.com/buildkite/buildkite-gha/releases/tag/v0.10.0|Release notes ↗>"},
+            "if": 'build.state == "passed"',
+        }])
+        writes = list(self.writes)
+        self.assertIn("No changes", self.release())
+        self.assertEqual(self.writes, writes)
+        self.assertEqual(self.provider_calls, 1)
+        self.assertEqual(len(self.notifications), 1)
+
+    def test_slack_highlight_is_short_and_does_not_mention_channels(self):
+        self.decision["reason"] = "Fixes $PATH & <!channel> handling.\n" + "More detail. " * 50
+        self.release()
+        message = self.notifications[0]["slack"]["message"]
+        self.assertTrue(message.startswith("Released v0.10.0 — Fixes $PATH &amp; &lt;!channel&gt; handling."))
+        self.assertNotIn("\n", message)
+        self.assertIn("… <https://github.com/", message)
+        self.assertLess(len(message), 320)
+
+    def test_patch_dry_run(self):
+        self.decision["bump"] = "patch"
+        for metadata in ([], [{"type": "thinking", "thinking": "", "signature": "test"}],
+                         [{"type": "redacted_thinking", "data": "test"}]):
+            with self.subTest(metadata=metadata):
+                self.response = {"stop_reason": "end_turn", "content": metadata + [
+                    {"type": "text", "text": json.dumps(self.decision)}]}
+                self.release("--dry-run")
+                plan = json.loads((self.checkout / ".release/proposal.json").read_text())
+                self.assertEqual(plan["tag"], "v0.9.9")
+                self.assertTrue(plan["notes"].startswith(self.decision["notes"]))
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.notifications, [])
+        self.assertEqual(self.git("ls-remote", "origin", "refs/tags/v0.9.9"), "")
+
+    def test_invalid_or_ambiguous_model_output_never_writes(self):
+        for decision in ({"bump": "major", "reason": "breaking", "notes": ""},
+                         {"bump": "uncertain", "reason": "Need evidence", "notes": ""},
+                         {"bump": "patch", "reason": "fix", "notes": "No heading"},
+                         {"bump": "patch", "reason": "fix", "notes": "## Highlights\n- Fix", "tag": "v9.0.0"}):
+            with self.subTest(decision=decision):
+                self.decision = decision
+                with self.assertRaises(RuntimeError):
+                    self.release()
+                self.assertEqual(self.writes, [])
+        self.response = {"stop_reason": "max_tokens", "content": []}
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
+            self.release()
+        self.decision = {"bump": "patch", "reason": "Fix", "notes": "## Highlights\n- Fixed behavior.\n"}
+        for blocks in ([{"type": "thinking", "thinking": ""}],
+                       [{"type": "tool_use", "name": "publish"},
+                        {"type": "text", "text": json.dumps(self.decision)}]):
+            with self.subTest(blocks=blocks):
+                self.response = {"stop_reason": "end_turn", "content": blocks}
+                with self.assertRaises(RuntimeError):
+                    self.release()
+                self.assertEqual(self.writes, [])
+
+    def test_malformed_model_response_is_saved_without_publication(self):
+        self.response = {"stop_reason": "end_turn", "content": [
+            {"type": "text", "text": "```json\n" + json.dumps(self.decision)}]}
+        with self.assertRaises(json.JSONDecodeError):
+            self.release()
+        self.assertEqual(json.loads((self.checkout / ".release/model-response.json").read_text()), self.response)
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.notifications, [])
+
+    def test_invalid_pr_link_never_publishes(self):
+        notes = self.decision["notes"]
+        for label, target in (("#12", 13), ("#13", 13), ("#13's sibling PR #12", 12)):
+            with self.subTest(label=label, target=target):
+                self.decision["notes"] = notes + f"- Another change. ([{label}](https://github.com/buildkite/buildkite-gha/pull/{target}))\n"
+                with self.assertRaisesRegex(RuntimeError, "PR link not in release evidence"):
+                    self.release()
+                self.assertEqual(self.writes, [])
+                self.assertEqual(self.notifications, [])
+
+    def test_no_release_decision(self):
+        self.decision = {"bump": "none", "reason": "Only spelling changes", "notes": ""}
+        self.release()
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.notifications, [])
+
+    def test_main_moves_during_generation(self):
+        self.advance_main = True
+        self.release()
+        self.assertEqual(self.git("ls-remote", "origin", "refs/tags/v0.10.0").split()[0], self.commit)
+
+    def test_already_released_newer_commit_skips_old_build(self):
+        newer = self.git("commit-tree", "HEAD^{tree}", "-p", self.commit, "-m", "Another merged change")
+        self.git("tag", "v0.10.0", newer)
+        self.git("push", "origin", f"{newer}:refs/heads/main", "refs/tags/v0.10.0")
+        self.releases["v0.10.0"] = {"tag_name": "v0.10.0", "draft": False, "prerelease": False}
+        self.assertIn("already covers this commit", self.release())
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.provider_calls, 0)
+
+    def test_wrong_build_and_ci_bypass_rejected_before_model(self):
+        for key, value in (("BUILDKITE_PIPELINE_SLUG", "buildkite-gha"), ("BUILDKITE_BRANCH", "feature"),
+                           ("BUILDKITE_PULL_REQUEST", "123"), ("BUILDKITE_TAG", "v0.10.0"),
+                           ("BUILDKITE_COMMIT", self.previous), ("VULNERABILITY_SCAN", "1"), ("DEMO_SUITE", "plugin")):
+            with self.subTest(key=key), patch.dict(self.env, {key: value}), self.assertRaises(RuntimeError):
+                self.release()
+        self.assertEqual(self.provider_calls, 0)
+        self.assertEqual(self.writes, [])
+
+    def test_missing_deployment_configuration_never_publishes(self):
+        for name in ("RELEASE_PIPELINE", "RELEASE_APP_ID", "RELEASE_APP_INSTALLATION_ID",
+                     "RELEASE_APP_PRIVATE_KEY_SECRET", "RELEASE_BUGSNAG_API_KEY_SECRET",
+                     "RELEASE_SLACK_CHANNEL", "RELEASE_MODEL"):
+            with self.subTest(name=name), patch.dict(self.env, {name: ""}):
+                with self.assertRaisesRegex(RuntimeError, f"{name} is required"):
+                    self.release()
+        self.assertEqual(self.provider_calls, 0)
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.notifications, [])
+
+    def test_conflicting_release_and_api_failure_are_not_absence(self):
+        self.releases["v0.10.0"] = {"tag_name": "v0.10.0", "draft": True}
+        with self.assertRaisesRegex(RuntimeError, "already exists"):
+            self.release()
+        del self.releases["v0.10.0"]
+        self.api_failure = 403
+        with self.assertRaisesRegex(RuntimeError, "HTTP 403: Resource not accessible by integration"):
+            self.release()
+        self.assertEqual(self.writes, [])
+
+    def test_missing_bugsnag_key_does_not_tag(self):
+        self.bugsnag_key = ""
+        with self.assertRaisesRegex(RuntimeError, "empty"):
+            self.release()
+        self.assertEqual(self.writes, [])
+
+    def test_unpublished_remote_tag_is_never_reused(self):
+        self.git("tag", "v0.10.0")
+        self.git("push", "origin", "v0.10.0")
+        with self.assertRaisesRegex(RuntimeError, "previous release is incomplete"):
+            self.release()
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.provider_calls, 0)
+        self.assertEqual(self.git("ls-remote", "origin", "refs/tags/v0.10.0").split()[0], self.commit)
+
+    def test_local_only_previous_tag_cannot_choose_version(self):
+        self.git("tag", "v0.99.0", self.previous)
+        with self.assertRaisesRegex(RuntimeError, "local-only"):
+            self.release()
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.provider_calls, 0)
+
+    def test_failed_publication_is_not_retried_or_overwritten(self):
+        self.fail_publish = True
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.release()
+        writes = list(self.writes)
+        with self.assertRaisesRegex(RuntimeError, "previous release is incomplete"):
+            self.release()
+        self.assertEqual(self.writes, writes)
+        self.assertEqual(self.comments[12], [])
+        self.assertEqual(self.notifications, [])
+
+    def test_existing_release_comment_is_not_duplicated(self):
+        self.comments[12] = [{"body": "Earlier discussion"}] * 100 + [
+            {"body": "Released in [v0.10.0](https://github.com/buildkite/buildkite-gha/releases/tag/v0.10.0)"}]
+        self.release()
+        self.assertEqual(len(self.comments[12]), 101)
+
+if __name__ == "__main__":
+    unittest.main()

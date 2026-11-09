@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/containerpolicy"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -796,8 +797,12 @@ func validateContainerMount(m containerMount) error {
 	return nil
 }
 
-func remoteMountTarget(repository, commit string) string {
-	sum := sha256.Sum256([]byte(strings.ToLower(repository) + "\x00" + commit))
+func remoteMountTarget(serverURL, repository, commit string) string {
+	identity := strings.ToLower(repository) + "\x00" + commit
+	if server := source.ServerURL(serverURL); server != "https://github.com" {
+		identity = server + "\x00" + identity
+	}
+	sum := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("/__w/_actions/%x", sum[:16])
 }
 

@@ -491,7 +491,9 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 		built.capabilities = capabilities
 		return built, nil
 	}
-	compiled, err := b.actionGraphs.compile(b.ctx, instance, plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL), actionRefs, actionInputs)
+	event := b.ir.Event
+	identityIDs := plan.EventIdentityIDs(event.Provider, event.Repository.Owner+"/"+event.Repository.Name, event.Actor, event.Payload)
+	compiled, err := b.actionGraphs.compile(b.ctx, instance, plan.EventServerURL(event.Provider, event.ServerURL), identityIDs, actionRefs, actionInputs)
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -566,7 +568,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 // Unknown vars keep planning conservative: an expression that may reference
 // github.token still requests the token.
 func (b planBuilder) authorityValues(instance JobInstance) expression.AbstractValues {
-	return expression.AbstractValues{
+	values := expression.AbstractValues{
 		References: map[string]any{
 			"github.server_url": plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL),
 			"matrix":            instance.Matrix,
@@ -574,11 +576,16 @@ func (b planBuilder) authorityValues(instance JobInstance) expression.AbstractVa
 		},
 		Inputs: instance.inputScope(),
 	}
+	event := b.ir.Event
+	for name, value := range plan.EventIdentityIDs(event.Provider, event.Repository.Owner+"/"+event.Repository.Name, event.Actor, event.Payload) {
+		values.References["github."+name] = value
+	}
+	return values
 }
 
 func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, jobReachable, stepReachable bool, built *builtPlanActions) error {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-	if descriptor.Adapter == "" || descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA && !jobReachable {
+	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path})
+	if descriptor.Adapter == "" || !jobReachable {
 		return nil
 	}
 	// Adapters validate a resolved view, never rewriting the emitted source.
@@ -588,10 +595,11 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 		source := inputs[name]
 		site := compileExpressionSite(source, expression.ProfileStepTemplate, expression.ResultString)
 		readsInputs, err := expression.NewEngine().ReferencesContext(site, "inputs", false)
-		if err != nil || !readsInputs {
+		checkoutHost := descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA && strings.EqualFold(name, "github-server-url")
+		if err != nil || !readsInputs && !checkoutHost {
 			continue
 		}
-		readsInputValues = true
+		readsInputValues = readsInputValues || readsInputs
 		analysis, err := expression.NewEngine().Analyze(site, b.authorityValues(instance))
 		if err != nil {
 			return fmt.Errorf("action input %q: %w", name, err)
@@ -862,6 +870,6 @@ func planRemoteWorkflowSource(source *RemoteWorkflowSource) *plan.RemoteWorkflow
 		return nil
 	}
 	return &plan.RemoteWorkflowSource{
-		Repository: source.Repository, RequestedRef: source.RequestedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
+		ServerURL: source.ServerURL, Repository: source.Repository, RequestedRef: source.RequestedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
 	}
 }

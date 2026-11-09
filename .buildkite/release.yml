@@ -1,0 +1,31 @@
+env:
+  MISE_JOBS: "1"
+  MISE_LOCKED: "1"
+
+steps:
+  - label: ":rocket: Decide, tag, build, and publish"
+    key: "publish-release"
+    if: build.branch == "main" && build.tag == null && build.pull_request.id == null
+    concurrency: 1
+    concurrency_group: "${BUILDKITE_PIPELINE_SLUG}"
+    timeout_in_minutes: 45
+    retry:
+      automatic: false
+    agents:
+      queue: "${RELEASE_QUEUE}"
+    plugins:
+      - setup-go#v0.1.0:
+          mise-version: "2026.10.17"
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.10.17"
+    command: |
+      case "$${RELEASE_DRY_RUN:-0}" in
+        0) python3 scripts/release-pipeline ;;
+        1) python3 scripts/release-pipeline --dry-run ;;
+        *) echo 'RELEASE_DRY_RUN must be 0 or 1' >&2; exit 1 ;;
+      esac
+    artifact_paths:
+      - ".release/model-response.json"
+      - ".release/proposal.json"
+      - ".release/notes.md"
+      - ".release/result.json"

@@ -130,6 +130,7 @@ type reusableResolution struct {
 
 type reusableResolver struct {
 	workspaceRoot      string
+	sourceServerURL    string
 	repositorySource   RepositorySource
 	workflowSource     *WorkflowSourceReference
 	stack              []reusableSourceIdentity
@@ -155,7 +156,7 @@ type workflowScan struct {
 	sources               map[string]WorkflowSourceReference
 }
 
-func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource, workflowSource *WorkflowSourceReference) ([]sourcedJob, []Warning, workflowScan, error) {
+func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource, workflowSource *WorkflowSourceReference, sourceServerURL string) ([]sourcedJob, []Warning, workflowScan, error) {
 	digest := "sha256:" + sha256Sum(source)
 	scan := workflowScan{runtimeMatrixBoundary: hasRuntimeMatrixBoundary(parsed), referencesVars: workflowReferencesVars(parsed)}
 	if !hasReusableCall(parsed) {
@@ -201,8 +202,8 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 	}
 	rootSource.digest = digest
 	resolver := reusableResolver{
-		workflowSource: workflowSource,
-		workspaceRoot:  rootSource.repositoryRoot, repositorySource: newMemoizedActionSource(repositorySource), stack: []reusableSourceIdentity{rootSource.identity}, context: context,
+		workflowSource: workflowSource, sourceServerURL: sourceServerURL,
+		workspaceRoot: rootSource.repositoryRoot, repositorySource: newMemoizedActionSource(repositorySource), stack: []reusableSourceIdentity{rootSource.identity}, context: context,
 		rootPermissions: effectivePermissions(nil, parsed.Permissions, nil, false), scan: scan,
 		warnedCancellation:            make(map[workflow.Position]bool),
 		warnedGuardedConcurrency:      make(map[workflow.Position]bool),
@@ -452,7 +453,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			return reusableResolution{}, err
 		}
 		if job.MaxParallelExpression != nil {
-			return reusableResolution{}, jobError(path, job, "needs-derived max-parallel on a reusable-workflow call is unsupported")
+			return reusableResolution{}, jobError(path, job, "expression-valued max-parallel on a reusable-workflow call is unsupported")
 		}
 		if job.MaxParallel != nil && len(matrices) > 1 {
 			return reusableResolution{}, jobError(path, job, "strategy.max-parallel on a reusable-workflow matrix cannot be preserved when the called jobs are flattened")
@@ -498,7 +499,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				if err != nil {
 					return reusableResolution{}, err
 				}
-				cancelInProgress, err := resolveWorkflowCancellation(calleeSource.displayPath, callee.Concurrency, concurrencyContext)
+				cancelInProgress, err := resolveCancellation(calleeSource.displayPath, "", callee.Concurrency, concurrencyContext)
 				if err != nil {
 					return reusableResolution{}, err
 				}
@@ -506,12 +507,11 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				// workflow, so GitHub never enters its group; the skipped jobs
 				// must not wait for or hold the gate. Every other guard keeps
 				// the gate: Buildkite enters the group before the runtime
-				// evaluates the guard, which is never weaker than GitHub's
-				// mutual exclusion, and a runtime-decided guard warns about
-				// the wait a skipped call may still incur.
+				// evaluates the guard. Warn about the wait and, when enabled,
+				// cancellation a skipped call may still cause.
 				guardKnown, guardValue := staticCallGuardValue(calleeGuards)
 				if !guardKnown || guardValue {
-					calleeConcurrencyGates = append(append([]WorkflowConcurrencyGate(nil), concurrencyGates...), WorkflowConcurrencyGate{ID: callNamespace, Group: group})
+					calleeConcurrencyGates = append(append([]WorkflowConcurrencyGate(nil), concurrencyGates...), WorkflowConcurrencyGate{ID: callNamespace, Group: group, CancelInProgress: cancelInProgress})
 					if len(needs) != 0 && !resolver.warnedPrerequisiteConcurrency[calleeCallPosition] {
 						resolver.warnedPrerequisiteConcurrency[calleeCallPosition] = true
 						warning := prerequisiteReusableConcurrencyWarning(calleeCallPosition)
@@ -1255,7 +1255,7 @@ func resolveInputSelectedFields(path string, job workflow.Job, scope expression.
 			}
 			if !reduced.Known {
 				step.TimeoutMinutesExpression = resolved
-			} else if minutes, ok := staticTimeoutMinutes(reduced.Value); ok {
+			} else if minutes, ok := staticNumber(reduced.Value); ok {
 				if minutes <= 0 || minutes > 360 || math.IsNaN(minutes) || math.IsInf(minutes, 0) {
 					return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "timeout-minutes expression must produce a number greater than 0 and at most 360")
 				}
@@ -1280,7 +1280,7 @@ func stepControlError(path string, job workflow.Job, step workflow.Step, control
 	return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("%s %s expression: %v", action, control, err))
 }
 
-func staticTimeoutMinutes(value any) (float64, bool) {
+func staticNumber(value any) (float64, bool) {
 	switch value := value.(type) {
 	case int:
 		return float64(value), true
@@ -1310,6 +1310,11 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, inputs reus
 	rejectJob := func(message string) error {
 		return reject(job.Span.Start.Line, job.Span.Start.Column, message)
 	}
+	for _, control := range []*expression.Expression{job.TimeoutMinutesExpression, job.MaxParallelExpression} {
+		if control != nil && readsUnknownInput(control.Text, expression.ProfilePartialTemplate, inputs) {
+			return reject(control.Span.Start.Line, control.Span.Start.Column, "job timeout-minutes and strategy.max-parallel can read only workflow inputs known before jobs run")
+		}
+	}
 	// Graph fields evaluate before jobs run, so only static inputs are known.
 	graphValues := []string{job.Name}
 	jobRuntimeValues := []string{job.DefaultShell, job.DefaultWorkingDirectory}
@@ -1319,6 +1324,9 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, inputs reus
 	// admits its input reads.
 	if job.Concurrency != nil && !usesNeeds(job.Concurrency.Group) {
 		graphValues = append(graphValues, job.Concurrency.Group)
+	}
+	if job.Concurrency != nil && job.Concurrency.CancelInProgressExpression != nil {
+		graphValues = append(graphValues, job.Concurrency.CancelInProgressExpression.Text)
 	}
 	for _, site := range runsOnSites(job) {
 		if readsUndeclaredInput(site.Source, expression.ProfilePartialTemplate, inputs) {

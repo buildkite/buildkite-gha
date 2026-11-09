@@ -381,7 +381,7 @@ func TestValidateActionResolutionsAttributesMissingCalledWorkflowAction(t *testi
 			Steps:          []workflow.Step{{Kind: "uses", Uses: reference, Span: workflow.Span{Start: workflow.Position{Line: 281, Column: 15}}}},
 		}},
 	}
-	evidence, err := validateActionResolutions(t.Context(), ir, Options{}, newActionGraphCache(Options{}))
+	evidence, err := validateActionResolutions(t.Context(), ir, Options{}, newActionGraphCache(Options{}, ir.Event.ServerURL))
 	if err == nil || len(evidence.Actions) != 1 || evidence.Actions[0].Passed {
 		t.Fatalf("validateActionResolutions() evidence = %#v, error = %v", evidence, err)
 	}
@@ -911,20 +911,30 @@ runs:
         TOKEN: ${{ github.token }}
       run: echo token
 `)
-	writeAction(t, workspace, "parent", `name: parent
+	for _, test := range []struct {
+		condition string
+		wantToken bool
+	}{
+		{condition: "false"},
+		{condition: "github.run_attempt == '1'", wantToken: true},
+		{condition: "github.run_attempt != '1'", wantToken: true},
+		{condition: "github.run_attempt == '1' && false"},
+	} {
+		writeAction(t, workspace, "parent", `name: parent
 runs:
   using: composite
   steps:
-    - if: false
+    - if: `+test.condition+`
       uses: ./child
 `)
 
-	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if compiled.requiresGitHubToken {
-		t.Fatal("unreachable nested shell requested a GitHub token")
+		compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.wantToken {
+			t.Fatalf("condition %q requires token = %t, want %t", test.condition, compiled.requiresGitHubToken, test.wantToken)
+		}
 	}
 }
 
@@ -1332,7 +1342,7 @@ runs:
         token: ${{ inputs.token }}
 `)
 	refs := []string{"./child", "./parent"}
-	graph, err := buildActionGraph(t.Context(), workspace, nil, refs, nil)
+	graph, err := buildActionGraph(t.Context(), workspace, nil, refs, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1401,6 +1411,29 @@ runs:
 	}
 	if fake.calls["owner/action@v1"] != 1 {
 		t.Fatalf("remote action resolutions = %d, want one shared resolution", fake.calls["owner/action@v1"])
+	}
+}
+
+func TestMemoizeRepositorySourceSeparatesHosts(t *testing.T) {
+	fake := &fakeActionSource{root: t.TempDir(), calls: map[string]int{}, commit: strings.Repeat("a", 40)}
+	shared := MemoizeRepositorySource(fake)
+	ref, err := source.Parse("owner/action@v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct{ host, commit string }{
+		{"", strings.Repeat("a", 40)},
+		{"https://github.example", strings.Repeat("b", 40)},
+		{"https://github.com", strings.Repeat("a", 40)},
+		{"https://github.example", strings.Repeat("b", 40)},
+	} {
+		ref.ServerURL = tt.host
+		resolved, materialized, err := shared.Fetch(t.Context(), ref)
+		if err != nil || resolved.Commit != tt.commit || source.ServerURL(resolved.Reference.ServerURL) != source.ServerURL(tt.host) {
+			t.Fatalf("source %q = %#v, %v", tt.host, resolved, err)
+		}
+		materialized.Release()
+		fake.commit = strings.Repeat("b", 40)
 	}
 }
 
@@ -1661,6 +1694,10 @@ runs:
 		{name: "matrix guard", condition: "matrix.enabled", input: "true", permissions: "{}"},
 		{name: "literal guard", condition: "false", input: "true", permissions: "{}"},
 		{name: "status guard", condition: "success() && false", input: "true", permissions: "{}"},
+		{name: "first attempt guard", condition: "github.run_attempt == '1'", input: "true", permissions: "{contents: read}", wantToken: true},
+		{name: "retry guard", condition: "github.run_attempt != '1'", input: "true", permissions: "{contents: read}", wantToken: true},
+		{name: "attempt guard empty permissions", condition: "github.run_attempt == '1'", input: "true", permissions: "{}", wantError: true},
+		{name: "false attempt guard", condition: "github.run_attempt == '1' && false", input: "true", permissions: "{}"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			definition := " {}"
@@ -1772,6 +1809,9 @@ func TestCompilePlansPrunesActionTokenAuthorityBehindKnownFalseCallGuard(t *test
 		{name: "caller input", guard: "inputs.enabled", pruned: true},
 		{name: "caller input with needs", guard: "inputs.enabled && needs.prepare.result == 'success'", pruned: true},
 		{name: "callee input name", guard: "inputs.run", pruned: false},
+		{name: "first attempt", guard: "github.run_attempt == '1'", pruned: false},
+		{name: "retry", guard: "github.run_attempt != '1'", pruned: false},
+		{name: "false attempt", guard: "false && github.run_attempt == '1'", pruned: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			repository := t.TempDir()
@@ -1964,6 +2004,46 @@ func TestCheckoutAuthorityFollowsRootReachability(t *testing.T) {
 	}
 }
 
+func TestCheckoutServerURLExpressionAndSourceHost(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := writeWorkflow(t, workspace, "checkout-host.yml", "")
+	writeAction(t, remote, "", checkoutTestManifest(actionintegration.CheckoutV7Commit))
+	for _, server := range []string{"https://github.com", "https://buildkite-ghe.com"} {
+		for _, input := range []string{"${{ github.server_url }}", "${{ github['server_url'] }}", "https://wrong.example", "${{ github.server_url }}/other"} {
+			t.Run(server+"/"+input, func(t *testing.T) {
+				workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@" + actionintegration.CheckoutV7Commit + "\n        with:\n          github-server-url: " + input + "\n")
+				event := bytes.Replace(pushEvent(t), []byte(`"event":`), []byte(fmt.Sprintf(`"server_url":%q,"event":`, server)), 1)
+				event = bytes.ReplaceAll(event, []byte("https://github.com/"), []byte(server+"/"))
+				bundle, err := CompileBundleWithOptions(workflowPath, workflow, event, "0.0.0-test", testDistributionDigest, "importer", Options{
+					EventTrust:     EventUntrusted,
+					Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+					ResolveActions: true,
+					ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+				})
+				// Only the GitHub.com source receives adapter input checks and
+				// authority. This fake can supply GHES bytes; real transport rejects them.
+				native := server == "https://github.com"
+				if native && (strings.Contains(input, "wrong.example") || strings.HasSuffix(input, "/other")) {
+					if err == nil || !strings.Contains(err.Error(), `explicit input "github-server-url" value is unsupported`) {
+						t.Fatalf("foreign checkout host error = %v", err)
+					}
+					return
+				}
+				if err != nil || len(bundle.Plans) != 1 {
+					t.Fatalf("compile = %#v, %v", bundle.Plans, err)
+				}
+				job := bundle.Plans[0].Job
+				if job.Event.ServerURL != server || len(job.Actions) != 1 || job.Actions[0].ServerURL != server || job.HasCapability("provider-token-read") != native || job.GitHubToken != nil {
+					t.Fatalf("checkout identity or authority = %#v", job)
+				}
+				if got := job.Program.Job.Steps[0].Invocation.With[0].Value.Source; got != input {
+					t.Fatalf("checkout source = %q, want retained expression %q", got, input)
+				}
+			})
+		}
+	}
+}
+
 func TestStaticallySkippedReusableJobDoesNotValidateCheckoutAdapterInputs(t *testing.T) {
 	repository, remote := t.TempDir(), t.TempDir()
 	caller := writeWorkflow(t, repository, "caller.yml", "")
@@ -2003,6 +2083,79 @@ jobs:
 	}
 	if _, err := compile(true); err == nil || !strings.Contains(err.Error(), `explicit input "persist-credentials" value is unsupported`) {
 		t.Fatalf("reachable checkout adapter error = %v", err)
+	}
+}
+
+func TestStaticallySkippedReusableJobDoesNotValidateArtifactAdapterInputs(t *testing.T) {
+	repository, remote := t.TempDir(), t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", "")
+	writeAction(t, remote, "", "name: artifact action\nruns:\n  using: node24\n  main: index.js\n")
+	options := Options{
+		EventTrust:     EventUntrusted,
+		Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	}
+	for _, adapter := range []struct{ name, commit, inputs string }{
+		{"download-artifact", actionintegration.DownloadArtifactV7Commit, "name: payload\n          path: ${{ runner.temp }}/digests"},
+		{"upload-artifact", actionintegration.UploadArtifactCommit, "path: payload\n          retention-days: -1"},
+	} {
+		for _, test := range []struct {
+			name, condition, stepCondition string
+			enabled, wantError             bool
+		}{
+			{name: "false input", condition: "inputs.enabled"},
+			{name: "true input", condition: "inputs.enabled", enabled: true, wantError: true},
+			{name: "false matrix", condition: "matrix.enabled"},
+			{name: "true matrix", condition: "matrix.enabled", enabled: true, wantError: true},
+			{name: "runtime condition", condition: "vars.RUNTIME_FLAG == 'yes'", wantError: true},
+			{name: "false step", condition: "true", stepCondition: "false", wantError: true},
+		} {
+			t.Run(adapter.name+"/"+test.name, func(t *testing.T) {
+				if test.stepCondition == "" {
+					test.stepCondition = "true"
+				}
+				writeWorkflow(t, repository, "reusable.yml", fmt.Sprintf(`on:
+  workflow_call:
+    inputs:
+      enabled: {type: boolean, required: true}
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo producer
+  merge:
+    needs: producer
+    if: %s
+    strategy:
+      matrix:
+        enabled: ["${{ inputs.enabled }}"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/%s@%s
+        if: %s
+        with:
+          %s
+`, test.condition, adapter.name, adapter.commit, test.stepCondition, adapter.inputs))
+				source := []byte(fmt.Sprintf("on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    with:\n      enabled: %t\n", test.enabled))
+				if err := os.WriteFile(caller, source, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				bundle, err := CompileBundleWithOptions(caller, source, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", options)
+				if test.wantError {
+					if err == nil || !strings.Contains(err.Error(), "bounded "+adapter.name+" adapter") {
+						t.Fatalf("reachable adapter error = %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(bundle.Plans) != 2 || bundle.Plans[1].Job.Workflow.LogicalJobID != "call.merge" || len(bundle.Plans[1].Job.Actions) != 1 {
+					t.Fatalf("skipped job and action lock not retained: %#v", bundle.Plans)
+				}
+			})
+		}
 	}
 }
 
@@ -2921,6 +3074,8 @@ func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 		actionintegration.UploadArtifactV1Commit,
 		actionintegration.UploadArtifactV2Commit,
 		actionintegration.UploadArtifactV3Commit,
+		actionintegration.UploadArtifactV322Commit,
+		actionintegration.UploadArtifactV322Node20Commit,
 		"c7d193f32edcb7bfad88892161225aeda64e9392", // v4.0.0
 		actionintegration.UploadArtifactV460Commit,
 		actionintegration.UploadArtifactCommit,
@@ -2966,6 +3121,10 @@ func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 	}
 
 	bundle = compile("      - uses: actions/upload-artifact@c7d193f32edcb7bfad88892161225aeda64e9392\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV322Commit + "\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV322Node20Commit + "\n" +
 		"        with:\n          path: payload\n" +
 		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV460Commit + "\n" +
 		"        with:\n          path: payload\n" +
@@ -3372,8 +3531,11 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if plans, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n          archive: true\n"); err != nil || len(plans) != 1 {
 		t.Fatalf("unknown upload-artifact fallback plans = %#v, error = %v", plans, err)
 	}
-	if _, err := compile("c6a366c94c3e0affe28c06c8df20a878f24da3cf", "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), "does not admit resolved commit") {
-		t.Fatalf("known unsupported upload-artifact commit error = %v", err)
+	for _, commit := range []string{actionintegration.UploadArtifactV322Commit, actionintegration.UploadArtifactV322Node20Commit} {
+		plans, err := compile(commit, "        with:\n          path: payload\n")
+		if err != nil || len(plans) != 1 || len(plans[0].Actions) != 1 || plans[0].Actions[0].Commit != commit {
+			t.Fatalf("GHES upload-artifact plans = %#v, error = %v", plans, err)
+		}
 	}
 
 	matrixWorkflow := []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        mode: [production, test]\n    steps:\n      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV6Commit + "\n        if: matrix.mode == 'test'\n        with:\n          name: ${{ github.sha }}\n          path: ./artifacts.tar.gz\n          retention-days: '0'\n")

@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -140,9 +142,10 @@ type RunnerSelector struct {
 // runs-on selector. Code is server-owned and open-ended; Message is the
 // server's explanation and never quotes runner labels.
 type RunnerRejection struct {
-	Labels  []string
-	Code    string
-	Message string
+	Labels   []string
+	Code     string
+	Message  string
+	SetupURL string
 }
 
 // Agent API rejection codes the compiler renders with dedicated guidance.
@@ -564,10 +567,10 @@ func runnerSelectorKey(labels []string) (string, error) {
 
 // runnerRejectionDiagnostic renders a rejected runs-on resolution. Callers
 // pass labels only when they came from workflow-authored static data.
-func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []string) (message, detail string) {
+func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []string) (message, detail, setupURL string) {
 	var rejection *runnerPolicyRejection
 	if !errors.As(err, &rejection) {
-		return "Runner target is unsupported. Use a configured runner target compatible with this job.", ""
+		return "Runner target is unsupported. Use a configured runner target compatible with this job.", "", ""
 	}
 	label := ""
 	if len(labels) == 1 {
@@ -578,39 +581,39 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 	}
 	switch rejection.reason {
 	case reasonNoLabels:
-		return "runs-on resolves to no runner labels. Set runs-on to a mapped runner label compatible with this job.", detail
+		return "runs-on resolves to no runner labels. Set runs-on to a mapped runner label compatible with this job.", detail, ""
 	case reasonDuplicateLabel:
-		return "runs-on contains a duplicate runner label. Remove duplicate labels from runs-on.", ""
+		return "runs-on contains a duplicate runner label. Remove duplicate labels from runs-on.", "", ""
 	case reasonUnsupportedOS:
 		switch strings.ToLower(strings.TrimSpace(rejection.label)) {
 		case "windows-latest", "windows-2022":
-			return "No Windows runner target is configured. " + windowsRunnerSetupGuidance, ""
+			return "No Windows runner target is configured. " + windowsRunnerSetupGuidance, "", ""
 		default:
-			return "This Windows runner variant has no local mapping. " + windowsRunnerVariantGuidance, ""
+			return "This Windows runner variant has no local mapping. " + windowsRunnerVariantGuidance, "", ""
 		}
 	case reasonUnmappedLabel:
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rejection.label)), "depot-windows-") {
-			return "This Windows runner variant has no local mapping. " + windowsRunnerVariantGuidance, ""
+			return "This Windows runner variant has no local mapping. " + windowsRunnerVariantGuidance, "", ""
 		}
-		return fmt.Sprintf("Runner label%s has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.", label), detail
+		return fmt.Sprintf("Runner label%s has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.", label), detail, ""
 	case reasonServerRejected:
 		if rejection.server != nil {
 			return serverRunnerRejectionDiagnostic(*rejection.server, label, detail)
 		}
-		return "Runner target is unsupported. Use a configured runner target compatible with this job.", detail
+		return "Runner target is unsupported. Use a configured runner target compatible with this job.", detail, ""
 	case reasonConflictingQueues, reasonConflictingTarget:
-		return "runs-on labels map to conflicting runner targets. Use labels that map to one runner target.", detail
+		return "runs-on labels map to conflicting runner targets. Use labels that map to one runner target.", detail, ""
 	case reasonUntrustedDefault:
-		return "This untrusted event cannot use the default runner. Use a runner label allowed for untrusted events, or ask an administrator to configure one.", detail
+		return "This untrusted event cannot use the default runner. Use a runner label allowed for untrusted events, or ask an administrator to configure one.", detail, ""
 	case reasonUntrustedQueue:
 		queues := append([]string(nil), untrustedQueues...)
 		sort.Strings(queues)
 		if len(queues) != 0 {
 			detail = "Queues allowed for untrusted events: " + strings.Join(queues, ", ") + "."
 		}
-		return "This untrusted event uses a runner that is not allowed for untrusted events. Use an allowed runner label, or ask an administrator to allow its queue.", detail
+		return "This untrusted event uses a runner that is not allowed for untrusted events. Use an allowed runner label, or ask an administrator to allow its queue.", detail, ""
 	default:
-		return "Runner target is unsupported. Use a configured runner target compatible with this job.", detail
+		return "Runner target is unsupported. Use a configured runner target compatible with this job.", detail, ""
 	}
 }
 
@@ -623,7 +626,7 @@ const windowsRunnerVariantGuidance = "Explicit Windows mappings support only win
 // cannot see locally, such as the cluster and the missing hosted queue. Codes
 // whose message already carries a remedy add no local guidance; unknown codes
 // keep the generic mapping guidance so newer servers degrade gracefully.
-func serverRunnerRejectionDiagnostic(rejection RunnerRejection, label, supportedDetail string) (message, detail string) {
+func serverRunnerRejectionDiagnostic(rejection RunnerRejection, label, supportedDetail string) (message, detail, setupURL string) {
 	subject := "the runs-on labels"
 	if label != "" {
 		subject = "runner label" + label
@@ -632,7 +635,10 @@ func serverRunnerRejectionDiagnostic(rejection RunnerRejection, label, supported
 	switch rejection.Code {
 	case RunnerRejectionMissingQueue, RunnerRejectionNoCluster:
 		// The server message may end with a documentation URL; leave it intact.
-		return message + strings.Join(strings.Fields(rejection.Message), " "), ""
+		if rejection.Code == RunnerRejectionMissingQueue {
+			setupURL = SafeRunnerSetupURL(rejection.SetupURL)
+		}
+		return message + strings.Join(strings.Fields(rejection.Message), " "), "", setupURL
 	case RunnerRejectionIncompatibleLabels:
 		if slices.ContainsFunc(rejection.Labels, func(label string) bool {
 			label = strings.ToLower(strings.TrimSpace(label))
@@ -649,12 +655,25 @@ func serverRunnerRejectionDiagnostic(rejection RunnerRejection, label, supported
 			}
 			// Keep the remedy visible, not in collapsed diagnostic detail.
 			// A space also preserves any URL at the end of the server prose.
-			return message + strings.Join(strings.Fields(rejection.Message), " ") + " " + guidance, ""
+			return message + strings.Join(strings.Fields(rejection.Message), " ") + " " + guidance, "", ""
 		}
-		return message + sentence(rejection.Message) + " Use a runner label compatible with this job and its Buildkite queue.", supportedDetail
+		return message + sentence(rejection.Message) + " Use a runner label compatible with this job and its Buildkite queue.", supportedDetail, ""
 	default:
-		return message + sentence(rejection.Message) + " Configure a mapping for this selector or use a mapped runner label.", supportedDetail
+		return message + sentence(rejection.Message) + " Configure a mapping for this selector or use a mapped runner label.", supportedDetail, ""
 	}
+}
+
+// SafeRunnerSetupURL accepts only absolute HTTP(S) links supplied by the server,
+// without credentials or browser-ambiguous whitespace and backslashes.
+func SafeRunnerSetupURL(value string) string {
+	if strings.ContainsFunc(value, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) || r == '\\' }) {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Hostname() == "" || parsed.User != nil || parsed.Opaque != "" {
+		return ""
+	}
+	return value
 }
 
 // sentence normalizes server prose so local guidance can follow it.

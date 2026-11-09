@@ -53,6 +53,8 @@ var (
 // RepositorySource to materialize the complete tree while retaining Path as
 // the exact requested resource for authorization and cache isolation.
 type Reference struct {
+	// ServerURL is source identity, not credential authority. Empty means GitHub.com.
+	ServerURL                         string
 	Owner, Repository, Path, Ref, Raw string
 	RepositoryRoot                    bool
 	authorizationRef                  string
@@ -93,6 +95,26 @@ func (m Materialized) Retain(ctx context.Context) (Materialized, error) {
 	return m.lease.retain(ctx)
 }
 
+// ServerURL returns the source origin. Legacy hostless sources mean GitHub.com,
+// never the event server or the containing action's host.
+func ServerURL(serverURL string) string {
+	if serverURL == "" {
+		return "https://github.com"
+	}
+	return serverURL
+}
+
+// ValidateServerURL accepts an omitted origin or a canonical HTTPS origin.
+// Validating an origin does not authorize access to it.
+func ValidateServerURL(serverURL string) error {
+	serverURL = ServerURL(serverURL)
+	u, err := url.Parse(serverURL)
+	if err != nil || len(serverURL) > 512 || u.Scheme != "https" || u.Hostname() == "" || strings.Contains(u.Host, "*") || u.User != nil || u.Opaque != "" || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.String() != serverURL || u.Host != strings.ToLower(u.Host) {
+		return fmt.Errorf("GitHub server URL must be a canonical HTTPS origin without credentials, path, query, or fragment")
+	}
+	return nil
+}
+
 // Parse parses owner/repository[/path]@ref.
 func Parse(raw string) (Reference, error) {
 	if len(raw) == 0 || len(raw) > 2048 || !utf8.ValidString(raw) || hasControl(raw) {
@@ -127,6 +149,9 @@ func Parse(raw string) (Reference, error) {
 // PinReference replaces a mutable ref with an immutable commit while retaining
 // the originally requested ref for repository-source authorization.
 func PinReference(ref Reference, commit string) (Reference, error) {
+	if err := ValidateServerURL(ref.ServerURL); err != nil {
+		return Reference{}, err
+	}
 	if !git.ValidObjectID(commit) {
 		return Reference{}, fmt.Errorf("commit must be lower-case full SHA")
 	}
@@ -138,6 +163,7 @@ func PinReference(ref Reference, commit string) (Reference, error) {
 	if err != nil {
 		return Reference{}, err
 	}
+	pinned.ServerURL = ref.ServerURL
 	pinned.RepositoryRoot = ref.RepositoryRoot
 	pinned.authorizationRef = ref.Ref
 	if ref.authorizationRef != "" {
@@ -192,6 +218,18 @@ func defaults() config {
 	api, _ := url.Parse(defaultAPI)
 	codeload, _ := url.Parse(defaultCodeload)
 	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, userAgent: useragent.FromVersion(""), now: time.Now, maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
+}
+
+// forServer selects endpoints for a validated source origin. Existing token
+// providers and Git fallback authorize GitHub.com only, never another origin.
+func (c config) forServer(serverURL string) config {
+	if ServerURL(serverURL) != "https://github.com" {
+		c.api, _ = url.Parse(serverURL + "/api/v3")
+		c.finalHosts = map[string]bool{c.api.Host: true}
+		c.credential = nil
+		c.git = ""
+	}
+	return c
 }
 
 // Option configures trusted process-level limits or test endpoints. Options must
@@ -367,11 +405,15 @@ func makeConfig(opts []Option) (config, error) {
 
 // Resolve pins a ref to a commit. Full lowercase SHA pins bypass mutable refs.
 func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error) {
+	if err := ValidateServerURL(ref.ServerURL); err != nil {
+		return Resolved{}, err
+	}
 	ctx = context.WithValue(ctx, sourceRepositoryRootKey{}, ref.RepositoryRoot)
 	parsed, err := Parse(ref.Raw)
 	if err != nil {
 		return Resolved{}, err
 	}
+	parsed.ServerURL = ref.ServerURL
 	parsed.RepositoryRoot = ref.RepositoryRoot
 	parsed.authorizationRef = ref.authorizationRef
 	ref = parsed
@@ -393,7 +435,7 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 // so a stale entry would fail every later operation until it expired. The
 // per-operation repository-source memoizer still pins one commit per upload.
 func (r *Resolver) gitRepositorySource(ref Reference) bool {
-	return ref.RepositoryRoot && r.cfg.git != ""
+	return ref.RepositoryRoot && r.cfg.git != "" && ServerURL(ref.ServerURL) == "https://github.com"
 }
 
 // gitFallbackError reports whether an anonymous GitHub API failure leaves a
@@ -418,10 +460,11 @@ func (r *Resolver) ResolutionSnapshotID() string {
 }
 
 func (r *Resolver) resolveMutableUncached(ctx context.Context, ref Reference) (Resolved, error) {
-	if err := r.cfg.credential.provision(ctx); err != nil {
+	cfg := r.cfg.forServer(ref.ServerURL)
+	if err := cfg.credential.provision(ctx); err != nil {
 		return Resolved{}, err
 	}
-	if r.cfg.credential != nil && r.cfg.credential.token != "" {
+	if cfg.credential != nil && cfg.credential.token != "" {
 		if err := r.ensurePublic(ctx, ref); err != nil {
 			if !gitFallbackError(err) || !r.gitRepositorySource(ref) {
 				return Resolved{}, markMissingRef(err)
@@ -447,7 +490,7 @@ func (r *Resolver) resolveMutableViaAPI(ctx context.Context, ref Reference) (Res
 				SHA  string `json:"sha"`
 			} `json:"object"`
 		}
-		err := r.get(ctx, repoParts(ref, "git", "ref", kind, ref.Ref), &v)
+		err := r.get(ctx, ref, repoParts(ref, "git", "ref", kind, ref.Ref), &v)
 		if err == nil {
 			sha, err := r.peel(ctx, ref, v.Object.Type, v.Object.SHA)
 			if err != nil {
@@ -471,7 +514,7 @@ func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, 
 	var v struct {
 		SHA string `json:"sha"`
 	}
-	if err := r.get(ctx, repoParts(ref, "commits", ref.Ref), &v); err != nil {
+	if err := r.get(ctx, ref, repoParts(ref, "commits", ref.Ref), &v); err != nil {
 		return Resolved{}, err
 	}
 	if !git.ValidObjectID(v.SHA) {
@@ -496,7 +539,7 @@ func (r *Resolver) peel(ctx context.Context, ref Reference, typ, sha string) (st
 				SHA  string `json:"sha"`
 			} `json:"object"`
 		}
-		if err := r.get(ctx, repoParts(ref, "git", "tags", sha), &v); err != nil {
+		if err := r.get(ctx, ref, repoParts(ref, "git", "tags", sha), &v); err != nil {
 			return "", err
 		}
 		typ, sha = v.Object.Type, v.Object.SHA
@@ -518,9 +561,11 @@ func apiURL(base *url.URL, parts ...string) *url.URL {
 	u.Path, u.RawPath = decoded.String(), escaped
 	return &u
 }
-func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
-	authenticated := actionSourceToken(r.cfg, parts) != ""
-	if err := r.apiBudget.check(ctx, authenticated, r.cfg.now()); err != nil {
+func (r *Resolver) get(ctx context.Context, ref Reference, parts []string, out any) error {
+	cfg := r.cfg.forServer(ref.ServerURL)
+	authenticated := actionSourceToken(cfg, parts) != ""
+	budget := githubAPIBudgetKey{serverURL: ServerURL(ref.ServerURL), authenticated: authenticated}
+	if err := r.apiBudget.check(ctx, budget, cfg.now()); err != nil {
 		var rate *RateLimitError
 		if errors.As(err, &rate) {
 			recordGitHubAPISuppression(ctx, authenticated, parts)
@@ -528,10 +573,10 @@ func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
 		}
 		return err
 	}
-	err := githubAPIGet(ctx, r.client, r.cfg, parts, out)
+	err := githubAPIGet(ctx, r.client, cfg, parts, out)
 	var rate *RateLimitError
 	if errors.As(err, &rate) {
-		r.apiBudget.record(authenticated, rate)
+		r.apiBudget.record(budget, rate)
 	}
 	return err
 }
@@ -1038,6 +1083,9 @@ func NewStoreContext(ctx context.Context, root string, client *http.Client, opts
 
 // Materialize returns the verified repository and selected source identity.
 func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialized, error) {
+	if err := ValidateServerURL(resolved.Reference.ServerURL); err != nil {
+		return Materialized{}, err
+	}
 	ctx = context.WithValue(ctx, sourceRepositoryRootKey{}, resolved.Reference.RepositoryRoot)
 	recordSourceStat(ctx, "materialization")
 	if !git.ValidObjectID(resolved.Commit) {
@@ -1050,6 +1098,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if err != nil {
 		return Materialized{}, err
 	}
+	parsed.ServerURL = resolved.Reference.ServerURL
 	parsed.RepositoryRoot = resolved.Reference.RepositoryRoot
 	parsed.authorizationRef = resolved.Reference.authorizationRef
 	resolved.Reference = parsed
@@ -1057,7 +1106,12 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if parsed.RepositoryRoot {
 		selectedPath = ""
 	}
-	base := filepath.Join(s.root, strings.ToLower(parsed.Owner), strings.ToLower(parsed.Repository), resolved.Commit)
+	root := s.root
+	if ServerURL(parsed.ServerURL) != "https://github.com" {
+		host := sha256.Sum256([]byte(parsed.ServerURL))
+		root = filepath.Join(root, ".servers", hex.EncodeToString(host[:]))
+	}
+	base := filepath.Join(root, strings.ToLower(parsed.Owner), strings.ToLower(parsed.Repository), resolved.Commit)
 	tree := filepath.Join(base, "tree")
 	parent := filepath.Dir(base)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -1233,7 +1287,7 @@ func (s *Store) authorizeCachedRepository(ctx context.Context, ref Reference, m 
 	if !m.Authenticated {
 		return nil
 	}
-	if !ref.RepositoryRoot || s.cfg.git == "" {
+	if !ref.RepositoryRoot || s.cfg.forServer(ref.ServerURL).git == "" {
 		return &NotPublicError{}
 	}
 	requestedRef := ref.Ref
@@ -1256,12 +1310,16 @@ func (s *Store) authorizeCachedRepository(ctx context.Context, ref Reference, m 
 }
 
 func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) (bool, error) {
-	u := apiURL(s.cfg.codeload, r.Reference.Owner, r.Reference.Repository, "tar.gz", r.Commit)
-	if !validArchiveURL(u, s.cfg.finalHosts) {
+	cfg := s.cfg.forServer(r.Reference.ServerURL)
+	u := apiURL(cfg.codeload, r.Reference.Owner, r.Reference.Repository, "tar.gz", r.Commit)
+	if ServerURL(r.Reference.ServerURL) != "https://github.com" {
+		u = apiURL(cfg.api, repoParts(r.Reference, "tarball", r.Commit)...)
+	}
+	if !validArchiveURL(u, cfg.finalHosts) {
 		return false, fmt.Errorf("archive URL denied")
 	}
-	err := s.downloadArchive(ctx, u, dst)
-	if !gitFallbackError(err) || !r.Reference.RepositoryRoot || s.cfg.git == "" {
+	err := s.downloadArchive(ctx, cfg, u, dst)
+	if !gitFallbackError(err) || !r.Reference.RepositoryRoot || cfg.git == "" {
 		return false, err
 	}
 	if err := s.extractGitRepository(ctx, r, dst); err != nil {
@@ -1313,7 +1371,7 @@ func (s *Store) extractGitRepository(ctx context.Context, resolved Resolved, dst
 	return nil
 }
 
-func (s *Store) downloadArchive(ctx context.Context, u *url.URL, dst string) (err error) {
+func (s *Store) downloadArchive(ctx context.Context, cfg config, u *url.URL, dst string) (err error) {
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if e != nil {
 		return e
@@ -1327,7 +1385,7 @@ func (s *Store) downloadArchive(ctx context.Context, u *url.URL, dst string) (er
 		if len(via) > 3 {
 			return fmt.Errorf("too many redirects")
 		}
-		if !validArchiveURL(req.URL, s.cfg.finalHosts) {
+		if !validArchiveURL(req.URL, cfg.finalHosts) {
 			return fmt.Errorf("archive redirect denied")
 		}
 		req.Header.Del("Authorization")
@@ -1343,7 +1401,7 @@ func (s *Store) downloadArchive(ctx context.Context, u *url.URL, dst string) (er
 	}
 	observation.response(resp)
 	defer func() { _ = resp.Body.Close() }()
-	if !validArchiveURL(resp.Request.URL, s.cfg.finalHosts) {
+	if !validArchiveURL(resp.Request.URL, cfg.finalHosts) {
 		return fmt.Errorf("archive final URL denied")
 	}
 	if resp.StatusCode == http.StatusNotFound {
@@ -1384,9 +1442,8 @@ func validArchiveURL(u *url.URL, allowed map[string]bool) bool {
 	if u.Scheme != "https" || u.User != nil {
 		return false
 	}
-	// An authority (including a port) can only appear when explicitly injected
-	// as a trusted test endpoint. Production's hostname-only allowlist rejects
-	// custom ports and IP literals.
+	// GHES allows only its selected authority, including any explicit port.
+	// GitHub.com's default allowlist remains limited to codeload.github.com.
 	if allowed[strings.ToLower(u.Host)] {
 		return true
 	}
@@ -1395,6 +1452,7 @@ func validArchiveURL(u *url.URL, allowed map[string]bool) bool {
 
 type manifest struct {
 	Schema        string         `json:"schema"`
+	ServerURL     string         `json:"server_url,omitempty"`
 	Owner         string         `json:"owner"`
 	Repository    string         `json:"repository"`
 	Commit        string         `json:"commit"`
@@ -1456,7 +1514,7 @@ func buildResolvedManifest(root string, c config, ref Reference, resolved Resolv
 }
 
 func buildManifestFiles(root string, c config, ref Reference, commit string, excludeGitMetadata bool, executablePaths []string) (manifest, error) {
-	m := manifest{Schema: "buildkite-gha-action-source/v1", Owner: strings.ToLower(ref.Owner), Repository: strings.ToLower(ref.Repository), Commit: commit}
+	m := manifest{Schema: "buildkite-gha-action-source/v1", ServerURL: ref.ServerURL, Owner: strings.ToLower(ref.Owner), Repository: strings.ToLower(ref.Repository), Commit: commit}
 	info, err := os.Stat(root)
 	if err != nil {
 		return m, fmt.Errorf("stat action source tree: %w", err)
@@ -1549,6 +1607,7 @@ func (s *Store) verify(base string, resolved Resolved) (manifest, error) {
 	}
 	got, e := buildResolvedManifest(filepath.Join(base, "tree"), s.cfg, resolved.Reference, resolved)
 	got.Authenticated = want.Authenticated
+	got.ServerURL, want.ServerURL = ServerURL(got.ServerURL), ServerURL(want.ServerURL)
 	if e != nil || !reflect.DeepEqual(got, want) {
 		return manifest{}, fmt.Errorf("cache verification failed")
 	}

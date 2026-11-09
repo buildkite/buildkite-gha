@@ -108,8 +108,8 @@ func jobGraphExpansionReport(expanded jobGraphExpansionResult, warnings []Warnin
 
 // expandJobGraph resolves reusable workflow calls, then turns the parsed
 // logical job graph into deterministic JobInstance values and report data.
-func expandJobGraph(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (jobGraphExpansionResult, error) {
-	resolved, warnings, scan, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource, options.WorkflowSource)
+func expandJobGraph(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options, sourceServerURL string) (jobGraphExpansionResult, error) {
+	resolved, warnings, scan, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource, options.WorkflowSource, sourceServerURL)
 	if err != nil {
 		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
 		for _, job := range parsed.Jobs {
@@ -217,7 +217,15 @@ func (e *jobGraphExpansion) expandMatrices() {
 	e.matricesByJob = make(map[string][]map[string]any, len(e.accepted))
 	for _, id := range e.order {
 		sourced := e.accepted[e.acceptedIndex[id]]
-		job := sourced.Job
+		job, err := resolveJobMaxParallel(sourced.Job, e.frameContext(sourced))
+		if err != nil {
+			position := sourced.MaxParallelExpression.Span.Start
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", sourced.path, position.Line, position.Column, id, "", "", 0, locatedJobError(sourced.path, sourced.Job, position.Line, position.Column, fmt.Sprintf("resolve strategy.max-parallel: %v", err))))
+			e.failedMatrices[id], e.failedJobs[id] = true, true
+			continue
+		}
+		sourced.Job = job
+		e.accepted[e.acceptedIndex[id]] = sourced
 		continuation := e.deferredContinuation(sourced)
 		descriptor, deferred, err := describeRuntimeMatrix(job, sourced.path, sourced.digest, sourced.needBindings, e.topologyJobs, e.matricesByJob)
 		scheduling, schedulingErr := e.validateRuntimeScheduling(sourced, descriptor, deferred)
@@ -264,8 +272,6 @@ func (e *jobGraphExpansion) expandMatrices() {
 			case err != nil:
 			case len(sourced.concurrencyGates) != 0:
 				err = deferredConcurrencyError("reusable-workflow", "a needs-derived matrix", "matrix")
-			case e.workflowConcurrency:
-				err = deferredConcurrencyError("workflow", "a needs-derived matrix", "matrix")
 			}
 			if err != nil {
 				e.rejectRuntimeMatrix(sourced, err)
@@ -808,11 +814,16 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		controlContext.Vars = nil
 		resolvedContinueOnError, continueOnErrorErr := resolveJobContinueOnError(instanceJob, controlContext)
 		instanceJob = resolvedContinueOnError
+		instanceJob, timeoutErr := resolveJobTimeout(instanceJob, instanceContext)
 		candidate := newJobCandidate(sourced, instanceJob, matrix, key, resolvedServices)
 		candidate.Strategy = strategy
 
 		valid := true
-		if containerErr != nil {
+		if timeoutErr != nil {
+			position := job.TimeoutMinutesExpression.Span.Start
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, key, "", 0, locatedJobError(jobPath, job, position.Line, position.Column, fmt.Sprintf("resolve job timeout-minutes: %v", timeoutErr))))
+			valid = false
+		} else if containerErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve job container: %v", containerErr))))
 			valid = false
 		} else if serviceErr != nil {
@@ -858,7 +869,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 				if sourced.blockerDetailUnsafe {
 					reportableLabels = nil
 				}
-				message, detail := runnerRejectionDiagnostic(err, reportableLabels, e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
+				message, detail, setupURL := runnerRejectionDiagnostic(err, reportableLabels, e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
 				blocker, blockerDetail := runnerRejectionBlocker(err, reportableLabels)
 				reportRunnerLabelDetail := ""
 				if len(reportableLabels) == 1 {
@@ -869,7 +880,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 					Blocker: blocker, BlockerDetail: blockerDetail,
 					ReportRunnerLabelDetail: reportRunnerLabelDetail,
 					Path:                    jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
-					Job: job.ID, Instance: key, Message: message, Detail: detail,
+					Job: job.ID, Instance: key, Message: message, Detail: detail, SetupURL: setupURL,
 					Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
 				})
 				valid = false
@@ -889,7 +900,8 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, concurrencyErr))
 			valid = false
 		}
-		if cancellationErr := rejectJobCancellation(jobPath, job); cancellationErr != nil {
+		cancelInProgress, cancellationErr := resolveCancellation(jobPath, job.ID, job.Concurrency, instanceContext)
+		if cancellationErr != nil {
 			position := job.Concurrency.CancelInProgressPosition
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, key, "", 0, cancellationErr))
 			valid = false
@@ -915,6 +927,9 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		instance.ToolCache = target.ToolCache
 		instance.Cache = target.Cache
 		instance.ConcurrencyGroup = concurrencyGroup
+		guardKnown, guardValue := staticCallGuardValue(sourced.callGuards)
+		// Buildkite enforces concurrency before run-job can skip this job.
+		instance.CancelInProgress = cancelInProgress && instanceJob.If != "false" && (!guardKnown || guardValue)
 		if e.bindInstanceDependencies(sourced, job, key, &instance) {
 			jobFailed = true
 			continue

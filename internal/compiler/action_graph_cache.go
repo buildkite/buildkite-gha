@@ -13,8 +13,9 @@ import (
 // actionGraphCache belongs to one bundle and is used sequentially. Only
 // completed graphs are retained; invocation inputs and authority are never cached.
 type actionGraphCache struct {
-	options Options
-	graphs  map[actionGraphKey]actionGraph
+	options         Options
+	sourceServerURL string
+	graphs          map[actionGraphKey]actionGraph
 }
 
 type actionGraphKey struct {
@@ -23,12 +24,12 @@ type actionGraphKey struct {
 	isRemote                                      bool
 }
 
-func newActionGraphCache(options Options) *actionGraphCache {
+func newActionGraphCache(options Options, sourceServerURL string) *actionGraphCache {
 	options.ActionSource = newMemoizedActionSource(options.ActionSource)
-	return &actionGraphCache{options: options, graphs: make(map[actionGraphKey]actionGraph)}
+	return &actionGraphCache{options: options, sourceServerURL: sourceServerURL, graphs: make(map[actionGraphKey]actionGraph)}
 }
 
-func (cache *actionGraphCache) compile(ctx context.Context, instance JobInstance, serverURL string, refs []string, inputs []map[string]string) (actionCompilation, error) {
+func (cache *actionGraphCache) compile(ctx context.Context, instance JobInstance, serverURL string, identityIDs map[string]any, refs []string, inputs []map[string]string) (actionCompilation, error) {
 	if inputs != nil && len(inputs) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
 	}
@@ -41,7 +42,7 @@ func (cache *actionGraphCache) compile(ctx context.Context, instance JobInstance
 	graph, ok := cache.graphs[key]
 	if !ok {
 		var err error
-		graph, err = buildActionGraph(ctx, instance.RepositoryRoot, cache.options.ActionSource, refs, workflowSourceResolver(instance, cache.options))
+		graph, err = buildActionGraph(ctx, instance.RepositoryRoot, cache.options.ActionSource, refs, workflowSourceResolver(instance, cache.options), cache.sourceServerURL)
 		if err != nil {
 			return actionCompilation{}, err
 		}
@@ -49,7 +50,7 @@ func (cache *actionGraphCache) compile(ctx context.Context, instance JobInstance
 	}
 	compiled, err := graph.analyzeInvocations(program.ActionAuthorityOptions{
 		ServerURL: serverURL, Strategy: instance.Strategy, Matrix: instance.Matrix,
-		WorkflowInputs: instance.inputScope(),
+		GitHubIdentityIDs: identityIDs, WorkflowInputs: instance.inputScope(),
 	}, refs, inputs)
 	if err != nil {
 		return actionCompilation{}, err

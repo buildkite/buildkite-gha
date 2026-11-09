@@ -82,7 +82,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		job.Inputs = mergeWorkflowInputs(job.Inputs, job.DeferredInputValues)
 		r.job = job
 	}
-	guardsPass, err := evaluateCallGuards(job)
+	guardsPass, err := evaluateCallGuards(job, r.RunIdentity)
 	if err != nil {
 		return jobResult, err
 	}
@@ -386,10 +386,17 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		}
 	}
 	toolCache := r.ToolCache
-	if toolCache == "" {
+	if toolCache == "" || containerSpec != nil {
+		// Job containers use the existing temp mount, not an unmounted host
+		// tool cache. Do not expose another host directory to the container.
 		toolCache = filepath.Join(runnerTemp, "tool-cache")
 		if err := os.Mkdir(toolCache, 0o755); err != nil {
 			return jobResult, fmt.Errorf("create runner tool cache: %w", err)
+		}
+		if containerSpec != nil {
+			if err := os.Chmod(toolCache, 0o777); err != nil {
+				return jobResult, fmt.Errorf("make container tool cache writable: %w", err)
+			}
 		}
 	} else {
 		if !filepath.IsAbs(toolCache) || filepath.Clean(toolCache) != toolCache {
@@ -492,8 +499,10 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		}()
 	}
 	runnerContext["temp"] = runnerTemp
+	runnerContext["tool_cache"] = toolCache
 	if r.jobContainer != nil {
 		runnerContext["temp"] = r.jobContainer.containerPath(runnerTemp)
+		runnerContext["tool_cache"] = r.jobContainer.containerPath(toolCache)
 	}
 	runtimeEnv := standardEnvironment(job, workspace, runnerTemp, toolCache, r.RunIdentity)
 	if eventPath != "" {
@@ -669,6 +678,13 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 		eval.GitHub["action"] = step.GitHubAction
 		if execution, ok := preFailures[stepIndex]; ok {
 			runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
+			continue
+		}
+		// Planning may have pruned credentials used by this step's environment.
+		// Use the same reachability decision as action preparation before
+		// evaluating fields on a step that cannot run.
+		if stepIndex < len(r.reachableSteps) && !r.reachableSteps[stepIndex] {
+			eval.Steps[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
 			continue
 		}
 		if runErr != nil || runCtx.Err() != nil {
@@ -892,12 +908,15 @@ func evaluateJobContinueOnError(control executionprogram.BoolControl, context ex
 	return control.Literal, nil
 }
 
-func evaluateCallGuards(job plan.Job) (bool, error) {
+func evaluateCallGuards(job plan.Job, identity RunIdentity) (bool, error) {
 	executionJob := job.ExecutionJob()
 	if executionJob == nil || len(job.CallGuards) != len(executionJob.Guards) {
 		return false, fmt.Errorf("evaluate reusable-workflow call guards: plan projection does not match normalized program")
 	}
 	github := githubContext(job)
+	for name, value := range identity.githubValues() {
+		github[name] = value
+	}
 	for i, guard := range job.CallGuards {
 		if len(guard.DeferredInputs) != 0 && !deferredInputsHydrated(guard.DeferredInputs, guard.DeferredInputValues) {
 			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: deferred inputs were not hydrated", i+1)
@@ -1477,6 +1496,9 @@ func githubContext(job plan.Job) map[string]any {
 		"workflow_sha":      workflowSHA,
 		"job":               job.Workflow.LogicalJobID,
 	}
+	for name, value := range plan.EventIdentityIDs(job.Event.Provider, job.Event.Repository, job.Event.Actor, event) {
+		github[name] = value
+	}
 	if rest, graphql := plan.EventAPIURLs(job.Event.Provider, job.Event.ServerURL); rest != "" {
 		github["api_url"], github["graphql_url"] = rest, graphql
 	}
@@ -1785,7 +1807,7 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 			}
 		}
 		if material != nil && actionRuntime != metadata.RuntimeDocker {
-			target := remoteMountTarget(entry.lock.Repository, entry.lock.Commit)
+			target := remoteMountTarget(entry.lock.ServerURL, entry.lock.Repository, entry.lock.Commit)
 			m := containerMount{host: material.RepositoryRoot, target: target, readonly: true, probe: true}
 			if old, ok := byTarget[target]; ok && old.host != m.host {
 				return nil, fmt.Errorf("conflicting verified action roots for %q", target)

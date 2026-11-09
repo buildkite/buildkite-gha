@@ -134,7 +134,7 @@ esac
 		Target:               plan.Target{StepKey: "gha-checkout", Queue: "trusted"},
 		RequiredCapabilities: []string{"network", "provider-token-read"},
 		Program: runtimeTestProgram([]runtimeTestStep{
-			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &plan.ActionSelector{Lock: checkoutID}},
+			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &plan.ActionSelector{Lock: checkoutID}, With: map[string]string{"github-server-url": "${{ github.server_url }}"}},
 			{ID: "hash", Kind: "run", Shell: "sh", Condition: "hashFiles('.git/HEAD') != ''", Env: map[string]string{"HEAD_HASH": "${{ hashFiles('.git/HEAD') }}"}, Command: "test \"$HEAD_HASH\" = " + headDigest},
 			{ID: "local", Kind: "uses", Uses: "./.github/actions/local", Action: &plan.ActionSelector{Lock: localID}},
 		}),

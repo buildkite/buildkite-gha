@@ -177,7 +177,7 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 				return nil
 			}
 			switch strings.ToLower(path[0]) {
-			case "actor", "base_ref", "event_name", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow", "workflow_ref", "workflow_sha":
+			case "actor", "actor_id", "base_ref", "event_name", "ref", "ref_name", "ref_type", "repository", "repository_id", "repository_owner", "repository_owner_id", "sha", "workflow", "workflow_ref", "workflow_sha":
 				if len(path) == 1 {
 					return nil
 				}
@@ -255,38 +255,45 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			if strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") {
 				return nil
 			}
-			if (strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "debug")) && scope != JobCondition && scope != CallCondition {
+			if (strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "tool_cache") || strings.EqualFold(path[0], "debug")) && scope != JobCondition && scope != CallCondition {
 				return nil
 			}
 		}
 		if scope == JobCondition {
 			return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, or runner.environment", reference)
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, runner.environment, runner.temp, or runner.debug", reference)
+		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, runner.environment, runner.temp, runner.tool_cache, or runner.debug", reference)
 	case "github":
 		if len(path) >= 1 && strings.EqualFold(path[0], "event") {
 			return nil
 		}
 		if len(path) == 1 {
 			switch strings.ToLower(path[0]) {
-			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow_ref", "workflow_sha":
+			case "actor", "actor_id", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_id", "repository_owner", "repository_owner_id", "sha", "workflow_ref", "workflow_sha":
 				return nil
 			case "event_path":
 				if scope == StepCondition || scope == actionStepCondition || scope == actionLifecycleCondition {
 					return nil
 				}
+			case "run_attempt":
+				if scope != actionLifecycleCondition {
+					return nil
+				}
 			case "server_url":
-				if scope == actionStepCondition {
+				if scope != actionLifecycleCondition {
 					return nil
 				}
 			}
 		}
-		supported := "actor, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, sha, workflow_ref, and workflow_sha"
+		supported := "actor, actor_id, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_id, repository_owner, repository_owner_id, sha, workflow_ref, and workflow_sha"
+		if scope != actionLifecycleCondition {
+			supported += ", plus run_attempt"
+		}
 		if scope == StepCondition || scope == actionStepCondition || scope == actionLifecycleCondition {
 			supported += ", plus event_path during execution"
 		}
-		if scope == actionStepCondition {
-			supported += ", plus server_url in composite step conditions"
+		if scope != actionLifecycleCondition {
+			supported += ", plus server_url"
 		}
 		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are %s", reference, supported)
 	case "needs":
@@ -660,7 +667,7 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		if value, ok := lookupRuntimeValue(context.GitHub, path); ok {
 			return value, nil
 		}
-		if context.GitHub == nil {
+		if context.GitHub == nil || len(path) == 1 && requiredGitHubRuntimeValue(path[0]) {
 			break
 		}
 		return nil, nil

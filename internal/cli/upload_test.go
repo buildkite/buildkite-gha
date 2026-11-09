@@ -153,6 +153,21 @@ func TestGeneratedFailureLinksFetchedRevisionInsteadOfCallerOrTag(t *testing.T) 
 	if !strings.Contains(annotation, `<a href="`+target+`"><code>`+html.EscapeString(display)+`:35:5</code></a>`) {
 		t.Fatalf("annotation lost remote source link: %s", annotation)
 	}
+	for _, host := range []string{"https://github.com", "https://source.example:8443", "http://source.example", "https://user:secret@source.example", "https://source.example/repo", "https://source.example?token=secret"} {
+		reference := report.Sources[display]
+		reference.ServerURL = host
+		report.Sources[display] = reference
+		_, artifacts = generatedFailure(t.Context(), report, caller)
+		message, annotation := string(artifacts[0].Contents), string(artifacts[1].Contents)
+		if host == "https://github.com" || host == "https://source.example:8443" {
+			want := strings.Replace(target, "https://github.com", host, 1)
+			if !strings.Contains(message, want) || !strings.Contains(annotation, `href="`+want+`"`) {
+				t.Fatalf("source host %q lost its diagnostic link: %q / %s", host, message, annotation)
+			}
+		} else if strings.Contains(message, "\x1b]8;") || strings.Contains(annotation, "href=") {
+			t.Fatalf("invented source link for malformed origin %q: %s", host, artifacts)
+		}
+	}
 	for _, invalid := range []string{"", "v2"} {
 		report.Sources[display] = compiler.WorkflowSourceReference{Repository: "owner/shared", Path: ".github/workflows/build's.yml", Commit: invalid}
 		_, artifacts = generatedFailure(t.Context(), report, caller)
@@ -1568,7 +1583,7 @@ func TestFailureCheckSummaryUsesAnnotationMarkupAndLinks(t *testing.T) {
 	}
 }
 
-func TestRunUploadEmitsUnsupportedJobCancellationAsFailingStep(t *testing.T) {
+func TestRunUploadEmitsNonBooleanJobCancellationAsFailingStep(t *testing.T) {
 	requireImporterHost(t)
 	directory := t.TempDir()
 	workflowPath := filepath.Join(directory, "rebase-needed.yml")
@@ -1579,7 +1594,7 @@ jobs:
     runs-on: ubuntu-latest
     concurrency:
       group: rebase-needed
-      cancel-in-progress: true
+      cancel-in-progress: ${{ 'true' }}
     steps: [{run: true}]
 `
 	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
@@ -1616,7 +1631,7 @@ jobs:
 	}
 	step := pipeline.Steps[0]
 	message := failureArtifactForStep(step.Plugins, runner.uploaded, "messages")
-	if step.Group != "" || step.Label != ":github: workflow · Rebase needed" || !isGeneratedFailureCommand(step.Command) || !strings.Contains(string(message), `job "label-rebase-needed": concurrency cancel-in-progress is unsupported`) || !step.Checkout.Skip {
+	if step.Group != "" || step.Label != ":github: workflow · Rebase needed" || !isGeneratedFailureCommand(step.Command) || !strings.Contains(string(message), `job "label-rebase-needed": concurrency cancel-in-progress resolved to string, want boolean`) || !step.Checkout.Skip {
 		t.Fatalf("job cancellation failure step = %#v", step)
 	}
 }
@@ -1676,6 +1691,7 @@ func setRunnerResolutionVerdicts(t *testing.T, verdicts map[string]map[string]an
 func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.T) {
 	requireImporterHost(t)
 	const missingQueueMessage = "The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-medium, or map this runner label to an existing queue: https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility"
+	const setupURL = "https://buildkite.com/organizations/acme/clusters/cluster/queues/new?queue=macos-medium&review=true"
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"runners.yml": "name: Runners\non: push\njobs:\n  mac:\n    runs-on: macos-latest\n    steps: [{run: true}]\n  arm:\n    runs-on: ubuntu-24.04-arm\n    steps: [{run: true}]\n  windows:\n    runs-on: windows-latest\n    steps: [{run: true}]\n  linux:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 	})
@@ -1684,7 +1700,7 @@ func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.
 		t.Fatal(err)
 	}
 	server, requests := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
-		"macos-latest":     {"error": map[string]any{"code": "missing_queue", "message": missingQueueMessage, "platform": "darwin/arm64", "required_queues": []string{"macos-medium"}}},
+		"macos-latest":     {"error": map[string]any{"code": "missing_queue", "message": missingQueueMessage, "platform": "darwin/arm64", "required_queues": []string{"macos-medium"}, "setup_url": setupURL}},
 		"ubuntu-24.04-arm": {"error": map[string]any{"code": "incompatible_labels", "message": "No compatible runner is configured."}},
 		"windows-latest":   {"error": map[string]any{"code": "incompatible_labels", "message": "No compatible runner is configured."}},
 		"ubuntu-latest":    {"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}},
@@ -1709,6 +1725,11 @@ func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.
 			Label   string             `yaml:"label"`
 			Command string             `yaml:"command"`
 			Plugins failureStepPlugins `yaml:"plugins"`
+			Retry   struct {
+				Manual struct {
+					Allowed *bool `yaml:"allowed"`
+				} `yaml:"manual"`
+			} `yaml:"retry"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
@@ -1717,9 +1738,15 @@ func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.
 	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Label != ":github: workflow · Runners" || !isGeneratedFailureCommand(pipeline.Steps[0].Command) {
 		t.Fatalf("pipeline = %#v", pipeline.Steps)
 	}
+	if allowed := pipeline.Steps[0].Retry.Manual.Allowed; allowed == nil || *allowed {
+		t.Fatal("synthetic failure must disable manual retry")
+	}
 	message := failureLogText(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
 	if !strings.Contains(message, `Buildkite could not resolve runner label "macos-latest". `+missingQueueMessage) {
 		t.Fatalf("missing_queue rejection was not rendered: %q", message)
+	}
+	if !strings.Contains(message, "Set up queue: "+setupURL) || !strings.Contains(message, "GHES workflows require a matching event.") {
+		t.Fatalf("queue setup guidance missing from failure log: %q", message)
 	}
 	if !strings.Contains(message, `Buildkite could not resolve runner label "ubuntu-24.04-arm". No compatible runner is configured. Use a runner label compatible with this job and its Buildkite queue.`) {
 		t.Fatalf("incompatible_labels rejection was not rendered: %q", message)
@@ -1733,6 +1760,9 @@ func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.
 	annotation := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "annotations"))
 	if !strings.Contains(annotation, "no hosted macOS queue") || !strings.Contains(annotation, "macos-medium") {
 		t.Fatalf("failure annotation = %q", annotation)
+	}
+	if !strings.Contains(annotation, `<a href="https://buildkite.com/organizations/acme/clusters/cluster/queues/new?queue=macos-medium&amp;review=true">Set up queue</a>`) || !strings.Contains(annotation, "GHES workflows require a matching event.") {
+		t.Fatalf("queue setup action missing from failure annotation: %q", annotation)
 	}
 }
 

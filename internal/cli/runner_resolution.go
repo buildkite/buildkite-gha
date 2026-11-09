@@ -96,7 +96,7 @@ func suggestedRunnerTargets(ctx context.Context, reports []compiler.Report, conf
 		if !ok {
 			continue
 		}
-		resolution.rejections = append(resolution.rejections, compiler.RunnerRejection{Labels: labels, Code: rejection.Code, Message: rejection.Message})
+		resolution.rejections = append(resolution.rejections, compiler.RunnerRejection{Labels: labels, Code: rejection.Code, Message: rejection.Message, SetupURL: rejection.SetupURL})
 	}
 	return resolution, nil
 }

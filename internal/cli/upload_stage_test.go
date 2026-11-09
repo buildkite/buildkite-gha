@@ -232,15 +232,17 @@ func runContinueAs(t *testing.T, runner *cliCaptureRunner, digest, producer, job
 }
 
 type continuePipelineStep struct {
-	Key              string `yaml:"key"`
-	Label            string `yaml:"label"`
-	Command          string `yaml:"command"`
-	Skip             string `yaml:"skip"`
-	Concurrency      int    `yaml:"concurrency"`
-	ConcurrencyGroup string `yaml:"concurrency_group"`
+	Key              string         `yaml:"key"`
+	Label            string         `yaml:"label"`
+	Command          string         `yaml:"command"`
+	Skip             string         `yaml:"skip"`
+	Concurrency      int            `yaml:"concurrency"`
+	ConcurrencyGroup string         `yaml:"concurrency_group"`
+	Retry            map[string]any `yaml:"retry"`
 	Agents           struct{ Queue string }
 	DependsOn        []struct {
-		Step string `yaml:"step"`
+		Step         string `yaml:"step"`
+		AllowFailure bool   `yaml:"allow_failure"`
 	} `yaml:"depends_on"`
 	Notify []struct {
 		GitHubCheck struct {
@@ -286,6 +288,47 @@ func pipelineUploads(runner *cliCaptureRunner) int {
 		}
 	}
 	return uploads
+}
+
+func TestContinueWorkflowConcurrency(t *testing.T) {
+	source := strings.Replace(continueDeferredMatrixWorkflow, "on: push\n", "on: push\nconcurrency: release\n", 1)
+	initial := runContinueInitialUploads(t, source)[0]
+	_, _, initialSteps := decodeContinuePipeline(t, []byte(initial.pipeline))
+	if len(initialSteps) != 5 || initialSteps[0].Concurrency != 1 || initialSteps[1].Concurrency != 1 || initialSteps[0].ConcurrencyGroup != initialSteps[1].ConcurrencyGroup {
+		t.Fatalf("initial upload must contain one ordered gate pair and three jobs: %#v", initialSteps)
+	}
+	var closeNeeds []string
+	for _, dep := range initialSteps[1].DependsOn {
+		if !dep.AllowFailure {
+			t.Fatalf("closing gate must allow failed members and uploaders: %#v", dep)
+		}
+		closeNeeds = append(closeNeeds, dep.Step)
+	}
+	if !slices.Contains(closeNeeds, initial.artifact.Continuation.StepKey) {
+		t.Fatalf("closing gate must depend on the deferred uploader: %v", closeNeeds)
+	}
+	for _, step := range initialSteps {
+		if len(step.Retry) != 0 {
+			t.Fatalf("workflow concurrency must preserve default retries: %#v", step)
+		}
+	}
+	for _, result := range []string{"success", "failure"} {
+		t.Run(result, func(t *testing.T) {
+			runner := initial.continueRunner(initial.producerManifest(t, result, `[{"target":"x","runner":"ubuntu-latest"}]`))
+			if code, stdout, stderr := runContinue(t, runner, initial.digest); code != 0 {
+				t.Fatalf("continue code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+			}
+			_, _, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
+			if len(steps) != 2 {
+				t.Fatalf("deferred upload must contain build and publish, not another gate pair: %#v", steps)
+			}
+			for _, step := range steps {
+				if step.Concurrency != 0 || len(step.Retry) != 0 {
+					t.Fatalf("deferred job must preserve default retries without reacquiring the group: %#v", step)
+				}
+			}
+		})
+	}
 }
 
 // TestContinueExpandsNeedsDerivedMatrix runs the importer's upload and then the
@@ -1167,6 +1210,10 @@ func TestAdvanceRequiresRecordedDeferredSources(t *testing.T) {
 	moved.Commit = strings.Repeat("b", 40)
 	movedPublish := publish
 	movedPublish.RemoteWorkflow = &moved
+	crossHost := *remote
+	crossHost.ServerURL = "https://ghe.example"
+	crossHostPublish := publish
+	crossHostPublish.RemoteWorkflow = &crossHost
 	editedBuild := build
 	editedBuild.SourceDigest = "sha256:" + strings.Repeat("3", 64)
 	unrecorded := instance("extra", "./.github/workflows/build.yml", nil)
@@ -1186,6 +1233,7 @@ func TestAdvanceRequiresRecordedDeferredSources(t *testing.T) {
 	}{
 		{name: "same sources", jobs: []compiler.JobInstance{build, publish}},
 		{name: "remote tag moved", jobs: []compiler.JobInstance{build, movedPublish}, want: `deferred job "gha-call-publish" comes from a different workflow source`},
+		{name: "remote host changed", jobs: []compiler.JobInstance{build, crossHostPublish}, want: `deferred job "gha-call-publish" comes from a different workflow source`},
 		{name: "workflow file edited", jobs: []compiler.JobInstance{editedBuild, publish}, want: `deferred job "gha-build" comes from a different workflow source`},
 		{name: "job not in the initial upload", jobs: []compiler.JobInstance{build, publish, unrecorded}, want: `job "gha-extra" did not exist in the initial upload`},
 	} {
@@ -1337,7 +1385,7 @@ func TestContinueSkipsStaticMatrixInstancesWhenProducerFails(t *testing.T) {
 // when every deferred step already exists with the plan this run compiled;
 // any other rejection fails with whole-build retry guidance.
 func TestContinueReplayIsIdempotent(t *testing.T) {
-	initial := runContinueInitialUpload(t)
+	initial := runContinueInitialUploads(t, "concurrency: release\n"+continueDeferredMatrixWorkflow)[0]
 	matrix := `[{"target":"x","runner":"ubuntu-latest"}]`
 	first := initial.continueRunner(initial.producerManifest(t, "success", matrix))
 	if code, stdout, stderr := runContinue(t, first, initial.digest); code != 0 {
@@ -1748,13 +1796,39 @@ func dependencyKeys(step continuePipelineStep) []string {
 	return keys
 }
 
+func TestContinueChainedStagesRejectRootConcurrencyCollision(t *testing.T) {
+	for _, group := range []string{"RELEASE", "other"} {
+		t.Run(group, func(t *testing.T) {
+			source := "concurrency: release\n" + strings.Replace(continueChainedWorkflow, "  build:\n", "  build:\n    concurrency: "+group+"\n", 1)
+			first := firstStage(runContinueInitialUploads(t, source)[0])
+			runner, code, stdout, stderr := first.run(t, "success", `[{"target":"linux","runner":"ubuntu-latest"}]`, continueProducerJobID, nil)
+			if group == "RELEASE" {
+				if code == 0 || !strings.Contains(stderr, "workflow concurrency gate shares group with member job") {
+					t.Fatalf("code = %d, stdout = %q, stderr = %q; want root-group collision rejection", code, stdout, stderr)
+				}
+				if pipelineUploads(runner) != 0 {
+					t.Fatal("uploaded jobs that would deadlock the root concurrency group")
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("disjoint group failed: code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+			}
+			child := first.nextStage(t, runner)
+			if child.initial.artifact.Continuation.Descriptor.Job != "deploy" {
+				t.Fatal("disjoint group did not preserve the later continuation")
+			}
+		})
+	}
+}
+
 // TestContinueChainsStages expands a component whose second matrix comes
 // from a job the first deferred upload compiles. The importer writes one
 // continuation for the component; its step compiles the jobs whose rows
 // exist and adds a child step that reads the rows package publishes; the
 // child step compiles the rest against the graph the first stage left.
 func TestContinueChainsStages(t *testing.T) {
-	initials := runContinueInitialUploads(t, continueChainedWorkflow)
+	initials := runContinueInitialUploads(t, "concurrency: release\n"+continueChainedWorkflow)
 	if len(initials) != 1 {
 		t.Fatalf("continuations = %d, want one for the whole component", len(initials))
 	}
@@ -2244,6 +2318,25 @@ func TestStageRecordRoundTrip(t *testing.T) {
 	sources := artifact.Continuation.Sources
 	if len(sources) != 2 || sources["build"].Path != "./.github/workflows/build.yml" || sources["build"].Remote != nil || sources["publish"] != sources["build"] {
 		t.Fatalf("artifact sources = %+v", sources)
+	}
+	for _, host := range []string{"", "https://github.com", "https://ghe.example:8443", "http://ghe.example", "https://ghe.example/path", "https://user:secret@ghe.example"} {
+		changed := artifact
+		changed.Continuation.Sources = maps.Clone(sources)
+		remote := sources["publish"]
+		remote.Remote = &compiler.RemoteWorkflowSource{ServerURL: host, Repository: "owner/workflows", RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("2", 64)}
+		changed.Continuation.Sources["publish"] = remote
+		data, err := json.Marshal(changed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := decodeStageRecord(data, "dev")
+		if host == "" || host == "https://github.com" || host == "https://ghe.example:8443" {
+			if err != nil || decoded.Continuation.Sources["publish"].Remote.ServerURL != host {
+				t.Fatalf("remote origin %q did not round trip: %v", host, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), "invalid remote source") {
+			t.Fatalf("malformed remote origin %q: %v", host, err)
+		}
 	}
 	var loose map[string]any
 	if err := json.Unmarshal(initial.data, &loose); err != nil {

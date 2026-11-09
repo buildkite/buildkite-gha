@@ -1045,8 +1045,14 @@ func TestCacheServiceRequiredUsesOnlyAuditedCacheLocks(t *testing.T) {
 		if err != nil || !required {
 			t.Fatalf("cache requirement for %s = %v, %v", commit, required, err)
 		}
+		locks[1].ServerURL = "https://github.example"
+		required, err = cacheServiceRequired(locks)
+		if err != nil || required {
+			t.Fatalf("same-name GHES action requested cache service: %v, %v", required, err)
+		}
 	}
 
+	locks[1].ServerURL = ""
 	locks[1].Commit = strings.Repeat("b", 40)
 	if _, err := cacheServiceRequired(locks); err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
 		t.Fatalf("unsupported cache lock error = %v", err)

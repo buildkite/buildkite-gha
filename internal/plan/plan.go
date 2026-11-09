@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"path"
 	"regexp"
 	"slices"
@@ -103,6 +102,7 @@ type ActionSelector struct {
 type ActionLock struct {
 	ID           string `json:"id"`
 	Source       string `json:"source"`
+	ServerURL    string `json:"server_url,omitempty"`
 	Repository   string `json:"repository,omitempty"`
 	RequestedRef string `json:"requested_ref,omitempty"`
 	Commit       string `json:"commit,omitempty"`
@@ -144,6 +144,34 @@ type Event struct {
 func EventRepositoryOwner(repository string) string {
 	owner, _, _ := strings.Cut(repository, "/")
 	return owner
+}
+
+// EventIdentityIDs exposes GitHub IDs only when the payload's named identity
+// agrees with the selected event. Missing IDs are unavailable, never inferred
+// from names, another provider, or the Buildkite build's creator.
+func EventIdentityIDs(provider, repository, actor string, payload map[string]any) map[string]any {
+	ids := map[string]any{}
+	if provider != "github" {
+		return ids
+	}
+	add := func(name string, object map[string]any, key, expected string) {
+		actual, _ := object[key].(string)
+		id, _ := object["id"].(json.Number)
+		number, err := id.Int64()
+		if expected != "" && strings.EqualFold(actual, expected) && err == nil && number > 0 {
+			ids[name] = id.String()
+		}
+	}
+	sender, _ := payload["sender"].(map[string]any)
+	add("actor_id", sender, "login", actor)
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	if strings.EqualFold(fullName, repository) {
+		add("repository_id", repo, "full_name", repository)
+		owner, _ := repo["owner"].(map[string]any)
+		add("repository_owner_id", owner, "login", EventRepositoryOwner(repository))
+	}
+	return ids
 }
 
 // EventRefName returns the short branch, tag, or pull request ref name.
@@ -203,11 +231,10 @@ func EventAPIURLs(provider, serverURL string) (rest, graphql string) {
 // ValidateGitHubServerURL accepts a canonical HTTPS origin, never credentials,
 // a repository path, or a query. The backend separately authorizes the host.
 func ValidateGitHubServerURL(serverURL string) error {
-	u, err := url.Parse(serverURL)
-	if err != nil || len(serverURL) > 512 || u.Scheme != "https" || u.Hostname() == "" || strings.Contains(u.Host, "*") || u.User != nil || u.Opaque != "" || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.String() != serverURL || u.Host != strings.ToLower(u.Host) {
+	if serverURL == "" {
 		return fmt.Errorf("GitHub server URL must be a canonical HTTPS origin without credentials, path, query, or fragment")
 	}
-	return nil
+	return source.ValidateServerURL(serverURL)
 }
 
 type Workflow struct {
@@ -227,6 +254,7 @@ type Workflow struct {
 // RemoteWorkflowSource binds a workflow file to one immutable remote
 // repository tree. Workflow.Digest binds the selected file bytes.
 type RemoteWorkflowSource struct {
+	ServerURL    string `json:"server_url,omitempty"`
 	Repository   string `json:"repository"`
 	RequestedRef string `json:"requested_ref"`
 	Commit       string `json:"commit"`
@@ -1033,6 +1061,9 @@ func validateRemoteWorkflowSource(workflow Workflow) error {
 		return nil
 	}
 	remote := workflow.Remote
+	if err := source.ValidateServerURL(remote.ServerURL); err != nil {
+		return fmt.Errorf("job plan remote workflow: %w", err)
+	}
 	if remote.Repository == "" || remote.Repository != strings.ToLower(remote.Repository) || len(remote.Repository) > 140 || remote.RequestedRef == "" || len(remote.RequestedRef) > 1024 || !utf8.ValidString(remote.RequestedRef) || hasControl(remote.RequestedRef) || !git.ValidObjectID(remote.Commit) || !digestPattern.MatchString(remote.SourceDigest) {
 		return fmt.Errorf("job plan remote workflow has invalid immutable source provenance")
 	}
@@ -1596,7 +1627,7 @@ func validateActionLocks(job Job) error {
 				containing := job.Workflow.selfRepositorySource()
 				containingActionRef := ""
 				if lock.Source == "github" {
-					containing = &RemoteWorkflowSource{Repository: lock.Repository, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
+					containing = &RemoteWorkflowSource{ServerURL: lock.ServerURL, Repository: lock.Repository, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
 					containingActionRef = lock.RequestedRef
 				}
 				identityErr = validateSelfRepositoryIdentity(uses, child, containing, containingActionRef)
@@ -1677,7 +1708,7 @@ func validateActionLocks(job Job) error {
 		if _, ok := job.Program.Actions[id]; ok {
 			continue
 		}
-		if _, native, err := integration.AdmitNativeAdapter(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit); err != nil {
+		if _, native, err := integration.AdmitNativeAdapter(integration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path}, lock.Commit); err != nil {
 			return fmt.Errorf("action lock %q is not an admitted native-adapter release: %w", id, err)
 		} else if native {
 			continue
@@ -1690,10 +1721,13 @@ func validateActionLocks(job Job) error {
 func validateLockIdentity(lock ActionLock) error {
 	switch lock.Source {
 	case "workspace":
-		if lock.Repository != "" || lock.RequestedRef != "" || lock.Commit != "" || lock.Path != "" && !cleanActionPath(lock.Path) {
+		if lock.ServerURL != "" || lock.Repository != "" || lock.RequestedRef != "" || lock.Commit != "" || lock.Path != "" && !cleanActionPath(lock.Path) {
 			return fmt.Errorf("invalid workspace identity")
 		}
 	case "github":
+		if err := source.ValidateServerURL(lock.ServerURL); err != nil {
+			return err
+		}
 		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !git.ValidObjectID(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) {
 			return fmt.Errorf("invalid GitHub identity")
 		}
@@ -1719,7 +1753,7 @@ func validateSelfRepositoryIdentity(uses string, lock ActionLock, containing *Re
 	if containingActionRef == "" && containing != nil {
 		containingActionRef = containing.Commit
 	}
-	if containing == nil || p != "" && !cleanActionPath(p) || strings.ContainsAny(p, "@?#") || lock.Source != "github" || lock.Repository != containing.Repository || lock.Commit != containing.Commit || lock.SourceDigest != containing.SourceDigest || lock.Path != p || lock.RequestedRef != containingActionRef {
+	if containing == nil || p != "" && !cleanActionPath(p) || strings.ContainsAny(p, "@?#") || lock.Source != "github" || source.ServerURL(lock.ServerURL) != source.ServerURL(containing.ServerURL) || lock.Repository != containing.Repository || lock.Commit != containing.Commit || lock.SourceDigest != containing.SourceDigest || lock.Path != p || lock.RequestedRef != containingActionRef {
 		return fmt.Errorf("self-repository action reference does not match containing source")
 	}
 	return nil

@@ -46,6 +46,7 @@ func (s PublicActionSource) Fetch(ctx context.Context, ref source.Reference) (so
 	}
 	identity := actionintegration.Identity{
 		Source:     "github",
+		ServerURL:  r.Reference.ServerURL,
 		Repository: strings.ToLower(ref.Owner + "/" + ref.Repository),
 		Path:       ref.Path,
 	}
@@ -63,6 +64,7 @@ func (s PublicActionSource) Fetch(ctx context.Context, ref source.Reference) (so
 
 type actionLockBuilder struct {
 	workspace             string
+	sourceServerURL       string
 	workflowSource        *RemoteWorkflowSource
 	resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)
 	source                ActionSource
@@ -121,6 +123,8 @@ type actionCompilation struct {
 func validateActionResolutions(ctx context.Context, ir IR, options Options, graphs *actionGraphCache) (ProcessingEvidence, error) {
 	evidence := ProcessingEvidence{ActionResolutionComplete: true}
 	var diagnostics []error
+	event := ir.Event
+	identityIDs := plan.EventIdentityIDs(event.Provider, event.Repository.Owner+"/"+event.Repository.Name, event.Actor, event.Payload)
 	for _, instance := range ir.Jobs {
 		for i, step := range instance.Steps {
 			if step.Kind != "uses" {
@@ -130,7 +134,7 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options, grap
 				evidence.ActionResolutionComplete = false
 				continue
 			}
-			compiled, err := graphs.compile(ctx, instance, plan.EventServerURL(ir.Event.Provider, ir.Event.ServerURL), []string{step.Uses}, []map[string]string{step.With})
+			compiled, err := graphs.compile(ctx, instance, plan.EventServerURL(event.Provider, event.ServerURL), identityIDs, []string{step.Uses}, []map[string]string{step.With})
 			evaluation := ActionEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Reference: step.Uses, Step: i + 1, Passed: err == nil, CacheSubstitutions: compiled.cacheSubstitutions}
 			evidence.Actions = append(evidence.Actions, evaluation)
 			if err == nil {
@@ -244,21 +248,21 @@ func unsupportedMetadataFields(reason string) string {
 }
 
 func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
-	return compileWorkflowActionInvocations(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil)
+	return compileWorkflowActionInvocations(ctx, workspace, actionSource, program.ActionAuthorityOptions{ServerURL: serverURL}, refs, suppliedInputs, nil, "")
 }
 
-func compileWorkflowActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)) (actionCompilation, error) {
+func compileWorkflowActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, authority program.ActionAuthorityOptions, refs []string, suppliedInputs []map[string]string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error), sourceServerURL string) (actionCompilation, error) {
 	if suppliedInputs != nil && len(suppliedInputs) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
 	}
-	graph, err := buildActionGraph(ctx, workspace, actionSource, refs, resolveWorkflowSource)
+	graph, err := buildActionGraph(ctx, workspace, actionSource, refs, resolveWorkflowSource, sourceServerURL)
 	if err != nil {
 		return actionCompilation{}, err
 	}
-	return graph.analyzeInvocations(program.ActionAuthorityOptions{ServerURL: serverURL}, refs, suppliedInputs)
+	return graph.analyzeInvocations(authority, refs, suppliedInputs)
 }
 
-func buildActionGraph(ctx context.Context, workspace string, actionSource ActionSource, refs []string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)) (actionGraph, error) {
+func buildActionGraph(ctx context.Context, workspace string, actionSource ActionSource, refs []string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error), sourceServerURL string) (actionGraph, error) {
 	if workspace == "" {
 		return actionGraph{}, fmt.Errorf("workflow path must identify a repository root")
 	}
@@ -266,7 +270,7 @@ func buildActionGraph(ctx context.Context, workspace string, actionSource Action
 	if err != nil {
 		return actionGraph{}, fmt.Errorf("resolve workspace: %w", err)
 	}
-	b := &actionLockBuilder{workspace: abs, source: actionSource, resolveWorkflowSource: resolveWorkflowSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
+	b := &actionLockBuilder{workspace: abs, sourceServerURL: sourceServerURL, source: actionSource, resolveWorkflowSource: resolveWorkflowSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
 	defer func() {
 		for _, materialized := range b.materialized {
 			materialized.Release()
@@ -378,7 +382,7 @@ func validateActionAdapterInputs(root *actionNode) error {
 		if child == nil {
 			return fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
 		}
-		descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: child.lock.Source, Repository: child.lock.Repository, Path: child.lock.Path})
+		descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: child.lock.Source, ServerURL: child.lock.ServerURL, Repository: child.lock.Repository, Path: child.lock.Path})
 		if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
 			if err := actionintegration.ValidateUploadArtifactInputs(child.lock.Commit, step.With); err != nil {
 				return fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
@@ -434,7 +438,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, cont
 	b.active[key] = true
 	defer delete(b.active, key)
 
-	_, native, err := actionintegration.AdmitNativeAdapter(actionintegration.Identity{Source: n.lock.Source, Repository: n.lock.Repository, Path: n.lock.Path}, n.lock.Commit)
+	_, native, err := actionintegration.AdmitNativeAdapter(actionintegration.Identity{Source: n.lock.Source, ServerURL: n.lock.ServerURL, Repository: n.lock.Repository, Path: n.lock.Path}, n.lock.Commit)
 	if err != nil {
 		return nil, err
 	}
@@ -487,7 +491,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, cont
 		childSource := b.workflowSource
 		childActionRef := ""
 		if lock.Source == "github" {
-			childSource = &RemoteWorkflowSource{Repository: lock.Repository, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
+			childSource = &RemoteWorkflowSource{ServerURL: lock.ServerURL, Repository: lock.Repository, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
 			childActionRef = lock.RequestedRef
 		}
 		for _, step := range m.Runs.Steps {
@@ -543,6 +547,10 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing
 	if err != nil {
 		return "", plan.ActionLock{}, "", "", err
 	}
+	ref.ServerURL = b.sourceServerURL
+	if self {
+		ref.ServerURL = containing.ServerURL
+	}
 	requestedRef := ref.Ref
 	if self && containingActionRef != "" {
 		// GitHub exposes the containing action's authored ref to its self
@@ -550,9 +558,9 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing
 		requestedRef = containingActionRef
 	}
 	canonical := strings.ToLower(ref.Owner + "/" + ref.Repository)
-	key := "github:" + canonical + "/" + ref.Path + "@" + requestedRef
+	key := "github:" + source.ServerURL(ref.ServerURL) + "\x00" + canonical + "/" + ref.Path + "@" + requestedRef
 	if n := b.nodes[key]; n != nil {
-		if self && (n.lock.Commit != containing.Commit || containing.SourceDigest != "" && n.lock.SourceDigest != containing.SourceDigest) {
+		if self && (source.ServerURL(n.lock.ServerURL) != source.ServerURL(containing.ServerURL) || n.lock.Commit != containing.Commit || containing.SourceDigest != "" && n.lock.SourceDigest != containing.SourceDigest) {
 			return "", plan.ActionLock{}, "", "", fmt.Errorf("self-repository action source differs from containing source")
 		}
 		return key, n.lock, "", "", nil
@@ -565,7 +573,10 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing
 		return "", plan.ActionLock{}, "", "", err
 	}
 	b.materialized = append(b.materialized, materialized)
-	if self && (resolved.Commit != containing.Commit || containing.SourceDigest != "" && materialized.SourceDigest != containing.SourceDigest) {
+	if err := source.ValidateServerURL(resolved.Reference.ServerURL); err != nil {
+		return "", plan.ActionLock{}, "", "", err
+	}
+	if self && (source.ServerURL(resolved.Reference.ServerURL) != source.ServerURL(containing.ServerURL) || resolved.Commit != containing.Commit || containing.SourceDigest != "" && materialized.SourceDigest != containing.SourceDigest) {
 		return "", plan.ActionLock{}, "", "", fmt.Errorf("self-repository action source differs from containing source")
 	}
 	repositoryRoot, err := canonicalMaterializedRepositoryRoot(materialized.RepositoryRoot)
@@ -577,8 +588,8 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing
 	if err != nil {
 		return "", plan.ActionLock{}, "", "", err
 	}
-	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: requestedRef, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest, ExecutablePaths: executablePaths}
-	identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
+	lock := plan.ActionLock{Source: "github", ServerURL: resolved.Reference.ServerURL, Repository: canonical, RequestedRef: requestedRef, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest, ExecutablePaths: executablePaths}
+	identity := actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path}
 	descriptor, _, admitErr := actionintegration.Admit(identity, lock.Commit)
 	if admitErr != nil && descriptor.Service == actionintegration.ServiceCache {
 		lock, repositoryRoot, admitErr = b.substituteCacheRelease(ctx, ref, lock, identity)
@@ -644,8 +655,9 @@ type memoizedActionSource struct {
 }
 
 type memoizedRepositoryPin struct {
-	commit string
-	digest string
+	serverURL string
+	commit    string
+	digest    string
 }
 
 type memoizedAction struct {
@@ -684,8 +696,8 @@ func newPinnedActionSource(actionSource ActionSource, locks []plan.ActionLock) A
 		if lock.Source != "github" || lock.Repository == "" || lock.RequestedRef == "" || lock.Commit == "" {
 			continue
 		}
-		key := strings.ToLower(lock.Repository) + "\x00" + lock.RequestedRef
-		pin := memoizedRepositoryPin{commit: strings.ToLower(lock.Commit), digest: lock.SourceDigest}
+		key := source.ServerURL(lock.ServerURL) + "\x00" + strings.ToLower(lock.Repository) + "\x00" + lock.RequestedRef
+		pin := memoizedRepositoryPin{serverURL: source.ServerURL(lock.ServerURL), commit: strings.ToLower(lock.Commit), digest: lock.SourceDigest}
 		if previous, exists := memoized.pins[key]; exists && previous != pin {
 			return conflictingPinSource{fmt.Errorf("action locks pin %s@%s to both %s and %s", lock.Repository, lock.RequestedRef, previous.commit, pin.commit)}
 		}
@@ -715,7 +727,10 @@ func MemoizeRepositorySource(repositorySource RepositorySource) RepositorySource
 }
 
 func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) (source.Resolved, source.Materialized, error) {
-	repositoryKey := strings.ToLower(ref.Owner+"/"+ref.Repository) + "\x00" + ref.Ref
+	if err := source.ValidateServerURL(ref.ServerURL); err != nil {
+		return source.Resolved{}, source.Materialized{}, err
+	}
+	repositoryKey := source.ServerURL(ref.ServerURL) + "\x00" + strings.ToLower(ref.Owner+"/"+ref.Repository) + "\x00" + ref.Ref
 	key := repositoryKey + "\x00" + ref.Path + "\x00" + fmt.Sprint(ref.RepositoryRoot)
 	s.mu.Lock()
 	if cached, ok := s.cache[key]; ok {
@@ -759,12 +774,17 @@ func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) 
 	if pinned && ref.Ref != pin.commit {
 		fetchRef, call.err = source.PinReference(ref, pin.commit)
 	}
+	if pinned && pin.serverURL != source.ServerURL(ref.ServerURL) {
+		fetchRef.ServerURL = pin.serverURL
+	}
 	if call.err == nil {
 		call.resolved, call.materialized, call.err = s.source.Fetch(ctx, fetchRef)
 	}
 	if call.err == nil {
+		serverURL := call.resolved.Reference.ServerURL
 		call.resolved.Reference = ref
-		if pinned && (call.resolved.Commit != pin.commit || call.materialized.SourceDigest != pin.digest) {
+		call.resolved.Reference.ServerURL = serverURL
+		if pinned && (source.ServerURL(serverURL) != pin.serverURL || call.resolved.Commit != pin.commit || call.materialized.SourceDigest != pin.digest) {
 			call.materialized.Release()
 			call.materialized = source.Materialized{}
 			call.err = fmt.Errorf("%s/%s@%s: repository source changed after immutable pin to commit %s", ref.Owner, ref.Repository, ref.Ref, pin.commit)
@@ -774,7 +794,7 @@ func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) 
 	delete(s.active, key)
 	if call.err == nil {
 		if !pinned {
-			s.pins[repositoryKey] = memoizedRepositoryPin{commit: call.resolved.Commit, digest: call.materialized.SourceDigest}
+			s.pins[repositoryKey] = memoizedRepositoryPin{serverURL: source.ServerURL(call.resolved.Reference.ServerURL), commit: call.resolved.Commit, digest: call.materialized.SourceDigest}
 		}
 		s.cache[key] = memoizedAction{resolved: call.resolved, materialized: call.materialized}
 	}

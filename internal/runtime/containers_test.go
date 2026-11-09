@@ -3217,7 +3217,7 @@ runs:
 `)
 			id := remoteLifecycleLockID(1)
 			steps := []runtimeTestStep{{ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: id}}}
-			target := remoteMountTarget("owner/repo", strings.Repeat("a", 40)) + "/selected"
+			target := remoteMountTarget("", "owner/repo", strings.Repeat("a", 40)) + "/selected"
 			if test.workflow {
 				steps = append(steps, runtimeTestStep{ID: "outside", Kind: "run", Shell: "sh", WorkingDirectory: target, Command: `touch "$WORKFLOW_MARKER"`})
 			}
@@ -3277,39 +3277,59 @@ func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
 	writeFixtureFile(t, remote, "selected/action.yml", "name: remote\nruns:\n  using: node24\n  main: main.js\n")
 	writeFixtureFile(t, remote, "selected/main.js", `require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, "remote=yes\n")
 `)
+	otherRemote := t.TempDir()
+	if err := os.CopyFS(otherRemote, os.DirFS(remote)); err != nil {
+		t.Fatal(err)
+	}
 	digest := digestTree(t, remote)
 	lockID := remoteLifecycleLockID(1)
 	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{{
 		ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID},
+	}, {
+		ID: "other_host", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: remoteLifecycleLockID(2)},
 	}})
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
-	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", digest, nil)}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", digest, nil), remoteLifecycleLock(remoteLifecycleLockID(2), "selected", digest, nil)}
+	job.Actions[1].ServerURL = "https://github.example"
 	job.Outputs = map[string]string{"remote": "${{ steps.remote.outputs.remote }}"}
-	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "selected"), SourceDigest: digest}}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote}, materialize: func(_ context.Context, resolved source.Resolved) (source.Materialized, error) {
+		root := remote
+		if resolved.Reference.ServerURL == "https://github.example" {
+			root = otherRemote
+		}
+		return source.Materialized{RepositoryRoot: root, SourceDigest: digest}, nil
+	}}
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: requireNode24(t), Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Outputs["remote"] != "yes" {
 		t.Fatalf("remote container action result = %#v, error = %v", result, err)
 	}
-	if materializer.calls != 1 {
-		t.Fatalf("remote materialization calls = %d, want 1", materializer.calls)
+	if materializer.calls != 2 {
+		t.Fatalf("remote materialization calls = %d, want 2", materializer.calls)
 	}
 	calls := f.calls(t)
 	createIndex := jobDockerCallIndex(calls, "create")
 	if createIndex < 0 {
 		t.Fatalf("Docker create absent: %#v", calls)
 	}
-	target := remoteMountTarget("owner/repo", strings.Repeat("a", 40))
+	target := remoteMountTarget("", "owner/repo", strings.Repeat("a", 40))
 	wantMount := "type=bind,source=" + remote + ",target=" + target + ",readonly"
 	count := 0
+	remoteMounts := map[string]bool{}
 	for _, arg := range calls[createIndex].Args {
 		if arg == wantMount {
 			count++
 		}
+		if (strings.HasPrefix(arg, "type=bind,source="+remote+",target=") || strings.HasPrefix(arg, "type=bind,source="+otherRemote+",target=")) && strings.HasSuffix(arg, ",readonly") {
+			remoteMounts[arg] = true
+		}
 	}
 	if count != 1 {
 		t.Fatalf("remote readonly root mount count = %d in %#v", count, calls[createIndex].Args)
+	}
+	if len(remoteMounts) != 2 {
+		t.Fatalf("same repository and commit on different hosts share a container mount: %#v", remoteMounts)
 	}
 	if jobDockerCallIndex(calls, "create") <= 0 {
 		t.Fatalf("remote materialization was not completed before Docker create")
@@ -3410,7 +3430,7 @@ echo NESTED_REMOTE=seen >> "$GITHUB_ENV"
 	if createIndex < 0 {
 		t.Fatalf("Docker create absent: %#v", calls)
 	}
-	wantMount := "type=bind,source=" + remote + ",target=" + remoteMountTarget("owner/repo", strings.Repeat("a", 40)) + ",readonly"
+	wantMount := "type=bind,source=" + remote + ",target=" + remoteMountTarget("", "owner/repo", strings.Repeat("a", 40)) + ",readonly"
 	if !slices.Contains(calls[createIndex].Args, wantMount) {
 		t.Fatalf("nested remote source was not mounted at create: %#v", calls[createIndex].Args)
 	}
@@ -3713,13 +3733,26 @@ func TestLiveJobContainerPersistsAcrossShellSteps(t *testing.T) {
 func TestLiveJobContainerDefaultNonRootUser(t *testing.T) {
 	d := requireDocker(t)
 	w := t.TempDir()
-	j := jobContainerPlan(t, w, []runtimeTestStep{{ID: "u", Kind: "run", Shell: "sh", Command: `test "$(id -u)" != 0`}})
+	j := jobContainerPlan(t, w, []runtimeTestStep{{ID: "u", Kind: "run", Shell: "sh", Command: `
+test "$(id -u)" != 0
+test '${{ runner.tool_cache }}' = "$RUNNER_TOOL_CACHE"
+test "$RUNNER_TOOL_CACHE" = /__w/_temp/tool-cache
+test ! -e "$RUNNER_TOOL_CACHE/host-only"
+mkdir -p '${{ runner.tool_cache }}/Python/3.13.13'
+echo container-tool > "$RUNNER_TOOL_CACHE/Python/3.13.13/sentinel"
+test "$(cat '${{ runner.tool_cache }}/Python/3.13.13/sentinel')" = container-tool
+`}})
 	j.Container.Image = "nginxinc/nginx-unprivileged:stable-alpine"
+	hostCache := t.TempDir()
+	writeFixtureFile(t, hostCache, "host-only", "host-tool")
 	runtimeExecutable := buildLiveContainerRuntime(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	if _, err := (Runner{Docker: d, RuntimeExecutable: runtimeExecutable}).runTestJob(ctx, j, w); err != nil {
+	if _, err := (Runner{Docker: d, RuntimeExecutable: runtimeExecutable, ToolCache: hostCache}).runTestJob(ctx, j, w); err != nil {
 		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(hostCache); err != nil || len(entries) != 1 || entries[0].Name() != "host-only" {
+		t.Fatalf("container changed the host tool cache: %v, %v", entries, err)
 	}
 }
 func TestLiveJobContainerCancellationKillsProcessTree(t *testing.T) {
