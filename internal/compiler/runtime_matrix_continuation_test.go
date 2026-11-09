@@ -1065,15 +1065,17 @@ runs:
 					Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
 					ResolveActions: true,
 				}
-				if phase == "static" {
+				switch phase {
+				case "static":
 					source = strings.Replace(source, "${{ fromJSON(needs.plan.outputs.matrix) }}", "[{target: x, runner: ubuntu-latest}]", 1)
-				} else if phase == "expanded" {
+				case "expanded":
 					options.RuntimeMatrixRows = map[string][]map[string]any{"build": {{"target": "x", "runner": "ubuntu-latest"}}}
 				}
 				snapshot := event
-				if identity == "different" {
+				switch identity {
+				case "different":
 					snapshot = bytes.Replace(event, []byte(`"id":42`), []byte(`"id":43`), 1)
-				} else if identity == "missing" {
+				case "missing":
 					snapshot = pushEvent(t)
 				}
 				path := writeWorkflow(t, repository, "identity.yml", source)
