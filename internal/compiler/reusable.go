@@ -453,7 +453,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			return reusableResolution{}, err
 		}
 		if job.MaxParallelExpression != nil {
-			return reusableResolution{}, jobError(path, job, "needs-derived max-parallel on a reusable-workflow call is unsupported")
+			return reusableResolution{}, jobError(path, job, "expression-valued max-parallel on a reusable-workflow call is unsupported")
 		}
 		if job.MaxParallel != nil && len(matrices) > 1 {
 			return reusableResolution{}, jobError(path, job, "strategy.max-parallel on a reusable-workflow matrix cannot be preserved when the called jobs are flattened")
@@ -1255,7 +1255,7 @@ func resolveInputSelectedFields(path string, job workflow.Job, scope expression.
 			}
 			if !reduced.Known {
 				step.TimeoutMinutesExpression = resolved
-			} else if minutes, ok := staticTimeoutMinutes(reduced.Value); ok {
+			} else if minutes, ok := staticNumber(reduced.Value); ok {
 				if minutes <= 0 || minutes > 360 || math.IsNaN(minutes) || math.IsInf(minutes, 0) {
 					return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "timeout-minutes expression must produce a number greater than 0 and at most 360")
 				}
@@ -1280,7 +1280,7 @@ func stepControlError(path string, job workflow.Job, step workflow.Step, control
 	return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("%s %s expression: %v", action, control, err))
 }
 
-func staticTimeoutMinutes(value any) (float64, bool) {
+func staticNumber(value any) (float64, bool) {
 	switch value := value.(type) {
 	case int:
 		return float64(value), true
@@ -1309,6 +1309,11 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, inputs reus
 	}
 	rejectJob := func(message string) error {
 		return reject(job.Span.Start.Line, job.Span.Start.Column, message)
+	}
+	for _, control := range []*expression.Expression{job.TimeoutMinutesExpression, job.MaxParallelExpression} {
+		if control != nil && readsUnknownInput(control.Text, expression.ProfilePartialTemplate, inputs) {
+			return reject(control.Span.Start.Line, control.Span.Start.Column, "job timeout-minutes and strategy.max-parallel can read only workflow inputs known before jobs run")
+		}
 	}
 	// Graph fields evaluate before jobs run, so only static inputs are known.
 	graphValues := []string{job.Name}

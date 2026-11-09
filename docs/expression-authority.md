@@ -232,7 +232,15 @@ choose which secret a credential reads. Evaluator
 diagnostics must not quote input-derived values. Graph fields, such as labels, matrices,
 `runs-on`, and concurrency, evaluate against the workflow frame's own inputs.
 So do service templates, which compile to literals or `needs`-only residuals.
-Dynamic service maps and needs-derived `max-parallel` read only `needs` outputs.
+Job `timeout-minutes` resolves to a number per expanded instance using the job
+control profile and compile-known values. `strategy.max-parallel` resolves before
+matrix expansion using its own profile, which excludes `matrix` and `strategy`.
+Both use the declaring workflow's typed inputs without source substitution;
+unresolved controls fail rather than entering the runtime program. Their
+`vars` reads use import-time repository/organization values, not environment
+values supplied after graph construction.
+The separate needs-derived `max-parallel` path and dynamic service maps read
+only `needs` outputs.
 Service credentials keep their input reads, which the runtime evaluates against
 `Job.Inputs`. A needs-derived concurrency group reads the frame's static inputs
 when its continuation resolves the group. Credentials and scheduling groups reject

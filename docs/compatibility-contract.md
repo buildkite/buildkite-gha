@@ -484,6 +484,32 @@ These records preserve the evidence behind the former combined reference.
 They distinguish reported observations from independently inspectable receipts.
 They are not an exhaustive conformance suite.
 
+### Compile-known job controls
+
+The [GitHub context-availability table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability)
+admits `github`, `needs`, `vars`, and `inputs` in `strategy`, with `matrix` and
+`strategy` additionally available to job `timeout-minutes`. Neither position
+admits step status functions, `hashFiles`, `env`, or secrets. This is documentation
+evidence, not a native execution receipt.
+
+Preserve those positional boundaries when evaluating compile-known controls.
+Timeout expressions must produce a finite number greater than zero and at most
+360; retain fractional minutes. Max-parallel expressions must produce a positive
+integer representable by the existing integer field; do not apply the deferred
+path's 256 limit to static values. Reject numeric strings without explicit
+conversion, booleans, null, collections, and unresolved values. Input values are
+data, never new expression source, and evaluation diagnostics must not quote them.
+
+The [compiler and generated-pipeline regressions](../internal/compiler/job_controls_test.go)
+cover constants, event/variable values, dispatch inputs, nested reusable inputs,
+per-row timeout, and invalid controls. The
+[deferred regressions](../internal/compiler/runtime_scheduling_test.go) retain
+the existing needs-derived max-parallel contract and evaluate matrix-backed
+timeout only once rows are available. Direct needs-derived timeout, deferred
+reusable input controls, and expression-valued max-parallel on reusable workflow
+invocations remain unsupported. Matrix fail-fast is separate. These local checks
+do not establish native parity, hosted execution, or released availability.
+
 ### Runner tool-cache paths
 
 The pinned runner [creates the tool cache and sets its context](https://github.com/actions/runner/blob/1ddb758ed014660b5d2220a5dc6b0e9957a9f96b/src/Runner.Worker/JobRunner.cs#L174-L176)

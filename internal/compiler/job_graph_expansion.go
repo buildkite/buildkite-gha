@@ -217,7 +217,15 @@ func (e *jobGraphExpansion) expandMatrices() {
 	e.matricesByJob = make(map[string][]map[string]any, len(e.accepted))
 	for _, id := range e.order {
 		sourced := e.accepted[e.acceptedIndex[id]]
-		job := sourced.Job
+		job, err := resolveJobMaxParallel(sourced.Job, e.frameContext(sourced))
+		if err != nil {
+			position := sourced.MaxParallelExpression.Span.Start
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", sourced.path, position.Line, position.Column, id, "", "", 0, locatedJobError(sourced.path, sourced.Job, position.Line, position.Column, fmt.Sprintf("resolve strategy.max-parallel: %v", err))))
+			e.failedMatrices[id], e.failedJobs[id] = true, true
+			continue
+		}
+		sourced.Job = job
+		e.accepted[e.acceptedIndex[id]] = sourced
 		continuation := e.deferredContinuation(sourced)
 		descriptor, deferred, err := describeRuntimeMatrix(job, sourced.path, sourced.digest, sourced.needBindings, e.topologyJobs, e.matricesByJob)
 		scheduling, schedulingErr := e.validateRuntimeScheduling(sourced, descriptor, deferred)
@@ -806,11 +814,16 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		controlContext.Vars = nil
 		resolvedContinueOnError, continueOnErrorErr := resolveJobContinueOnError(instanceJob, controlContext)
 		instanceJob = resolvedContinueOnError
+		instanceJob, timeoutErr := resolveJobTimeout(instanceJob, instanceContext)
 		candidate := newJobCandidate(sourced, instanceJob, matrix, key, resolvedServices)
 		candidate.Strategy = strategy
 
 		valid := true
-		if containerErr != nil {
+		if timeoutErr != nil {
+			position := job.TimeoutMinutesExpression.Span.Start
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, key, "", 0, locatedJobError(jobPath, job, position.Line, position.Column, fmt.Sprintf("resolve job timeout-minutes: %v", timeoutErr))))
+			valid = false
+		} else if containerErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve job container: %v", containerErr))))
 			valid = false
 		} else if serviceErr != nil {

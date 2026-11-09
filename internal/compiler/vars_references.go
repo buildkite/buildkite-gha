@@ -104,7 +104,7 @@ func jobReferencesVars(job workflow.Job) bool {
 			return true
 		}
 	}
-	if expressionReferencesVars(job.RunsOnExpr) || matrixReferencesVars(job.Matrix) {
+	if expressionReferencesVars(job.RunsOnExpr) || matrixReferencesVars(job.Matrix) || expressionReferencesVars(job.TimeoutMinutesExpression) || expressionReferencesVars(job.MaxParallelExpression) {
 		return true
 	}
 	if job.Reusable != nil {

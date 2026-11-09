@@ -492,6 +492,7 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		ProfileRunName:                  {"run-${{ github.event_name }}", ResultString, "run-push"},
 		ProfileJobCondition:             {"always() && inputs.enabled", ResultBoolean, true},
 		ProfileJobControl:               {"${{ matrix.enabled }}", ResultBoolean, true},
+		ProfileStrategyParallel:         {"${{ inputs.enabled && 3 || 1 }}", ResultNumber, 3},
 		ProfileStepCondition:            {"always() && inputs.enabled", ResultBoolean, true},
 		ProfileActionStepCondition:      {"always() && inputs.enabled", ResultBoolean, true},
 		ProfileActionStepTemplate:       {"${{ inputs.name }}", ResultString, "value"},
@@ -1582,7 +1583,7 @@ func profileIDs() []ProfileID {
 		ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput, ProfileStepTemplate,
 		ProfileStepControl, ProfileReusableStepControl, ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileDeferredInput, ProfileServiceCredential, ProfileServiceMap,
 		ProfileServiceEnvironment, ProfileCompileServiceCredential,
-		ProfileSchedulingGroup, ProfileSchedulingParallel,
+		ProfileSchedulingGroup, ProfileSchedulingParallel, ProfileStrategyParallel,
 		ProfileActionInputDefault, ProfileDockerActionArg,
 		ProfileActionStepCondition, ProfileActionStepTemplate, ProfileWorkflowEnvironment,
 	}

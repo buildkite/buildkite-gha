@@ -146,6 +146,7 @@ type Job struct {
 	ContinueOnErrorExpression string                 `json:"continue_on_error_expression,omitempty"`
 	ContinueOnErrorSpan       Span                   `json:"-"`
 	TimeoutMinutes            float64                `json:"timeout_minutes,omitempty"`
+	TimeoutMinutesExpression  *expression.Expression `json:"timeout_minutes_expression,omitempty"`
 	Outputs                   map[string]string      `json:"outputs,omitempty"`
 	Container                 *Container             `json:"container,omitempty"`
 	Services                  []Service              `json:"services,omitempty"`
