@@ -612,6 +612,10 @@ scripts/compare-example advanced
 
 The branch must be pushed, and its remote commit must match `HEAD`. Use `--github-only` or `--buildkite-only` to launch one side.
 
+The Buildkite example launchers use `.buildkite/upload-examples.sh` to build and
+invoke the checked-out CLI directly. Compilation stays in this source-testing
+pipeline; the GitHub Actions plugin does not build it.
+
 ## Publish a release
 
 Configured main CI builds automatically trigger the release pipeline after all
