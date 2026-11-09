@@ -533,7 +533,10 @@ defaults, conditions, and shell execution with distinct IDs, including
 `9007199254740993`. [Source checks](../internal/plan/plan_test.go) reject missing,
 malformed, mismatched, and other-provider identities;
 [expression checks](../internal/expression/engine_test.go) cover unavailable
-values, static indexing, payload retention, and token effects. These are local
+values, static indexing, payload retention, and token effects.
+[Deferred-matrix checks](../internal/compiler/runtime_matrix_continuation_test.go)
+require the same ID guards in action preflight and expanded jobs, rejecting
+reachable or unknown composite child-input token branches. These are local
 implementation checks against documented fields, not native execution or
 backend delivery evidence for every event, manual build, or retry path.
 

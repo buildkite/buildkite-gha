@@ -248,10 +248,10 @@ func unsupportedMetadataFields(reason string) string {
 }
 
 func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
-	return compileWorkflowActionInvocations(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil, "")
+	return compileWorkflowActionInvocations(ctx, workspace, actionSource, program.ActionAuthorityOptions{ServerURL: serverURL}, refs, suppliedInputs, nil, "")
 }
 
-func compileWorkflowActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error), sourceServerURL string) (actionCompilation, error) {
+func compileWorkflowActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, authority program.ActionAuthorityOptions, refs []string, suppliedInputs []map[string]string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error), sourceServerURL string) (actionCompilation, error) {
 	if suppliedInputs != nil && len(suppliedInputs) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
 	}
@@ -259,7 +259,7 @@ func compileWorkflowActionInvocations(ctx context.Context, workspace string, act
 	if err != nil {
 		return actionCompilation{}, err
 	}
-	return graph.analyzeInvocations(program.ActionAuthorityOptions{ServerURL: serverURL}, refs, suppliedInputs)
+	return graph.analyzeInvocations(authority, refs, suppliedInputs)
 }
 
 func buildActionGraph(ctx context.Context, workspace string, actionSource ActionSource, refs []string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error), sourceServerURL string) (actionGraph, error) {
