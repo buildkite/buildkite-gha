@@ -23,7 +23,7 @@ func TestActionGraphCacheReusesGraphButNotAuthorityOrResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := cache.compile(t.Context(), instance, "https://github.com", refs, inputs)
+	first, err := cache.compile(t.Context(), instance, "https://github.com", nil, refs, inputs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestActionGraphCacheReusesGraphButNotAuthorityOrResults(t *testing.T) {
 		{nil, "https://github.com", false},
 		{inputs, "https://github.com", false},
 	} {
-		got, err := cache.compile(t.Context(), instance, test.server, refs, test.inputs)
+		got, err := cache.compile(t.Context(), instance, test.server, nil, refs, test.inputs)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,7 +79,7 @@ func TestActionGraphCacheReusesGraphButNotAuthorityOrResults(t *testing.T) {
 			t.Fatal("mutating a prior result corrupted the cached graph")
 		}
 	}
-	if _, err := newActionGraphCache(Options{}, "").compile(t.Context(), instance, "https://github.com", refs, inputs); err == nil {
+	if _, err := newActionGraphCache(Options{}, "").compile(t.Context(), instance, "https://github.com", nil, refs, inputs); err == nil {
 		t.Fatal("a new bundle reused another bundle's graph")
 	}
 }
@@ -92,7 +92,7 @@ func TestActionGraphCacheSeparatesSourceAndOrderedRoots(t *testing.T) {
 	instance := JobInstance{RepositoryRoot: workspace, SourcePath: "ci.yml", SourceDigest: "original", RemoteWorkflow: &RemoteWorkflowSource{Repository: "owner/repo", RequestedRef: "main", Commit: "original", SourceDigest: "original"}}
 	refs := []string{"./one", "./two"}
 	cache := newActionGraphCache(Options{}, "")
-	if _, err := cache.compile(t.Context(), instance, "https://github.com", refs, nil); err != nil {
+	if _, err := cache.compile(t.Context(), instance, "https://github.com", nil, refs, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.RemoveAll(workspace); err != nil {
@@ -125,7 +125,7 @@ func TestActionGraphCacheSeparatesSourceAndOrderedRoots(t *testing.T) {
 			if test.refs != nil {
 				requested = test.refs
 			}
-			if _, err := cache.compile(t.Context(), changed, "https://github.com", requested, nil); err == nil {
+			if _, err := cache.compile(t.Context(), changed, "https://github.com", nil, requested, nil); err == nil {
 				t.Fatal("different source or roots reused the cached graph")
 			}
 		})
@@ -138,11 +138,11 @@ func TestActionGraphCacheRetriesFailedConstruction(t *testing.T) {
 	instance := JobInstance{RepositoryRoot: workspace}
 	cache := newActionGraphCache(Options{}, "")
 	refs := []string{"./parent"}
-	if _, err := cache.compile(t.Context(), instance, "https://github.com", refs, nil); err == nil {
+	if _, err := cache.compile(t.Context(), instance, "https://github.com", nil, refs, nil); err == nil {
 		t.Fatal("missing child was accepted")
 	}
 	writeAction(t, workspace, "child", "name: child\nruns:\n  using: node24\n  main: index.js\n")
-	got, err := cache.compile(t.Context(), instance, "https://github.com", refs, nil)
+	got, err := cache.compile(t.Context(), instance, "https://github.com", nil, refs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

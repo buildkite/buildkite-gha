@@ -387,7 +387,7 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 					return fmt.Errorf("github.token is unavailable in this field")
 				}
 				return nil
-			case "action", "action_path", "action_ref", "action_repository", "actor", "api_url", "graphql_url", "base_ref", "event_name", "event_path", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_owner", "run_attempt", "run_id", "run_number", "server_url", "sha", "workflow", "workflow_ref", "workflow_sha", "workspace":
+			case "action", "action_path", "action_ref", "action_repository", "actor", "actor_id", "api_url", "graphql_url", "base_ref", "event_name", "event_path", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_id", "repository_owner", "repository_owner_id", "run_attempt", "run_id", "run_number", "server_url", "sha", "workflow", "workflow_ref", "workflow_sha", "workspace":
 				return nil
 			default:
 				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
@@ -484,12 +484,12 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 }
 
 // requiredGitHubRuntimeValue names github members that must never fall back to
-// null: token because absence means missing authority, and run identity or
+// null: token because absence means missing authority, and identity or
 // workspace because a silently empty value would corrupt derived cache keys
 // and paths when the runtime cannot supply them.
 func requiredGitHubRuntimeValue(name string) bool {
 	switch strings.ToLower(name) {
-	case "token", "run_attempt", "run_id", "run_number", "workspace":
+	case "token", "actor_id", "repository_id", "repository_owner_id", "run_attempt", "run_id", "run_number", "workspace":
 		return true
 	default:
 		return false

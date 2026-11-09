@@ -390,5 +390,5 @@ func analyzeConditionNode(node actionlint.ExprNode, known map[string]any) (Analy
 
 func abstractReferenceEffects(root string, path []string) Effects {
 	return Effects{EventPayload: strings.EqualFold(root, "event") ||
-		strings.EqualFold(root, "github") && (len(path) == 0 || strings.EqualFold(path[0], "event"))}
+		strings.EqualFold(root, "github") && (len(path) == 0 || githubReferenceNeedsPayload(path))}
 }

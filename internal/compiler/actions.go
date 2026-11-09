@@ -123,6 +123,8 @@ type actionCompilation struct {
 func validateActionResolutions(ctx context.Context, ir IR, options Options, graphs *actionGraphCache) (ProcessingEvidence, error) {
 	evidence := ProcessingEvidence{ActionResolutionComplete: true}
 	var diagnostics []error
+	event := ir.Event
+	identityIDs := plan.EventIdentityIDs(event.Provider, event.Repository.Owner+"/"+event.Repository.Name, event.Actor, event.Payload)
 	for _, instance := range ir.Jobs {
 		for i, step := range instance.Steps {
 			if step.Kind != "uses" {
@@ -132,7 +134,7 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options, grap
 				evidence.ActionResolutionComplete = false
 				continue
 			}
-			compiled, err := graphs.compile(ctx, instance, plan.EventServerURL(ir.Event.Provider, ir.Event.ServerURL), []string{step.Uses}, []map[string]string{step.With})
+			compiled, err := graphs.compile(ctx, instance, plan.EventServerURL(event.Provider, event.ServerURL), identityIDs, []string{step.Uses}, []map[string]string{step.With})
 			evaluation := ActionEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Reference: step.Uses, Step: i + 1, Passed: err == nil, CacheSubstitutions: compiled.cacheSubstitutions}
 			evidence.Actions = append(evidence.Actions, evaluation)
 			if err == nil {
@@ -246,10 +248,10 @@ func unsupportedMetadataFields(reason string) string {
 }
 
 func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
-	return compileWorkflowActionInvocations(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil, "")
+	return compileWorkflowActionInvocations(ctx, workspace, actionSource, program.ActionAuthorityOptions{ServerURL: serverURL}, refs, suppliedInputs, nil, "")
 }
 
-func compileWorkflowActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error), sourceServerURL string) (actionCompilation, error) {
+func compileWorkflowActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, authority program.ActionAuthorityOptions, refs []string, suppliedInputs []map[string]string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error), sourceServerURL string) (actionCompilation, error) {
 	if suppliedInputs != nil && len(suppliedInputs) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
 	}
@@ -257,7 +259,7 @@ func compileWorkflowActionInvocations(ctx context.Context, workspace string, act
 	if err != nil {
 		return actionCompilation{}, err
 	}
-	return graph.analyzeInvocations(program.ActionAuthorityOptions{ServerURL: serverURL}, refs, suppliedInputs)
+	return graph.analyzeInvocations(authority, refs, suppliedInputs)
 }
 
 func buildActionGraph(ctx context.Context, workspace string, actionSource ActionSource, refs []string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error), sourceServerURL string) (actionGraph, error) {

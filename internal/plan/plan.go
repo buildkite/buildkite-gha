@@ -146,6 +146,34 @@ func EventRepositoryOwner(repository string) string {
 	return owner
 }
 
+// EventIdentityIDs exposes GitHub IDs only when the payload's named identity
+// agrees with the selected event. Missing IDs are unavailable, never inferred
+// from names, another provider, or the Buildkite build's creator.
+func EventIdentityIDs(provider, repository, actor string, payload map[string]any) map[string]any {
+	ids := map[string]any{}
+	if provider != "github" {
+		return ids
+	}
+	add := func(name string, object map[string]any, key, expected string) {
+		actual, _ := object[key].(string)
+		id, _ := object["id"].(json.Number)
+		number, err := id.Int64()
+		if expected != "" && strings.EqualFold(actual, expected) && err == nil && number > 0 {
+			ids[name] = id.String()
+		}
+	}
+	sender, _ := payload["sender"].(map[string]any)
+	add("actor_id", sender, "login", actor)
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	if strings.EqualFold(fullName, repository) {
+		add("repository_id", repo, "full_name", repository)
+		owner, _ := repo["owner"].(map[string]any)
+		add("repository_owner_id", owner, "login", EventRepositoryOwner(repository))
+	}
+	return ids
+}
+
 // EventRefName returns the short branch, tag, or pull request ref name.
 func EventRefName(ref string) string {
 	for _, prefix := range []string{"refs/heads/", "refs/tags/", "refs/pull/"} {

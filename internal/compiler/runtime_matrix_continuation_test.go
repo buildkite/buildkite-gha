@@ -1043,6 +1043,72 @@ func TestRuntimeMatrixResolvesDeferredActionsBeforeUpload(t *testing.T) {
 	}
 }
 
+func TestRuntimeMatrixActionIdentityGuards(t *testing.T) {
+	repository := t.TempDir()
+	writeAction(t, repository, "child", "name: child\ninputs:\n  token:\n    required: false\nruns:\n  using: node24\n  main: index.js\n")
+	writeAction(t, repository, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        token: ${{ (github.actor_id != '9007199254740993' || github.repository_id != '42' || github.repository_owner_id != '73') && github.token || '' }}
+`)
+	const payload = `"sender":{"login":"buildkite-gha-smoke","id":9007199254740993},"repository":{"full_name":"buildkite/buildkite-gha","id":42,"owner":{"login":"buildkite","id":73}}`
+	event := bytes.Replace(pushEvent(t), []byte(`"payload": {`), []byte(`"payload": {`+payload+`,`), 1)
+	for _, phase := range []string{"static", "deferred", "expanded"} {
+		for _, identity := range []string{"matching", "different", "missing"} {
+			t.Run(phase+"/"+identity, func(t *testing.T) {
+				source := strings.Replace(runtimeMatrixWorkflow, "      - run: echo ${{ matrix.target }}\n", "      - uses: ./parent\n", 1)
+				options := Options{
+					EventTrust:     EventUntrusted,
+					Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+					ResolveActions: true,
+				}
+				switch phase {
+				case "static":
+					source = strings.Replace(source, "${{ fromJSON(needs.plan.outputs.matrix) }}", "[{target: x, runner: ubuntu-latest}]", 1)
+				case "expanded":
+					options.RuntimeMatrixRows = map[string][]map[string]any{"build": {{"target": "x", "runner": "ubuntu-latest"}}}
+				}
+				snapshot := event
+				switch identity {
+				case "different":
+					snapshot = bytes.Replace(event, []byte(`"id":42`), []byte(`"id":43`), 1)
+				case "missing":
+					snapshot = pushEvent(t)
+				}
+				path := writeWorkflow(t, repository, "identity.yml", source)
+				bundle, err := CompileBundleWithOptions(path, []byte(source), snapshot, "0.0.0-test", testDistributionDigest, "importer", options)
+				if identity != "matching" {
+					if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant github.token authority") {
+						t.Fatalf("unsafe token branch: error = %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if phase == "deferred" {
+					if len(bundle.IR.Continuations) != 1 || len(bundle.IR.Continuations[0].ActionLocks) != 2 {
+						t.Fatalf("deferred action locks = %#v", bundle.IR.Continuations)
+					}
+					return
+				}
+				for _, artifact := range bundle.Plans {
+					if artifact.Job.Workflow.LogicalJobID == "build" {
+						if artifact.Job.GitHubToken != nil || len(artifact.Job.RequiredSecrets) != 0 || artifact.Job.Event.PayloadFile || !artifact.Job.Event.PayloadArtifact {
+							t.Fatal("identity guard must retain payload without file or credential authority")
+						}
+						return
+					}
+				}
+				t.Fatal("compiled bundle lacks the build job")
+			})
+		}
+	}
+}
+
 // TestRuntimeMatrixReportsVarsReferencedOnlyByDeferredActions proves a vars
 // reference that lives only in an action of a deferred job is reported by
 // ActionsReferenceVars, although the deferred jobs have no plan in the bundle.

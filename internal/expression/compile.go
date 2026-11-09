@@ -214,7 +214,7 @@ func validateCompileExpressionNodeWithRunID(node actionlint.ExprNode, allowRunID
 			return nil
 		case strings.EqualFold(root, "github") && len(path) == 1:
 			switch strings.ToLower(path[0]) {
-			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow":
+			case "actor", "actor_id", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_id", "repository_owner", "repository_owner_id", "sha", "workflow":
 				return nil
 			case "run_id":
 				if allowRunID {

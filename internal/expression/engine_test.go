@@ -34,6 +34,46 @@ func TestEngineLiteralPreservesExpressionTypes(t *testing.T) {
 	}
 }
 
+func TestEngineGitHubIdentityIDs(t *testing.T) {
+	engine := NewEngine()
+	ids := map[string]any{"actor_id": "9007199254740993", "repository_id": "42", "repository_owner_id": "73"}
+	values := Values{Compile: CompileContext{GitHub: ids}, Runtime: Context{GitHub: ids}, Condition: ConditionContext{GitHub: ids}}
+	missing := Values{Compile: CompileContext{GitHub: map[string]any{}}, Runtime: Context{GitHub: map[string]any{}}, Condition: ConditionContext{GitHub: map[string]any{}}}
+	for name, id := range ids {
+		for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunName, ProfileWorkflowConcurrency, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput, ProfileStepTemplate, ProfileActionStepTemplate, ProfileActionInputDefault, ProfileServiceCredential, ProfileJobCondition, ProfileCallCondition, ProfileStepCondition, ProfileActionStepCondition, ProfileActionLifecycle} {
+			site := Site{Source: "${{ github['" + strings.ToUpper(name) + "'] }}", Profile: profile, Result: ResultString}
+			want := id
+			if profiles[profile].Form == FormExpression {
+				site.Source = "github['" + strings.ToUpper(name) + "'] == '" + id.(string) + "'"
+				site.Result, want = ResultBoolean, true
+			}
+			got, err := engine.Evaluate(site, values)
+			if err != nil || got != want {
+				t.Fatalf("%s / %s = %#v, %v; want %#v", profile, name, got, err, want)
+			}
+			if _, err := engine.Evaluate(site, missing); err == nil {
+				t.Fatalf("%s / %s invented a value for missing identity", profile, name)
+			}
+		}
+		denied := Site{Source: "${{ false && github." + name + " }}", Profile: ProfileDockerActionArg}
+		if _, err := engine.Validate(denied); err == nil {
+			t.Fatal("identity broadened Docker argument contexts")
+		}
+	}
+	site := Site{Source: "${{ github.actor_id == 'other' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString}
+	broad, err := engine.Analyze(site, AbstractValues{})
+	if err != nil || !broad.Effects.EventPayload || broad.Effects.GitHubToken == 0 {
+		t.Fatalf("unknown identity analysis = %#v, %v", broad, err)
+	}
+	narrow, err := engine.Analyze(site, AbstractValues{References: map[string]any{"github.actor_id": "9007199254740993"}})
+	if err != nil || !narrow.Value.Known || narrow.Value.Value != "" || !narrow.Effects.EventPayload || narrow.Effects.GitHubToken != 0 {
+		t.Fatalf("known identity analysis = %#v, %v", narrow, err)
+	}
+	if got, err := engine.Evaluate(site, values); err != nil || got != narrow.Value.Value {
+		t.Fatalf("concrete identity guard = %#v, %v; want token-free abstract result", got, err)
+	}
+}
+
 func TestEngineToolCacheRemainsRuntimeOnly(t *testing.T) {
 	engine := NewEngine()
 	for _, profile := range []ProfileID{ProfileStepTemplate, ProfileActionStepTemplate, ProfileActionInputDefault, ProfileJobOutput} {

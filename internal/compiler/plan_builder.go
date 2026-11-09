@@ -491,7 +491,9 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 		built.capabilities = capabilities
 		return built, nil
 	}
-	compiled, err := b.actionGraphs.compile(b.ctx, instance, plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL), actionRefs, actionInputs)
+	event := b.ir.Event
+	identityIDs := plan.EventIdentityIDs(event.Provider, event.Repository.Owner+"/"+event.Repository.Name, event.Actor, event.Payload)
+	compiled, err := b.actionGraphs.compile(b.ctx, instance, plan.EventServerURL(event.Provider, event.ServerURL), identityIDs, actionRefs, actionInputs)
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -566,7 +568,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 // Unknown vars keep planning conservative: an expression that may reference
 // github.token still requests the token.
 func (b planBuilder) authorityValues(instance JobInstance) expression.AbstractValues {
-	return expression.AbstractValues{
+	values := expression.AbstractValues{
 		References: map[string]any{
 			"github.server_url": plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL),
 			"matrix":            instance.Matrix,
@@ -574,6 +576,11 @@ func (b planBuilder) authorityValues(instance JobInstance) expression.AbstractVa
 		},
 		Inputs: instance.inputScope(),
 	}
+	event := b.ir.Event
+	for name, value := range plan.EventIdentityIDs(event.Provider, event.Repository.Owner+"/"+event.Repository.Name, event.Actor, event.Payload) {
+		values.References["github."+name] = value
+	}
+	return values
 }
 
 func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, jobReachable, stepReachable bool, built *builtPlanActions) error {

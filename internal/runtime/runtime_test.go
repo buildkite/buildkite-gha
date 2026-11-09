@@ -2554,6 +2554,106 @@ test '${{ inputs.enabled }}' = "$WORKFLOW_ENABLED"`},
 	}
 }
 
+func TestCompiledGitHubIdentityIDs(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/identity.yml"
+	workflow := `on: push
+run-name: Repository ${{ github.repository_id }}
+jobs:
+  test:
+    if: github.actor_id == '9007199254740993'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        owner: ["${{ github.repository_owner_id }}"]
+    env:
+      REPOSITORY_ID: ${{ github.repository_id }}
+    outputs:
+      identity: ${{ steps.identity.outputs.value }}
+    steps:
+      - if: github.repository_owner_id != '73'
+        run: exit 99
+      - id: identity
+        uses: ./.github/actions/identity
+        with:
+          owner: ${{ matrix.owner }}
+  call:
+    if: github.repository_id == '42'
+    uses: ./.github/workflows/called.yml
+    with:
+      actor: ${{ github.actor_id }}
+`
+	writeFixtureFile(t, workspace, workflowPath, workflow)
+	writeFixtureFile(t, workspace, ".github/workflows/called.yml", `on:
+  workflow_call:
+    inputs:
+      actor:
+        type: string
+jobs:
+  called:
+    runs-on: ubuntu-latest
+    outputs:
+      identity: ${{ github.actor_id }}:${{ github.repository_id }}:${{ github.repository_owner_id }}
+    steps:
+      - run: test '${{ inputs.actor }}' = '9007199254740993'
+`)
+	writeFixtureFile(t, workspace, ".github/actions/identity/action.yml", `name: identity
+inputs:
+  owner:
+    required: true
+  actor:
+    default: ${{ github.actor_id }}
+outputs:
+  value:
+    value: ${{ steps.check.outputs.value }}
+runs:
+  using: composite
+  steps:
+    - id: check
+      if: github['repository_id'] == '42' && github.actor_id == inputs.actor
+      shell: sh
+      run: |
+        test '${{ inputs.owner }}' = '73'
+        test "$REPOSITORY_ID" = '42'
+        test '${{ github.actor_id }}' = '9007199254740993'
+        test '${{ github.repository_owner_id }}' = '73'
+        echo 'value=${{ inputs.actor }}:${{ github.repository_id }}:${{ inputs.owner }}' >> "$GITHUB_OUTPUT"
+    - if: github.actor_id != '9007199254740993'
+      shell: sh
+      env:
+        TOKEN: ${{ github.token }}
+      run: exit 99
+`)
+	event := []byte(`{"provider":"github","event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat","payload":{"sender":{"login":"Octocat","id":9007199254740993},"repository":{"full_name":"Acme/Widgets","id":42,"owner":{"login":"Acme","id":73}}}}`)
+	bundle, err := compiler.CompileBundle(filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("got %d plans, want direct and reusable jobs", len(bundle.Plans))
+	}
+	for _, artifact := range bundle.Plans {
+		job, err := plan.Decode(artifact.Contents)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.Event.PayloadFile || job.GitHubToken != nil || len(job.RequiredSecrets) != 0 {
+			t.Fatal("identity reads must not grant file or credential authority")
+		}
+		if job.Event.PayloadArtifact {
+			payload, err := plan.DecodeEventPayload(bundle.EventArtifact.Contents, job.Event.PayloadDigest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job.Event.Payload = &payload
+		}
+		result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+		if err != nil || result.Conclusion != "success" || result.Outputs["identity"] != "9007199254740993:42:73" {
+			t.Fatalf("RunJob(%s) = %#v, %v", job.Workflow.LogicalJobID, result, err)
+		}
+	}
+}
+
 func TestCompiledGitHubServerURLs(t *testing.T) {
 	for _, test := range []struct {
 		server, rest, graphql string
