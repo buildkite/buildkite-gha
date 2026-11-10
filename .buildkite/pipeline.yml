@@ -71,7 +71,7 @@ steps:
         env:
           BUILDKITE_GHA_LIVE_REQUIRED: "1"
         plugins:
-          - setup-go#v0.1.0:
+          - setup-go#v0.1.1:
               mise-version: "2026.10.17"
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
               version: "2026.10.17"
@@ -89,11 +89,11 @@ steps:
         parallelism: 1
         cache: ".buildkite/cache-volume"
         plugins:
-          - setup-go#v0.1.0:
+          - setup-go#v0.1.1:
               mise-version: "2026.10.17"
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
               version: "2026.10.17"
-          - tests#v1.0.0:
+          - tests#v1.1.0:
               client-version: "3.0.0"
               test-runner: "gotest"
               test-cmd: "go test -count=1 -json {{packages}}"
@@ -191,7 +191,7 @@ steps:
     artifact_paths:
       - ".runtime-benchmark/**/*"
     plugins:
-      - setup-go#v0.1.0:
+      - setup-go#v0.1.1:
           mise-version: "2026.5.12"
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
@@ -212,7 +212,7 @@ steps:
     if: build.env("VULNERABILITY_SCAN") == "1"
     cache: ".buildkite/cache-volume"
     plugins:
-      - setup-go#v0.1.0:
+      - setup-go#v0.1.1:
           mise-version: "2026.10.17"
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.10.17"
