@@ -12,7 +12,19 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}} -X github.com/buildkite/buildkite-gha/internal/telemetry.BugsnagAPIKey={{ envOrDefault "BUGSNAG_API_KEY" "" }}
+  - id: buildkite-gha-linux-arm64
+    main: ./cmd/buildkite-gha
+    binary: buildkite-gha
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [arm64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X github.com/buildkite/buildkite-gha/internal/telemetry.BugsnagAPIKey={{ envOrDefault "BUGSNAG_API_KEY" "" }}
   - id: buildkite-gha-darwin
     main: ./cmd/buildkite-gha
     binary: buildkite-gha
@@ -24,7 +36,19 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}} -X github.com/buildkite/buildkite-gha/internal/telemetry.BugsnagAPIKey={{ envOrDefault "BUGSNAG_API_KEY" "" }}
+  - id: buildkite-gha-windows
+    main: ./cmd/buildkite-gha
+    binary: buildkite-gha
+    env:
+      - CGO_ENABLED=0
+    goos: [windows]
+    goarch: [amd64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X github.com/buildkite/buildkite-gha/internal/telemetry.BugsnagAPIKey={{ envOrDefault "BUGSNAG_API_KEY" "" }}
 
 archives:
   - id: buildkite-gha
@@ -57,13 +81,44 @@ archives:
           mode: 0644
           owner: root
           group: root
+  - id: buildkite-gha-linux-arm64-archive
+    ids: [buildkite-gha-linux-arm64]
+    formats: [tar.gz]
+    name_template: buildkite-gha_Linux_arm64
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+      owner: root
+      group: root
+    files:
+      - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+          mode: 0644
+          owner: root
+          group: root
+  - id: buildkite-gha-windows-archive
+    ids: [buildkite-gha-windows]
+    formats: [tar.gz]
+    name_template: buildkite-gha_Windows_x86_64
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+      owner: root
+      group: root
+    files:
+      - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+          mode: 0644
+          owner: root
+          group: root
 
 checksum:
   name_template: checksums.txt
 
 release:
   name_template: "{{ .Tag }}"
-  target_commitish: "{{ .Commit }}"
+  # The publisher creates and verifies the tag first. A historical target here
+  # can require Workflows write permission even though the tag already exists.
   use_existing_draft: true
 
 changelog:

@@ -105,6 +105,7 @@
         "stage": {"$ref": "#/$defs/stageID"},
         "message": {"type": "string", "minLength": 1, "maxLength": 16384},
         "detail": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "setup_url": {"type": "string", "format": "uri", "pattern": "^https?://"},
         "location": {"$ref": "#/$defs/location"},
         "job": {"type": "string", "minLength": 1, "maxLength": 255},
         "instance": {"type": "string", "minLength": 1, "maxLength": 255},

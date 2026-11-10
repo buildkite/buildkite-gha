@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,25 +23,30 @@ import (
 )
 
 const (
-	pluginDevDarwinRuntimeEnvironment = "BUILDKITE_GHA_PLUGIN_DEV_DARWIN_RUNTIME"
-	pluginDevLinuxRuntimeEnvironment  = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_RUNTIME"
-	pluginChecksumLimit               = 4 << 20
-	pluginArchiveLimit                = 256 << 20
+	pluginDevDarwinRuntimeEnvironment     = "BUILDKITE_GHA_PLUGIN_DEV_DARWIN_RUNTIME"
+	pluginDevLinuxRuntimeEnvironment      = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_RUNTIME"
+	pluginDevLinuxARM64RuntimeEnvironment = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_ARM64_RUNTIME"
+	pluginDevWindowsRuntimeEnvironment    = "BUILDKITE_GHA_PLUGIN_DEV_WINDOWS_RUNTIME"
+	pluginChecksumLimit                   = 4 << 20
+	pluginArchiveLimit                    = 256 << 20
 )
 
-var stableVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+var releaseVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*)?(\+[0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*)?$`)
 
 var pluginReleaseBaseURL = "https://github.com/buildkite/buildkite-gha/releases/download"
 
 var pluginHTTPClient = securePluginHTTPClient()
 
 type pluginRuntimeAcquisition struct {
-	version string
+	version  string
+	binaries map[compiler.Platform]string
 }
 
 const (
-	pluginLinuxAsset  = "buildkite-gha_Linux_x86_64.tar.gz"
-	pluginDarwinAsset = "buildkite-gha_Darwin_arm64.tar.gz"
+	pluginLinuxAsset      = "buildkite-gha_Linux_x86_64.tar.gz"
+	pluginLinuxARM64Asset = "buildkite-gha_Linux_arm64.tar.gz"
+	pluginDarwinAsset     = "buildkite-gha_Darwin_arm64.tar.gz"
+	pluginWindowsAsset    = "buildkite-gha_Windows_x86_64.tar.gz"
 )
 
 func securePluginHTTPClient() *http.Client {
@@ -61,22 +67,56 @@ func securePluginHTTPClient() *http.Client {
 func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[compiler.Platform]bool, hostPlatform compiler.Platform, host runtimeDistribution) (map[compiler.Platform]runtimeDistribution, error) {
 	distributions := make(map[compiler.Platform]runtimeDistribution, len(required))
 	devPaths := map[compiler.Platform]string{
-		compiler.PlatformLinuxAMD64:  os.Getenv(pluginDevLinuxRuntimeEnvironment),
-		compiler.PlatformDarwinARM64: os.Getenv(pluginDevDarwinRuntimeEnvironment),
+		compiler.PlatformLinuxAMD64:   os.Getenv(pluginDevLinuxRuntimeEnvironment),
+		compiler.PlatformLinuxARM64:   os.Getenv(pluginDevLinuxARM64RuntimeEnvironment),
+		compiler.PlatformDarwinARM64:  os.Getenv(pluginDevDarwinRuntimeEnvironment),
+		compiler.PlatformWindowsAMD64: os.Getenv(pluginDevWindowsRuntimeEnvironment),
 	}
-	if a.version != "dev" {
+	if a.binaries == nil && a.version != "dev" {
 		for platform, path := range devPaths {
 			if path != "" {
 				return nil, fmt.Errorf("%s is test/dev-only and is rejected by release builds", pluginDevRuntimeEnvironment(platform))
 			}
 		}
 	}
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformLinuxARM64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		if !required[platform] {
 			continue
 		}
 		if platform == hostPlatform {
+			if source := a.binaries[platform]; source != "" {
+				_, expected, err := parsePluginBinaryURL(source)
+				if err != nil {
+					return nil, err
+				}
+				if expected != nil && host.digest != fmt.Sprintf("sha256:%x", expected) {
+					return nil, fmt.Errorf("importer binary checksum verification failed")
+				}
+			}
 			distributions[platform] = host
+			continue
+		}
+		if a.binaries != nil {
+			source := a.binaries[platform]
+			if source == "" {
+				return nil, fmt.Errorf("binary URL for %s is required; custom binaries do not fall back to releases", platform)
+			}
+			source, expected, err := parsePluginBinaryURL(source)
+			if err != nil {
+				return nil, err
+			}
+			contents, err := downloadPluginReleaseFile(ctx, pluginHTTPClient, source, a.version, runtimeDistributionLimit)
+			if err != nil {
+				return nil, fmt.Errorf("download %s binary: %w", platform, err)
+			}
+			digest := sha256.Sum256(contents)
+			if expected != nil && !bytes.Equal(digest[:], expected) {
+				return nil, fmt.Errorf("%s binary checksum verification failed", platform)
+			}
+			if err := validateRuntimeDistributionBinary(platform, contents); err != nil {
+				return nil, fmt.Errorf("validate %s binary: %w", platform, err)
+			}
+			distributions[platform] = runtimeDistribution{contents: contents, digest: fmt.Sprintf("sha256:%x", digest)}
 			continue
 		}
 		if a.version == "dev" {
@@ -91,8 +131,8 @@ func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[com
 			distributions[platform] = loaded[platform]
 			continue
 		}
-		if !stableVersionPattern.MatchString(a.version) {
-			return nil, fmt.Errorf("running version %q is not a stable semantic version", a.version)
+		if !releaseVersionPattern.MatchString(a.version) {
+			return nil, fmt.Errorf("running version %q is not a release version; configure binary URLs for other platforms", a.version)
 		}
 		distribution, err := acquirePluginRuntime(ctx, a.version, platform, pluginHTTPClient, pluginReleaseBaseURL, pluginArchiveCachePath(a.version, pluginRuntimeAsset(platform)))
 		if err != nil {
@@ -104,15 +144,44 @@ func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[com
 }
 
 func pluginDevRuntimeEnvironment(platform compiler.Platform) string {
+	if platform == compiler.PlatformWindowsAMD64 {
+		return pluginDevWindowsRuntimeEnvironment
+	}
 	if platform == compiler.PlatformDarwinARM64 {
 		return pluginDevDarwinRuntimeEnvironment
+	}
+	if platform == compiler.PlatformLinuxARM64 {
+		return pluginDevLinuxARM64RuntimeEnvironment
 	}
 	return pluginDevLinuxRuntimeEnvironment
 }
 
+func parsePluginBinaryURL(value string) (string, []byte, error) {
+	source, fragment, hasFragment := strings.Cut(value, "#")
+	parsed, err := url.Parse(source)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil {
+		return "", nil, errors.New("binary must be an HTTPS URL without user credentials")
+	}
+	if !hasFragment {
+		return source, nil, nil
+	}
+	hash, ok := strings.CutPrefix(fragment, "sha256=")
+	digest, err := hex.DecodeString(hash)
+	if !ok || err != nil || len(digest) != sha256.Size {
+		return "", nil, errors.New("binary URL fragment must be sha256= followed by 64 hexadecimal digits")
+	}
+	return source, digest, nil
+}
+
 func pluginRuntimeAsset(platform compiler.Platform) string {
+	if platform == compiler.PlatformWindowsAMD64 {
+		return pluginWindowsAsset
+	}
 	if platform == compiler.PlatformDarwinARM64 {
 		return pluginDarwinAsset
+	}
+	if platform == compiler.PlatformLinuxARM64 {
+		return pluginLinuxARM64Asset
 	}
 	return pluginLinuxAsset
 }
@@ -214,9 +283,13 @@ func extractPluginRuntime(archive []byte, platform compiler.Platform) ([]byte, e
 		if header.Typeflag != tar.TypeReg || header.Size < 0 || header.Size > runtimeDistributionLimit {
 			return nil, fmt.Errorf("%s archive contains an unsafe member %q", platform, header.Name)
 		}
+		binaryName := "buildkite-gha"
+		if platform == compiler.PlatformWindowsAMD64 {
+			binaryName = "buildkite-gha.exe"
+		}
 		switch header.Name {
-		case "buildkite-gha":
-			if seenBinary || header.Mode&0o111 == 0 {
+		case binaryName:
+			if seenBinary || (platform != compiler.PlatformWindowsAMD64 && header.Mode&0o111 == 0) {
 				return nil, fmt.Errorf("%s archive has an invalid executable member", platform)
 			}
 			seenBinary = true
@@ -234,7 +307,7 @@ func extractPluginRuntime(archive []byte, platform compiler.Platform) ([]byte, e
 		}
 	}
 	if !seenBinary || !seenLicense {
-		return nil, fmt.Errorf("%s archive must contain exactly buildkite-gha and LICENSE", platform)
+		return nil, fmt.Errorf("%s archive must contain exactly its executable and LICENSE", platform)
 	}
 	return executable, nil
 }

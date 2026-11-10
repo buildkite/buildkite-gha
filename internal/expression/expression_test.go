@@ -2,6 +2,7 @@ package expression
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"reflect"
 	"strings"
@@ -154,7 +155,7 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 	}
 }
 
-func TestDockerActionArgsUseOnlyDirectInputs(t *testing.T) {
+func TestDockerActionArgsUseOnlyInputs(t *testing.T) {
 	tests := []struct {
 		name     string
 		template string
@@ -164,12 +165,17 @@ func TestDockerActionArgsUseOnlyDirectInputs(t *testing.T) {
 		{name: "literal", template: " --flag=$value; ", want: " --flag=$value; "},
 		{name: "property", template: "prefix-${{ inputs.Name }}-suffix", want: "prefix-value-suffix"},
 		{name: "literal index", template: "${{ inputs['name'] }}", want: "value"},
-		{name: "whole inputs", template: "${{ inputs }}", invalid: true},
+		{name: "computed input", template: "${{ inputs[format('{0}', 'name')] }}", want: "value"},
 		{name: "dynamic input", template: "${{ inputs[env.name] }}", invalid: true},
 		{name: "nested input", template: "${{ inputs.name.value }}", invalid: true},
 		{name: "other context", template: "${{ secrets.token }}", invalid: true},
-		{name: "operator", template: "${{ inputs.name || 'fallback' }}", invalid: true},
-		{name: "function", template: "${{ format('{0}', inputs.name) }}", invalid: true},
+		{name: "provided", template: "${{ inputs.name || 'fallback' }}", want: "value"},
+		{name: "fallback", template: "${{ inputs.missing || 'fallback' }}", want: "fallback"},
+		{name: "function", template: "${{ format('--{0}', inputs.name) }}", want: "--value"},
+		{name: "lazy function", template: "${{ inputs.name || fromJSON('invalid') }}", want: "value"},
+		{name: "unreachable secret", template: "${{ 'safe' || secrets.token }}", invalid: true},
+		{name: "unreachable token", template: "${{ 'safe' || github.token }}", invalid: true},
+		{name: "unavailable function", template: "${{ 'safe' || hashFiles('**') }}", invalid: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -221,6 +227,42 @@ func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T)
 	}
 }
 
+func TestRunnerEnvironmentIsAvailableOnEveryRuntimeSurface(t *testing.T) {
+	runner := map[string]string{"os": "Linux", "arch": "X64", "environment": "self-hosted"}
+	if got, err := Evaluate("${{ runner.environment }}", Context{Runner: runner}); err != nil || got != "self-hosted" {
+		t.Fatalf("Evaluate() = %q, %v", got, err)
+	}
+	if got, err := EvaluateStep("${{ RUNNER.Environment }}", Context{Runner: runner}); err != nil || got != "self-hosted" {
+		t.Fatalf("EvaluateStep() = %q, %v", got, err)
+	}
+	for _, test := range []struct {
+		condition string
+		want      bool
+	}{
+		{"runner.environment == 'self-hosted'", true},
+		{"runner.environment == 'github-hosted'", false},
+		{"runner.environment != 'github-hosted' && runner.os == 'Linux'", true},
+	} {
+		if got, err := EvaluateCondition(test.condition, ConditionContext{Runner: runner}); err != nil || got != test.want {
+			t.Fatalf("EvaluateCondition(%q) = %v, %v; want %v", test.condition, got, err, test.want)
+		}
+	}
+	for _, scope := range []ConditionScope{JobCondition, StepCondition} {
+		if err := ValidateCondition("runner.environment == 'github-hosted'", scope); err != nil {
+			t.Fatalf("ValidateCondition() scope %v runner.environment = %v", scope, err)
+		}
+	}
+	if err := ValidateCondition("runner.name == 'x'", StepCondition); err == nil || !strings.Contains(err.Error(), "runner.environment") {
+		t.Fatalf("ValidateCondition() runner.name error = %v, want the supported list to name runner.environment", err)
+	}
+	if got, err := EvaluateActionInputDefault("${{ runner.environment == 'github-hosted' && 'hosted' || 'self' }}", Context{Runner: runner}); err != nil || got != "self" {
+		t.Fatalf("EvaluateActionInputDefault() = %q, %v", got, err)
+	}
+	if _, err := Evaluate("${{ runner.environment }}", Context{Runner: map[string]string{"os": "Linux"}}); err == nil {
+		t.Fatal("Evaluate() resolved runner.environment without a runner context value")
+	}
+}
+
 func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *testing.T) {
 	for _, template := range []string{
 		"${{ github.server_url == 'https://github.com' && github.token || '' }}",
@@ -231,6 +273,8 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 		"${{ job['check_run_id'] }}",
 		"${{ job.check_run_id || 'unavailable' }}",
 		"${{ toJSON(matrix) }}",
+		"${{ github.event[inputs.field] || 'fallback' }}",
+		"${{ toJSON(github.event.*.name) }}",
 		"${{ true && 'quoted }} braces' || '' }}",
 		"${{ 1 > 0 }}",
 	} {
@@ -238,7 +282,7 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job[env.NAME] }}", "${{ job.check_run_id.extra }}", "${{ job.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ github.event[secrets.FIELD] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job[env.NAME] }}", "${{ job.check_run_id.extra }}", "${{ job.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
@@ -248,12 +292,24 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 	}
 }
 
-func TestEvaluateActionInputDefaultTreatsRunnerDebugAsFalse(t *testing.T) {
+func TestEvaluateActionInputDefaultSupportsDynamicEventAccess(t *testing.T) {
+	context := Context{
+		GitHub: map[string]any{"event": map[string]any{"action": "opened"}},
+		Inputs: map[string]string{"field": "action"},
+	}
+	got, err := EvaluateActionInputDefault("${{ github.event[inputs.field] }}", context)
+	if err != nil || got != "opened" {
+		t.Fatalf("EvaluateActionInputDefault() = %q, %v, want opened", got, err)
+	}
+}
+
+func TestEvaluateActionInputDefaultTreatsRunnerDebugAsDisabled(t *testing.T) {
 	for _, test := range []struct {
 		template string
 		want     string
 	}{
-		{template: "${{ runner.debug }}", want: "false"},
+		{template: "${{ runner.debug }}"},
+		{template: "${{ runner['debug'] }}"},
 		{template: "${{ runner.debug == '1' }}", want: "false"},
 	} {
 		got, err := EvaluateActionInputDefault(test.template, Context{})
@@ -263,22 +319,37 @@ func TestEvaluateActionInputDefaultTreatsRunnerDebugAsFalse(t *testing.T) {
 	}
 }
 
-func TestRunnerDebugRemainsUnavailableOutsideActionInputDefaults(t *testing.T) {
-	template := "${{ runner.debug }}"
-	if err := ValidateRuntimeTemplate(template); err == nil {
-		t.Fatal("ValidateRuntimeTemplate() accepted runner.debug")
+func TestRunnerDebugIsAvailableOnlyInRunnerBackedRuntimeProfiles(t *testing.T) {
+	if got, err := EvaluateStep("${{ runner.debug }}", Context{}); err != nil || got != "" {
+		t.Fatalf("EvaluateStep() = %q, %v; want empty disabled value", got, err)
 	}
-	if _, err := Evaluate(template, Context{}); err == nil {
-		t.Fatal("Evaluate() accepted runner.debug")
+	if got, err := EvaluateStep("${{ runner.debug == '1' }}", Context{}); err != nil || got != "false" {
+		t.Fatalf("EvaluateStep() comparison = %q, %v; want false", got, err)
 	}
-	if _, err := EvaluateStep(template, Context{}); err == nil {
-		t.Fatal("EvaluateStep() accepted runner.debug")
+	if got, err := EvaluateStepControl("${{ runner.debug == '1' }}", Context{}); err != nil || got != false {
+		t.Fatalf("EvaluateStepControl() = %#v, %v; want false", got, err)
 	}
-	if _, err := EvaluateCondition("runner.debug", ConditionContext{}); err == nil {
-		t.Fatal("EvaluateCondition() accepted runner.debug")
+	if got, err := EvaluateJobOutput("${{ runner['debug'] || 'disabled' }}", Context{}); err != nil || got != "disabled" {
+		t.Fatalf("EvaluateJobOutput() = %q, %v; want disabled", got, err)
 	}
-	if _, err := EvaluateActionLifecycleCondition("runner.debug", ConditionContext{}); err == nil {
-		t.Fatal("EvaluateActionLifecycleCondition() accepted runner.debug")
+	for _, source := range []string{"runner.debug == '1'", "runner['debug'] == '1'"} {
+		if got, err := EvaluateCondition(source, ConditionContext{}); err != nil || got {
+			t.Errorf("EvaluateCondition(%q) = %v, %v; want false", source, got, err)
+		}
+		if got, err := EvaluateActionLifecycleCondition(source, ConditionContext{}); err != nil || got {
+			t.Errorf("EvaluateActionLifecycleCondition(%q) = %v, %v; want false", source, got, err)
+		}
+	}
+	for _, source := range []string{"${{ runner.debug }}", "${{ runner['debug'] }}"} {
+		if err := ValidateRuntimeTemplate(source); err == nil {
+			t.Errorf("ValidateRuntimeTemplate(%q) accepted runner.debug in a generic runtime field", source)
+		}
+		if _, err := NewEngine().Evaluate(Site{Source: source, Profile: ProfileRuntimeTemplate, Result: ResultString}, Values{}); err == nil {
+			t.Errorf("Engine.Evaluate(%q) accepted runner.debug in a generic runtime field", source)
+		}
+	}
+	if err := ValidateCondition("runner.debug == '1'", JobCondition); err == nil {
+		t.Fatal("ValidateCondition() accepted runner.debug in a job condition")
 	}
 }
 
@@ -357,8 +428,8 @@ func TestEvaluateActionInputDefaultSupportsJobStatus(t *testing.T) {
 	if _, err := EvaluateActionInputDefault("${{ job.status }}", Context{}); err == nil {
 		t.Fatal("EvaluateActionInputDefault() accepted unavailable job.status")
 	}
-	if _, err := Evaluate("${{ job.status }}", Context{JobStatus: "success"}); err == nil {
-		t.Fatal("Evaluate() accepted action-default-only job.status")
+	if err := ValidateRuntimeTemplate("${{ job.status }}"); err == nil {
+		t.Fatal("ValidateRuntimeTemplate() accepted job.status before steps run")
 	}
 }
 
@@ -494,7 +565,11 @@ func TestEvaluateSupportsStaticIndexReferences(t *testing.T) {
 }
 
 func TestServiceRuntimeContext(t *testing.T) {
-	services := map[string]ServiceContext{"redis": {ID: "container-id", Network: "job-network", Ports: map[string]string{"6379": "49152"}}}
+	services := map[string]ServiceContext{
+		"redis":          {ID: "container-id", Network: "job-network", Ports: map[string]string{"6379": "49152"}},
+		"s3.docker.test": {ID: "dotted-id", Network: "job-network", Ports: map[string]string{"6379": "49153"}},
+		"s3-docker-test": {ID: "hyphenated-id", Network: "job-network", Ports: map[string]string{"6379": "49154"}},
+	}
 	context := Context{Services: services, Env: map[string]string{"PORT": "6379"}}
 	for _, reference := range []string{"job.services.redis.ports[6379]", "JOB.Services.REDIS.Ports[6379]", "job.services.REDIS.ports['6379']"} {
 		got, err := Evaluate("${{ "+reference+" }}", context)
@@ -511,6 +586,11 @@ func TestServiceRuntimeContext(t *testing.T) {
 	for template, want := range map[string]string{
 		"${{ job.services['redis'].id }}":                      "container-id",
 		"${{ format('{0}', job.services.redis.ports[6379]) }}": "49152",
+		"${{ job.services['s3.docker.test'].id }}":             "dotted-id",
+		"${{ job.services['s3-docker-test'].id }}":             "hyphenated-id",
+		"${{ job.services['s3.docker.test'].network }}":        "job-network",
+		"${{ job.services['s3.docker.test'].ports[6379] }}":    "49153",
+		"${{ job.services['s3-docker-test'].ports[6379] }}":    "49154",
 	} {
 		if got, err := EvaluateStep(template, context); err != nil || got != want {
 			t.Fatalf("EvaluateStep(%q) = %q, %v; want %q", template, got, err, want)
@@ -525,7 +605,33 @@ func TestServiceRuntimeContext(t *testing.T) {
 	if got, err := EvaluateCondition("job.services.redis.id == 'container-id' && job.services.redis.network == 'job-network'", ConditionContext{Services: services}); err != nil || !got {
 		t.Fatalf("service identity condition = %v, %v", got, err)
 	}
-	for _, reference := range []string{"job.services.missing.ports[6379]", "job.services.redis.ports[1234]", "job.services.redis.ports[env.PORT]", "job.status"} {
+	engine := NewEngine()
+	known := AbstractValues{References: map[string]any{
+		"job.services.s3.docker.test.id": "dotted-id", "job.services.s3-docker-test.id": "hyphenated-id",
+		"job.services.s3.docker.test.network": "job-network", "job.services.s3-docker-test.network": "job-network",
+	}}
+	for source, want := range map[string]bool{
+		"job.services['s3.docker.test'].id != job.services['s3-docker-test']['id']":           true,
+		"job.services['s3.docker.test'].id == job.services['s3-docker-test']['id']":           false,
+		"job.services['s3.docker.test']['network'] == job.services['s3-docker-test'].network": true,
+	} {
+		site := Site{Source: source, Profile: ProfileStepCondition, Result: ResultBoolean}
+		if got, err := engine.Evaluate(site, Values{Condition: ConditionContext{Services: services}}); err != nil || got != want {
+			t.Fatalf("Evaluate(%q) = %v, %v; want %v", source, got, err, want)
+		}
+		if got, err := engine.Analyze(site, known); err != nil || !got.Value.Known || got.Value.Value != want || got.Effects != (Effects{}) {
+			t.Fatalf("Analyze(%q) = %#v, %v; want known %v without effects", source, got, err, want)
+		}
+		if got, err := engine.Analyze(site, AbstractValues{}); err != nil || got.Value.Known || got.Effects != (Effects{}) {
+			t.Fatalf("unknown Analyze(%q) = %#v, %v", source, got, err)
+		}
+	}
+	for _, source := range []string{"job", "job['services']", "job.services[env.NAME].id", "job.services.s3.docker.test.id", "true || job['name']"} {
+		if _, err := engine.Validate(Site{Source: source, Profile: ProfileStepCondition, Result: ResultBoolean}); err == nil {
+			t.Errorf("Validate(%q) unexpectedly succeeded", source)
+		}
+	}
+	for _, reference := range []string{"job.services.s3.docker.test.id", "job.services.missing.ports[6379]", "job.services.redis.ports[1234]", "job.services.redis.ports[env.PORT]", "job.status"} {
 		if _, err := Evaluate("${{ "+reference+" }}", context); err == nil {
 			t.Errorf("Evaluate(%q) unexpectedly succeeded", reference)
 		}
@@ -604,13 +710,15 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 	for _, template := range []string{
 		"${{ github }}",
 		"${{ github.* }}",
-		"${{ github.event.*.token }}",
 		"${{ toJSON(github.*) }}",
 		"${{ format('{0}', github) }}",
 	} {
 		if _, err := ReferencesGitHubToken(template); err == nil || !strings.Contains(err.Error(), "must name one static property") {
 			t.Fatalf("ReferencesGitHubToken(%q) error = %v, want static-property rejection", template, err)
 		}
+	}
+	if got, err := ReferencesGitHubToken("${{ github.event.*.token }}"); err != nil || got {
+		t.Fatalf("ReferencesGitHubToken() event payload projection = %v, %v, want false", got, err)
 	}
 	if _, err := ReferencesStepGitHubToken("${{ toJSON(github[env.NAME]) }}"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
 		t.Fatalf("ReferencesStepGitHubToken() serialized dynamic index error = %v", err)
@@ -711,7 +819,6 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 		{name: "hashFiles needs a pattern", source: "hashFiles()", scope: StepCondition, want: `condition function "hashFiles" requires 1 to 255 arguments`},
 		{name: "hashFiles unavailable in jobs", source: "hashFiles('go.sum')", scope: JobCondition, want: `condition function "hashFiles" is unavailable in job conditions`},
 		{name: "function arguments", source: "always(true)", scope: StepCondition, want: `condition function "always" arguments are unsupported`},
-		{name: "runtime event payload", source: "github.event.pull_request.draft", scope: JobCondition, want: `condition reference "github.event.pull_request.draft" is unavailable at runtime`},
 		{name: "unsupported github property", source: "github.run_id", scope: StepCondition, want: `condition reference "github.run_id" is unavailable at runtime`},
 		{name: "step context in job", source: "steps.build.outcome", scope: JobCondition, want: `condition context "steps" is unavailable in job conditions`},
 		{name: "environment in job", source: "env.ENABLED", scope: JobCondition, want: `condition context "env" is unavailable in job conditions`},
@@ -723,6 +830,15 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 			err := ValidateCondition(test.source, test.scope)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("ValidateCondition() error = %v, want %q", err, test.want)
+			}
+			var blocker interface {
+				CompatibilityBlocker() (string, string)
+			}
+			if !errors.As(err, &blocker) {
+				t.Fatalf("ValidateCondition() error has no compatibility blocker: %v", err)
+			}
+			if kind, detail := blocker.CompatibilityBlocker(); kind != "expression" || detail != test.source {
+				t.Fatalf("compatibility blocker = %q / %q", kind, detail)
 			}
 		})
 	}
@@ -787,9 +903,9 @@ func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
 		"${{ github[env.KEY] }}",
 		"${{ false && secrets[env.KEY] || '' }}",
 		"${{ steps[env.KEY].outputs.image }}",
-		"${{ toJSON(needs) }}",
+		"${{ toJSON(needs.*) }}",
 		"${{ matrix[steps[env.KEY].outputs.image] || 'fallback' }}",
-		"${{ matrix[toJSON(needs)] }}",
+		"${{ matrix[toJSON(needs[env.KEY])] }}",
 	} {
 		if _, err := EvaluateStep(template, context); err == nil {
 			t.Errorf("EvaluateStep(%q) allowed prohibited access", template)
@@ -824,8 +940,13 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 		"ref_name":          "feature",
 		"ref_type":          "branch",
 		"repository_owner":  "buildkite",
+		"run_attempt":       "2",
+		"run_id":            "0198c0c5-2e0f-7c68-8b0c-2e0f7c688b0c",
+		"run_number":        "512",
 		"token":             "ghs_scoped_token",
 		"workflow":          "CI",
+		"workspace":         "/workspace",
+		"event":             map[string]any{"action": "opened", "pull_request": map[string]any{"draft": true}},
 	}}
 	for template, want := range map[string]string{
 		"${{ github.action_path }}/script.sh":                      "/workspace/actions/composite/script.sh",
@@ -835,7 +956,11 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 		"${{ github.ref_name }}":                                   "feature",
 		"${{ github.ref_type }}":                                   "branch",
 		"${{ github.repository_owner }}":                           "buildkite",
+		"${{ github.run_attempt }}":                                "2",
+		"${{ github.run_id }}":                                     "0198c0c5-2e0f-7c68-8b0c-2e0f7c688b0c",
+		"${{ github.run_number }}":                                 "512",
 		"${{ github.workflow }}":                                   "CI",
+		"${{ github.workspace }}/fake-home":                        "/workspace/fake-home",
 	} {
 		if got, err := EvaluateStep(template, context); err != nil || got != want {
 			t.Errorf("EvaluateStep(%q) = %q, %v; want %q", template, got, err, want)
@@ -846,12 +971,22 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 		"  \"action_ref\": \"v2\",\n" +
 		"  \"action_repository\": \"owner/action\",\n" +
 		"  \"base_ref\": \"main\",\n" +
+		"  \"event\": {\n" +
+		"    \"action\": \"opened\",\n" +
+		"    \"pull_request\": {\n" +
+		"      \"draft\": true\n" +
+		"    }\n" +
+		"  },\n" +
 		"  \"job\": \"build\",\n" +
 		"  \"ref_name\": \"feature\",\n" +
 		"  \"ref_type\": \"branch\",\n" +
 		"  \"repository_owner\": \"buildkite\",\n" +
+		"  \"run_attempt\": \"2\",\n" +
+		"  \"run_id\": \"0198c0c5-2e0f-7c68-8b0c-2e0f7c688b0c\",\n" +
+		"  \"run_number\": \"512\",\n" +
 		"  \"token\": \"ghs_scoped_token\",\n" +
-		"  \"workflow\": \"CI\"\n" +
+		"  \"workflow\": \"CI\",\n" +
+		"  \"workspace\": \"/workspace\"\n" +
 		"}"
 	for _, template := range []string{"${{ toJSON(github) }}", "${{ ToJson(GitHub) }}"} {
 		if got, err := EvaluateStep(template, context); err != nil || got != wantJSON {
@@ -864,14 +999,28 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 	if got, err := EvaluateStep("${{ github.action_path }}", Context{GitHub: map[string]any{}}); err != nil || got != "" {
 		t.Fatalf("EvaluateStep() action_path outside composite scope = %q, %v; want empty", got, err)
 	}
-	if _, err := EvaluateStep("${{ github.run_id }}", context); err == nil {
-		t.Fatal("EvaluateStep() accepted github.run_id")
+	for _, template := range []string{"${{ github.run_attempt }}", "${{ github.run_id }}", "${{ github.run_number }}", "${{ github.workspace }}"} {
+		if _, err := EvaluateStep(template, Context{GitHub: map[string]any{}}); err == nil || !strings.Contains(err.Error(), "unavailable github value") {
+			t.Errorf("EvaluateStep(%q) without run identity error = %v, want unavailable github value", template, err)
+		}
+	}
+	if _, err := EvaluateStep("${{ github.run_started_at }}", context); err == nil || !strings.Contains(err.Error(), `unsupported runtime github reference "github.run_started_at"`) {
+		t.Fatalf("EvaluateStep() github.run_started_at error = %v, want unsupported reference", err)
+	}
+	if got, err := EvaluateStep("${{ toJSON(github.event) }}", context); err != nil || got != "{\n  \"action\": \"opened\",\n  \"pull_request\": {\n    \"draft\": true\n  }\n}" {
+		t.Fatalf("EvaluateStep() event payload = %q, %v", got, err)
+	}
+	context.Vars = map[string]string{"EVENT_FIELD": "action"}
+	if got, err := EvaluateStep("${{ github.event[vars.EVENT_FIELD] }}", context); err != nil || got != "opened" {
+		t.Fatalf("EvaluateStep() dynamic event member = %q, %v", got, err)
+	}
+	if _, err := EvaluateStep("${{ github.event.action }}", Context{GitHub: map[string]any{}}); err == nil || !strings.Contains(err.Error(), "event payload") {
+		t.Fatalf("EvaluateStep() missing event payload error = %v", err)
 	}
 	for _, template := range []string{
 		"${{ github }}",
 		"${{ github[env.KEY] }}",
 		"${{ github.* }}",
-		"${{ toJSON(github.event) }}",
 		"${{ toJSON(github.*) }}",
 		"${{ toJSON(secrets) }}",
 		"${{ format('{0}', github) }}",
@@ -942,8 +1091,10 @@ func TestEvaluateJobSurfacesErrors(t *testing.T) {
 		{name: "job env excludes steps", evaluate: EvaluateJobEnvironment, template: "${{ false && steps.build.outputs.value || 'ok' }}"},
 		{name: "job default excludes steps", evaluate: EvaluateJobDefault, template: "${{ false && steps.build.outputs.value || 'ok' }}"},
 		{name: "dynamic secret", evaluate: EvaluateJobEnvironment, template: "${{ false && secrets[env.KEY] || 'ok' }}"},
-		{name: "aggregate needs", evaluate: EvaluateJobDefault, template: "${{ false && toJSON(needs) || 'ok' }}"},
+		{name: "projected needs", evaluate: EvaluateJobDefault, template: "${{ false && toJSON(needs.*) || 'ok' }}"},
 		{name: "aggregate steps", evaluate: EvaluateJobOutput, template: "${{ false && toJSON(steps) || 'ok' }}"},
+		{name: "dynamic service", evaluate: EvaluateJobOutput, template: "${{ false && job.services[env.KEY].id || 'ok' }}"},
+		{name: "job identity", evaluate: EvaluateJobOutput, template: "${{ false && job.name || 'ok' }}"},
 		{name: "hash files", evaluate: EvaluateJobDefault, template: "${{ false && hashFiles('go.sum') || 'ok' }}"},
 	}
 	for _, test := range tests {
@@ -1041,50 +1192,6 @@ func TestValidateReusableInputDefaultRejectsUnavailableContexts(t *testing.T) {
 		if err := ValidateReusableInputDefault(template); err == nil {
 			t.Errorf("ValidateReusableInputDefault(%q) unexpectedly succeeded", template)
 		}
-	}
-}
-
-func TestValidateConditionUsesConcreteMatrixTypes(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		source string
-		matrix map[string]any
-		want   string
-	}{
-		{name: "numeric value", source: "matrix.version == 12", matrix: map[string]any{"version": 14.0}},
-		{name: "json numeric value", source: "matrix.version == 12", matrix: map[string]any{"version": json.Number("14")}},
-		{name: "boolean value", source: "matrix.experimental == true", matrix: map[string]any{"experimental": false}},
-		{name: "string and number", source: "matrix.version == 12", matrix: map[string]any{"version": "14"}},
-		{name: "null and number", source: "matrix.version == 12", matrix: map[string]any{"version": nil}},
-		{name: "missing value", source: "matrix.version == 12", matrix: map[string]any{}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			err := ValidateConditionWithMatrix(test.source, JobCondition, test.matrix)
-			if test.want == "" && err != nil {
-				t.Fatalf("ValidateCondition() error = %v", err)
-			}
-			if test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
-				t.Fatalf("ValidateCondition() error = %v, want %q", err, test.want)
-			}
-		})
-	}
-	if err := ValidateCondition("matrix.version == 12", JobCondition); err != nil {
-		t.Fatalf("ValidateCondition() rejected unknown matrix type: %v", err)
-	}
-}
-
-func TestValidateConditionAcceptsCompilerNumericKinds(t *testing.T) {
-	values := []any{
-		int(-1), int8(-1), int16(-1), int32(-1), int64(-1),
-		uint(1), uint8(1), uint16(1), uint32(1), uint64(1), ^uint64(0),
-		float32(1.5), float64(1.5), json.Number("1e3"),
-	}
-	for _, value := range values {
-		t.Run(reflect.TypeOf(value).String(), func(t *testing.T) {
-			if err := ValidateConditionWithMatrix("matrix.value != 0", JobCondition, map[string]any{"value": value}); err != nil {
-				t.Fatalf("ValidateConditionWithMatrix(%T) error = %v", value, err)
-			}
-		})
 	}
 }
 
@@ -1208,6 +1315,7 @@ func TestValidateActionLifecycleCondition(t *testing.T) {
 		"steps.build.conclusion == 'success' && runner.os == 'Linux'",
 		"inputs.cache == true && hashFiles('Cargo.lock') != ''",
 		"inputs['cache'] == true",
+		"github.event[env.EVENT_FIELD] == 'opened'",
 	} {
 		if err := ValidateActionLifecycleCondition(condition); err != nil {
 			t.Errorf("ValidateActionLifecycleCondition(%q) error = %v", condition, err)
@@ -1220,6 +1328,7 @@ func TestValidateActionLifecycleCondition(t *testing.T) {
 		"vars[env.FLAG] == 'true'",
 		"steps[env.STEP].conclusion == 'success'",
 		"inputs[env.INPUT] == true",
+		"github.event[secrets.FIELD] == 'opened'",
 		"unknown()",
 	} {
 		if err := ValidateActionLifecycleCondition(condition); err == nil {
@@ -1243,6 +1352,17 @@ func TestEvaluateActionLifecycleConditionUsesWorkflowInputsAndHashFiles(t *testi
 	}
 	if !reflect.DeepEqual(patterns, []string{"Cargo.lock"}) {
 		t.Fatalf("hashFiles patterns = %#v, want [Cargo.lock]", patterns)
+	}
+}
+
+func TestEvaluateActionLifecycleConditionSupportsDynamicEventAccess(t *testing.T) {
+	context := ConditionContext{
+		GitHub: map[string]any{"event": map[string]any{"action": "opened"}},
+		Env:    map[string]string{"EVENT_FIELD": "action"},
+	}
+	got, err := EvaluateActionLifecycleCondition("github.event[env.EVENT_FIELD] == 'opened'", context)
+	if err != nil || !got {
+		t.Fatalf("EvaluateActionLifecycleCondition() = %v, %v, want true", got, err)
 	}
 }
 
@@ -1837,7 +1957,7 @@ func TestCompileConditionValidationSupportsStringPredicates(t *testing.T) {
 	if resolved, err := EvaluateCompileCondition(source, context); err != nil || !resolved {
 		t.Fatalf("EvaluateCompileCondition() = %v, %v, want true", resolved, err)
 	}
-	if err := ValidateCompileConditionWithMatrix("contains(toJSON(github.event), needs.build.outputs.marker)", JobCondition, context, nil); err == nil || !strings.Contains(err.Error(), "whole github.event access is unsupported") {
+	if err := ValidateCompileConditionWithMatrix("contains(toJSON(github.event), needs.build.outputs.marker)", JobCondition, context, nil); err != nil {
 		t.Fatalf("ValidateCompileConditionWithMatrix() whole event error = %v", err)
 	}
 }
@@ -1875,40 +1995,6 @@ func TestCompileInputLiteralRepresentations(t *testing.T) {
 				t.Fatalf("compileInputLiteral(%#v) = %q, %v, want %q", test.value, got, err, test.want)
 			}
 		})
-	}
-}
-
-func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
-	template := "${{ !inputs.enabled && matrix.run-new && 'inputs.enabled' || inputs['label'] }}"
-	got, err := SubstituteCompileInputs(template, map[string]any{"enabled": false, "label": "it''s ready"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "${{ !false && matrix.run-new && 'inputs.enabled' || 'it''''s ready' }}"
-	if got != want {
-		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
-	}
-}
-
-func TestSubstituteCompileInputsResolvesNestedComputedInputIndex(t *testing.T) {
-	got, err := SubstituteCompileInputs("${{ inputs[inputs.key] }}", map[string]any{"key": "target", "target": "release"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := "${{ 'release' }}"; got != want {
-		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
-	}
-}
-
-func TestSubstituteCompileInputsIgnoresNestedInputsProperties(t *testing.T) {
-	template := "${{ inputs.debug }} ${{ github.event.inputs.debug }} ${{ steps.inputs.name }} ${{ fromJSON(vars.CFG).inputs.name }}"
-	got, err := SubstituteCompileInputs(template, map[string]any{"debug": true, "name": "prod"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "${{ true }} ${{ github.event.inputs.debug }} ${{ steps.inputs.name }} ${{ fromJSON(vars.CFG).inputs.name }}"
-	if got != want {
-		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
 	}
 }
 
@@ -1960,7 +2046,7 @@ func TestReduceAvailableCompileTemplateRejectsIntroducedExpressionSyntax(t *test
 	}
 }
 
-func TestReduceAvailableCompileTemplateRejectsWholeEventAccess(t *testing.T) {
+func TestReduceAvailableCompileTemplatePreservesWholeEventAccess(t *testing.T) {
 	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"action": "opened"}}}
 	context.Event = context.GitHub["event"].(map[string]any)
 	for _, template := range []string{
@@ -1968,9 +2054,9 @@ func TestReduceAvailableCompileTemplateRejectsWholeEventAccess(t *testing.T) {
 		"${{ toJSON(github.event.*) }}",
 		"${{ toJSON(event.*) }}",
 	} {
-		_, err := ReduceAvailableCompileTemplate(template, context)
-		if err == nil || !strings.Contains(err.Error(), "whole github.event access is unsupported") {
-			t.Errorf("ReduceAvailableCompileTemplate(%q) error = %v", template, err)
+		got, err := ReduceAvailableCompileTemplate(template, context)
+		if err != nil || got != template {
+			t.Errorf("ReduceAvailableCompileTemplate(%q) = %q, %v", template, got, err)
 		}
 	}
 }
@@ -2009,12 +2095,12 @@ func TestEvaluateCompileTemplateUsesGitHubNumberRendering(t *testing.T) {
 }
 
 func TestValidateServiceCredentialTemplateContexts(t *testing.T) {
-	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}"} {
+	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER || 'user' }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}", "${{ needs.build.outputs.user }}", "${{ strategy.job-index }}", "${{ inputs.user }}"} {
 		if err := ValidateServiceCredentialTemplate(template); err != nil {
 			t.Errorf("ValidateServiceCredentialTemplate(%q) = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ needs.build.outputs.user }}", "${{ env.USER.extra }}", "${{ secrets }}"} {
+	for _, template := range []string{"${{ matrix.user }}", "${{ env.USER.extra }}", "${{ secrets }}", "${{ 'safe' || secrets[env.KEY] }}", "${{ 'safe' || secrets[needs.build.outputs.key] }}", "${{ 'safe' || toJSON(github) }}"} {
 		if err := ValidateServiceCredentialTemplate(template); err == nil {
 			t.Errorf("ValidateServiceCredentialTemplate(%q) succeeded", template)
 		}
@@ -2047,6 +2133,8 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 		{expression: "${{ case(true, 'safe', github.token) }}", want: `unavailable value "github.token"`},
 		{expression: "${{ case(true, 'safe', secrets.TOKEN) }}", want: `unsupported compile-time context "secrets"`},
 		{expression: "${{ toJSON(github.event) }}", want: `unavailable value "github.event"`},
+		{expression: "${{ github.run_attempt }}", want: `unavailable value "github.run_attempt": run identity is unavailable in this import-time expression position; github values available at import: actor, actor_id, base_ref, event.<property>, event_name, head_ref, ref, ref_name, ref_type, repository, repository_id, repository_owner, repository_owner_id, sha, workflow`},
+		{expression: "${{ github.job }}", want: `unavailable value "github.job"; github values available at import: actor,`},
 		{expression: "${{ toJSON(github.event.*) }}", want: `whole event projection is unsupported`},
 		{expression: "${{ toJSON(event) }}", want: `whole event access is unsupported`},
 		{expression: "${{ hashFiles('go.sum') }}", want: `unsupported compile-time function "hashFiles"`},

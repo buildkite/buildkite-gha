@@ -8,32 +8,52 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
-	"time"
 
-	"github.com/buildkite/buildkite-gha/internal/useragent"
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
 )
 
-const runnerResolutionResponseLimit = 64 << 10
+// A maximum batch of 100 missing_queue rejections whose messages each name a
+// long cluster name stays far below this cap, so oversized responses indicate
+// a misbehaving server rather than a legitimately verbose diagnostic.
+const runnerResolutionResponseLimit = 1 << 20
 const runnerResolutionBatchLimit = 100
 
 type RunnerRequirement struct {
-	ID     string
-	Labels []string
+	ID               string
+	Labels           []string
+	ConfiguredTarget *ConfiguredRunnerTarget
+}
+
+type ConfiguredRunnerTarget struct {
+	Queue    string `json:"queue"`
+	Platform string `json:"platform"`
 }
 
 type RunnerSuggestion struct {
-	ID       string
-	Queue    string
-	Platform string
-	Image    string
-	Warnings []RunnerWarning
+	ID        string
+	Queue     string
+	Platform  string
+	Image     string
+	Agents    map[string]string
+	ToolCache *bool
+	Validated bool
+	Warnings  []RunnerWarning
 }
 
 type RunnerWarning struct {
 	Code    string
 	Message string
+}
+
+// RunnerRejection is the Agent API's refusal to resolve one requirement. Code
+// is an open set owned by the server; callers must tolerate codes they do not
+// recognize and render Message, which the server keeps free of runner labels.
+type RunnerRejection struct {
+	ID       string
+	Code     string
+	Message  string
+	SetupURL string
 }
 
 type AgentRunnerResolverConfig struct {
@@ -46,109 +66,106 @@ type AgentRunnerResolverConfig struct {
 
 type AgentRunnerResolver struct {
 	resolveURL string
-	jobToken   string
-	userAgent  string
-	client     *http.Client
+	agent      *agentapi.Client
 }
 
 func NewAgentRunnerResolver(config AgentRunnerResolverConfig) (*AgentRunnerResolver, error) {
-	resolveURL, err := agentRunnerResolutionURL(config.Endpoint, config.JobID)
+	agent, err := agentapi.New(agentapi.Config{
+		Endpoint: config.Endpoint, JobID: config.JobID, JobToken: config.JobToken,
+		ClientVersion: config.ClientVersion, HTTPClient: config.Client,
+	}, "runner resolution")
 	if err != nil {
 		return nil, err
 	}
-	if config.JobToken == "" || strings.ContainsAny(config.JobToken, "\r\n") {
-		return nil, fmt.Errorf("runner resolution Agent job token is required")
-	}
-	client := config.Client
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-	}
-	bounded := *client
-	bounded.Jar = nil
-	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	if bounded.Timeout == 0 {
-		bounded.Timeout = 15 * time.Second
-	}
 	return &AgentRunnerResolver{
-		resolveURL: resolveURL, jobToken: config.JobToken,
-		userAgent: useragent.FromVersion(config.ClientVersion), client: &bounded,
+		resolveURL: agent.URL("github-actions/runners"), agent: agent,
 	}, nil
 }
 
-func (c *AgentRunnerResolver) Resolve(ctx context.Context, requirements []RunnerRequirement) ([]RunnerSuggestion, error) {
+// Resolve returns the server's target for every requirement it accepted and
+// its rejection for every requirement it refused. Each requirement appears in
+// exactly one of the two results.
+func (c *AgentRunnerResolver) Resolve(ctx context.Context, requirements []RunnerRequirement) ([]RunnerSuggestion, []RunnerRejection, error) {
 	if c == nil {
-		return nil, fmt.Errorf("runner resolver is not configured")
+		return nil, nil, fmt.Errorf("runner resolver is not configured")
 	}
 	var suggestions []RunnerSuggestion
+	var rejections []RunnerRejection
 	for start := 0; start < len(requirements); start += runnerResolutionBatchLimit {
 		end := min(start+runnerResolutionBatchLimit, len(requirements))
-		resolved, err := c.resolveBatch(ctx, requirements[start:end])
+		resolved, rejected, err := c.resolveBatch(ctx, requirements[start:end])
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		suggestions = append(suggestions, resolved...)
+		rejections = append(rejections, rejected...)
 	}
-	return suggestions, nil
+	return suggestions, rejections, nil
 }
 
-func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []RunnerRequirement) ([]RunnerSuggestion, error) {
+func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []RunnerRequirement) ([]RunnerSuggestion, []RunnerRejection, error) {
 	type selector struct {
 		Labels []string `json:"labels"`
 	}
 	type requirement struct {
-		ID       string   `json:"id"`
-		Selector selector `json:"selector"`
+		ID               string                  `json:"id"`
+		Selector         selector                `json:"selector"`
+		ConfiguredTarget *ConfiguredRunnerTarget `json:"configured_target,omitempty"`
 	}
 	body := struct {
-		Requirements []requirement `json:"requirements"`
-	}{Requirements: make([]requirement, len(requirements))}
+		Requirements           []requirement `json:"requirements"`
+		SupportsAgentTags      bool          `json:"supports_agent_tags"`
+		SupportsMacOSAgentTags bool          `json:"supports_macos_agent_tags"`
+		SupportsQueueSetup     bool          `json:"supports_queue_setup"`
+	}{Requirements: make([]requirement, len(requirements)), SupportsAgentTags: true, SupportsMacOSAgentTags: true, SupportsQueueSetup: true}
 	expected := make(map[string]bool, len(requirements))
 	for i, input := range requirements {
 		if input.ID == "" || expected[input.ID] {
-			return nil, fmt.Errorf("runner requirements require unique non-empty IDs")
+			return nil, nil, fmt.Errorf("runner requirements require unique non-empty IDs")
 		}
 		expected[input.ID] = true
-		body.Requirements[i] = requirement{ID: input.ID, Selector: selector{Labels: input.Labels}}
+		body.Requirements[i] = requirement{ID: input.ID, Selector: selector{Labels: input.Labels}, ConfiguredTarget: input.ConfiguredTarget}
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("encode runner resolution request: %w", err)
+		return nil, nil, fmt.Errorf("encode runner resolution request: %w", err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.resolveURL, bytes.NewReader(encoded))
 	if err != nil {
-		return nil, fmt.Errorf("create runner resolution request: %w", err)
+		return nil, nil, fmt.Errorf("create runner resolution request: %w", err)
 	}
-	request.Header.Set("Authorization", "Token "+c.jobToken)
-	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", c.userAgent)
-	response, err := c.client.Do(request)
+	response, err := c.agent.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("request runner resolution: %w", err)
+		return nil, nil, fmt.Errorf("request runner resolution: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, runnerResolutionResponseLimit))
-		return nil, fmt.Errorf("runner resolution service returned HTTP %d", response.StatusCode)
+		return nil, nil, fmt.Errorf("runner resolution service returned HTTP %d", response.StatusCode)
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, runnerResolutionResponseLimit+1))
 	if err != nil {
-		return nil, fmt.Errorf("read runner resolution response: %w", err)
+		return nil, nil, fmt.Errorf("read runner resolution response: %w", err)
 	}
 	if len(payload) > runnerResolutionResponseLimit {
-		return nil, fmt.Errorf("runner resolution response exceeds the %d-byte limit", runnerResolutionResponseLimit)
+		return nil, nil, fmt.Errorf("runner resolution response exceeds the %d-byte limit", runnerResolutionResponseLimit)
 	}
 	var decoded struct {
 		Resolutions []struct {
-			ID     string `json:"id"`
-			Target *struct {
-				Queue    string `json:"queue"`
-				Platform string `json:"platform"`
-				Image    string `json:"image"`
+			ID        string `json:"id"`
+			Validated bool   `json:"validated"`
+			Target    *struct {
+				Queue     string            `json:"queue"`
+				Platform  string            `json:"platform"`
+				Image     string            `json:"image"`
+				Agents    map[string]string `json:"agents"`
+				ToolCache *bool             `json:"tool_cache"`
 			} `json:"target"`
 			Error *struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
+				Code     string `json:"code"`
+				Message  string `json:"message"`
+				SetupURL string `json:"setup_url"`
 			} `json:"error"`
 			Warnings []struct {
 				Code    string `json:"code"`
@@ -158,48 +175,42 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	if err := decoder.Decode(&decoded); err != nil {
-		return nil, fmt.Errorf("decode runner resolution response: %w", err)
+		return nil, nil, fmt.Errorf("decode runner resolution response: %w", err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("runner resolution response has trailing data")
+		return nil, nil, fmt.Errorf("runner resolution response has trailing data")
 	}
 	if len(decoded.Resolutions) != len(requirements) {
-		return nil, fmt.Errorf("runner resolution response has an unexpected number of resolutions")
+		return nil, nil, fmt.Errorf("runner resolution response has an unexpected number of resolutions")
 	}
 	seen := make(map[string]bool, len(decoded.Resolutions))
 	suggestions := make([]RunnerSuggestion, 0, len(decoded.Resolutions))
+	var rejections []RunnerRejection
 	for _, resolution := range decoded.Resolutions {
 		hasTarget := resolution.Target != nil
 		hasError := resolution.Error != nil
 		if !expected[resolution.ID] || seen[resolution.ID] || hasTarget == hasError {
-			return nil, fmt.Errorf("runner resolution response is invalid")
+			return nil, nil, fmt.Errorf("runner resolution response is invalid")
 		}
 		seen[resolution.ID] = true
 		if resolution.Target != nil {
-			suggestion := RunnerSuggestion{ID: resolution.ID, Queue: resolution.Target.Queue, Platform: resolution.Target.Platform, Image: resolution.Target.Image}
+			suggestion := RunnerSuggestion{ID: resolution.ID, Queue: resolution.Target.Queue, Platform: resolution.Target.Platform, Image: resolution.Target.Image, Agents: resolution.Target.Agents, ToolCache: resolution.Target.ToolCache, Validated: resolution.Validated}
 			for _, warning := range resolution.Warnings {
 				if strings.TrimSpace(warning.Code) == "" || strings.TrimSpace(warning.Message) == "" {
-					return nil, fmt.Errorf("runner resolution response contains an invalid warning")
+					return nil, nil, fmt.Errorf("runner resolution response contains an invalid warning")
 				}
 				suggestion.Warnings = append(suggestion.Warnings, RunnerWarning{Code: warning.Code, Message: warning.Message})
 			}
 			suggestions = append(suggestions, suggestion)
-		} else if len(resolution.Warnings) != 0 {
-			return nil, fmt.Errorf("runner resolution response contains warnings without a target")
+			continue
 		}
+		if len(resolution.Warnings) != 0 {
+			return nil, nil, fmt.Errorf("runner resolution response contains warnings without a target")
+		}
+		if strings.TrimSpace(resolution.Error.Code) == "" || strings.TrimSpace(resolution.Error.Message) == "" {
+			return nil, nil, fmt.Errorf("runner resolution response contains an invalid error")
+		}
+		rejections = append(rejections, RunnerRejection{ID: resolution.ID, Code: resolution.Error.Code, Message: resolution.Error.Message, SetupURL: resolution.Error.SetupURL})
 	}
-	return suggestions, nil
-}
-
-func agentRunnerResolutionURL(endpoint, jobID string) (string, error) {
-	if !validBuildkiteJobID(jobID) {
-		return "", fmt.Errorf("runner resolution Agent job ID is required")
-	}
-	u, err := url.Parse(endpoint)
-	if err != nil || !validCredentialServiceURL(u) {
-		return "", fmt.Errorf("safe runner resolution Agent endpoint using HTTPS or loopback HTTP is required")
-	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/github-actions/runners"
-	u.RawPath = ""
-	return u.String(), nil
+	return suggestions, rejections, nil
 }

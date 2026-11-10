@@ -1,6 +1,14 @@
+//go:generate go run ./cmd/generate-cache-profiles
+
 package integration
 
-import "sort"
+import (
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/buildkite/buildkite-gha/internal/git"
+)
 
 const (
 	// Cache commits identify representative audited actions/cache releases admitted
@@ -13,6 +21,9 @@ const (
 	CacheCommit     = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 )
 
+// cacheCommits label the principal upstream releases named in diagnostics.
+// The complete admission set is the generated frozen snapshot in
+// cache_profiles_generated.go.
 var cacheCommits = map[string]string{
 	"f4b3439a656ba812b8cb417d2d49f9c810103092": "v3.4.0",
 	"387e18722e6ff315b24a3b8b071feddd27b7bf7e": "v3.4.2",
@@ -35,23 +46,114 @@ var cacheCommits = map[string]string{
 	CacheCommit: "v6.1.0",
 }
 
-func validateCacheCommit(commit string) error {
-	if _, ok := cacheCommits[commit]; !ok {
-		commits := make([]string, 0, len(cacheCommits))
-		for supported, version := range cacheCommits {
-			commits = append(commits, version+" ("+supported+")")
-		}
-		sort.Strings(commits)
-		return versionError("actions/cache", "Buildkite cache-v2 service", commit, commits)
-	}
-	return nil
+// cacheUnsupportedCommits are snapshot commits upstream withdrew after
+// tagging them. They stay rejected even though their bundles are
+// cache-v2-capable.
+var cacheUnsupportedCommits = map[string]bool{
+	"58c1e461ab4154b5b12d40cb0e84792b845ab8ba": true, // v3.4.1, replaced by v3.4.2
 }
 
-// CacheCommits returns the complete immutable admission set.
+// cacheContract records which entry points of one immutable upstream commit
+// run a bundled @actions/cache client that speaks the cache-v2 protocol the
+// Buildkite cache service implements.
+type cacheContract struct {
+	client              string
+	root, restore, save bool
+}
+
+func (c cacheContract) admits(entryPoint string) bool {
+	switch entryPoint {
+	case "":
+		return c.root
+	case "restore":
+		return c.restore
+	case "save":
+		return c.save
+	}
+	return false
+}
+
+// validateCacheCommitFor admits one action entry point only when the exact
+// commit is in the frozen snapshot. Unlike the native checkout and
+// upload-artifact adapters, actions/cache runs the upstream bundle against
+// the job-scoped cache token, so a commit outside the snapshot never runs.
+// The compiler substitutes the release from SubstituteCacheCommit instead.
+func validateCacheCommitFor(entryPoint string) func(string) error {
+	return func(commit string) error {
+		if !git.ValidObjectID(commit) || cacheUnsupportedCommits[commit] || !cacheCommitContracts[commit].admits(entryPoint) {
+			return versionError("actions/cache", "Buildkite cache-v2 service", commit, supportedCacheContracts())
+		}
+		return nil
+	}
+}
+
+// SubstituteCacheCommit selects the audited release that runs in place of a
+// resolved actions/cache commit outside the frozen snapshot. It returns the
+// newest principal release sharing the requested version ref's major, or the
+// newest principal release overall when the ref names no admitted major.
+func SubstituteCacheCommit(requestedRef string) (commit, release string) {
+	requestedMajor, _, _ := strings.Cut(strings.TrimPrefix(requestedRef, "v"), ".")
+	var newest, newestForMajor cacheRelease
+	for candidate, label := range cacheCommits {
+		release := parseCacheRelease(candidate, label)
+		if release.newer(newest) {
+			newest = release
+		}
+		if strconv.Itoa(release.major) == requestedMajor && release.newer(newestForMajor) {
+			newestForMajor = release
+		}
+	}
+	if newestForMajor.commit != "" {
+		return newestForMajor.commit, newestForMajor.label
+	}
+	return newest.commit, newest.label
+}
+
+type cacheRelease struct {
+	commit, label       string
+	major, minor, patch int
+}
+
+func parseCacheRelease(commit, label string) cacheRelease {
+	release := cacheRelease{commit: commit, label: label}
+	parts := strings.Split(strings.TrimPrefix(label, "v"), ".")
+	numbers := []*int{&release.major, &release.minor, &release.patch}
+	for i := 0; i < len(parts) && i < len(numbers); i++ {
+		*numbers[i], _ = strconv.Atoi(parts[i])
+	}
+	return release
+}
+
+func (r cacheRelease) newer(other cacheRelease) bool {
+	if other.commit == "" {
+		return true
+	}
+	if r.major != other.major {
+		return r.major > other.major
+	}
+	if r.minor != other.minor {
+		return r.minor > other.minor
+	}
+	return r.patch > other.patch
+}
+
+func supportedCacheContracts() []string {
+	commits := make([]string, 0, len(cacheCommits)+1)
+	for supported, version := range cacheCommits {
+		commits = append(commits, version+" ("+supported+")")
+	}
+	sort.Strings(commits)
+	return append(commits, "other cache-v2 commits in the frozen upstream release and main snapshots (main "+cacheMainSnapshotCommit+")")
+}
+
+// CacheCommits returns the complete immutable admission set: every snapshot
+// commit whose root, restore, and save entry points all speak cache v2.
 func CacheCommits() []string {
-	commits := make([]string, 0, len(cacheCommits))
-	for commit := range cacheCommits {
-		commits = append(commits, commit)
+	commits := make([]string, 0, len(cacheCommitContracts))
+	for commit, contract := range cacheCommitContracts {
+		if !cacheUnsupportedCommits[commit] && contract.root && contract.restore && contract.save {
+			commits = append(commits, commit)
+		}
 	}
 	sort.Strings(commits)
 	return commits

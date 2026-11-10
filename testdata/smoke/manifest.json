@@ -11,6 +11,15 @@
       "action_preflight": "none"
     },
     {
+      "id": "smoke-powershell",
+      "workflow": "testdata/compatibility-gaps/.github/workflows/other-shells.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "runtime-pass",
+      "evidence": "PowerShell 7.4.13 on Linux passes TestPowerShellExecution and TestCompatibilityGapOtherShells.",
+      "note": "Execution requires pwsh on PATH; the local smoke gate only validates and compiles.",
+      "action_preflight": "none"
+    },
+    {
       "id": "smoke-concurrent",
       "workflow": "testdata/smoke/.github/workflows/concurrent.yml",
       "event": "testdata/smoke/events/push.json",
@@ -126,6 +135,24 @@
       "evidence": "Exact-commit Buildkite build 252 and a read-only API observation proved both persisted job-scoped workflow-command annotation contracts.",
       "note": "The verifier bound build 252, merged implementation commit 4050f0c884eef0f54a77c27958abe3ca21ede9e0, and generated job 019fb5d6-f314-4294-b991-7ceb540604b7.",
       "action_preflight": "none"
+    },
+    {
+      "id": "hash-files",
+      "workflow": "testdata/smoke/.github/workflows/hash-files.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "Expression and runtime tests cover hashing, glob ordering, empty matches, and step conditions.",
+      "note": "Run the hash-files compatibility proof for end-to-end hosted runtime evidence.",
+      "action_preflight": "none"
+    },
+    {
+      "id": "rust",
+      "workflow": "testdata/smoke/.github/workflows/rust.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "Validation, compilation, and hosted admission cover the dtolnay/rust-toolchain composite action.",
+      "note": "Run the rust compatibility proof for end-to-end hosted cargo build and test evidence.",
+      "action_preflight": "hosted"
     },
     {
       "id": "upload-artifact",

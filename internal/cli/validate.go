@@ -18,9 +18,10 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
-func validate(args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
+func validate(ctx context.Context, args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
 	args, actionCacheDir, err := validateActionCacheArgs(args)
 	if err != nil {
 		return usageError(stderr, "validate: %v", err)
@@ -32,16 +33,16 @@ func validate(args []string, stdout, stderr io.Writer, clientVersion string, age
 	if actionCacheDir != "" && profile == "" {
 		return usageError(stderr, "validate: --action-cache-dir requires --profile hosted")
 	}
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	if actionCacheDir != "" {
-		if _, err := actionsource.NewStore(actionCacheDir, nil); err != nil {
+		if _, err := actionsource.NewStoreContext(ctx, actionCacheDir, nil); err != nil {
 			return usageError(stderr, "validate: --action-cache-dir: %v", err)
 		}
 	}
 	if profile != "" && eventPath == "" && eventName == "" && !allEvents {
 		return usageError(stderr, "validate: --profile hosted requires --event, --event-path, or --all-events; use bare validate <workflow> for event-independent syntax and trigger compatibility validation")
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	out := newProcessingOutput(ctx, "validate", format, stdout, stderr, agent)
 	if allEvents {
 		return validateAllEvents(ctx, out, workflowPath, clientVersion, actionCacheDir, nil, stderr)
@@ -124,12 +125,21 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 	}
 	// Profile validation applies the hosted runner policy so validate and
 	// upload agree on supported labels, including the default macOS queue.
+	request := hostedCompileRequest{
+		WorkflowPath:     workflowPath,
+		WorkflowSource:   source,
+		EventSource:      event,
+		Version:          commandVersion(clientVersion),
+		ImporterStep:     "buildkite-gha-profile-importer",
+		RepositorySource: repositorySource,
+	}
 	validationOptions := compiler.DefaultOptions()
 	if profile != "" {
-		validationOptions = hostedOptions("", nil, nil)
+		validationOptions = request.validationOptions()
 	}
 	validationOptions.RepositorySource = repositorySource
-	processingReport, ok := validatedProcessingReportWithOptions(ctx, out, workflowPath, profile, source, event, loadEvent != nil, &validationOptions)
+	validationOptions.WorkflowSource = candidateWorkflowSource(event)
+	processingReport, ok := validatedProcessingReport(ctx, out, workflowPath, profile, source, event, loadEvent != nil, validationOptions)
 	if !ok {
 		return 1
 	}
@@ -149,32 +159,33 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		}
 		// Profile validation never executes generated plans, so the importer
 		// digest stands in for every platform's runtime distribution.
-		runtimeDistributions := map[compiler.Platform]string{
+		request.DistributionDigest = distributionDigest
+		request.RuntimeDistributions = map[compiler.Platform]string{
 			compiler.PlatformLinuxAMD64:  distributionDigest,
+			compiler.PlatformLinuxARM64:  distributionDigest,
 			compiler.PlatformDarwinARM64: distributionDigest,
 		}
-		preflight, profileErr := compileHostedWithActionCache(ctx, workflowPath, source, event, commandVersion(clientVersion), distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, actionCacheDir, repositorySource, nil)
-		applyHostedPreflight(&processingReport, preflight)
+		preflight, profileErr := compileHostedRequest(ctx, request)
+		applyHostedCompilation(&processingReport, workflowPath, preflight, profileErr)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
 				return 1
 			}
-			processingReport.Result = classifyHostedFailure(&processingReport, workflowPath, profileErr)
 			_ = out.write(ctx, processingReport)
 			return 1
 		}
 		if preflight.HasActions {
 			processingReport.Diagnostics = append(processingReport.Diagnostics, compatibility.Diagnostic{
-				Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Category: "compatibility", Stage: string(compiler.StageAdmission),
+				Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Category: "compatibility", Stage: workflowprocessing.StageAdmission,
 				Message: "Action runtime behavior was not evaluated. The action source, metadata, declared runtime, entrypoints, inputs, and nested actions were validated, but the action code was not executed and may depend on GitHub-only services. No action is required for admission; test the action on Buildkite if runtime compatibility is important.",
 			})
 		}
 		if contextRequired {
-			processingReport.SetStage(string(compiler.StageAdmission), compatibility.NotEvaluated)
+			processingReport.SetStage(workflowprocessing.StageAdmission, compatibility.NotEvaluated)
 			processingReport.Admission.Result = compatibility.NotEvaluated
 			processingReport.Diagnostics = append(processingReport.Diagnostics, compatibility.Diagnostic{
-				Level: "error", Code: compiler.CodeContextRequired, Category: "context", Stage: string(compiler.StageAdmission),
+				Level: "error", Code: workflowprocessing.CodeContextRequired, Category: "context", Stage: workflowprocessing.StageAdmission,
 				Message: "Push and pull request path filters require linked Buildkite webhook data and a verified local git diff before admission can be determined.",
 			})
 			processingReport.Result = "context-required"
@@ -183,9 +194,6 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 			}
 			return 1
 		}
-		processingReport.SetStage(string(compiler.StageAdmission), compatibility.Passed)
-		processingReport.Admission.Result = "admitted"
-		processingReport.Result = "admitted"
 		if out.write(ctx, processingReport) != nil {
 			return 1
 		}
@@ -222,7 +230,7 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 		actionSource, sourceCleanup, sourceErr := newHostedActionSource(ctx, actionCacheDir, clientVersion, nil, nil)
 		cleanup = sourceCleanup
 		if sourceErr != nil {
-			validationReport := compatibility.EnvironmentProcessingReport(workflowPath, hostedProfile, "public repository source could not be configured")
+			validationReport := repositorySourceSetupReport(workflowPath, "public repository source could not be configured", sourceErr)
 			report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
 			_ = out.writeV3(ctx, report)
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", sourceErr)
@@ -244,7 +252,7 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 	validation, validationErr := compiler.ValidateWithOptionsContext(ctx, workflowPath, source, validationOptions)
 	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)
 	if validationErr != nil {
-		validationReport.Result = "incompatible"
+		validationReport.Result = validationFailureResult(validationReport)
 		report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
 		if out.writeV3(ctx, report) != nil {
 			return 1
@@ -262,7 +270,7 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 		declared[trigger.Event] = true
 	}
 	failed := false
-	for _, event := range []string{"push", "pull_request", "merge_group", "release", "workflow_dispatch", "schedule"} {
+	for _, event := range []string{"push", "pull_request", "merge_group", "release", "deployment", "deployment_status", "create", "delete", "label", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "workflow_dispatch", "schedule"} {
 		if !declared[event] {
 			continue
 		}
@@ -381,8 +389,8 @@ func validateArgs(args []string) (workflowPath, eventPath, eventName, format, pr
 	if eventSeen && profile == "" {
 		return "", "", "", "", "", false, fmt.Errorf("--event requires --profile hosted")
 	}
-	if eventSeen && !slices.Contains([]string{"push", "pull_request", "merge_group", "release", "workflow_dispatch", "schedule"}, eventName) {
-		return "", "", "", "", "", false, fmt.Errorf("unsupported --event %q; supported events are push, pull_request, merge_group, release, workflow_dispatch, and schedule", eventName)
+	if eventSeen && !slices.Contains([]string{"push", "pull_request", "merge_group", "release", "deployment", "deployment_status", "create", "delete", "label", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "workflow_dispatch", "schedule"}, eventName) {
+		return "", "", "", "", "", false, fmt.Errorf("unsupported --event %q; supported events are push, pull_request, merge_group, release, deployment, deployment_status, create, delete, label, fork, public, gollum, page_build, watch, milestone, branch_protection_rule, discussion, discussion_comment, issues, issue_comment, pull_request_review, pull_request_review_comment, workflow_dispatch, and schedule", eventName)
 	}
 	if allEvents && (eventPathSeen || eventSeen) {
 		return "", "", "", "", "", false, fmt.Errorf("--all-events is mutually exclusive with --event and --event-path")
@@ -408,9 +416,49 @@ func generatedEventSnapshot(name string) ([]byte, error) {
 		Ref:        "refs/heads/main", SHA: strings.Repeat("0", 40), Actor: "buildkite-gha", Payload: map[string]any{},
 	}
 	switch name {
+	case "discussion", "discussion_comment":
+		event.Payload["repository"] = map[string]any{"id": 1, "full_name": "example/repository"}
+		event.Payload["action"] = "created"
+		event.Payload["discussion"] = map[string]any{"id": 2, "number": 1, "title": "Question"}
+		if name == "discussion_comment" {
+			event.Payload["comment"] = map[string]any{"id": 3, "discussion_id": 2, "body": "An answer"}
+		}
+	case "branch_protection_rule":
+		event.Payload["repository"] = map[string]any{"id": 1, "full_name": "example/repository"}
+		event.Payload["action"] = "created"
+		event.Payload["rule"] = map[string]any{"id": 2, "repository_id": 1, "name": "release/*"}
+	case "milestone":
+		event.Payload["repository"] = map[string]any{"id": 1, "full_name": "example/repository"}
+		event.Payload["action"] = "created"
+		event.Payload["milestone"] = map[string]any{"id": 2, "number": 1, "title": "Release"}
+	case "watch":
+		event.Payload["repository"] = map[string]any{"id": 1, "full_name": "example/repository"}
+		event.Payload["action"] = "started"
+	case "page_build":
+		event.Payload["repository"] = map[string]any{"id": 1, "full_name": "example/repository"}
+		event.Payload["id"] = 2
+		event.Payload["build"] = map[string]any{"commit": strings.Repeat("1", 40), "status": "built"}
+	case "gollum":
+		event.Payload["repository"] = map[string]any{"id": 1, "full_name": "example/repository"}
+		event.Payload["pages"] = []any{map[string]any{"page_name": "Home", "action": "created", "sha": strings.Repeat("1", 40)}}
+	case "public":
+		event.Payload["repository"] = map[string]any{"id": 1, "full_name": "example/repository", "private": false}
+	case "fork":
+		event.Payload["repository"] = map[string]any{"id": 1, "full_name": "example/repository"}
+		event.Payload["forkee"] = map[string]any{"id": 2, "full_name": "contributor/fork"}
+	case "label":
+		event.Payload["repository"] = map[string]any{"id": 1, "full_name": "example/repository"}
+		event.Payload["action"] = "created"
+		event.Payload["label"] = map[string]any{"id": 2, "name": "triage"}
+	case "create", "delete":
+		event.Payload["repository"] = map[string]any{"id": 1, "full_name": "example/repository"}
+		event.Payload["ref"], event.Payload["ref_type"] = "feature/example", "branch"
+		if name == "create" {
+			event.Ref = "refs/heads/feature/example"
+		}
 	case "push":
 		event.Payload["ref"] = event.Ref
-	case "pull_request":
+	case "pull_request", "pull_request_review", "pull_request_review_comment":
 		event.Ref = "refs/pull/1/merge"
 		event.Payload["action"] = "opened"
 		event.Payload["number"] = 1
@@ -418,6 +466,14 @@ func generatedEventSnapshot(name string) ([]byte, error) {
 			"number": 1,
 			"base":   map[string]any{"ref": "main"},
 			"head":   map[string]any{"ref": "example"},
+		}
+		switch name {
+		case "pull_request_review":
+			event.Payload["action"] = "submitted"
+			event.Payload["review"] = map[string]any{"id": 2, "state": "approved"}
+		case "pull_request_review_comment":
+			event.Payload["action"] = "created"
+			event.Payload["comment"] = map[string]any{"id": 3, "path": "example.go"}
 		}
 	case "merge_group":
 		event.Ref = "refs/heads/gh-readonly-queue/main/pr-1-deadbeef"
@@ -436,11 +492,25 @@ func generatedEventSnapshot(name string) ([]byte, error) {
 			"draft":      false,
 			"prerelease": false,
 		}
+	case "deployment", "deployment_status":
+		event.Ref = "refs/heads/staging"
+		event.Payload["repository"] = map[string]any{"id": 1, "full_name": "example/repository"}
+		event.Payload["deployment"] = map[string]any{"id": 2, "sha": event.SHA, "ref": "staging", "environment": "preview"}
+		if name == "deployment_status" {
+			event.Payload["deployment_status"] = map[string]any{"id": 3, "state": "success", "environment": "preview", "environment_url": "https://example.com/preview"}
+		}
+	case "issues":
+		event.Payload["action"] = "opened"
+		event.Payload["issue"] = map[string]any{"number": 1}
+	case "issue_comment":
+		event.Payload["action"] = "created"
+		event.Payload["issue"] = map[string]any{"number": 1}
+		event.Payload["comment"] = map[string]any{"id": 1}
 	case "schedule":
 		event.Payload["schedule"] = "0 0 * * *"
 	case "workflow_dispatch":
 	default:
-		return nil, fmt.Errorf("unsupported generated event %q; supported events are push, pull_request, merge_group, release, workflow_dispatch, and schedule", name)
+		return nil, fmt.Errorf("unsupported generated event %q; supported events are push, pull_request, merge_group, release, deployment, deployment_status, create, delete, label, fork, public, gollum, page_build, watch, milestone, branch_protection_rule, discussion, discussion_comment, issues, issue_comment, pull_request_review, pull_request_review_comment, workflow_dispatch, and schedule", name)
 	}
 	return json.Marshal(event)
 }

@@ -8,12 +8,12 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/expression"
-	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
 
 type registeredPost struct {
-	condition  string
-	invocation *preparedInvocation
+	conditionSite *executionprogram.Site
+	invocation    *preparedInvocation
 }
 
 type postRegistry struct {
@@ -34,6 +34,15 @@ type preparedInvocation struct {
 
 type remotePreparations map[string]*preparedInvocation
 
+// actionPreFailure identifies one failed preparation occurrence, even when
+// independent failures wrap the same cancellation or deadline sentinel.
+type actionPreFailure struct {
+	err error
+}
+
+func (e *actionPreFailure) Error() string { return e.err.Error() }
+func (e *actionPreFailure) Unwrap() error { return e.err }
+
 func bindCompositeInvocationSteps(invocation *preparedInvocation, steps map[string]expression.StepStatus) {
 	if invocation != nil && invocation.isolated {
 		invocation.eval.Steps = steps
@@ -45,7 +54,7 @@ type remotePreparationStatus struct {
 }
 
 type remotePreparationTimeout struct {
-	step     plan.Step
+	step     executionprogram.Step
 	eval     expression.Context
 	resolved bool
 	bounded  context.Context
@@ -54,11 +63,11 @@ type remotePreparationTimeout struct {
 
 func (t *remotePreparationTimeout) context(parent context.Context) (context.Context, error) {
 	if !t.resolved {
-		step, err := evaluateStepTimeout(t.step, t.eval)
+		timeoutMinutes, err := evaluateStepTimeout(t.step, t.eval)
 		if err != nil {
 			return nil, fmt.Errorf("controls: %w", err)
 		}
-		t.bounded, t.cancel = stepContext(parent, step.TimeoutMinutes)
+		t.bounded, t.cancel = stepContext(parent, timeoutMinutes)
 		t.resolved = true
 	}
 	return t.bounded, nil
@@ -89,7 +98,7 @@ func (w *node16DeprecationWarnings) record(reference string) {
 	w.actions[reference] = struct{}{}
 }
 
-func (w *node16DeprecationWarnings) emit(processor *commandProcessor) {
+func (w *node16DeprecationWarnings) emit(processor *commandOutputProcessor) {
 	if w == nil || processor == nil {
 		return
 	}

@@ -3,12 +3,14 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
+	"github.com/buildkite/buildkite-gha/internal/compiler"
 )
 
 func TestValidateReportsIndependentWorkflowAndEventSyntaxFailures(t *testing.T) {
@@ -29,7 +31,7 @@ func TestValidateReportsIndependentWorkflowAndEventSyntaxFailures(t *testing.T) 
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	results := map[string]string{}
+	results := map[compiler.ProcessingStage]string{}
 	for _, stage := range report.Stages {
 		results[stage.ID] = stage.Result
 	}
@@ -49,7 +51,7 @@ func TestValidateReportsIndependentWorkflowAndEventSyntaxFailures(t *testing.T) 
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	results = map[string]string{}
+	results = map[compiler.ProcessingStage]string{}
 	for _, stage := range report.Stages {
 		results[stage.ID] = stage.Result
 	}
@@ -58,6 +60,55 @@ func TestValidateReportsIndependentWorkflowAndEventSyntaxFailures(t *testing.T) 
 	}
 	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Category != "syntax" {
 		t.Fatalf("diagnostics with valid event = %#v", report.Diagnostics)
+	}
+}
+
+func TestValidateReportsActionableWorkflowSyntaxDiagnostics(t *testing.T) {
+	for _, test := range []struct {
+		name, source, headline, message, job string
+		column                               int
+	}{
+		{
+			name:     "GitHub environment expression name",
+			source:   "on: push\njobs:\n  deploy:\n    environment: ${{ github.ref_name }}\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			headline: `job "deploy": environment names that use expressions are unsupported; use a literal environment name`,
+			message:  `job "deploy": environment names that use expressions are unsupported; use a literal environment name`,
+			job:      "deploy",
+			column:   18,
+		},
+		{
+			name:     "job-level write-all",
+			source:   "on: push\njobs:\n  publish:\n    permissions: write-all\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			headline: "permissions: write-all is unsupported as job-level shorthand.",
+			message:  `permissions: write-all is unsupported as job-level shorthand. In job "publish", you cannot set separate repository permissions. At the workflow top level, declare each needed repository permission, such as contents: write and pull-requests: write. These permissions apply to every job that receives GITHUB_TOKEN. Use permissions: write-all at the workflow top level only when every supported repository permission should have write access. If you need different repository permissions for individual jobs, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`,
+			job:      "publish",
+			column:   18,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflowPath := filepath.Join(t.TempDir(), "workflow.yml")
+			if err := os.WriteFile(workflowPath, []byte(test.source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+				t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+			}
+			var report compatibility.ProcessingReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Diagnostics) != 1 {
+				t.Fatalf("diagnostics = %#v, want one", report.Diagnostics)
+			}
+			diagnostic := report.Diagnostics[0]
+			if diagnostic.Message != test.message || diagnostic.Job != test.job || diagnostic.Location == nil || diagnostic.Location.Path != workflowPath || diagnostic.Location.Line != 4 || diagnostic.Location.Column != test.column {
+				t.Fatalf("diagnostic = %#v, want message %q, job %q at %s:4:%d", diagnostic, test.message, test.job, workflowPath, test.column)
+			}
+			if headline, _ := annotationDiagnosticPresentation(diagnostic); headline != test.headline {
+				t.Fatalf("diagnostic headline = %q, want %q", headline, test.headline)
+			}
+		})
 	}
 }
 
@@ -84,10 +135,11 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		}
 		for _, want := range []string{
 			`<h2 class="h4 mb2">Workflow could not be run</h2>`,
-			`<p><strong>Windows runners aren&#39;t currently supported.</strong></p>`,
-			`Imported jobs run on Linux or macOS Buildkite hosted agents.`,
-			`If this job can run on Linux, change <code>windows-latest</code> to <code>ubuntu-latest</code>.`,
-			`If it requires Windows, open an issue in <a href="https://github.com/buildkite/buildkite-gha" target="_blank">buildkite/buildkite-gha</a> to help us prioritize Windows support.`,
+			`<p><strong>No Windows runner target is configured.</strong></p>`,
+			`Windows jobs require a Windows Server 2022 x86-64 queue.`,
+			`Ask a pipeline administrator to map windows-latest or windows-2022 to that queue`,
+			`contact Buildkite support to check hosted Windows access and automatic routing.`,
+			`href="https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#windows-jobs"`,
 			"Job <code>test</code>",
 		} {
 			if !strings.Contains(string(annotation.stdin), want) {
@@ -126,6 +178,68 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 			t.Fatalf("stderr = %q", stderr.String())
 		}
 	})
+}
+
+func TestValidatePublishesActionableTriggerDiagnostics(t *testing.T) {
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+
+	tests := []struct {
+		name           string
+		workflow       string
+		wantMessage    string
+		wantAnnotation []string
+		line, column   int
+	}{
+		{
+			name: "unsupported merge group type",
+			line: 3, column: 5,
+			workflow: "on:\n  merge_group:\n    types: [not-real]\n" +
+				"jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+			wantMessage: `merge_group type "not-real" is unsupported. Supported types are checks_requested and destroyed. Set types to the activities this workflow handles. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
+			wantAnnotation: []string{
+				`<p><strong>merge_group type &#34;not-real&#34; is unsupported.</strong></p>`,
+				`Supported types are checks_requested and destroyed.`,
+				`Set types to the activities this workflow handles.`,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workflowPath := filepath.Join(t.TempDir(), "workflow.yml")
+			if err := os.WriteFile(workflowPath, []byte(test.workflow), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev", runner); code != 1 {
+				t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+			}
+			var report compatibility.ProcessingReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Diagnostics) != 1 || report.Diagnostics[0].Message != test.wantMessage {
+				t.Fatalf("diagnostics = %#v, want message %q", report.Diagnostics, test.wantMessage)
+			}
+			location := report.Diagnostics[0].Location
+			if location == nil || location.Path != workflowPath || location.Line != test.line || location.Column != test.column {
+				t.Fatalf("diagnostic location = %#v, want %s:%d:%d", location, workflowPath, test.line, test.column)
+			}
+			if len(runner.commands) != 1 || runner.commands[0].args[8] != "error" {
+				t.Fatalf("commands = %#v, want one error annotation", runner.commands)
+			}
+			annotation := string(runner.commands[0].stdin)
+			for _, want := range append(test.wantAnnotation,
+				fmt.Sprintf("<code>%s:%d:%d</code>", workflowPath, test.line, test.column),
+				`open an issue in <a href="https://github.com/buildkite/buildkite-gha" target="_blank">buildkite/buildkite-gha</a> so we can prioritize it`,
+			) {
+				if !strings.Contains(annotation, want) {
+					t.Fatalf("annotation = %q, want %q", annotation, want)
+				}
+			}
+		})
+	}
 }
 
 func TestValidateActionCacheRequiresHostedProfile(t *testing.T) {

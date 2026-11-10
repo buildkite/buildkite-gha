@@ -10,11 +10,13 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
-func compile(args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
+func compile(ctx context.Context, args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
 	version := commandVersion(clientVersion)
 	workflowPath, eventPath, format, err := compileArgs(args)
 	if err != nil {
@@ -23,7 +25,7 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 	if eventPath == "" {
 		return usageError(stderr, "compile: --event-path is required")
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	out := newProcessingOutput(ctx, "compile", "text", stderr, stderr, agent)
 	event, eventErr := os.ReadFile(eventPath)
@@ -41,8 +43,32 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 	}
 	defer cleanup()
 	options := compiler.DefaultOptions()
+	options.EventFile = true // --event-path supplies the caller's event payload.
 	options.RepositorySource = repositorySource
-	processingReport, ok := validatedProcessingReportWithOptions(ctx, out, workflowPath, "", source, event, true, &options)
+	options.WorkflowSource = candidateWorkflowSource(event)
+	// Environments resolve only through the job-scoped Agent API, so compile
+	// resolves them when it runs inside a Buildkite job and otherwise leaves
+	// workflows that declare environments to fail at compile time.
+	options.EnvironmentSource = environmentSourceFromAgent(clientVersion)
+	// Repository and organization variables likewise resolve only through the
+	// job-scoped Agent API, and only when the workflow references vars.
+	// Compile-time fields read them, so they must be known before validation.
+	variables := variableSourceFromAgent(clientVersion)
+	parsedEvent, parsedEventErr := compiler.ParseEvent(event)
+	workflowReferencesVars := false
+	if variables != nil && parsedEventErr == nil {
+		staticValidation, _ := compiler.ValidateWithOptionsContext(ctx, workflowPath, source, options)
+		workflowReferencesVars = staticValidation.ReferencesVars
+		vars, varsErr := resolveVariableSources(ctx, variables, parsedEvent, workflowReferencesVars)
+		if varsErr != nil {
+			report := compatibility.NewProcessingReport(workflowPath, "")
+			report.Result = "indeterminate"
+			report.AddVariableResolutionFailure(varsErr.Error())
+			return out.fail(ctx, report, varsErr)
+		}
+		options.Vars = vars
+	}
+	processingReport, ok := validatedProcessingReport(ctx, out, workflowPath, "", source, event, true, options)
 	if !ok {
 		return 1
 	}
@@ -67,13 +93,39 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 			return 1
 		}
 		bundle, compileErr := compiler.CompileBundleContext(ctx, workflowPath, source, event, version, digest, "gha-importer", options)
+		if compileErr == nil && parsedEventErr == nil {
+			actionVars, again, varsErr := resolveActionVariables(ctx, variables, parsedEvent, workflowReferencesVars, bundle)
+			if varsErr != nil {
+				processingReport.AddVariableResolutionFailure(varsErr.Error())
+				processingReport.Result = "indeterminate"
+				return out.fail(ctx, processingReport, varsErr)
+			}
+			if again {
+				options.Vars = actionVars
+				bundle, compileErr = compiler.CompileBundleContext(ctx, workflowPath, source, event, version, digest, "gha-importer", options)
+			}
+		}
+		if bundle.IR.Sources != nil {
+			processingReport.Sources = bundle.IR.Sources
+		}
 		processingReport.ApplyEvidence(bundle.Processing)
 		err = compileErr
 		result = bundle.Pipeline
 		warnings = bundle.IR.Warnings
+		if err == nil && len(bundle.IR.Continuations) != 0 {
+			// The workflow compiles, but its deferred upload steps exist only
+			// in the pipeline that upload emits inside a build, so a rendered
+			// single-workflow pipeline would omit jobs.
+			processingReport.Result = "compilable"
+			_ = out.write(ctx, processingReport)
+			writeCompilerWarnings(stderr, "compile", workflowPath, warnings)
+			descriptor := bundle.IR.Continuations[0].Descriptor
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: job %q takes its %s from a job output, so upload expands it with a deferred step inside the build; the pipeline format cannot render it. Use --format ir-json to inspect the compiled graph.\n", descriptor.Job, descriptor.Kind())
+			return 1
+		}
 	}
 	if err != nil {
-		processingReport.AddFailure(workflowPath, string(compiler.StagePlans), compiler.CodePlanConstruction, "compatibility", err)
+		processingReport.AddFailure(workflowPath, workflowprocessing.StagePlans, workflowprocessing.CodePlanConstruction, "compatibility", err)
 		processingReport.Result = "incompatible"
 		_ = out.write(ctx, processingReport)
 		return 1
@@ -90,7 +142,11 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 
 func writeCompilerWarnings(stderr io.Writer, command, path string, warnings []compiler.Warning) {
 	for _, warning := range warnings {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: %s: warning: %s:%d:%d: [%s] %s\n", command, path, warning.Line, warning.Column, warning.Code, warning.Message)
+		warningPath := warning.Path
+		if warningPath == "" {
+			warningPath = path
+		}
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: %s: warning: %s:%d:%d: [%s] %s\n", command, warningPath, warning.Line, warning.Column, warning.Code, warning.Message)
 	}
 }
 

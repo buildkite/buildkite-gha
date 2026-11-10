@@ -13,14 +13,13 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
-	"github.com/buildkite/buildkite-gha/internal/useragent"
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
 )
 
 const (
@@ -49,45 +48,31 @@ type AgentOIDCTokenConfig struct {
 
 // AgentOIDCTokens mints job-bound Buildkite OIDC tokens through the Agent API.
 type AgentOIDCTokens struct {
-	mintURL   string
-	jobToken  string
-	claims    []string
-	awsTags   []string
-	subject   string
-	userAgent string
-	client    *http.Client
+	mintURL string
+	claims  []string
+	awsTags []string
+	subject string
+	agent   *agentapi.Client
 }
 
 func NewAgentOIDCTokens(config AgentOIDCTokenConfig) (*AgentOIDCTokens, error) {
-	mintURL, err := agentOIDCTokenURL(config.Endpoint, config.JobID)
+	agent, err := agentapi.New(agentapi.Config{
+		Endpoint: config.Endpoint, JobID: config.JobID, JobToken: config.JobToken,
+		ClientVersion: config.ClientVersion, HTTPClient: config.Client,
+	}, "OIDC token")
 	if err != nil {
 		return nil, err
 	}
-	if config.JobToken == "" || strings.ContainsAny(config.JobToken, "\r\n") {
-		return nil, fmt.Errorf("OIDC token Agent job token is required")
-	}
-	client := config.Client
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-	}
-	bounded := *client
-	bounded.Jar = nil
-	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	if bounded.Timeout == 0 {
-		bounded.Timeout = 15 * time.Second
-	}
 	return &AgentOIDCTokens{
-		mintURL:   mintURL,
-		jobToken:  config.JobToken,
-		claims:    append([]string(nil), config.Claims...),
-		awsTags:   append([]string(nil), config.AWSSessionTags...),
-		subject:   config.SubjectClaim,
-		userAgent: useragent.FromVersion(config.ClientVersion),
-		client:    &bounded,
+		mintURL: agent.URL("oidc/tokens"),
+		claims:  append([]string(nil), config.Claims...),
+		awsTags: append([]string(nil), config.AWSSessionTags...),
+		subject: config.SubjectClaim,
+		agent:   agent,
 	}, nil
 }
 
-func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (string, error) {
+func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (token string, err error) {
 	if c == nil {
 		return "", fmt.Errorf("OIDC token provider is not configured")
 	}
@@ -107,11 +92,9 @@ func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (strin
 	if err != nil {
 		return "", fmt.Errorf("create OIDC token request: %w", err)
 	}
-	request.Header.Set("Authorization", "Token "+c.jobToken)
-	request.Header.Set("Accept", "application/json")
+	defer func() { err = markJobSetupFailure(FailureClassOIDCToken, credentialRequestFailure(ctx, err)) }()
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", c.userAgent)
-	response, err := c.client.Do(request)
+	response, err := c.agent.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("request OIDC token: %w", err)
 	}
@@ -133,7 +116,7 @@ func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (strin
 		Token string `json:"token"`
 	}
 	if err := decoder.Decode(&decoded); err != nil {
-		return "", fmt.Errorf("decode OIDC token response: %w", err)
+		return "", fmt.Errorf("decode OIDC token response")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return "", fmt.Errorf("OIDC token response has trailing data")
@@ -144,41 +127,19 @@ func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (strin
 	return decoded.Token, nil
 }
 
-func agentOIDCTokenURL(endpoint, jobID string) (string, error) {
-	if !validBuildkiteJobID(jobID) {
-		return "", fmt.Errorf("OIDC token Agent job ID is required")
-	}
-	u, err := url.Parse(endpoint)
-	if err != nil || !validCredentialServiceURL(u) {
-		return "", fmt.Errorf("safe OIDC token Agent endpoint using HTTPS or loopback HTTP is required")
-	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/oidc/tokens"
-	u.RawPath = ""
-	return u.String(), nil
-}
-
-type oidcTokenHTTPError struct {
-	status  int
-	message string
-}
-
-func (e *oidcTokenHTTPError) Error() string { return e.message }
-
 func oidcTokenStatusError(status int) error {
-	message := ""
 	switch status {
 	case http.StatusBadRequest, http.StatusUnprocessableEntity:
-		message = "OIDC token request was rejected"
+		return credentialStatusError(status, "OIDC token request was rejected")
 	case http.StatusUnauthorized, http.StatusForbidden:
-		message = "OIDC token request was denied"
+		return credentialStatusError(status, "OIDC token request was denied")
 	case http.StatusNotFound:
-		message = "OIDC token service is not enabled for this organization"
+		return credentialStatusError(status, "OIDC token service is not enabled for this organization")
 	case http.StatusTooManyRequests:
-		message = "OIDC token service is rate limited"
+		return credentialStatusError(status, "OIDC token service is rate limited")
 	default:
-		message = fmt.Sprintf("OIDC token service returned HTTP %d", status)
+		return credentialStatusError(status, "OIDC token service returned HTTP %d", status)
 	}
-	return &oidcTokenHTTPError{status: status, message: message}
 }
 
 func isIDTokenEnvironment(name string) bool {
@@ -186,9 +147,9 @@ func isIDTokenEnvironment(name string) bool {
 }
 
 func removeIDTokenEnvironment(env map[string]string) map[string]string {
-	clean := cloneStrings(env)
-	delete(clean, "ACTIONS_ID_TOKEN_REQUEST_URL")
-	delete(clean, "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+	clean := mergeStringMaps(env)
+	deleteEnvironment(clean, "ACTIONS_ID_TOKEN_REQUEST_URL")
+	deleteEnvironment(clean, "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
 	return clean
 }
 
@@ -197,18 +158,49 @@ type idTokenService struct {
 	listener   net.Listener
 	provider   OIDCTokenProvider
 	redactor   Redactor
-	processor  *commandProcessor
+	processor  *commandOutputProcessor
 	warning    sync.Once
 	mu         sync.RWMutex
-	authHashes map[[sha256.Size]byte]struct{}
+	authHashes map[[sha256.Size]byte]*idTokenInvocation
 }
 
-func startIDTokenService(ctx context.Context, provider OIDCTokenProvider, redactor Redactor, processor *commandProcessor) (*idTokenService, error) {
+type idTokenInvocation struct {
+	mu       sync.Mutex
+	failures map[string]error
+}
+
+func (i *idTokenInvocation) recordResult(audience string, err error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if err == nil {
+		delete(i.failures, audience)
+		return
+	}
+	var setup *jobSetupFailure
+	if errors.As(err, &setup) {
+		if i.failures == nil {
+			i.failures = make(map[string]error)
+		}
+		i.failures[audience] = err
+	}
+}
+
+func (i *idTokenInvocation) failureError() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	failures := make([]error, 0, len(i.failures))
+	for _, err := range i.failures {
+		failures = append(failures, err)
+	}
+	return errors.Join(failures...)
+}
+
+func startIDTokenService(ctx context.Context, provider OIDCTokenProvider, redactor Redactor, processor *commandOutputProcessor) (*idTokenService, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("start actions ID-token service: %w", err)
 	}
-	service := &idTokenService{listener: listener, provider: provider, redactor: redactor, processor: processor, authHashes: map[[sha256.Size]byte]struct{}{}}
+	service := &idTokenService{listener: listener, provider: provider, redactor: redactor, processor: processor, authHashes: map[[sha256.Size]byte]*idTokenInvocation{}}
 	service.server = &http.Server{
 		Handler:           service,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -224,7 +216,7 @@ func (s *idTokenService) Close(parent context.Context) error {
 	return s.server.Shutdown(ctx)
 }
 
-func (s *idTokenService) actionEnvironment(ctx context.Context, baseEnv map[string]string) (map[string]string, func(), error) {
+func (s *idTokenService) actionEnvironment(ctx context.Context, baseEnv map[string]string) (map[string]string, func() error, error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return nil, nil, fmt.Errorf("create actions ID-token request credential: %w", err)
@@ -236,12 +228,14 @@ func (s *idTokenService) actionEnvironment(ctx context.Context, baseEnv map[stri
 		return nil, nil, s.processor.scrubError(err)
 	}
 	s.mu.Lock()
-	s.authHashes[hash] = struct{}{}
+	invocation := &idTokenInvocation{}
+	s.authHashes[hash] = invocation
 	s.mu.Unlock()
-	revoke := func() {
+	revoke := func() error {
 		s.mu.Lock()
 		delete(s.authHashes, hash)
 		s.mu.Unlock()
+		return invocation.failureError()
 	}
 	env := map[string]string{
 		"ACTIONS_ID_TOKEN_REQUEST_URL":   "http://" + s.listener.Addr().String() + "/idtoken?api-version=2",
@@ -249,13 +243,13 @@ func (s *idTokenService) actionEnvironment(ctx context.Context, baseEnv map[stri
 	}
 	host, _, err := net.SplitHostPort(s.listener.Addr().String())
 	if err != nil {
-		revoke()
+		_ = revoke()
 		return nil, nil, fmt.Errorf("parse actions ID-token listener: %w", err)
 	}
 	for _, name := range []string{"NO_PROXY", "no_proxy"} {
 		env[name] = host
-		if baseEnv[name] != "" {
-			env[name] = baseEnv[name] + "," + host
+		if existing := environmentValue(baseEnv, name); existing != "" {
+			env[name] = existing + "," + host
 		}
 	}
 	return env, revoke, nil
@@ -270,24 +264,30 @@ func (s *idTokenService) ServeHTTP(w http.ResponseWriter, request *http.Request)
 	presentedHash := sha256.Sum256([]byte(presented))
 	s.mu.RLock()
 	matched := 0
-	for authHash := range s.authHashes {
-		matched |= subtle.ConstantTimeCompare(presentedHash[:], authHash[:])
+	var invocation *idTokenInvocation
+	for authHash, candidate := range s.authHashes {
+		match := subtle.ConstantTimeCompare(presentedHash[:], authHash[:])
+		matched |= match
+		if match == 1 {
+			invocation = candidate
+		}
 	}
 	s.mu.RUnlock()
 	if presented == "" || matched != 1 {
 		http.Error(w, "actions ID-token request is unauthorized", http.StatusUnauthorized)
 		return
 	}
-	token, err := s.provider.OIDCToken(request.Context(), request.URL.Query().Get("audience"))
+	audience := request.URL.Query().Get("audience")
+	token, err := s.provider.OIDCToken(request.Context(), audience)
 	if err != nil {
 		status := http.StatusBadGateway
-		var statusErr *oidcTokenHTTPError
-		if errors.As(err, &statusErr) {
-			switch statusErr.status {
+		if upstreamStatus, ok := AgentAPIHTTPStatus(err); ok {
+			switch upstreamStatus {
 			case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
-				status = statusErr.status
+				status = upstreamStatus
 			}
 		}
+		invocation.recordResult(audience, err)
 		http.Error(w, "could not mint actions ID token", status)
 		return
 	}
@@ -296,6 +296,7 @@ func (s *idTokenService) ServeHTTP(w http.ResponseWriter, request *http.Request)
 		http.Error(w, "could not protect actions ID token", http.StatusInternalServerError)
 		return
 	}
+	invocation.recordResult(audience, nil)
 	s.warning.Do(func() { s.processor.trustedWarning(oidcIssuerMigrationWarn) })
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {

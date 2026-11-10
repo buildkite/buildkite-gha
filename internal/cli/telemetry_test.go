@@ -3,34 +3,331 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"go.yaml.in/yaml/v4"
 )
+
+func TestPluginPathFilterTelemetry(t *testing.T) {
+	requireImporterHost(t)
+	jobs := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	filtered := "on:\n  push:\n    paths: ['src/**']\n  pull_request:\n    paths: ['src/**']\n"
+	sources := map[string]string{
+		"match.yml":        filtered + jobs,
+		"nonmatch.yml":     strings.ReplaceAll(filtered, "src/**", "docs/**") + jobs,
+		"ignore.yml":       strings.ReplaceAll(filtered, "paths: ['src/**']", "paths-ignore: ['docs/**']") + jobs,
+		"excluded.yml":     strings.ReplaceAll(filtered, "    paths:", "    branches: [other]\n    paths:") + jobs,
+		"mismatch.yml":     filtered + jobs,
+		"invalid-glob.yml": strings.ReplaceAll(filtered, "src/**", "[") + jobs,
+		"broken.yml":       "on: [",
+		"plain.yml":        "on: [push, pull_request]\n" + jobs,
+		"callee.yml":       "on: workflow_call\n" + jobs,
+	}
+	repository := writeUploadWorkflowRepository(t, sources)
+	runGit := func(args ...string) string {
+		t.Helper()
+		output, err := exec.Command("git", append([]string{"-C", repository}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	runGit("config", "user.name", "Test")
+	runGit("config", "user.email", "test@example.com")
+	runGit("remote", "add", "origin", "https://github.com/buildkite/buildkite-gha.git")
+	runGit("commit", "-qm", "base")
+	base := runGit("rev-parse", "HEAD")
+	if err := os.Mkdir(filepath.Join(repository, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "src", "changed.go"), []byte("package changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "src")
+	runGit("commit", "-qm", "head")
+	head := runGit("rev-parse", "HEAD")
+	prBase := runGit("commit-tree", base+"^{tree}", "-p", base, "-m", "diverged base")
+	if err := os.WriteFile(filepath.Join(repository, ".github/workflows/mismatch.yml"), []byte(filtered+jobs+"# local change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	setCLIPluginBuildkiteEnvironment(t, "path-telemetry-importer")
+	t.Setenv("BUILDKITE_COMMIT", head)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	var paths []string
+	for name := range sources {
+		paths = append(paths, ".github/workflows/"+name)
+	}
+	configuration, err := json.Marshal(map[string]any{"workflows": paths})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+
+	for _, test := range []struct {
+		name, event                                      string
+		status                                           int
+		disabled, shallow, newBranch, tag, uploadFailure bool
+		emptyCommits                                     bool
+	}{
+		{name: "push", event: "push", status: 202},
+		{name: "new branch", event: "push", status: 202, newBranch: true},
+		{name: "new ref at existing commit", event: "push", status: 202, newBranch: true, emptyCommits: true},
+		{name: "PR divergent base", event: "pull_request", status: 202},
+		{name: "unavailable history", event: "push", status: 202, shallow: true},
+		{name: "tag", event: "push", status: 202, tag: true},
+		{name: "old receiver", event: "push", status: 400},
+		{name: "failed transport", event: "push", status: 503},
+		{name: "failed pipeline upload", event: "push", status: 202, uploadFailure: true},
+		{name: "opt out", event: "push", status: 202, disabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", fmt.Sprint(test.disabled))
+			t.Setenv("BUILDKITE_GITHUB_EVENT", test.event)
+			ref, before, pinnedBase := "refs/heads/main", base, base
+			if test.newBranch {
+				before, pinnedBase = zeroGitCommit, ""
+			}
+			if test.tag {
+				ref = "refs/tags/v1"
+				t.Setenv("BUILDKITE_TAG", "v1")
+			}
+			payload := map[string]any{"ref": ref, "before": before, "after": head,
+				"created": test.newBranch, "deleted": false, "forced": false,
+				"commits": []any{map[string]any{"id": head}}, "repository": map[string]any{"full_name": "buildkite/buildkite-gha"}}
+			if test.emptyCommits {
+				payload["commits"] = []any{}
+				// The head commit changed src, but this ref creation pushes no commits.
+				payload["head_commit"] = map[string]any{"id": head, "added": []string{"src/changed.go"}}
+			}
+			if test.event == "pull_request" {
+				pinnedBase, ref = prBase, "refs/pull/42/head"
+				t.Setenv("BUILDKITE_PULL_REQUEST", "42")
+				t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
+				payload["action"], payload["number"] = "opened", 42
+				payload["pull_request"] = map[string]any{
+					"head": map[string]any{"sha": head, "ref": "main", "repo": map[string]any{"full_name": "buildkite/buildkite-gha"}},
+					"base": map[string]any{"sha": prBase, "ref": "main", "repo": map[string]any{"full_name": "buildkite/buildkite-gha"}},
+				}
+			}
+			if test.shallow {
+				shallow := filepath.Join(repository, ".git/shallow")
+				if err := os.WriteFile(shallow, []byte(base+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Remove(shallow) })
+			}
+			var received telemetry.Properties
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/github-actions/runners") {
+					// Automatic runner resolution retains its existing local fallback.
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if r.URL.Path != "/v3/jobs/"+cliTestJobID+"/posthog/events" || r.Header.Get("Authorization") != "Token telemetry-token" {
+					t.Errorf("unexpected request %s", r.URL.Path)
+				}
+				var event struct {
+					Properties telemetry.Properties `json:"properties"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+					t.Error(err)
+				}
+				received, requests = event.Properties, requests+1
+				w.WriteHeader(test.status)
+			}))
+			defer server.Close()
+			t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+			webhook, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &cliCaptureRunner{webhook: webhook}
+			wantCode, wantOutcome := 0, telemetry.OutcomeSuccess
+			if test.uploadFailure {
+				runner.pipelineUploadErr = fmt.Errorf("pipeline upload rejected")
+				wantCode, wantOutcome = 1, telemetry.OutcomeFailure
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != wantCode {
+				t.Fatalf("code=%d stderr=%s", code, stderr.String())
+			}
+			// A successful error-step upload is command success, never path success.
+			var pipeline struct {
+				Steps []struct {
+					Command string `yaml:"command"`
+					Label   string `yaml:"label"`
+					Group   string `yaml:"group"`
+					Skip    string `yaml:"skip"`
+				} `yaml:"steps"`
+			}
+			for _, command := range runner.commands {
+				if reflect.DeepEqual(command.args, []string{"pipeline", "upload", "--no-interpolation"}) {
+					if err := yaml.Unmarshal(command.stdin, &pipeline); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			failures := 0
+			for _, step := range pipeline.Steps {
+				if isGeneratedFailureCommand(step.Command) {
+					failures++
+				}
+			}
+			if failures == 0 {
+				t.Fatal("expected uploaded error steps")
+			}
+			if test.emptyCommits {
+				skipped, control := 0, false
+				for _, step := range pipeline.Steps {
+					if step.Label == ":github: workflow · .github/workflows/match.yml" || step.Label == ":github: workflow · .github/workflows/ignore.yml" {
+						if step.Skip == "Changed paths do not match this workflow's path filters" && !isGeneratedFailureCommand(step.Command) {
+							skipped++
+						}
+					}
+					control = control || step.Group == ":github: workflow · .github/workflows/plain.yml"
+				}
+				if skipped != 2 || !control {
+					t.Fatalf("empty ref must skip filtered workflow and retain control: %#v", pipeline.Steps)
+				}
+			}
+			if test.disabled {
+				if requests != 0 {
+					t.Fatal("opt-out sent telemetry")
+				}
+				return
+			}
+			if requests != 1 || received.Outcome != wantOutcome || received.PathFilters == nil || received.PathFiltersTruncated == nil || *received.PathFiltersTruncated {
+				t.Fatalf("requests=%d telemetry=%#v", requests, received)
+			}
+			decisions := make(map[string]telemetry.PathFilter)
+			for _, decision := range *received.PathFilters {
+				decisions[filepath.Base(decision.WorkflowPath)] = decision
+			}
+			if len(decisions) != 8 {
+				t.Fatalf("decisions=%#v", decisions)
+			}
+			want := map[string]string{"match.yml": "match/paths_match", "nonmatch.yml": "nonmatch/paths_do_not_match",
+				"ignore.yml":   "match/paths_match",
+				"excluded.yml": "not_evaluated/non_path_filter_exclusion", "mismatch.yml": "error/path_evidence_unavailable",
+				"broken.yml": "error/workflow_parse_error", "plain.yml": "not_evaluated/no_path_filters", "invalid-glob.yml": "error/trigger_error"}
+			comparisonBase := base
+			if test.emptyCommits {
+				want["match.yml"] = "nonmatch/paths_do_not_match"
+				want["ignore.yml"] = "nonmatch/paths_do_not_match"
+				comparisonBase = head
+			}
+			if test.shallow {
+				want["match.yml"], want["nonmatch.yml"] = "error/path_evidence_unavailable", "error/path_evidence_unavailable"
+				want["ignore.yml"] = "error/path_evidence_unavailable"
+			}
+			if test.tag {
+				for _, name := range []string{"match.yml", "nonmatch.yml", "ignore.yml", "excluded.yml", "mismatch.yml"} {
+					want[name] = "not_evaluated/tag_push"
+				}
+			}
+			for name, expected := range want {
+				decision := decisions[name]
+				if got := decision.Outcome + "/" + decision.Reason; got != expected {
+					t.Errorf("%s=%s want %s", name, got, expected)
+				}
+			}
+			matched := decisions["match.yml"]
+			if matched.HeadSHA != head || matched.EventName != test.event || matched.EventRef != ref || matched.WorkflowDigest != fmt.Sprintf("%x", sha256.Sum256([]byte(sources["match.yml"]))) {
+				t.Fatalf("event/source identity=%#v", matched)
+			}
+			if !test.tag && !test.shallow && (matched.WorkflowSHA != head || matched.BaseSHA != pinnedBase || matched.ComparisonBaseSHA != comparisonBase) {
+				t.Fatalf("comparison identity=%#v", matched)
+			}
+			if decisions["mismatch.yml"].WorkflowSHA != "" {
+				t.Fatal("unverified workflow claimed a source commit")
+			}
+		})
+	}
+}
+
+func TestCommandTelemetryOmitsInvalidOrUnrelatedAgentStatus(t *testing.T) {
+	events := make(chan telemetry.Properties, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var event struct {
+			Properties telemetry.Properties `json:"properties"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			t.Error(err)
+		}
+		events <- event.Properties
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	client, err := telemetry.New(telemetry.Config{Endpoint: server.URL, JobID: cliTestJobID, JobToken: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		code       telemetry.FailureCode
+		status     int
+		wantStatus int
+	}{
+		{telemetry.FailureCodeWorkflowToken, -1, 0},
+		{telemetry.FailureCodeWorkflowToken, 99, 0},
+		{telemetry.FailureCodeWorkflowToken, 100, 100},
+		{telemetry.FailureCodeWorkflowToken, 599, 599},
+		{telemetry.FailureCodeWorkflowToken, 600, 0},
+		{telemetry.FailureCodeOIDCToken, 403, 403},
+		{telemetry.FailureCodeCacheCredential, 422, 422},
+		{telemetry.FailureCodeRuntimeIntegrity, 403, 0},
+		{telemetry.FailureCodeSecretUnavailable, 404, 0},
+	} {
+		details := &commandTelemetryDetails{}
+		details.setFailureCode(test.code)
+		details.setAgentAPIHTTPStatus(test.status)
+		if err := client.Emit(telemetry.CommandRunJob, telemetry.OutcomeFailure, 0, details.forOutcome(telemetry.OutcomeFailure)); err != nil {
+			t.Fatalf("status %d dropped the event: %v", test.status, err)
+		}
+		event := <-events
+		if event.FailureCode != test.code || event.AgentAPIHTTPStatus != test.wantStatus {
+			t.Fatalf("code %s, status %d: event = %#v", test.code, test.status, event)
+		}
+	}
+}
 
 func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
 	type event struct {
 		Event      string `json:"event"`
 		Properties struct {
-			Command       string `json:"command"`
-			Outcome       string `json:"outcome"`
-			ClientVersion string `json:"client_version"`
-			DurationMS    int64  `json:"duration_ms"`
-			FailurePhase  string `json:"failure_phase"`
-			FailureCode   string `json:"failure_code"`
-			ErrorMessage  string `json:"error_message"`
+			Command       string                           `json:"command"`
+			Outcome       string                           `json:"outcome"`
+			ClientVersion string                           `json:"client_version"`
+			DurationMS    int64                            `json:"duration_ms"`
+			FailurePhase  string                           `json:"failure_phase"`
+			FailureCode   string                           `json:"failure_code"`
+			ErrorMessage  string                           `json:"error_message"`
+			SourceStats   *actionsource.SourceStatsSummary `json:"source_stats"`
 		} `json:"properties"`
 	}
 	events := make(chan event, 2)
@@ -73,6 +370,10 @@ func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
 		if received.Properties.ClientVersion != "test-version" || received.Properties.DurationMS < 0 {
 			t.Fatalf("run(%q) client version/duration = %q/%d", test.args, received.Properties.ClientVersion, received.Properties.DurationMS)
 		}
+		stats := received.Properties.SourceStats
+		if stats == nil || stats.Requests == nil || stats.CacheHits == nil || len(stats.Requests) != 0 || len(stats.CacheHits) != 0 || stats.Materializations != 0 {
+			t.Fatalf("run(%q) must report an empty source summary, got %#v", test.args, stats)
+		}
 		if received.Properties.FailurePhase != "configuration" || received.Properties.FailureCode != "unknown" {
 			t.Fatalf("run(%q) failure = %q/%q", test.args, received.Properties.FailurePhase, received.Properties.FailureCode)
 		}
@@ -106,6 +407,55 @@ func TestCommandCompletionTelemetryOptOut(t *testing.T) {
 	}
 }
 
+func TestCommandTelemetryReportsRuntimeSourceThrottle(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+	}))
+	defer upstream.Close()
+	localURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := http.DefaultTransport
+	http.DefaultTransport = sourceStatsRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "codeload.github.com" {
+			return original.RoundTrip(r)
+		}
+		local := r.Clone(r.Context())
+		local.URL.Scheme, local.URL.Host = localURL.Scheme, localURL.Host
+		response, err := original.RoundTrip(local)
+		if response != nil {
+			response.Request = r
+		}
+		return response, err
+	})
+	t.Cleanup(func() { http.DefaultTransport = original })
+	job := cliRunJobPlan()
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{{ID: "a-0000000000000001", Source: "github", Repository: "actions/upload-artifact", RequestedRef: "v7", Commit: actionintegration.UploadArtifactV7Commit, SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
+	job.Program.Job.Steps = []program.Step{cliActionStep("upload", "actions/upload-artifact@v7", job.Actions[0].ID)}
+	path, digest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, digest)
+	events := captureCommandTelemetry(t)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", path}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 || !strings.Contains(stderr.String(), "rate limit exceeded") {
+		t.Fatalf("run = %d: %s", code, &stderr)
+	}
+	select {
+	case event := <-events:
+		if event.SourceStats == nil || len(event.SourceStats.Requests) != 1 {
+			t.Fatalf("missing source telemetry: %#v", event)
+		}
+		request := event.SourceStats.Requests[0]
+		if event.Outcome != telemetry.OutcomeFailure || request.Operation != "archive" || request.Kind != "action" || request.Result != "rate_limit" || request.Status != 429 || request.Count != 1 || event.SourceStats.Materializations != 1 {
+			t.Fatalf("source telemetry: %#v / %#v", event, event.SourceStats)
+		}
+	default:
+		t.Fatal("missing command event")
+	}
+}
+
 func TestCommandCompletionTelemetryFailureDoesNotChangeExit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "private response", http.StatusInternalServerError)
@@ -125,22 +475,178 @@ func TestCommandCompletionTelemetryFailureDoesNotChangeExit(t *testing.T) {
 	}
 }
 
+func TestSuccessfulImportTelemetryIncludesWorkflowDiagnostics(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", root)
+	events := make(chan map[string]json.RawMessage, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var event struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			t.Error(err)
+		}
+		events <- event.Properties
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+
+	details := &commandTelemetryDetails{}
+	for _, name := range []string{"docs.yml", "test.yml", "docs.yml"} {
+		details.addReportDiagnostics(compatibility.ProcessingReport{
+			Workflow: filepath.Join(root, ".github", "workflows", name),
+			Diagnostics: []compatibility.Diagnostic{{
+				Level: "error", Code: compiler.CodePipelineGeneration,
+				Message: "Push filters could not be evaluated.", Detail: "Missing\nwebhook history.",
+				Location: &compatibility.SourceLocation{Path: "reusable.yml", Line: 3},
+			}},
+		})
+	}
+	details.addReportDiagnostics(compatibility.NewProcessingReport("valid.yml", ""))
+	emitCommandTelemetry(t.Context(), telemetry.CommandPluginImport, telemetry.OutcomeSuccess, "dev", 0, details.forOutcome(telemetry.OutcomeSuccess))
+	var properties map[string]json.RawMessage
+	select {
+	case properties = <-events:
+	default:
+		t.Fatal("successful import did not send telemetry")
+	}
+	if string(properties["outcome"]) != `"success"` {
+		t.Fatalf("outcome = %s", properties["outcome"])
+	}
+	for _, field := range []string{"failure_phase", "failure_code", "error_message", "error_message_truncated"} {
+		if _, exists := properties[field]; exists {
+			t.Fatalf("successful import sent %s", field)
+		}
+	}
+	var diagnostics []telemetry.Diagnostic
+	if err := json.Unmarshal(properties["diagnostics"], &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	want := []telemetry.Diagnostic{
+		{Code: compiler.CodePipelineGeneration, Severity: telemetry.SeverityError, Message: "Push filters could not be evaluated. Missing webhook history.", WorkflowPath: ".github/workflows/docs.yml"},
+		{Code: compiler.CodePipelineGeneration, Severity: telemetry.SeverityError, Message: "Push filters could not be evaluated. Missing webhook history.", WorkflowPath: ".github/workflows/test.yml"},
+	}
+	if !reflect.DeepEqual(diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", diagnostics, want)
+	}
+}
+
 func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 	details := &commandTelemetryDetails{}
 	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
-		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: "must not be uploaded"},
-		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: "different sensitive text"},
-		{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Stage: string(compiler.StageAdmission), Message: "must not be uploaded"},
-		{Level: "error", Code: "E_FUTURE_UNALLOWLISTED", Stage: string(compiler.StageGraph), Message: "must not be uploaded"},
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: compiler.StageWorkflowParsing, Message: "invalid workflow"},
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: compiler.StageWorkflowParsing, Message: "invalid job"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions, Blocker: "runner_label", BlockerDetail: "windows-latest", Message: "unsupported runner"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions, Blocker: "runner_label", BlockerDetail: "macos-10", Message: "unsupported runner"},
+		{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Stage: compiler.StageAdmission, Message: "unproven action"},
+		{Level: "error", Code: "E_FUTURE_UNALLOWLISTED", Stage: compiler.StageGraph, Message: "must not be uploaded"},
 	}})
 	got := details.telemetryDetails()
 	if got.FailurePhase != "parsing" || got.FailureCode != "E_WORKFLOW_SYNTAX" {
 		t.Fatalf("failure details = %#v", got)
 	}
-	want := []telemetry.Diagnostic{
-		{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError},
-		{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning},
+	if got.Blocker != "runner_label" || got.BlockerDetail != "windows-latest" {
+		t.Fatalf("blocker = %q / %q", got.Blocker, got.BlockerDetail)
 	}
+	want := []telemetry.Diagnostic{
+		{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError, Message: "invalid workflow"},
+		{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError, Message: "invalid job"},
+		{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError, Blocker: "runner_label", BlockerDetail: "windows-latest", Message: "unsupported runner"},
+		{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError, Blocker: "runner_label", BlockerDetail: "macos-10", Message: "unsupported runner"},
+		{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning, Message: "unproven action"},
+	}
+	if !reflect.DeepEqual(got.Diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
+	}
+}
+
+func TestCommandTelemetryDiagnosticLimitUsesWireIdentity(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	common := strings.Repeat("x", 1024)
+	for i := range 20 {
+		details.addReportDiagnostics(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{{
+			Level: "error", Code: compiler.CodeWorkflowSyntax, Message: common + strings.Repeat("y", i+1),
+		}}})
+	}
+	want := []telemetry.Diagnostic{{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError, Message: common, MessageTruncated: true}}
+	for i := range 20 {
+		message := strings.Repeat("distinct ", i+1) + "error"
+		details.addReportDiagnostics(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{{
+			Level: "error", Code: compiler.CodeWorkflowSyntax, Message: message,
+		}}})
+		if i < 19 {
+			want = append(want, telemetry.Diagnostic{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError, Message: message})
+		}
+	}
+	if got := details.forOutcome(telemetry.OutcomeSuccess).Diagnostics; !reflect.DeepEqual(got, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", got, want)
+	}
+}
+
+func TestTriggerFailureTelemetryIncludesTrigger(t *testing.T) {
+	for _, test := range []struct {
+		err             error
+		blocker, detail string
+	}{
+		{&buildkitepipeline.UnsupportedTriggerEventError{Event: "workflow_run"}, "trigger", "workflow_run"},
+		{&buildkitepipeline.UnsupportedPathFiltersError{Event: "push", Reason: "history unavailable"}, "path_filter", "push"},
+		{&buildkitepipeline.UnsupportedPathFiltersError{Event: "pull_request", Reason: "history unavailable"}, "path_filter", "pull_request"},
+	} {
+		details := &commandTelemetryDetails{}
+		details.observe(triggerFailureProcessingReport(workflowInput{Path: "workflow.yml", Source: []byte("on: push\n")}, test.err))
+		got := details.telemetryDetails()
+		if got.Blocker != test.blocker || got.BlockerDetail != test.detail || len(got.Diagnostics) != 1 || got.Diagnostics[0].Blocker != test.blocker || got.Diagnostics[0].BlockerDetail != test.detail {
+			t.Fatalf("trigger telemetry = %#v", got)
+		}
+	}
+}
+
+func TestGeneratedFailureAnnotationsDoNotDiscardRunnerTelemetry(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci.yml", "hosted")
+	for _, test := range []struct {
+		line                           int
+		job, instance, blocker, detail string
+	}{
+		{10, "test", "a", "runner_policy", "conflicting_queues"},
+		{10, "test", "b", "runner_policy", "conflicting_targets"},
+		{20, "later", "c", "runner_label", "windows-latest"},
+	} {
+		report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+			Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions,
+			Blocker: test.blocker, BlockerDetail: test.detail, Message: "runner target rejected",
+			Job: test.job, Instance: test.instance,
+			Location: &compatibility.SourceLocation{Path: "ci.yml", Line: test.line, Column: 5},
+		})
+	}
+	_, _ = generatedFailure(t.Context(), report, sourceLinkContext{})
+	details := &commandTelemetryDetails{}
+	details.addReportDiagnostics(report)
+	got := details.telemetryDetails().Diagnostics
+	if len(got) != 3 || got[0].BlockerDetail != "conflicting_queues" || got[1].BlockerDetail != "conflicting_targets" || got[2].BlockerDetail != "windows-latest" {
+		t.Fatalf("telemetry lost a runner rejection after annotation: %#v", got)
+	}
+}
+
+func TestUnsupportedTriggerWarningTelemetryIncludesTrigger(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	warnings := []compiler.Warning{{
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Blocker: "trigger", BlockerDetail: "workflow_run",
+		Message: "Unsupported trigger", Path: "reusable.yml", Line: 2, Column: 3,
+	}}
+	details.addWarnings("workflow.yml", warnings)
+	report := compatibility.NewProcessingReport("workflow.yml", "")
+	report.ApplyWarnings("workflow.yml", warnings)
+	details.addReportDiagnostics(report)
+	got := details.telemetryDetails()
+	want := []telemetry.Diagnostic{{
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Severity: telemetry.SeverityWarning,
+		Blocker: "trigger", BlockerDetail: "workflow_run",
+		Message: "reusable.yml:2:3: Unsupported trigger", WorkflowPath: "workflow.yml",
+	}}
 	if !reflect.DeepEqual(got.Diagnostics, want) {
 		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
 	}
@@ -150,12 +656,12 @@ func TestUnprovenActionRuntimeIgnoresNativeAdapters(t *testing.T) {
 	bundleWith := func(locks ...plan.ActionLock) compiler.Bundle {
 		return compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Actions: locks,
-			Steps:   []plan.Step{{Kind: "uses", Uses: "actions/checkout@v4"}},
+			Program: &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{{Kind: "uses", Invocation: &program.Invocation{Uses: program.Site{Source: "actions/checkout@v4"}}}}}},
 		}}}}
 	}
-	checkout := plan.ActionLock{Source: "github", Repository: "actions/checkout"}
-	upload := plan.ActionLock{Source: "github", Repository: "actions/upload-artifact"}
-	download := plan.ActionLock{Source: "github", Repository: "actions/download-artifact"}
+	checkout := plan.ActionLock{Source: "github", Repository: "actions/checkout", Commit: actionintegration.CheckoutV7Commit}
+	upload := plan.ActionLock{Source: "github", Repository: "actions/upload-artifact", Commit: actionintegration.UploadArtifactV7Commit}
+	download := plan.ActionLock{Source: "github", Repository: "actions/download-artifact", Commit: actionintegration.DownloadArtifactV8Commit}
 	setupGo := plan.ActionLock{Source: "github", Repository: "actions/setup-go"}
 	local := plan.ActionLock{Source: "workspace", Path: "actions/build"}
 
@@ -181,13 +687,13 @@ func TestUnprovenActionRuntimeIgnoresNativeAdapters(t *testing.T) {
 func TestHandledReportErrorsDoNotAttributeCommandFailure(t *testing.T) {
 	details := &commandTelemetryDetails{}
 	details.addReportDiagnostics(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
-		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions), Message: "emitted as a failing step"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions, Message: "emitted as a failing step"},
 	}})
 	got := details.forOutcome(telemetry.OutcomeFailure)
 	if got.FailurePhase != telemetry.FailurePhaseUnknown || got.FailureCode != telemetry.FailureCodeUnknown {
 		t.Fatalf("handled error attributed a later failure: %#v", got)
 	}
-	want := []telemetry.Diagnostic{{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError}}
+	want := []telemetry.Diagnostic{{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError, Message: "emitted as a failing step"}}
 	if !reflect.DeepEqual(got.Diagnostics, want) {
 		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
 	}
@@ -259,6 +765,78 @@ func TestCommandTelemetryCapturesBoundedErrorTailWithoutChangingOutput(t *testin
 	}
 	if success := details.forOutcome(telemetry.OutcomeSuccess); success.ErrorMessage != "" || success.ErrorMessageTruncated {
 		t.Fatalf("successful telemetry included error output: %#v", success)
+	}
+}
+
+func TestObservedFailureMessageSurvivesLaterErrorOutput(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	writer := details.captureErrors(io.Discard)
+	message := "GitHub environments and environment secrets are unsupported. Remove the environment key from job \"deploy\"."
+	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: compiler.StageWorkflowParsing, Message: message},
+	}})
+	if _, err := writer.Write([]byte(strings.Repeat("annotation and pipeline-upload chatter\n", 100))); err != nil {
+		t.Fatal(err)
+	}
+	got := details.forOutcome(telemetry.OutcomeFailure)
+	if got.ErrorMessage != message || got.ErrorMessageTruncated {
+		t.Fatalf("failure message = %q (truncated %t), want the attributing diagnostic message", got.ErrorMessage, got.ErrorMessageTruncated)
+	}
+	if got.FailureCode != telemetry.FailureCodeWorkflowSyntax {
+		t.Fatalf("failure code = %q", got.FailureCode)
+	}
+}
+
+func TestObservedFailureMessageIncludesDetail(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions, Message: "expression is unsupported", Detail: "github.workspace"},
+	}})
+	if got := details.forOutcome(telemetry.OutcomeFailure); got.ErrorMessage != "expression is unsupported github.workspace" {
+		t.Fatalf("failure message = %q, want message with detail", got.ErrorMessage)
+	}
+}
+
+func TestVariableResolutionTelemetryStaysDistinctFromEnvironmentFailures(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		add  func(*compatibility.ProcessingReport)
+		code telemetry.FailureCode
+	}{
+		{"variables", func(r *compatibility.ProcessingReport) { r.AddVariableResolutionFailure("variable lookup failed") }, telemetry.FailureCodeVariableResolution},
+		{"environment", func(r *compatibility.ProcessingReport) { r.AddEnvironmentFailure("repository source failed") }, telemetry.FailureCodeEnvironment},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			report := compatibility.NewProcessingReport("workflow.yml", "")
+			test.add(&report)
+			details := &commandTelemetryDetails{}
+			details.observe(report)
+			got := details.forOutcome(telemetry.OutcomeFailure)
+			if got.FailureCode != test.code || len(got.Diagnostics) != 1 || got.Diagnostics[0].Code != string(test.code) {
+				t.Fatalf("failure code/diagnostics = %q/%#v; want %q", got.FailureCode, got.Diagnostics, test.code)
+			}
+		})
+	}
+}
+
+func TestObservedFailureMessageKeepsItsHeadWithinTheTelemetryBound(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions,
+			Message: "expression is unsupported", Detail: strings.Repeat("界", telemetry.MaxErrorMessageBytes)},
+	}})
+	got := details.forOutcome(telemetry.OutcomeFailure)
+	if !got.ErrorMessageTruncated {
+		t.Fatal("over-long failure message was not marked truncated")
+	}
+	if len(got.ErrorMessage) > telemetry.MaxErrorMessageBytes {
+		t.Fatalf("failure message = %d bytes, want at most %d", len(got.ErrorMessage), telemetry.MaxErrorMessageBytes)
+	}
+	if !strings.HasPrefix(got.ErrorMessage, "expression is unsupported") {
+		t.Fatalf("failure message = %q, want the head naming the rejected feature", got.ErrorMessage[:64])
+	}
+	if !utf8.ValidString(got.ErrorMessage) {
+		t.Fatal("head-bounded failure message is not valid UTF-8")
 	}
 }
 

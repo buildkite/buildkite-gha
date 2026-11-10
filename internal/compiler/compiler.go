@@ -1,4 +1,3 @@
-// Package compiler expands an owned workflow into deterministic workflow JSON IR.
 package compiler
 
 import (
@@ -10,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -25,28 +26,67 @@ const schema = "buildkite-gha/compiler-ir/v1"
 
 // IR is the deterministic, actionlint-independent workflow compiler output.
 type IR struct {
-	Schema    string            `json:"schema"`
-	Workflow  WorkflowSource    `json:"workflow"`
-	Warnings  []Warning         `json:"warnings,omitempty"`
-	Event     Event             `json:"event"`
-	Vars      map[string]string `json:"vars,omitempty"`
-	Execution ExecutionBoundary `json:"execution"`
-	Jobs      []JobInstance     `json:"jobs"`
+	Schema   string         `json:"schema"`
+	Workflow WorkflowSource `json:"workflow"`
+	Warnings []Warning      `json:"warnings,omitempty"`
+	Event    Event          `json:"event"`
+	// OrganizationVars and RepositoryVars are the snapshots of
+	// Options.Vars. VarsBeforeEnvironment merges them for compile-time fields.
+	OrganizationVars map[string]string `json:"organization_vars,omitempty"`
+	RepositoryVars   map[string]string `json:"repository_vars,omitempty"`
+	Execution        ExecutionBoundary `json:"execution"`
+	Jobs             []JobInstance     `json:"jobs"`
+	// Continuations are the deferred uploads that expand needs-derived
+	// matrices or select runners after their producer jobs run. Their jobs are
+	// absent from Jobs until a stage recompiles with the verified outputs.
+	Continuations []RuntimeContinuation `json:"continuations,omitempty"`
+	// RuntimeMatrixSkippedJobs is the forward closure of roots whose verified
+	// producers did not succeed. The continuation renders skipped placeholders.
+	RuntimeMatrixSkippedJobs map[string]bool `json:"runtime_matrix_skipped_jobs,omitempty"`
+	// deferredActions lists, per continuation consumer job ID, the `uses`
+	// steps of its deferred jobs. It is process-local input to
+	// resolveContinuationActions, which records the resulting locks on the
+	// continuation.
+	deferredActions map[string][]deferredAction
+	// deferredActionsReferenceVars records that a resolved action of a
+	// deferred job reads the vars context, so ActionsReferenceVars can report
+	// it although the deferred jobs have no plans in the bundle.
+	deferredActionsReferenceVars bool
+	// JobGraphComplete distinguishes a complete expanded graph from the
+	// partial instances retained when expansion fails. It is process-local
+	// evidence and is not part of serialized compiler output.
+	JobGraphComplete bool `json:"-"`
+	// Sources retains input identities for diagnostic presentation,
+	// including files whose parsing or graph expansion failed.
+	Sources map[string]WorkflowSourceReference `json:"-"`
+}
+
+// VarsBeforeEnvironment is the vars context GitHub evaluates before any job's
+// environment applies: compile-time fields such as runs-on, strategy, and
+// concurrency, plus jobs.<id>.if and reusable-workflow call guards.
+func (ir IR) VarsBeforeEnvironment() map[string]string {
+	return plan.MergeVars(ir.OrganizationVars, ir.RepositoryVars)
 }
 
 // WorkflowConcurrencyGate is one statically resolved called-workflow
 // concurrency scope inherited by a flattened job.
 type WorkflowConcurrencyGate struct {
-	ID    string `json:"id"`
-	Group string `json:"group"`
+	ID               string `json:"id"`
+	Group            string `json:"group"`
+	CancelInProgress bool   `json:"cancel_in_progress,omitempty"`
 }
 
 // Warning is one source-located, non-fatal compatibility diagnostic.
 type Warning struct {
-	Code    string `json:"code"`
-	Line    int    `json:"line"`
-	Column  int    `json:"column"`
-	Message string `json:"message"`
+	Code          string `json:"code"`
+	Blocker       string `json:"blocker,omitempty"`
+	BlockerDetail string `json:"blocker_detail,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Line          int    `json:"line"`
+	Column        int    `json:"column"`
+	Job           string `json:"job,omitempty"`
+	Step          int    `json:"step,omitempty"`
+	Message       string `json:"message"`
 }
 
 // ExecutionBoundary makes the compile-only boundary explicit.
@@ -62,6 +102,7 @@ type WorkflowSource struct {
 	RunName                       string             `json:"run_name,omitempty"`
 	Digest                        string             `json:"digest"`
 	ConcurrencyGroup              string             `json:"concurrency_group,omitempty"`
+	CancelInProgress              bool               `json:"cancel_in_progress,omitempty"`
 	Triggers                      []workflow.Trigger `json:"-"`
 	WorkflowTokenPolicyFilename   string             `json:"-"`
 	WorkflowTokenPermissions      map[string]string  `json:"-"`
@@ -70,46 +111,64 @@ type WorkflowSource struct {
 
 // JobInstance is one statically expanded job in the owned IR.
 type JobInstance struct {
-	Key                     string                    `json:"key"`
-	LogicalJobID            string                    `json:"logical_job_id"`
-	Label                   string                    `json:"label"`
-	Needs                   []string                  `json:"needs,omitempty"`
-	NeedGroups              map[string][]string       `json:"need_groups,omitempty"`
-	NeedOutputs             map[string][]NeedOutput   `json:"need_outputs,omitempty"`
-	CallGuards              []CallGuard               `json:"call_guards,omitempty"`
-	RunsOn                  []string                  `json:"runs_on"`
-	Queue                   string                    `json:"queue"`
-	Platform                Platform                  `json:"-"`
-	RuntimeImage            string                    `json:"runtime_image,omitempty"`
-	Cache                   *CacheVolume              `json:"-"`
-	Matrix                  map[string]any            `json:"matrix,omitempty"`
-	Inputs                  map[string]any            `json:"inputs,omitempty"`
-	DeferredInputs          map[string]DeferredInput  `json:"deferred_inputs,omitempty"`
-	FailFast                *bool                     `json:"fail_fast,omitempty"`
-	MaxParallel             *int                      `json:"max_parallel,omitempty"`
-	ConcurrencyGroup        string                    `json:"concurrency_group,omitempty"`
-	ConcurrencyGates        []WorkflowConcurrencyGate `json:"workflow_concurrency_gates,omitempty"`
-	Steps                   []workflow.Step           `json:"steps"`
-	Env                     map[string]string         `json:"env,omitempty"`
-	Permissions             map[string]string         `json:"permissions,omitempty"`
-	If                      string                    `json:"if,omitempty"`
-	ContinueOnError         bool                      `json:"continue_on_error,omitempty"`
-	TimeoutMinutes          float64                   `json:"timeout_minutes,omitempty"`
-	DefaultShell            string                    `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string                    `json:"default_working_directory,omitempty"`
-	Outputs                 map[string]string         `json:"outputs,omitempty"`
-	Container               *workflow.Container       `json:"container,omitempty"`
-	Services                []workflow.Service        `json:"services,omitempty"`
-	ServicesExpression      string                    `json:"services_expression,omitempty"`
-	SourcePath              string                    `json:"source_path"`
-	SourceDigest            string                    `json:"source_digest"`
-	RemoteWorkflow          *RemoteWorkflowSource     `json:"remote_workflow,omitempty"`
-	RepositoryRoot          string                    `json:"-"`
-	Source                  workflow.Span             `json:"source"`
-	secretAuthority         secretAuthority
-	tokenPolicyNarrowed     bool
-	jobPermissionsIgnored   bool
-	reusableCall            workflow.Position
+	Key                       string                    `json:"key"`
+	CacheMode                 string                    `json:"cache_mode,omitempty"`
+	LogicalJobID              string                    `json:"logical_job_id"`
+	Label                     string                    `json:"label"`
+	Needs                     []string                  `json:"needs,omitempty"`
+	NeedGroups                map[string][]string       `json:"need_groups,omitempty"`
+	NeedOutputs               map[string][]NeedOutput   `json:"need_outputs,omitempty"`
+	CallGuards                []CallGuard               `json:"call_guards,omitempty"`
+	RunsOn                    []string                  `json:"runs_on"`
+	Queue                     string                    `json:"queue"`
+	Platform                  Platform                  `json:"-"`
+	RuntimeImage              string                    `json:"runtime_image,omitempty"`
+	Agents                    map[string]string         `json:"agents,omitempty"`
+	ToolCache                 *bool                     `json:"tool_cache,omitempty"`
+	Cache                     *CacheVolume              `json:"-"`
+	Matrix                    map[string]any            `json:"matrix,omitempty"`
+	Strategy                  map[string]any            `json:"strategy,omitempty"`
+	Inputs                    map[string]any            `json:"inputs,omitempty"`
+	DeferredInputs            map[string]DeferredInput  `json:"deferred_inputs,omitempty"`
+	FailFast                  *bool                     `json:"fail_fast,omitempty"`
+	MaxParallel               *int                      `json:"max_parallel,omitempty"`
+	ConcurrencyGroup          string                    `json:"concurrency_group,omitempty"`
+	CancelInProgress          bool                      `json:"cancel_in_progress,omitempty"`
+	ConcurrencyGates          []WorkflowConcurrencyGate `json:"workflow_concurrency_gates,omitempty"`
+	Environment               string                    `json:"environment,omitempty"`
+	EnvironmentApproval       bool                      `json:"environment_approval,omitempty"`
+	Steps                     []workflow.Step           `json:"steps"`
+	Env                       map[string]string         `json:"env,omitempty"`
+	Permissions               map[string]string         `json:"permissions,omitempty"`
+	If                        string                    `json:"if,omitempty"`
+	ContinueOnError           bool                      `json:"continue_on_error,omitempty"`
+	ContinueOnErrorExpression string                    `json:"continue_on_error_expression,omitempty"`
+	ContinueOnErrorSpan       workflow.Span             `json:"-"`
+	TimeoutMinutes            float64                   `json:"timeout_minutes,omitempty"`
+	DefaultShell              string                    `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory   string                    `json:"default_working_directory,omitempty"`
+	Outputs                   map[string]string         `json:"outputs,omitempty"`
+	Container                 *workflow.Container       `json:"container,omitempty"`
+	Services                  []workflow.Service        `json:"services,omitempty"`
+	ServicesExpression        string                    `json:"services_expression,omitempty"`
+	SourcePath                string                    `json:"source_path"`
+	SourceDigest              string                    `json:"source_digest"`
+	RemoteWorkflow            *RemoteWorkflowSource     `json:"remote_workflow,omitempty"`
+	BlockerDetailUnsafe       bool                      `json:"blocker_detail_unsafe,omitempty"`
+	RepositoryRoot            string                    `json:"-"`
+	Source                    workflow.Span             `json:"source"`
+	environmentSecrets        []string
+	environmentVariables      map[string]string
+	secretAuthority           secretAuthority
+	tokenPolicyNarrowed       bool
+	jobPermissionsIgnored     bool
+	reusableCall              workflow.Position
+}
+
+// inputScope is the workflow input scope for this job's runtime expressions.
+// Deferred inputs are absent until the runtime hydrates them.
+func (instance JobInstance) inputScope() expression.InputScope {
+	return expression.InputScope{Values: instance.Inputs, Complete: len(instance.DeferredInputs) == 0}
 }
 
 // CallGuard is one immutable caller-scoped condition inherited by a flattened
@@ -122,30 +181,41 @@ type CallGuard struct {
 	NeedOutputs    map[string][]NeedOutput  `json:"need_outputs,omitempty"`
 }
 
-// DeferredInput binds one string workflow_call input to exact prerequisite
-// outputs without exposing the caller's needs context to the callee.
+// DeferredInput is one workflow_call input whose value embeds caller
+// needs outputs. Template is the caller value with every graph-time part
+// folded; NeedGroups and NeedOutputs bind each referenced caller job to exact
+// producers and outputs without exposing the caller's needs context to the
+// callee.
 type DeferredInput struct {
-	Sources []string     `json:"sources"`
-	Outputs []NeedOutput `json:"outputs,omitempty"`
+	Template    string                  `json:"template"`
+	Type        string                  `json:"type,omitempty"`
+	Inputs      map[string]any          `json:"inputs,omitempty"`
+	NeedGroups  map[string][]string     `json:"need_groups"`
+	NeedOutputs map[string][]NeedOutput `json:"need_outputs"`
 }
 
-// NeedOutput selects one caller-visible output from a concrete prerequisite.
-// An empty output list explicitly prevents an aggregate need from exposing its
-// producers' internal outputs.
-type NeedOutput struct {
-	Name    string `json:"name"`
-	StepKey string `json:"step_key"`
-	Output  string `json:"output"`
-}
+// NeedOutput is the plan-boundary projection of one caller-visible output from
+// a concrete prerequisite. An empty output list explicitly prevents an
+// aggregate need from exposing its producers' internal outputs.
+type NeedOutput = plan.NeedOutput
 
 // Report summarizes successful workflow validation.
 type Report struct {
+	Sources               map[string]WorkflowSourceReference
 	LogicalJobs           int
 	Instances             int
 	Warnings              []Warning
 	Jobs                  []JobInstance
 	RuntimeMatrixBoundary bool
-	RuntimeMatrices       []RuntimeMatrixDescriptor
+	// ReferencesVars reports whether any expression in the workflow or a
+	// reusable workflow it calls reads the vars context. Callers resolve
+	// repository and organization variables before compiling only when it is
+	// set, so workflows without vars references cost no resolution request.
+	ReferencesVars  bool
+	RuntimeMatrices []RuntimeOutputDescriptor
+	// Continuations lists the deferred uploads that expand needs-derived
+	// matrices or select runners after their producer jobs run. Their jobs are not in Jobs.
+	Continuations         []RuntimeContinuation
 	ParsedJobs            []ParsedJob
 	NotEvaluatedJobs      map[string]bool
 	NotEvaluatedInstances map[string]bool
@@ -160,7 +230,8 @@ type ParsedJob struct {
 
 // ParseWorkflow reports only event-independent workflow syntax and job
 // identities. Later stages deliberately remain unevaluated.
-func ParseWorkflow(path string, source []byte) (Report, error) {
+func ParseWorkflow(path string, source []byte) (report Report, err error) {
+	defer func() { report.Sources = retainRootSource(report.Sources, path, source) }()
 	parsed, err := parseReusableWorkflow(path, source)
 	if err != nil {
 		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
@@ -182,7 +253,8 @@ func ValidateWithOptions(path string, source []byte, options Options) (Report, e
 
 // ValidateWithOptionsContext validates the static graph and permits
 // cancellation while resolving public reusable-workflow source.
-func ValidateWithOptionsContext(ctx context.Context, path string, source []byte, options Options) (Report, error) {
+func ValidateWithOptionsContext(ctx context.Context, path string, source []byte, options Options) (report Report, err error) {
+	defer func() { report.Sources = retainRootSource(report.Sources, path, source) }()
 	var optionsErr error
 	if err := options.validate(); err != nil {
 		optionsErr = &ProcessingFinding{
@@ -203,14 +275,15 @@ func ValidateWithOptionsContext(ctx context.Context, path string, source []byte,
 		Payload: map[string]any{},
 	}
 	context := compileContext(event, nil, path, parsed.Name)
+	context.WorkflowRunID = options.BuildID
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	context.GitHub["head_ref"] = "validation"
-	runNameErr := validateWorkflowRunName(path, parsed)
+	runNameErr := ValidateWorkflowRunName(path, parsed)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
-	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
+	cancelInProgress, cancellationErr := resolveCancellation(path, "", parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options, event.ServerURL)
 	if err := errors.Join(optionsErr, triggerErr, runNameErr, concurrencyErr, cancellationErr, expandErr); err != nil {
 		return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
@@ -230,7 +303,8 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 
 // ValidateEventWithOptionsContext validates the graph and event while
 // permitting cancellation during public source resolution.
-func ValidateEventWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) (Report, error) {
+func ValidateEventWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) (report Report, err error) {
+	defer func() { report.Sources = retainRootSource(report.Sources, path, source) }()
 	var optionsErr error
 	if err := options.validate(); err != nil {
 		optionsErr = &ProcessingFinding{
@@ -256,14 +330,15 @@ func ValidateEventWithOptionsContext(ctx context.Context, path string, source, e
 		}, errors.Join(parseErr, eventErr, optionsErr)
 	}
 	event.Trust = options.EventTrust
-	context := compileContext(event, options.Vars.snapshot(), path, parsed.Name)
+	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
+	context.WorkflowRunID = options.BuildID
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	_, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
-	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
+	cancelInProgress, cancellationErr := resolveCancellation(path, "", parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options, event.ServerURL)
 	if err := errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr); err != nil {
 		return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
@@ -285,7 +360,7 @@ func CompileWithOptions(path string, source, eventSource []byte, options Options
 // CompileWithOptionsContext compiles a workflow and permits cancellation while
 // resolving public reusable-workflow source.
 func CompileWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) ([]byte, error) {
-	ir, err := compile(ctx, path, source, eventSource, options)
+	ir, err := CompileIRWithOptionsContext(ctx, path, source, eventSource, options)
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +374,16 @@ func CompileWithOptionsContext(ctx context.Context, path string, source, eventSo
 	return out.Bytes(), nil
 }
 
-func compile(ctx context.Context, path string, source, eventSource []byte, options Options) (IR, error) {
+// CompileIRWithOptionsContext returns the owned compiler IR even when a
+// failure occurs after static job expansion. Callers may use that partial
+// result for diagnostics and may compile unaffected jobs separately. Every
+// retained plan still requires normal admission before execution.
+func CompileIRWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) (IR, error) {
+	return compile(ctx, path, source, eventSource, options)
+}
+
+func compile(ctx context.Context, path string, source, eventSource []byte, options Options) (ir IR, err error) {
+	defer func() { ir.Sources = retainRootSource(ir.Sources, path, source) }()
 	if err := options.validate(); err != nil {
 		return IR{}, &ProcessingFinding{
 			Code: CodeEnvironment, Category: "environment",
@@ -316,39 +400,45 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 		return IR{}, processingFinding(StageEventValidation, CodeEventInvalid, "environment", err)
 	}
 	event.Trust = options.EventTrust
-	vars := options.Vars.snapshot()
-	context := compileContext(event, vars, path, parsed.Name)
+	organizationVars, repositoryVars := cloneMap(options.Vars.Organization), cloneMap(options.Vars.Repository)
+	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
+	context.WorkflowRunID = options.BuildID
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	runName, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
-	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
+	cancelInProgress, cancellationErr := resolveCancellation(path, "", parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options, event.ServerURL)
+	jobGraphComplete := expandErr == nil
+	if jobGraphComplete {
+		expandErr = resolveJobEnvironments(ctx, expanded.instances, event, options)
+	}
 	digest := sha256.Sum256(source)
-	ir := IR{
+	ir = IR{
 		Schema: schema,
 		Workflow: WorkflowSource{
-			Path: path, Name: parsed.Name, RunName: runName, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
+			Path: path, Name: parsed.Name, RunName: runName, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, CancelInProgress: cancelInProgress, Triggers: parsed.Triggers,
 			WorkflowTokenPolicyFilename: workflowTokenPolicyFilename, WorkflowTokenPermissions: workflowTokenPermissions, WorkflowTokenPolicyDiagnostic: workflowTokenPolicyDiagnostic,
 		},
-		Event:    event,
-		Vars:     vars,
-		Warnings: append(compilerWarnings(parsed, cancelInProgress), expanded.warnings...),
+		Event:            event,
+		OrganizationVars: organizationVars,
+		RepositoryVars:   repositoryVars,
+		Warnings:         append(compilerWarnings(parsed, cancelInProgress), expanded.warnings...),
 		Execution: ExecutionBoundary{
 			Supported: true,
 			Reason:    "run-job rejects unsupported shells and local actions",
 		},
-		Jobs: expanded.instances,
+		Jobs: expanded.instances, Continuations: expanded.continuations, RuntimeMatrixSkippedJobs: expanded.skippedJobs, deferredActions: expanded.deferredActions, JobGraphComplete: jobGraphComplete, Sources: expanded.sources,
 	}
 	return ir, errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr)
 }
 
 // ResolveWorkflowRunName evaluates one parsed workflow's explicit run-name
-// against the event snapshot used for compilation. Dispatch inputs are only
-// available when the workflow applies to the event.
-func ResolveWorkflowRunName(path string, parsed *workflow.Workflow, event Event, applicable bool) (string, error) {
-	context := compileContext(event, nil, path, parsed.Name)
+// against the event and pre-environment variable snapshots used for compilation.
+// Dispatch inputs are only available when the workflow applies to the event.
+func ResolveWorkflowRunName(path string, parsed *workflow.Workflow, event Event, vars VariableSources, applicable bool) (string, error) {
+	context := compileContext(event, vars.CompileTimeVars(), path, parsed.Name)
 	if applicable {
 		context.Inputs = workflowDispatchInputs(parsed, event)
 	}
@@ -359,7 +449,8 @@ func resolveWorkflowRunName(path string, parsed *workflow.Workflow, context expr
 	if strings.TrimSpace(parsed.RunName) == "" {
 		return "", nil
 	}
-	resolved, err := expression.EvaluateRunName(parsed.RunName, context)
+	value, err := evaluateCompileSite(parsed.RunName, expression.ProfileRunName, expression.ResultString, context)
+	resolved, _ := value.(string)
 	if err == nil {
 		if strings.TrimSpace(resolved) == "" {
 			return "", nil
@@ -371,11 +462,13 @@ func resolveWorkflowRunName(path string, parsed *workflow.Workflow, context expr
 		fmt.Errorf("%s:%d:%d: workflow run-name: %w", path, position.Line, position.Column, err))
 }
 
-func validateWorkflowRunName(path string, parsed *workflow.Workflow) error {
+// ValidateWorkflowRunName validates the authored run-name's expression surface
+// without evaluating event inputs or variable values.
+func ValidateWorkflowRunName(path string, parsed *workflow.Workflow) error {
 	if strings.TrimSpace(parsed.RunName) == "" {
 		return nil
 	}
-	if err := expression.ValidateRunName(parsed.RunName); err != nil {
+	if err := validateCompileSite(parsed.RunName, expression.ProfileRunName, expression.ResultString); err != nil {
 		position := parsed.RunNameSpan.Start
 		return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, position.Line, position.Column, "", "", "", 0,
 			fmt.Errorf("%s:%d:%d: workflow run-name: %w", path, position.Line, position.Column, err))
@@ -410,35 +503,148 @@ func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string
 
 func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warning {
 	var warnings []Warning
+	supported := make(map[string]bool, len(parsed.Triggers))
 	for _, trigger := range parsed.Triggers {
+		if buildkitepipeline.SupportedTriggerEvent(trigger.Event) {
+			supported[trigger.Event] = true
+		}
+	}
+	supportedNames := make([]string, 0, len(supported))
+	for event := range supported {
+		supportedNames = append(supportedNames, event)
+	}
+	sort.Strings(supportedNames)
+	for _, trigger := range parsed.Triggers {
+		if trigger.Event == "merge_group" && (trigger.Paths != nil || trigger.PathsIgnore != nil) {
+			warnings = append(warnings, mergeGroupPathFiltersWarning(trigger.Position))
+		}
+		if trigger.Event == "release" && (trigger.Types == nil || slices.ContainsFunc(trigger.Types, func(activity string) bool {
+			return slices.Contains([]string{"unpublished", "edited", "deleted", "prereleased"}, activity)
+		})) {
+			warnings = append(warnings, nativeReleaseActivitiesWarning(trigger.Position))
+		}
 		if buildkitepipeline.SupportedTriggerEvent(trigger.Event) {
 			continue
 		}
+		message := fmt.Sprintf("on.%s is ignored, so nothing in this workflow runs from it.", trigger.Event)
+		if len(supportedNames) == 0 {
+			message += " This workflow declares no supported triggers that still run."
+		} else {
+			message += " The supported triggers declared in this workflow still run: " + strings.Join(supportedNames, ", ") + "."
+			message += " Move the jobs this trigger guards to one of those triggers if you need them."
+		}
+		if trigger.Event == "pull_request_target" {
+			message += " pull_request_target is intentionally unsupported for security reasons. Use pull_request with careful checkout and ref handling instead; changing the event alone does not make untrusted code safe. See https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#workflow-names-and-triggers for details."
+		} else {
+			message += fmt.Sprintf(" If you need %s, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.", trigger.Event)
+		}
 		warnings = append(warnings, Warning{
-			Code:    "W_TRIGGER_EVENT_UNSUPPORTED",
-			Line:    trigger.Position.Line,
-			Column:  trigger.Position.Column,
-			Message: fmt.Sprintf("on.%s has no Buildkite build source; this trigger is ignored and never starts a build", trigger.Event),
+			Code:          "W_TRIGGER_EVENT_UNSUPPORTED",
+			Blocker:       "trigger",
+			BlockerDetail: trigger.Event,
+			Line:          trigger.Position.Line,
+			Column:        trigger.Position.Column,
+			Message:       message,
 		})
 	}
 	if parsed.Concurrency != nil && cancelInProgress {
-		position := parsed.Concurrency.CancelInProgressPosition
-		warnings = append(warnings, Warning{
-			Code:    "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED",
-			Line:    position.Line,
-			Column:  position.Column,
-			Message: "workflow concurrency cancel-in-progress is not enforced; Buildkite pipeline settings can approximate it for same-branch builds",
-		})
+		warnings = append(warnings, workflowCancellationWarning(parsed.Concurrency.CancelInProgressPosition))
 	}
 	return warnings
 }
 
-func legacyCheckoutWarning(position workflow.Position, release string) Warning {
+func nativeReleaseActivitiesWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "GitHub Actions Pipeline Triggers accept all seven release activities and apply GitHub's draft-release suppression. Native Buildkite release builds deliver only published, created, and released, so unpublished, edited, deleted, and prereleased will not run this workflow through the native integration.",
+	}
+}
+
+func mergeGroupPathFiltersWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_MERGE_GROUP_PATH_FILTERS_IGNORED",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "on.merge_group paths and paths-ignore are ignored, matching GitHub, which does not evaluate path filters for merge_group events. Every merge_group delivery runs this workflow. Move the filtering into a job or step condition if you need it.",
+	}
+}
+
+func workflowCancellationWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "Workflow cancel-in-progress requests cancellation through the opening concurrency gate only. Older gate steps can be canceled, but jobs that already passed their gate can keep running and overlap with the newer workflow. Cancellation is asynchronous, not atomic latest-wins. A reusable call whose condition is decided at runtime can request cancellation even when that condition is false.",
+	}
+}
+
+func guardedReusableConcurrencyWarning(position workflow.Position, calleePath string) Warning {
+	return Warning{
+		Code:    "W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: fmt.Sprintf("The call condition depends on runtime values, so Buildkite enters the concurrency group of reusable workflow %q before it knows whether the call runs. When the condition is false, the skipped jobs still wait for the group and hold it until they finish. GitHub never enters the group for a skipped call. Write the condition with github, inputs, or event values only, which resolve during compilation, if the wait matters.", calleePath),
+	}
+}
+
+func prerequisiteReusableConcurrencyWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_REUSABLE_WORKFLOW_CONCURRENCY_QUEUED_BEFORE_PREREQUISITES",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "Buildkite reserves the reusable workflow's concurrency queue position at pipeline upload, before its prerequisites finish. The opening gate waits for those prerequisites, but later calls or builds using the group can wait behind it even when they are ready. GitHub admits the called workflow after its prerequisites finish. Mutual exclusion is preserved; admission order can differ.",
+	}
+}
+
+func legacyCheckoutWarning(position workflow.Position, release string, defaultsToFullHistory bool) Warning {
+	generation := "v2"
+	if defaultsToFullHistory {
+		generation = "v1"
+	}
+	message := fmt.Sprintf("actions/checkout %s behaves like %s. It does not set the ref and commit outputs, which actions/checkout added in v4.2.0.", release, generation)
+	if defaultsToFullHistory {
+		message += " It also defaults to full history when fetch-depth is omitted. Upgrade to actions/checkout v4 or later if either difference matters."
+	} else {
+		message += " Upgrade to actions/checkout v4 or later if a later step reads either output."
+	}
 	return Warning{
 		Code:    "W_CHECKOUT_LEGACY_RELEASE",
 		Line:    position.Line,
 		Column:  position.Column,
-		Message: fmt.Sprintf("actions/checkout %s is emulated by the native adapter with its release contract; upgrade to v4 or later", release),
+		Message: message,
+	}
+}
+
+func unknownCheckoutCommitWarning(position workflow.Position, commit string) Warning {
+	return Warning{
+		Code:   "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("actions/checkout resolved to immutable commit %s, which is absent from the frozen per-commit snapshot. The native adapter is using the supported %s contract instead; it still restricts repository, ref, path, credentials, and other inputs, and does not run the upstream action JavaScript.",
+			commit, actionintegration.CheckoutFallbackContractRelease),
+	}
+}
+
+func unknownUploadArtifactCommitWarning(position workflow.Position, commit string) Warning {
+	return Warning{
+		Code:   "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("actions/upload-artifact resolved to immutable commit %s, which is absent from the frozen per-commit snapshot. The native adapter is using the supported %s contract instead; it still restricts names, paths, archive mode, overwrite, hidden files, sizes, and outputs, and does not run the upstream action JavaScript.",
+			commit, actionintegration.UploadArtifactFallbackContractRelease),
+	}
+}
+
+func substitutedCacheCommitWarning(position workflow.Position, substitution CacheSubstitution) Warning {
+	action, _, _ := strings.Cut(substitution.Reference, "@")
+	return Warning{
+		Code:   "W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("%s resolved to commit %s, which is not in the frozen actions/cache snapshot admitted to the Buildkite cache-v2 service. The audited %s release (%s) runs instead. Pin %s@%s to remove this warning.",
+			substitution.Reference, substitution.ResolvedCommit, substitution.Release, substitution.Commit, action, substitution.Commit),
 	}
 }
 
@@ -451,6 +657,16 @@ func legacyUploadArtifactWarning(position workflow.Position, release string) War
 	}
 }
 
+func unknownDownloadArtifactCommitWarning(position workflow.Position, commit string) Warning {
+	return Warning{
+		Code:   "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("actions/download-artifact resolved to immutable commit %s, which is outside the exact admission set. The native adapter is using the supported %s contract instead; it still restricts selection to artifacts from verified direct needs producers and enforces destination, ZIP, digest, count, and size bounds, and does not run the upstream action JavaScript.",
+			commit, actionintegration.DownloadArtifactFallbackContractRelease),
+	}
+}
+
 func reusableWorkflowTokenWarning(position workflow.Position) Warning {
 	return Warning{
 		Code:    "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS",
@@ -460,12 +676,21 @@ func reusableWorkflowTokenWarning(position workflow.Position) Warning {
 	}
 }
 
-func jobWorkflowTokenWarning(position workflow.Position) Warning {
+func jobWorkflowTokenWarning(position workflow.Position, permissions map[string]string) Warning {
+	names := make([]string, 0, len(permissions))
+	for name := range permissions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	effective := make([]string, 0, len(names))
+	for _, name := range names {
+		effective = append(effective, strings.ReplaceAll(name, "_", "-")+": "+permissions[name])
+	}
 	return Warning{
 		Code:    "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS",
 		Line:    position.Line,
 		Column:  position.Column,
-		Message: "job-level repository permissions are ignored for hosted GITHUB_TOKEN; the top-level requesting workflow permissions apply",
+		Message: "Job-level permissions are ignored for GITHUB_TOKEN. The top-level workflow permissions apply instead. This job's token has " + strings.Join(effective, ", ") + ". Move this job's permissions block to the workflow top level. If you need per-job permissions, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
 	}
 }
 
@@ -476,12 +701,18 @@ func resolveCompileContainer(container *workflow.Container, context expression.C
 	resolved := *container
 	resolved.Env = cloneMap(container.Env)
 	resolved.Ports = append([]string(nil), container.Ports...)
+	resolved.Volumes = append([]string(nil), container.Volumes...)
 	if strings.Contains(resolved.Image, "${{") {
-		image, err := expression.EvaluateCompileStringTemplate(resolved.Image, context)
+		value, err := evaluateCompileSite(resolved.Image, expression.ProfileCompileContainerImage, expression.ResultString, context)
 		if err != nil {
 			return nil, err
 		}
-		resolved.Image = image
+		resolved.Image = value.(string)
+		// GitHub treats an empty evaluated image as host execution, including
+		// object-form containers. Literal images are validated during parsing.
+		if resolved.Image == "" {
+			return nil, nil
+		}
 	}
 	if strings.TrimSpace(resolved.Image) == "" {
 		return nil, fmt.Errorf("container image resolved to an empty string")
@@ -493,6 +724,11 @@ func resolveCompileContainer(container *workflow.Container, context expression.C
 }
 
 func resolveCompileServices(services []workflow.Service, context expression.CompileContext) ([]workflow.Service, error) {
+	// Credentials and env are runner-evaluated after the job's environment
+	// applies. Keep vars residual so both read the environment-overlaid scopes.
+	// Other service fields retain their compile-time vars snapshot.
+	runtimeContext := context
+	runtimeContext.Vars = nil
 	resolved := make([]workflow.Service, 0, len(services))
 	for _, service := range services {
 		container := service.Container
@@ -503,10 +739,7 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 			credentials := *container.Credentials
 			container.Credentials = &credentials
 			for _, field := range []*string{&container.Credentials.Username, &container.Credentials.Password} {
-				if err := expression.ValidateServiceCredentialTemplate(*field); err != nil {
-					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
-				}
-				value, err := expression.EvaluateAvailableCompileTemplate(*field, context)
+				value, err := reduceTemplateString(*field, expression.ProfileCompileServiceCredential, runtimeContext)
 				if err != nil {
 					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
 				}
@@ -515,14 +748,17 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 		}
 		fields := []*string{&container.Image, &container.Options, &container.Command, &container.Entrypoint}
 		for _, field := range fields {
-			value, err := expression.EvaluateAvailableCompileTemplate(*field, context)
+			value, err := reducePartialTemplateString(*field, expression.ProfileServiceTemplate, context)
 			if err != nil {
 				return nil, fmt.Errorf("service %q: %w", service.Name, err)
 			}
 			*field = value
 		}
 		for key, value := range container.Env {
-			resolvedValue, err := expression.EvaluateAvailableCompileTemplate(value, context)
+			if err := validateCompileSite(value, expression.ProfileServiceEnvironment, expression.ResultString); err != nil {
+				return nil, fmt.Errorf("service %q environment %q: %w", service.Name, key, err)
+			}
+			resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceEnvironment, runtimeContext)
 			if err != nil {
 				return nil, fmt.Errorf("service %q environment %q: %w", service.Name, key, err)
 			}
@@ -530,18 +766,11 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 		}
 		for _, values := range [][]string{container.Ports, container.Volumes} {
 			for j, value := range values {
-				resolvedValue, err := expression.EvaluateAvailableCompileTemplate(value, context)
+				resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceTemplate, context)
 				if err != nil {
 					return nil, fmt.Errorf("service %q: %w", service.Name, err)
 				}
 				values[j] = resolvedValue
-			}
-		}
-		for _, value := range append(append(append([]string{container.Image, container.Options, container.Command, container.Entrypoint}, container.Ports...), container.Volumes...), mapValues(container.Env)...) {
-			if strings.Contains(value, "${{") {
-				if err := expression.ValidateServiceRuntimeTemplate(value); err != nil {
-					return nil, fmt.Errorf("service %q: %w", service.Name, err)
-				}
 			}
 		}
 		if container.Image == "" {
@@ -553,20 +782,17 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 	return resolved, nil
 }
 
-func mapValues(values map[string]string) []string {
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		result = append(result, value)
-	}
-	return result
-}
-
 func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, context expression.CompileContext, matrix map[string]any) (string, error) {
 	if concurrency == nil {
 		return "", nil
 	}
 	context.Matrix = matrix
-	group, err := expression.EvaluateCompileTemplate(concurrency.Group, context)
+	profile := expression.ProfileCompileTemplate
+	if jobID == "" {
+		profile = expression.ProfileWorkflowConcurrency
+	}
+	value, err := evaluateCompileSite(concurrency.Group, profile, expression.ResultString, context)
+	group, _ := value.(string)
 	if err != nil {
 		message := fmt.Sprintf("concurrency group cannot be resolved at compile time: %v", err)
 		if jobID == "" {
@@ -583,27 +809,24 @@ func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, c
 	return group, nil
 }
 
-func rejectJobCancellation(path string, job workflow.Job) error {
-	if job.Concurrency == nil || (!job.Concurrency.CancelInProgress && job.Concurrency.CancelInProgressExpression == nil) {
-		return nil
-	}
-	position := job.Concurrency.CancelInProgressPosition
-	return locatedJobError(path, job, position.Line, position.Column, "concurrency cancel-in-progress is unsupported")
-}
-
-func resolveWorkflowCancellation(path string, concurrency *workflow.Concurrency, context expression.CompileContext) (bool, error) {
+func resolveCancellation(path, jobID string, concurrency *workflow.Concurrency, context expression.CompileContext) (bool, error) {
 	if concurrency == nil || concurrency.CancelInProgressExpression == nil {
 		return concurrency != nil && concurrency.CancelInProgress, nil
 	}
-	value, err := expression.EvaluateCompile(*concurrency.CancelInProgressExpression, context)
-	if err != nil {
+	failure := func(message string) (bool, error) {
 		position := concurrency.CancelInProgressPosition
-		return false, fmt.Errorf("%s:%d:%d: workflow concurrency cancel-in-progress cannot be resolved at compile time: %v", path, position.Line, position.Column, err)
+		if jobID != "" {
+			return false, locatedJobError(path, workflow.Job{ID: jobID}, position.Line, position.Column, message)
+		}
+		return false, fmt.Errorf("%s:%d:%d: workflow %s", path, position.Line, position.Column, message)
+	}
+	value, err := evaluateCompileSite(concurrency.CancelInProgressExpression.Text, expression.ProfileCompile, expression.ResultAny, context)
+	if err != nil {
+		return failure(fmt.Sprintf("concurrency cancel-in-progress cannot be resolved at compile time: %v", err))
 	}
 	cancelInProgress, ok := value.(bool)
 	if !ok {
-		position := concurrency.CancelInProgressPosition
-		return false, fmt.Errorf("%s:%d:%d: workflow concurrency cancel-in-progress resolved to %T, want boolean", path, position.Line, position.Column, value)
+		return failure(fmt.Sprintf("concurrency cancel-in-progress resolved to %T, want boolean", value))
 	}
 	return cancelInProgress, nil
 }
@@ -629,11 +852,13 @@ func supported(path string, job workflow.Job) error {
 	ids := make(map[string]struct{}, len(job.Steps))
 	for i, step := range job.Steps {
 		if step.Kind == "uses" && strings.HasPrefix(strings.ToLower(step.Uses), "docker://") {
-			return attributedProcessingFinding(
-				StageGraph, CodeGraphInvalid, "compatibility", path, step.Span.Start.Line, step.Span.Start.Column,
-				job.ID, "", step.Uses, i+1,
-				locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, actionsource.UnsupportedContainerActionReason),
-			)
+			return &ProcessingFinding{
+				Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
+				Blocker: "action_ref", BlockerDetail: step.Uses,
+				Path: path, Line: step.Span.Start.Line, Column: step.Span.Start.Column,
+				Job: job.ID, Action: step.Uses, Step: i + 1,
+				Err: locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, actionsource.UnsupportedContainerActionReason),
+			}
 		}
 		if step.ID != "" {
 			id := strings.ToLower(step.ID)
@@ -646,60 +871,75 @@ func supported(path string, job workflow.Job) error {
 	return nil
 }
 
+// resolveCompileTimeConditions reduces event values in the job and step
+// conditions. Conditions keep vars residual: the runtime evaluates each
+// position with its own scopes from the plan (repository over organization
+// for the job condition, the environment laid over them for steps), and a
+// condition a variable makes false must not prune token or secret authority,
+// which planning computes from the residual condition.
 func resolveCompileTimeConditions(job workflow.Job, context expression.CompileContext, matrix map[string]any) workflow.Job {
 	context.Matrix = matrix
-	if resolved, ok := resolveCompileTimeCondition(job.If, context); ok {
+	context.Vars = nil
+	// Runtime conditions read inputs from the plan; keep them residual.
+	context.Inputs, context.InputsComplete = nil, false
+	if resolved, ok := resolveCompileTimeCondition(job.If, expression.ProfileCompileJobCondition, context); ok {
 		job.If = resolved
 	}
 	job.Steps = append([]workflow.Step(nil), job.Steps...)
 	for i := range job.Steps {
 		step := &job.Steps[i]
-		if resolved, ok := resolveCompileTimeCondition(step.If, context); ok {
+		if resolved, ok := resolveCompileTimeCondition(step.If, expression.ProfileCompileStepCondition, context); ok {
 			step.If = resolved
 		}
 	}
 	return job
 }
 
-func resolveCompileTimeCondition(source string, context expression.CompileContext) (string, bool) {
-	usesEvent, err := expression.ReferencesGitHubEvent(source)
+func resolveCompileTimeCondition(source string, profile expression.ProfileID, context expression.CompileContext) (string, bool) {
+	usesEvent, err := siteReferencesEvent(source, profile, expression.ResultBoolean, true)
 	if err != nil || !usesEvent {
 		return source, false
 	}
-	resolved, err := expression.EvaluateCompileCondition(source, context)
-	if err == nil {
+	reduced, err := reduceCompileSite(source, profile, expression.ResultBoolean, context)
+	if err != nil {
+		return source, false
+	}
+	if reduced.Known {
+		resolved, _ := reduced.Value.(bool)
 		if resolved {
-			referencesStatus, _ := expression.ReferencesStatusFunction(source)
+			referencesStatus, _ := referencesStatus(source, profile)
 			if referencesStatus {
 				return "always()", true
 			}
 		}
 		return strconv.FormatBool(resolved), true
 	}
-	reduced, err := expression.ReduceCompileCondition(source, context)
-	if err != nil {
-		return source, false
-	}
-	return reduced, true
+	return reduced.Source, true
 }
 
-func supportedConditions(path string, job workflow.Job, matrix map[string]any, matrixKnown bool) error {
-	validate := expression.ValidateCondition
-	if matrixKnown {
-		validate = func(source string, scope expression.ConditionScope) error {
-			return expression.ValidateConditionWithMatrix(source, scope, matrix)
+func supportedConditions(path string, job workflow.Job) error {
+	validate := func(source string, scope expression.ConditionScope) error {
+		profile, err := runtimeConditionProfile(scope)
+		if err != nil {
+			return err
 		}
+		return validateCompileSite(source, profile, expression.ResultBoolean)
 	}
 	return validateConditions(path, job, validate)
 }
 
-func supportedCompileTimeConditions(path string, job workflow.Job, context expression.CompileContext, matrix map[string]any) error {
+func supportedCompileTimeConditions(path string, job workflow.Job, context expression.CompileContext) error {
 	validate := func(source string, scope expression.ConditionScope) error {
-		usesEvent, err := expression.ReferencesGitHubEvent(source)
+		profile, err := compileConditionProfile(scope)
+		if err != nil {
+			return err
+		}
+		usesEvent, err := siteReferencesEvent(source, profile, expression.ResultBoolean, true)
 		if err != nil || !usesEvent {
 			return nil
 		}
-		return expression.ValidateCompileConditionWithMatrix(source, scope, context, matrix)
+		_, err = reduceCompileSite(source, profile, expression.ResultBoolean, context)
+		return err
 	}
 	return validateConditions(path, job, validate)
 }
@@ -711,7 +951,7 @@ func validateConditions(path string, job workflow.Job, validate func(string, exp
 		if position.Line == 0 {
 			position = job.Span.Start
 		}
-		diagnostics = append(diagnostics, locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("job condition: %v", err)))
+		diagnostics = append(diagnostics, locatedJobWrappedError(path, job, position.Line, position.Column, "job condition", err))
 	}
 	for i, step := range job.Steps {
 		if err := validate(step.If, expression.StepCondition); err != nil {
@@ -723,7 +963,7 @@ func validateConditions(path string, job workflow.Job, validate func(string, exp
 			if step.ID != "" {
 				label = fmt.Sprintf("step %q", step.ID)
 			}
-			diagnostics = append(diagnostics, locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("%s condition: %v", label, err)))
+			diagnostics = append(diagnostics, locatedJobWrappedError(path, job, position.Line, position.Column, label+" condition", err))
 		}
 	}
 	return errors.Join(diagnostics...)

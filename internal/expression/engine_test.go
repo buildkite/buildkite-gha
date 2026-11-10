@@ -1,0 +1,1630 @@
+package expression
+
+import (
+	"encoding/json"
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestEngineLiteralPreservesExpressionTypes(t *testing.T) {
+	tests := []struct {
+		value any
+		want  string
+	}{
+		{nil, "null"},
+		{true, "true"},
+		{"yes please", "'yes please'"},
+		{"it's 10", "'it''s 10'"},
+		{"10", "'10'"},
+		{json.Number("10.5"), "10.5"},
+		{7, "7"},
+		{2.5, "2.5"},
+	}
+	engine := NewEngine()
+	for _, test := range tests {
+		got, err := engine.Literal(test.value)
+		if err != nil || got != test.want {
+			t.Errorf("Literal(%#v) = %q, %v; want %q", test.value, got, err, test.want)
+		}
+	}
+	if _, err := engine.Literal(map[string]any{"key": "value"}); err == nil {
+		t.Fatal("Literal() accepted an aggregate")
+	}
+}
+
+func TestEngineGitHubIdentityIDs(t *testing.T) {
+	engine := NewEngine()
+	ids := map[string]any{"actor_id": "9007199254740993", "repository_id": "42", "repository_owner_id": "73"}
+	values := Values{Compile: CompileContext{GitHub: ids}, Runtime: Context{GitHub: ids}, Condition: ConditionContext{GitHub: ids}}
+	missing := Values{Compile: CompileContext{GitHub: map[string]any{}}, Runtime: Context{GitHub: map[string]any{}}, Condition: ConditionContext{GitHub: map[string]any{}}}
+	for name, id := range ids {
+		for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunName, ProfileWorkflowConcurrency, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput, ProfileStepTemplate, ProfileActionStepTemplate, ProfileActionInputDefault, ProfileServiceCredential, ProfileJobCondition, ProfileCallCondition, ProfileStepCondition, ProfileActionStepCondition, ProfileActionLifecycle} {
+			site := Site{Source: "${{ github['" + strings.ToUpper(name) + "'] }}", Profile: profile, Result: ResultString}
+			want := id
+			if profiles[profile].Form == FormExpression {
+				site.Source = "github['" + strings.ToUpper(name) + "'] == '" + id.(string) + "'"
+				site.Result, want = ResultBoolean, true
+			}
+			got, err := engine.Evaluate(site, values)
+			if err != nil || got != want {
+				t.Fatalf("%s / %s = %#v, %v; want %#v", profile, name, got, err, want)
+			}
+			if _, err := engine.Evaluate(site, missing); err == nil {
+				t.Fatalf("%s / %s invented a value for missing identity", profile, name)
+			}
+		}
+		denied := Site{Source: "${{ false && github." + name + " }}", Profile: ProfileDockerActionArg}
+		if _, err := engine.Validate(denied); err == nil {
+			t.Fatal("identity broadened Docker argument contexts")
+		}
+	}
+	site := Site{Source: "${{ github.actor_id == 'other' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString}
+	broad, err := engine.Analyze(site, AbstractValues{})
+	if err != nil || !broad.Effects.EventPayload || broad.Effects.GitHubToken == 0 {
+		t.Fatalf("unknown identity analysis = %#v, %v", broad, err)
+	}
+	narrow, err := engine.Analyze(site, AbstractValues{References: map[string]any{"github.actor_id": "9007199254740993"}})
+	if err != nil || !narrow.Value.Known || narrow.Value.Value != "" || !narrow.Effects.EventPayload || narrow.Effects.GitHubToken != 0 {
+		t.Fatalf("known identity analysis = %#v, %v", narrow, err)
+	}
+	if got, err := engine.Evaluate(site, values); err != nil || got != narrow.Value.Value {
+		t.Fatalf("concrete identity guard = %#v, %v; want token-free abstract result", got, err)
+	}
+}
+
+func TestEngineToolCacheRemainsRuntimeOnly(t *testing.T) {
+	engine := NewEngine()
+	for _, profile := range []ProfileID{ProfileStepTemplate, ProfileActionStepTemplate, ProfileActionInputDefault, ProfileJobOutput} {
+		site := Site{Source: "${{ runner.tool_cache }}/Python/3.13.13", Profile: profile, Result: ResultString}
+		reduced, err := engine.Reduce(site, Values{})
+		if err != nil || reduced.Known || !strings.Contains(reduced.Source, "runner.tool_cache") {
+			t.Fatalf("Reduce(%s) = %#v, %v; want runtime tool cache", profile, reduced, err)
+		}
+		got, err := engine.Evaluate(site, Values{Runtime: Context{Runner: map[string]string{"tool_cache": "/tools"}}})
+		if err != nil || got != "/tools/Python/3.13.13" {
+			t.Fatalf("Evaluate(%s) = %#v, %v", profile, got, err)
+		}
+		if _, err := engine.Evaluate(site, Values{}); err == nil {
+			t.Fatalf("%s accepted an unavailable tool cache", profile)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileStepCondition, ProfileActionStepCondition, ProfileActionLifecycle} {
+		site := Site{Source: "runner['tool_cache'] == '/tools'", Profile: profile, Result: ResultBoolean}
+		got, err := engine.Evaluate(site, Values{Condition: ConditionContext{Runner: map[string]string{"tool_cache": "/tools"}}})
+		if err != nil || got != true {
+			t.Fatalf("Evaluate(%s) = %#v, %v", profile, got, err)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunsOnTemplate, ProfileWorkflowConcurrency, ProfileJobEnvironment, ProfileServiceEnvironment, ProfileJobDefault, ProfileRuntimeTemplate} {
+		if _, err := engine.Validate(Site{Source: "${{ runner.tool_cache }}", Profile: profile, Result: ResultString}); err == nil {
+			t.Errorf("%s admitted a tool-cache path before job setup", profile)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileJobCondition, ProfileCallCondition} {
+		if _, err := engine.Validate(Site{Source: "false && runner.tool_cache != ''", Profile: profile, Result: ResultBoolean}); err == nil {
+			t.Errorf("%s admitted a tool-cache path before job setup", profile)
+		}
+	}
+	site := Site{Source: "${{ runner.tool_cache == '/tools' && github.token || 'none' }}", Profile: ProfileStepTemplate, Result: ResultString}
+	unknown, err := engine.Analyze(site, AbstractValues{})
+	if err != nil || unknown.Value.Known || unknown.Effects.GitHubToken != GitHubTokenDirect {
+		t.Fatalf("unknown tool-cache authority = %#v, %v", unknown, err)
+	}
+	for _, path := range []string{"/tools", "/other"} {
+		analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{"runner.tool_cache": path, "github.token": "token"}})
+		want, effect := "none", GitHubTokenEffect(0)
+		if path == "/tools" {
+			want, effect = "token", GitHubTokenDirect
+		}
+		if err != nil || !analysis.Value.Known || analysis.Value.Value != want || analysis.Effects.GitHubToken != effect {
+			t.Fatalf("known tool-cache authority = %#v, %v", analysis, err)
+		}
+		value, err := engine.Evaluate(site, Values{Runtime: Context{Runner: map[string]string{"tool_cache": path}, GitHub: map[string]any{"token": "token"}}})
+		if err != nil || value != want {
+			t.Fatalf("concrete tool-cache branch = %#v, %v; want %q", value, err, want)
+		}
+	}
+}
+
+func TestEngineEventPathRemainsRuntimeOnly(t *testing.T) {
+	engine := NewEngine()
+	for _, profile := range []ProfileID{ProfileJobEnvironment, ProfileJobOutput, ProfileStepTemplate, ProfileActionStepTemplate, ProfileActionInputDefault} {
+		site := Site{Source: "${{ github.event_path }}", Profile: profile, Result: ResultString}
+		reduced, err := engine.Reduce(site, Values{Compile: CompileContext{GitHub: map[string]any{"event": map[string]any{}}}})
+		if err != nil || reduced.Known || !strings.Contains(reduced.Source, "github.event_path") {
+			t.Fatalf("Reduce(%s) = %#v, %v; want runtime event path", profile, reduced, err)
+		}
+		for _, path := range []string{"", "/runtime/event.json"} {
+			got, err := engine.Evaluate(site, Values{Runtime: Context{GitHub: map[string]any{"event_path": path}}})
+			if err != nil || got != path {
+				t.Errorf("Evaluate(%s) = %#v, %v; want %q", profile, got, err, path)
+			}
+		}
+	}
+	for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunsOnTemplate, ProfileRunName, ProfileWorkflowConcurrency} {
+		if _, err := engine.Validate(Site{Source: "${{ github.event_path }}", Profile: profile, Result: ResultString}); err == nil {
+			t.Errorf("%s admitted an execution path during graph construction", profile)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileJobCondition, ProfileCallCondition} {
+		if _, err := engine.Validate(Site{Source: "github.event_path != ''", Profile: profile, Result: ResultBoolean}); err == nil {
+			t.Errorf("%s admitted an execution path before job setup", profile)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileStepTemplate, ProfileActionInputDefault} {
+		site := Site{Source: "${{ github.event_path != '' && github.token || 'missing' }}", Profile: profile, Result: ResultString}
+		unknown, err := engine.Analyze(site, AbstractValues{})
+		if err != nil || unknown.Value.Known || unknown.Effects.GitHubToken != GitHubTokenDirect || unknown.Effects.EventPayload {
+			t.Fatalf("unknown event path authority = %#v, %v", unknown, err)
+		}
+		for _, path := range []string{"", "/runtime/event.json"} {
+			known := map[string]any{"github.event_path": path, "github.token": "synthetic-token"}
+			analysis, err := engine.Analyze(site, AbstractValues{References: known})
+			want, effect := "missing", GitHubTokenEffect(0)
+			if path != "" {
+				want, effect = "synthetic-token", GitHubTokenDirect
+			}
+			if err != nil || !analysis.Value.Known || analysis.Value.Value != want || analysis.Effects.GitHubToken != effect || analysis.Effects.EventPayload {
+				t.Fatalf("known event path authority = %#v, %v; want %q, %v", analysis, err, want, effect)
+			}
+			value, err := engine.Evaluate(site, Values{Runtime: Context{GitHub: map[string]any{"event_path": path, "token": "synthetic-token"}}})
+			if err != nil || value != want {
+				t.Fatalf("concrete event path branch = %#v, %v; want %q", value, err, want)
+			}
+		}
+	}
+}
+
+func TestEngineRunAttemptConditionsRemainRuntimeOnly(t *testing.T) {
+	engine := NewEngine()
+	for _, profile := range []ProfileID{ProfileCompileJobCondition, ProfileCompileCallCondition, ProfileCompileStepCondition, ProfileJobCondition, ProfileCallCondition, ProfileStepCondition, ProfileActionStepCondition} {
+		site := Site{Source: "github.run_attempt == '1'", Profile: profile, Result: ResultBoolean}
+		reduced, err := engine.Reduce(site, Values{Compile: CompileContext{GitHub: map[string]any{"repository": "PostHog/posthog"}}})
+		if err != nil || reduced.Known || !strings.Contains(reduced.Source, "github.run_attempt") {
+			t.Fatalf("Reduce(%s) = %#v, %v; want runtime attempt", profile, reduced, err)
+		}
+		analysis, err := engine.Analyze(site, AbstractValues{})
+		if err != nil || analysis.Value.Known {
+			t.Fatalf("Analyze(%s) = %#v, %v; want unknown attempt", profile, analysis, err)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileJobCondition, ProfileCallCondition, ProfileStepCondition, ProfileActionStepCondition} {
+		for _, attempt := range []string{"1", "2", "5"} {
+			for _, source := range []string{"github.run_attempt == '1'", "github['run_attempt'] == 1", "github.run_attempt != '1'"} {
+				site := Site{Source: source, Profile: profile, Result: ResultBoolean}
+				want := attempt == "1"
+				if strings.Contains(source, "!=") {
+					want = !want
+				}
+				value, err := engine.Evaluate(site, Values{Condition: ConditionContext{GitHub: map[string]any{"run_attempt": attempt}}})
+				if err != nil || value != want {
+					t.Fatalf("Evaluate(%s, %s, %s) = %v, %v; want %t", profile, source, attempt, value, err, want)
+				}
+				analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{"github.run_attempt": attempt}})
+				if err != nil || !analysis.Value.Known || analysis.Value.Value != want {
+					t.Fatalf("Analyze(%s) = %#v, %v; want %t", profile, analysis, err, want)
+				}
+			}
+		}
+		for _, source := range []string{"github.run_attempt == '1'", "github.run_attempt != '1'"} {
+			_, err := engine.Evaluate(Site{Source: source, Profile: profile, Result: ResultBoolean}, Values{Condition: ConditionContext{GitHub: map[string]any{}}})
+			if err == nil || !strings.Contains(err.Error(), "unavailable") {
+				t.Fatalf("Evaluate(%s) error = %v; want unavailable identity", profile, err)
+			}
+		}
+		for _, source := range []string{"false && github.token != ''", "false && github.run_id != ''", "false && github.run_number != ''"} {
+			if _, err := engine.Validate(Site{Source: source, Profile: profile, Result: ResultBoolean}); err == nil {
+				t.Fatalf("%s admitted %s", profile, source)
+			}
+		}
+	}
+	for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunsOnTemplate, ProfileRunName, ProfileWorkflowConcurrency} {
+		if _, err := engine.Validate(Site{Source: "${{ github.run_attempt }}", Profile: profile, Result: ResultString}); err == nil {
+			t.Fatalf("%s admitted attempt during graph construction", profile)
+		}
+	}
+	if _, err := engine.Validate(Site{Source: "github.run_attempt == '1'", Profile: ProfileActionLifecycle, Result: ResultBoolean}); err == nil {
+		t.Fatal("admitted attempt in unrelated lifecycle profile")
+	}
+}
+
+func TestEnginePostHogFirstAttemptJobCondition(t *testing.T) {
+	// ci-backend.yml at b9a0729f733e6dd170017677bb339608489ec3d2.
+	site := Site{Profile: ProfileJobCondition, Result: ResultBoolean, Source: `!cancelled() && github.run_attempt == '1'
+&& github.actor != 'dependabot[bot]'
+&& github.event.pull_request.head.repo.full_name == 'PostHog/posthog'
+&& needs.select-tests.result == 'success'`}
+	for _, test := range []struct {
+		attempt, actor, repository, result string
+		cancelled, want                    bool
+	}{
+		{"1", "octocat", "PostHog/posthog", "success", false, true},
+		{"2", "octocat", "PostHog/posthog", "success", false, false},
+		{"1", "dependabot[bot]", "PostHog/posthog", "success", false, false},
+		{"1", "octocat", "octocat/posthog", "success", false, false},
+		{"1", "octocat", "PostHog/posthog", "skipped", false, false},
+		{"1", "octocat", "PostHog/posthog", "success", true, false},
+	} {
+		condition := ConditionContext{
+			GitHub: map[string]any{"run_attempt": test.attempt, "actor": test.actor,
+				"event": map[string]any{"pull_request": map[string]any{"head": map[string]any{"repo": map[string]any{"full_name": test.repository}}}}},
+			Needs: map[string]NeedStatus{"select-tests": {Result: test.result}}, Cancelled: test.cancelled,
+		}
+		got, err := NewEngine().Evaluate(site, Values{Condition: condition})
+		if err != nil || got != test.want {
+			t.Errorf("condition(%+v) = %v, %v; want %t", test, got, err, test.want)
+		}
+	}
+}
+
+func TestEngineInputReferences(t *testing.T) {
+	for _, test := range []struct {
+		source  string
+		names   []string
+		dynamic bool
+	}{
+		{"${{ inputs.Label }}-${{ inputs['enabled'] }}", []string{"enabled", "label"}, false},
+		{"${{ inputs[inputs.key] }}", []string{"key"}, true},
+		{"${{ inputs[env.KEY] }}", []string{}, true},
+		{"${{ toJSON(inputs) }}", []string{}, true},
+		{"${{ github.event.inputs.name }}-${{ 'inputs.fake' }}", []string{}, false},
+		{"${{ false && inputs.unselected || github.token }}", []string{"unselected"}, false},
+	} {
+		names, dynamic, err := NewEngine().InputReferences(Site{Source: test.source, Profile: ProfileStepTemplate})
+		if err != nil || !reflect.DeepEqual(names, test.names) || dynamic != test.dynamic {
+			t.Errorf("InputReferences(%q) = %v, %v, %v", test.source, names, dynamic, err)
+		}
+	}
+}
+
+func TestEnginePreservesInputScopeDuringEventReduction(t *testing.T) {
+	inputs := map[string]any{"label": "synthetic-input-sentinel", "enabled": false}
+	compile := CompileContext{GitHub: map[string]any{"ref": "refs/heads/main", "event": map[string]any{"branch": "event-branch"}}}
+	for _, test := range []struct {
+		source string
+		want   string
+	}{
+		{"${{ inputs.label }}", "synthetic-input-sentinel"},
+		{"${{ format('{0}-{1}', github.ref, inputs.label) }}", "refs/heads/main-synthetic-input-sentinel"},
+		{"${{ format('{0}-{1}', github.event.branch, inputs.label) }}", "event-branch-synthetic-input-sentinel"},
+		{"${{ github.ref == inputs.label }}", "false"},
+		{"${{ inputs.enabled && github.token || '' }}", ""},
+	} {
+		site := Site{Source: test.source, Profile: ProfileStepTemplate, Result: ResultString}
+		reduced, err := NewEngine().Reduce(site, Values{Compile: compile})
+		if err != nil || reduced.Known || strings.Contains(reduced.Source, "synthetic-input-sentinel") || !strings.Contains(reduced.Source, "inputs.") {
+			t.Fatalf("Reduce(%q) = %#v, %v", test.source, reduced, err)
+		}
+		site.Source = reduced.Source
+		got, err := NewEngine().Evaluate(site, Values{Runtime: Context{WorkflowInputs: inputs, GitHub: compile.GitHub}})
+		if err != nil || got != test.want {
+			t.Errorf("Evaluate(reduced %q) = %#v, %v; want %q", test.source, got, err, test.want)
+		}
+		analysis, err := NewEngine().Analyze(site, AbstractValues{Inputs: InputScope{Values: inputs, Complete: true}})
+		if err != nil || analysis.Effects.GitHubToken != 0 {
+			t.Errorf("input-scoped authority = %#v, %v", analysis, err)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileCompileJobCondition, ProfileJobCondition, ProfileStepCondition} {
+		site := Site{Source: "inputs.enabled && github.event.branch == 'event-branch'", Profile: profile, Result: ResultBoolean}
+		reduced, err := NewEngine().Reduce(site, Values{Compile: compile})
+		if err != nil || reduced.Known || !strings.Contains(reduced.Source, "inputs.enabled") || strings.Contains(reduced.Source, "github.event.branch") {
+			t.Errorf("Reduce(%s condition) = %#v, %v", profile, reduced, err)
+		}
+	}
+}
+
+func TestEnginePartialInputAuthorityMatchesHydratedEvaluation(t *testing.T) {
+	partial := InputScope{Values: map[string]any{"key": "value", "enabled": false}}
+	hydrated := map[string]any{"key": "value", "enabled": false, "value": "yes"}
+	for _, test := range []struct {
+		source string
+		token  bool
+	}{
+		{"inputs[inputs.key] && github.token || ''", true},
+		{"contains(toJSON(inputs), 'yes') && github.token || ''", true},
+		{"fromJSON(toJSON(inputs)).value && github.token || ''", true},
+		{"inputs.enabled && github.token || ''", false},
+		{"inputs['enabled'] && github.token || ''", false},
+	} {
+		t.Run(test.source, func(t *testing.T) {
+			site := Site{Source: "${{ " + test.source + " }}", Profile: ProfileStepTemplate, Result: ResultString}
+			analysis, err := NewEngine().Analyze(site, AbstractValues{Inputs: partial})
+			if err != nil || (analysis.Effects.GitHubToken != 0) != test.token {
+				t.Fatalf("partial Analyze() = %#v, %v; want token %t", analysis, err, test.token)
+			}
+			got, err := NewEngine().Evaluate(site, Values{Runtime: Context{WorkflowInputs: hydrated, GitHub: map[string]any{"token": "synthetic-token"}}})
+			want := ""
+			if test.token {
+				want = "synthetic-token"
+			}
+			if err != nil || got != want {
+				t.Fatalf("hydrated Evaluate() = %#v, %v; want %q", got, err, want)
+			}
+			// Once the object is complete, computed and aggregate reads can
+			// prove these same token branches false without over-authorizing.
+			analysis, err = NewEngine().Analyze(site, AbstractValues{Inputs: InputScope{Values: partial.Values, Complete: true}})
+			if err != nil || analysis.Effects.GitHubToken != 0 || !analysis.Value.Known || analysis.Value.Value != "" {
+				t.Fatalf("complete Analyze() = %#v, %v; want known empty value without token", analysis, err)
+			}
+		})
+	}
+	for _, profile := range []ProfileID{ProfileJobCondition, ProfileStepCondition} {
+		analysis, err := NewEngine().Analyze(Site{Source: "inputs['enabled']", Profile: profile, Result: ResultBoolean}, AbstractValues{Inputs: partial})
+		if err != nil || !analysis.Value.Known || analysis.Value.Value != false {
+			t.Errorf("indexed known-false %s condition = %#v, %v", profile, analysis, err)
+		}
+	}
+	for _, test := range []struct {
+		source string
+		known  bool
+	}{
+		{"${{ inputs[inputs.key] || 'fallback' }}", false},
+		{"${{ toJSON(inputs) }}", false},
+		{"${{ inputs.enabled }}", true},
+		{"${{ inputs['enabled'] }}", true},
+	} {
+		reduced, err := NewEngine().Reduce(Site{Source: test.source, Profile: ProfileReusableStepControl, Result: ResultAny}, Values{Compile: CompileContext{Inputs: partial.Values}})
+		if err != nil || reduced.Known != test.known || (test.known && reduced.Value != false) || (!test.known && reduced.Source != test.source) {
+			t.Errorf("partial Reduce(%s) = %#v, %v", test.source, reduced, err)
+		}
+	}
+}
+
+func TestEngineInputErrorsHideValues(t *testing.T) {
+	inputs := map[string]any{"pattern": "synthetic-input-sentinel-{bad}"}
+	site := Site{Source: "${{ format(inputs.pattern, 'value') }}", Profile: ProfileStepTemplate, Result: ResultString}
+	_, concreteErr := NewEngine().Evaluate(site, Values{Runtime: Context{WorkflowInputs: inputs}})
+	_, abstractErr := NewEngine().Analyze(site, AbstractValues{Inputs: InputScope{Values: inputs, Complete: true}})
+	for _, err := range []error{concreteErr, abstractErr} {
+		if err == nil || strings.Contains(err.Error(), "synthetic-input-sentinel") {
+			t.Errorf("expected a value-safe format error, got %v", err)
+		}
+	}
+}
+
+func TestNeedsJSONUsesRuntimeValuesWithoutGrantingAuthority(t *testing.T) {
+	engine := NewEngine()
+	const want = "{\n  \"build\": {\n    \"outputs\": {},\n    \"result\": \"failure\"\n  }\n}"
+	values := Values{Runtime: Context{Needs: map[string]NeedStatus{"build": {Result: "failure"}}}}
+	known := AbstractValues{References: map[string]any{
+		"needs": map[string]any{"build": map[string]any{"outputs": map[string]string{}, "result": "failure"}},
+	}}
+	for _, profile := range []ProfileID{ProfileStepTemplate, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput} {
+		t.Run(string(profile), func(t *testing.T) {
+			site := Site{Source: "${{ toJSON(needs) }}", Profile: profile, Result: ResultString}
+			got, err := engine.Evaluate(site, values)
+			if err != nil || got != want {
+				t.Fatalf("Evaluate() = %#v, %v; want %q", got, err, want)
+			}
+			analysis, err := engine.Analyze(site, known)
+			if err != nil || !analysis.Value.Known || analysis.Value.Value != want || analysis.Effects != (Effects{}) {
+				t.Fatalf("known Analyze() = %#v, %v", analysis, err)
+			}
+			analysis, err = engine.Analyze(site, AbstractValues{})
+			if err != nil || analysis.Value.Known || analysis.Effects != (Effects{}) {
+				t.Fatalf("unknown Analyze() = %#v, %v", analysis, err)
+			}
+			if got, err := engine.Evaluate(site, Values{}); err != nil || got != "{}" {
+				t.Fatalf("empty needs = %#v, %v", got, err)
+			}
+		})
+	}
+	guarded := Site{Source: "${{ contains(toJSON(needs), 'success') && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString}
+	analysis, err := engine.Analyze(guarded, known)
+	if err != nil || !analysis.Value.Known || analysis.Value.Value != "" || analysis.Effects != (Effects{}) {
+		t.Fatalf("known-false needs guard = %#v, %v", analysis, err)
+	}
+	analysis, err = engine.Analyze(guarded, AbstractValues{})
+	if err != nil || analysis.Value.Known || analysis.Effects.GitHubToken != GitHubTokenDirect {
+		t.Fatalf("unknown needs guard = %#v, %v", analysis, err)
+	}
+}
+
+func TestDeferredInputPreservesDeclaredType(t *testing.T) {
+	engine := NewEngine()
+	for _, test := range []struct {
+		name, source, output string
+		result               ResultType
+		want                 any
+		wantErr              string
+	}{
+		{name: "true", source: "${{ needs.detect.outputs.deps == 'true' }}", output: "true", result: ResultBoolean, want: true},
+		{name: "false", source: "${{ needs.detect.outputs.deps == 'true' }}", output: "false", result: ResultBoolean, want: false},
+		{name: "missing", source: "${{ needs.detect.outputs.deps == 'true' }}", result: ResultBoolean, want: false},
+		{name: "number", source: "${{ fromJSON(needs.detect.outputs.deps) }}", output: "7", result: ResultNumber, want: float64(7)},
+		{name: "string remains string", source: "${{ needs.detect.outputs.deps == 'true' }}", output: "false", result: ResultString, want: "false"},
+		{name: "boolean rejects string", source: "${{ needs.detect.outputs.deps }}", output: "false", result: ResultBoolean, wantErr: "want boolean"},
+		{name: "number rejects string", source: "${{ needs.detect.outputs.deps }}", output: "7", result: ResultNumber, wantErr: "want number"},
+		{name: "boolean rejects template", source: "prefix-${{ needs.detect.outputs.deps }}", output: "true", result: ResultBoolean, wantErr: "expression"},
+		{name: "unreachable secret", source: "${{ needs.detect.outputs.deps == 'true' || secrets.TOKEN }}", output: "true", result: ResultBoolean, wantErr: "secrets"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			site := Site{Source: test.source, Profile: ProfileDeferredInput, Result: test.result}
+			values := Values{Runtime: Context{Needs: map[string]NeedStatus{"detect": {Outputs: map[string]string{"deps": test.output}}}}}
+			got, err := engine.Evaluate(site, values)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("Evaluate() = %#v, %v; want %q", got, err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("Evaluate() = %#v, %v; want %#v", got, err, test.want)
+			}
+			analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{"needs.detect.outputs.deps": test.output}})
+			if err != nil || !analysis.Value.Known || !reflect.DeepEqual(analysis.Value.Value, test.want) || analysis.Effects != (Effects{}) {
+				t.Fatalf("known Analyze() = %#v, %v", analysis, err)
+			}
+			unknown, err := engine.Analyze(site, AbstractValues{})
+			if err != nil || unknown.Value.Known || unknown.Effects != (Effects{}) {
+				t.Fatalf("unknown Analyze() = %#v, %v", unknown, err)
+			}
+			reduced, err := engine.Reduce(site, Values{})
+			if err != nil || reduced.Known {
+				t.Fatalf("Reduce() = %#v, %v", reduced, err)
+			}
+			site.Source = reduced.Source
+			got, err = engine.Evaluate(site, values)
+			if err != nil || !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("Evaluate(reduced) = %#v, %v; want %#v", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
+	engine := NewEngine()
+	profiles := Profiles()
+	if len(profiles) != len(profileIDs()) {
+		t.Fatalf("profile table has %d entries, want %d", len(profiles), len(profileIDs()))
+	}
+	compile := CompileContext{
+		GitHub: map[string]any{"event_name": "push", "server_url": "https://github.com"},
+		Inputs: map[string]any{"enabled": true, "name": "value"},
+		Matrix: map[string]any{"os": "linux", "enabled": true},
+		Vars:   map[string]string{"NAME": "value"},
+	}
+	runtime := Context{
+		Env:            map[string]string{"NAME": "value"},
+		Vars:           map[string]string{"NAME": "value"},
+		GitHub:         map[string]any{"event_name": "push", "server_url": "https://github.com"},
+		Inputs:         map[string]string{"enabled": "true", "name": "value"},
+		WorkflowInputs: map[string]any{"enabled": true, "name": "value"},
+		Matrix:         map[string]any{"enabled": true},
+		Needs:          map[string]NeedStatus{"build": {Outputs: map[string]string{"value": `{"name":"value"}`}, Result: "success"}},
+	}
+	condition := ConditionContext{
+		Env:    runtime.Env,
+		GitHub: runtime.GitHub,
+		Inputs: map[string]any{"enabled": true, "name": "value"},
+		Needs:  runtime.Needs,
+	}
+	values := Values{Compile: compile, Runtime: runtime, Condition: condition}
+	abstract := AbstractValues{References: map[string]any{
+		"env.name":                  "value",
+		"github.event_name":         "push",
+		"github.server_url":         "https://github.com",
+		"inputs.enabled":            true,
+		"inputs.name":               "value",
+		"needs.build.outputs.value": `{"name":"value"}`,
+	}}
+	type example struct {
+		source string
+		result ResultType
+		want   any
+	}
+	examples := map[ProfileID]example{
+		ProfileCompile:                  {"${{ case(true, contains('abc', 'b'), false) }}", ResultBoolean, true},
+		ProfileRunsOn:                   {"${{ inputs.name }}", ResultString, "value"},
+		ProfileRunsOnTemplate:           {"linux-${{ inputs.name }}", ResultString, "linux-value"},
+		ProfileCompileTemplate:          {"${{ case(true, true, false) }}", ResultString, "true"},
+		ProfileWorkflowConcurrency:      {"${{ case(true, true, false) }}", ResultString, "true"},
+		ProfileCompileContainerImage:    {"node:${{ case(true, 24, 25) }}", ResultString, "node:24"},
+		ProfilePartialTemplate:          {"value-${{ inputs.name }}", ResultString, "value-value"},
+		ProfileCompileJobCondition:      {"github.event_name == 'push'", ResultBoolean, true},
+		ProfileCompileStepCondition:     {"inputs.enabled", ResultBoolean, true},
+		ProfileCompileCallCondition:     {"inputs.enabled", ResultBoolean, true},
+		ProfileReusableStepControl:      {"${{ true }}", ResultBoolean, true},
+		ProfileReusableInput:            {"${{ 'value' }}", ResultString, "value"},
+		ProfileRunName:                  {"run-${{ github.event_name }}", ResultString, "run-push"},
+		ProfileJobCondition:             {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileJobControl:               {"${{ matrix.enabled }}", ResultBoolean, true},
+		ProfileStrategyParallel:         {"${{ inputs.enabled && 3 || 1 }}", ResultNumber, 3},
+		ProfileStepCondition:            {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileActionStepCondition:      {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileActionStepTemplate:       {"${{ inputs.name }}", ResultString, "value"},
+		ProfileWorkflowEnvironment:      {"${{ inputs.name }}", ResultString, "value"},
+		ProfileCallCondition:            {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileActionLifecycle:          {"${{ always() && inputs.enabled }}", ResultBoolean, true},
+		ProfileJobEnvironment:           {"${{ inputs.name }}", ResultString, "value"},
+		ProfileJobDefault:               {"${{ inputs.name }}", ResultString, "value"},
+		ProfileJobOutput:                {"${{ inputs.name }}", ResultString, "value"},
+		ProfileStepTemplate:             {"${{ case(true, format('{0}', inputs.name), 'unused') }}", ResultString, "value"},
+		ProfileStepControl:              {"${{ true }}", ResultBoolean, true},
+		ProfileRuntimeTemplate:          {"${{ env.NAME }}", ResultString, "value"},
+		ProfileServiceTemplate:          {"${{ needs.build.outputs.value || 'fallback' }}", ResultString, `{"name":"value"}`},
+		ProfileServiceEnvironment:       {"${{ format('{0}-{1}-{2}', env.NAME, needs.build.outputs.value, vars.NAME) }}", ResultString, `value-{"name":"value"}-value`},
+		ProfileDeferredInput:            {"type=raw,value=${{ needs.build.outputs.value }}", ResultString, `type=raw,value={"name":"value"}`},
+		ProfileSchedulingGroup:          {"group-${{ needs.build.outputs.value }}", ResultString, `group-{"name":"value"}`},
+		ProfileSchedulingParallel:       {"${{ fromJSON('2') }}", ResultNumber, float64(2)},
+		ProfileCompileServiceCredential: {"${{ env.NAME || 'fallback' }}", ResultString, "value"},
+		ProfileServiceCredential:        {"${{ env.NAME || 'fallback' }}", ResultString, "value"},
+		ProfileServiceMap:               {"${{ fromJSON(needs.build.outputs.value || '{}') }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
+		ProfileActionInputDefault:       {"${{ case(true, inputs.name, 'unused') }}", ResultString, "value"},
+		ProfileDockerActionArg:          {"${{ format('{0}', inputs.name || 'fallback') }}", ResultString, "value"},
+	}
+	for _, id := range profileIDs() {
+		t.Run(string(id), func(t *testing.T) {
+			if _, ok := profiles[id]; !ok {
+				t.Fatal("profile is missing")
+			}
+			example, ok := examples[id]
+			if !ok {
+				t.Fatal("representative example is missing")
+			}
+			site := Site{Source: example.source, Profile: id, Result: example.result, Purpose: PurposeExpression}
+			if _, err := engine.Validate(site); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			if got, err := engine.Evaluate(site, values); err != nil {
+				t.Fatalf("Evaluate() error = %v", err)
+			} else if !reflect.DeepEqual(got, example.want) {
+				t.Fatalf("Evaluate() = %#v, want %#v", got, example.want)
+			}
+			if reduced, err := engine.Reduce(site, values); err != nil || (!reduced.Known && reduced.Source == "") {
+				t.Fatalf("Reduce() = %#v, %v", reduced, err)
+			}
+			if analysis, err := engine.Analyze(site, abstract); err != nil {
+				t.Fatalf("Analyze() = %#v, %v", analysis, err)
+			}
+		})
+	}
+}
+
+func TestEngineWorkflowConcurrencyRunIdentity(t *testing.T) {
+	engine := NewEngine()
+	values := Values{Compile: CompileContext{GitHub: map[string]any{"workflow": "CodeQL"}, WorkflowRunID: "build-a"}}
+	site := Site{Source: "${{ github.workflow }}-${{ github['run_id'] }}-${{ GITHUB.RUN_ID }}", Profile: ProfileWorkflowConcurrency, Result: ResultString}
+	got, err := engine.Evaluate(site, values)
+	if err != nil || got != "CodeQL-build-a-build-a" {
+		t.Fatalf("Evaluate() = %#v, %v", got, err)
+	}
+	analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{"github.workflow": "CodeQL", "github.run_id": "build-a"}})
+	if err != nil || !analysis.Value.Known || analysis.Value.Value != got || analysis.Effects != (Effects{}) {
+		t.Fatalf("known Analyze() = %#v, %v", analysis, err)
+	}
+	analysis, err = engine.Analyze(site, AbstractValues{})
+	if err != nil || analysis.Value.Known || analysis.Effects != (Effects{}) {
+		t.Fatalf("unknown Analyze() = %#v, %v", analysis, err)
+	}
+	// Evaluating concurrency must not make the run ID available to folding
+	// at other graph-time positions through a shared GitHub context map.
+	if _, exists := values.Compile.GitHub["run_id"]; exists {
+		t.Fatal("concurrency changed the shared GitHub context")
+	}
+	for _, source := range []string{
+		"${{ true || github.token }}", "${{ true || toJSON(github) }}",
+		"${{ github.run_number }}", "${{ github.run_attempt }}", "${{ needs.build.outputs.group }}",
+	} {
+		site.Source = source
+		if _, err := engine.Evaluate(site, values); err == nil {
+			t.Errorf("concurrency admitted %s", source)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunName, ProfileRunsOnTemplate} {
+		site.Profile, site.Source = profile, "${{ github.run_id }}"
+		if _, err := engine.Evaluate(site, values); err == nil {
+			t.Errorf("%s admitted run identity", profile)
+		}
+	}
+}
+
+func TestEngineCompileTemplateScalarAndContainerImageBoundaries(t *testing.T) {
+	engine := NewEngine()
+	for _, test := range []struct {
+		source string
+		want   string
+	}{
+		{source: "${{ true }}", want: "true"},
+		{source: "${{ 2.5 }}", want: "2.5"},
+		{source: "${{ null }}", want: ""},
+	} {
+		value, err := engine.Evaluate(Site{Source: test.source, Profile: ProfileCompileTemplate, Result: ResultString}, Values{})
+		if err != nil || value != test.want {
+			t.Errorf("Evaluate(%q) = %#v, %v; want %q", test.source, value, err, test.want)
+		}
+	}
+	if _, err := engine.Evaluate(Site{Source: "${{ true }}", Profile: ProfileCompileContainerImage, Result: ResultString}, Values{}); err == nil || !strings.Contains(err.Error(), "want string") {
+		t.Fatalf("strict complete expression error = %v", err)
+	}
+	for _, source := range []string{"${{ null }}", "${{ matrix.container }}", "${{ '' }}"} {
+		site := Site{Source: source, Profile: ProfileCompileContainerImage, Result: ResultString}
+		values := Values{Compile: CompileContext{Matrix: map[string]any{}}}
+		value, err := engine.Evaluate(site, values)
+		if err != nil || value != "" {
+			t.Fatalf("optional container image %q = %#v, %v", source, value, err)
+		}
+		reduced, err := engine.Reduce(site, values)
+		if err != nil || !reduced.Known || reduced.Value != "" {
+			t.Fatalf("reduced optional container image %q = %#v, %v", source, reduced, err)
+		}
+		analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{"matrix.container": nil}})
+		if err != nil || !analysis.Value.Known || analysis.Value.Value != "" || analysis.Effects != (Effects{}) {
+			t.Fatalf("analyzed optional container image %q = %#v, %v", source, analysis, err)
+		}
+	}
+	value, err := engine.Evaluate(Site{Source: "node:${{ 24 }}", Profile: ProfileCompileContainerImage, Result: ResultString}, Values{})
+	if err != nil || value != "node:24" {
+		t.Fatalf("interpolated container image = %#v, %v", value, err)
+	}
+	_, err = engine.Evaluate(Site{Source: "${{ vars.IMAGE }}", Profile: ProfileCompileContainerImage, Result: ResultString}, Values{Compile: CompileContext{Vars: map[string]string{"IMAGE": "${{ secrets.TOKEN }}"}}})
+	if err == nil || !strings.Contains(err.Error(), "contains expression syntax") {
+		t.Fatalf("container image injection error = %v", err)
+	}
+}
+
+func TestEngineMatchesUnexportedSemanticImplementations(t *testing.T) {
+	engine := NewEngine()
+	runtime := Context{Env: map[string]string{"NAME": "world"}, Matrix: map[string]any{"enabled": true}}
+	condition := ConditionContext{Env: runtime.Env, Matrix: runtime.Matrix}
+	tests := []struct {
+		name   string
+		site   Site
+		values Values
+		direct func() (any, error)
+	}{
+		{name: "job condition", site: Site{Source: "matrix.enabled", Profile: ProfileJobCondition, Result: ResultBoolean}, values: Values{Condition: condition}, direct: func() (any, error) { return EvaluateCondition("matrix.enabled", condition) }},
+		{name: "step template", site: Site{Source: "hello ${{ env.NAME }}", Profile: ProfileStepTemplate, Result: ResultString}, values: Values{Runtime: runtime}, direct: func() (any, error) { return EvaluateStep("hello ${{ env.NAME }}", runtime) }},
+		{name: "step control", site: Site{Source: "${{ matrix.enabled }}", Profile: ProfileStepControl, Result: ResultBoolean}, values: Values{Runtime: runtime}, direct: func() (any, error) { return EvaluateStepControl("${{ matrix.enabled }}", runtime) }},
+		{name: "runtime template", site: Site{Source: "hello ${{ env.NAME }}", Profile: ProfileRuntimeTemplate, Result: ResultString}, values: Values{Runtime: runtime}, direct: func() (any, error) { return Evaluate("hello ${{ env.NAME }}", runtime) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, gotErr := engine.Evaluate(test.site, test.values)
+			want, wantErr := test.direct()
+			if !reflect.DeepEqual(got, want) || errorText(gotErr) != errorText(wantErr) {
+				t.Fatalf("Engine.Evaluate() = %#v, %v; direct implementation = %#v, %v", got, gotErr, want, wantErr)
+			}
+		})
+	}
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func TestCompileInputFallbackDistinguishesMissingAndDeferredValues(t *testing.T) {
+	site := Site{Source: "${{ inputs.name || 'fallback' }}", Profile: ProfileCompileTemplate, Result: ResultString}
+	for _, test := range []struct {
+		name    string
+		context CompileContext
+		want    string
+		known   bool
+	}{
+		{name: "absent", context: CompileContext{Inputs: map[string]any{}, InputsComplete: true}, want: "fallback", known: true},
+		{name: "present", context: CompileContext{Inputs: map[string]any{"name": "provided"}, InputsComplete: true}, want: "provided", known: true},
+		{name: "empty", context: CompileContext{Inputs: map[string]any{"name": ""}, InputsComplete: true}, want: "fallback", known: true},
+		{name: "unavailable", context: CompileContext{InputsComplete: true}},
+		{name: "deferred", context: CompileContext{Inputs: map[string]any{"other": "known"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := NewEngine().Reduce(site, Values{Compile: test.context})
+			if err != nil || got.Known != test.known || test.known && got.Value != test.want || !test.known && got.Source != site.Source {
+				t.Fatalf("Reduce() = %#v, %v; want known=%t value=%q", got, err, test.known, test.want)
+			}
+		})
+	}
+}
+
+func TestEngineProfileScopesAreDistinctAndAuthoritative(t *testing.T) {
+	engine := NewEngine()
+	validate := func(profile ProfileID, source string) error {
+		_, err := engine.Validate(Site{Source: source, Profile: profile, Result: ResultBoolean, Purpose: PurposeExpression})
+		return err
+	}
+	if err := validate(ProfileCompileJobCondition, "matrix.os == 'linux' && needs.build.result == 'success'"); err != nil {
+		t.Fatalf("compile job condition: %v", err)
+	}
+	if err := validate(ProfileCompileJobCondition, "env.FLAG"); err == nil {
+		t.Fatal("compile job condition admitted step env")
+	}
+	if err := validate(ProfileCompileStepCondition, "env.FLAG && steps.build.outcome == 'success' && matrix.os"); err != nil {
+		t.Fatalf("compile step condition: %v", err)
+	}
+	if err := validate(ProfileCompileCallCondition, "needs.build.result == 'success' && inputs.enabled"); err != nil {
+		t.Fatalf("compile call condition: %v", err)
+	}
+	if err := validate(ProfileCompileCallCondition, "matrix.os"); err == nil {
+		t.Fatal("compile call condition admitted callee matrix")
+	}
+
+	_, err := engine.Validate(Site{Source: "${{ vars.NAME }}", Profile: ProfileRunName, Result: ResultString, Purpose: PurposeExpression})
+	if err != nil {
+		t.Fatalf("run-name vars error = %v", err)
+	}
+	_, err = engine.Validate(Site{Source: "${{ 'safe' || env.NAME }}", Profile: ProfileRunName, Result: ResultString, Purpose: PurposeExpression})
+	if err == nil || !strings.Contains(err.Error(), `run-name context "env" is unavailable`) {
+		t.Fatalf("run-name env error = %v", err)
+	}
+
+	_, err = engine.Validate(Site{Source: "${{ unsupported.value }}", Profile: ProfilePartialTemplate, Result: ResultString, Purpose: PurposeExpression})
+	if err == nil || !strings.Contains(err.Error(), `expression context "unsupported" is unavailable in this profile`) {
+		t.Fatalf("declarative context policy error = %v", err)
+	}
+	_, err = engine.Validate(Site{Source: "${{ hashFiles('file') }}", Profile: ProfilePartialTemplate, Result: ResultString, Purpose: PurposeExpression})
+	if err == nil || !strings.Contains(err.Error(), `expression function "hashFiles" is unavailable in this profile`) {
+		t.Fatalf("declarative function policy error = %v", err)
+	}
+}
+
+func TestEngineValidateConditionAttributesEarlySecretReferenceError(t *testing.T) {
+	const source = "secrets[env.NAME]"
+	_, err := (Engine{}).Validate(Site{Source: source, Profile: ProfileCompileJobCondition, Result: ResultBoolean})
+	var blocker interface {
+		CompatibilityBlocker() (string, string)
+	}
+	if !errors.As(err, &blocker) {
+		t.Fatalf("Validate() error = %v, want compatibility blocker", err)
+	}
+	if kind, detail := blocker.CompatibilityBlocker(); kind != "expression" || detail != source {
+		t.Fatalf("compatibility blocker = %q / %q", kind, detail)
+	}
+}
+
+func TestEngineAnalysisDefersRunnerEnvironmentToRuntime(t *testing.T) {
+	engine := NewEngine()
+	condition, err := engine.Analyze(Site{
+		Source:  "runner.environment == 'github-hosted'",
+		Profile: ProfileStepCondition,
+		Result:  ResultBoolean,
+		Purpose: PurposeExpression,
+	}, AbstractValues{})
+	if err != nil || condition.Value.Known {
+		t.Fatalf("Analyze() condition = %#v, %v; want runtime-dependent", condition, err)
+	}
+	token, err := engine.Analyze(Site{
+		Source:  "${{ runner.environment == 'github-hosted' && github.token || '' }}",
+		Profile: ProfileStepTemplate,
+		Result:  ResultString,
+		Purpose: PurposeWorkflowActionInput,
+	}, AbstractValues{})
+	if err != nil || token.Effects.GitHubToken != GitHubTokenDirect {
+		t.Fatalf("Analyze() token effects = %v, %v; want conservative authority", token.Effects.GitHubToken, err)
+	}
+}
+
+func TestEngineJobStatusIsLimitedToRunningJobPositions(t *testing.T) {
+	engine := NewEngine()
+	values := Values{Runtime: Context{JobStatus: "failure"}, Condition: ConditionContext{JobStatus: "failure", Unsuccessful: true, Failure: true}}
+	for _, test := range []struct {
+		profile ProfileID
+		source  string
+		result  ResultType
+		want    any
+	}{
+		{profile: ProfileStepTemplate, source: "status=${{ job.status }}", result: ResultString, want: "status=failure"},
+		{profile: ProfileActionStepTemplate, source: "${{ job['status'] }}", result: ResultString, want: "failure"},
+		{profile: ProfileJobOutput, source: "${{ job.status }}", result: ResultString, want: "failure"},
+		{profile: ProfileStepControl, source: "${{ job.status == 'failure' }}", result: ResultBoolean, want: true},
+		{profile: ProfileStepCondition, source: "always() && job.status == 'failure'", result: ResultBoolean, want: true},
+		{profile: ProfileActionStepCondition, source: "always() && job.status == 'success'", result: ResultBoolean, want: false},
+		{profile: ProfileActionLifecycle, source: "job.status == 'failure'", result: ResultBoolean, want: true},
+	} {
+		site := Site{Source: test.source, Profile: test.profile, Result: test.result, Purpose: PurposeExpression}
+		if got, err := engine.Evaluate(site, values); err != nil || got != test.want {
+			t.Errorf("%s Evaluate(%q) = %#v, %v; want %#v", test.profile, test.source, got, err, test.want)
+		}
+		if _, err := engine.Evaluate(site, Values{}); err == nil || !strings.Contains(err.Error(), "unavailable job.status") {
+			t.Errorf("%s Evaluate(%q) without status error = %v", test.profile, test.source, err)
+		}
+	}
+	// Positions evaluated before steps run, or outside the job, keep rejecting
+	// job.status even in unreachable branches.
+	for _, profile := range []ProfileID{ProfileJobEnvironment, ProfileJobDefault, ProfileRuntimeTemplate, ProfileServiceEnvironment, ProfileServiceCredential, ProfileDockerActionArg} {
+		if _, err := engine.Validate(Site{Source: "${{ false && job.status || 'ok' }}", Profile: profile, Result: ResultString}); err == nil {
+			t.Errorf("%s admitted job.status", profile)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileJobCondition, ProfileCompileJobCondition, ProfileCallCondition, ProfileCompileCallCondition} {
+		if _, err := engine.Validate(Site{Source: "false && job.status == 'success'", Profile: profile, Result: ResultBoolean}); err == nil {
+			t.Errorf("%s admitted job.status", profile)
+		}
+	}
+	// job.status is not a status function, so the implicit success() guard
+	// still applies, and planning treats the value as unknown.
+	guarded := Site{Source: "job.status == 'failure'", Profile: ProfileStepCondition, Result: ResultBoolean}
+	if got, err := engine.Evaluate(guarded, values); err != nil || got != false {
+		t.Errorf("implicit success guard = %#v, %v; want false", got, err)
+	}
+	if references, err := engine.ReferencesStatus(guarded); err != nil || references {
+		t.Errorf("ReferencesStatus(job.status) = %v, %v; want false", references, err)
+	}
+	token, err := engine.Analyze(Site{Source: "${{ job.status == 'success' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}, AbstractValues{})
+	if err != nil || token.Value.Known || token.Effects.GitHubToken != GitHubTokenDirect {
+		t.Errorf("Analyze() = %#v, %v; want unknown value with conservative token authority", token, err)
+	}
+}
+
+func TestEngineGitHubActionIsLimitedToRuntimeGitHubPositions(t *testing.T) {
+	engine := NewEngine()
+	values := Values{Runtime: Context{GitHub: map[string]any{"action": "__actions_checkout_2"}}}
+	for _, test := range []struct {
+		profile ProfileID
+		source  string
+		result  ResultType
+		want    any
+	}{
+		{profile: ProfileStepTemplate, source: "name=${{ github.action }}", result: ResultString, want: "name=__actions_checkout_2"},
+		{profile: ProfileActionStepTemplate, source: "${{ github['action'] }}", result: ResultString, want: "__actions_checkout_2"},
+		{profile: ProfileStepControl, source: "${{ github.action == '__actions_checkout_2' }}", result: ResultBoolean, want: true},
+	} {
+		site := Site{Source: test.source, Profile: test.profile, Result: test.result, Purpose: PurposeExpression}
+		if got, err := engine.Evaluate(site, values); err != nil || got != test.want {
+			t.Errorf("%s Evaluate(%q) = %#v, %v; want %#v", test.profile, test.source, got, err, test.want)
+		}
+	}
+	// Conditions and compile-time positions keep their closed github
+	// subsets, even in unreachable branches.
+	for _, profile := range []ProfileID{ProfileStepCondition, ProfileActionStepCondition, ProfileActionLifecycle, ProfileJobCondition, ProfileCompileStepCondition} {
+		if _, err := engine.Validate(Site{Source: "false && github.action == '__run'", Profile: profile, Result: ResultBoolean}); err == nil {
+			t.Errorf("%s admitted github.action", profile)
+		}
+	}
+	for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunsOnTemplate, ProfileRunName} {
+		if _, err := engine.Validate(Site{Source: "${{ false && github.action || 'ok' }}", Profile: profile, Result: ResultString}); err == nil {
+			t.Errorf("%s admitted github.action", profile)
+		}
+	}
+	// The step name is unknown to planning: it grants no authority itself and
+	// keeps every branch it guards.
+	plain, err := engine.Analyze(Site{Source: "${{ github.action }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}, AbstractValues{})
+	if err != nil || plain.Value.Known || plain.Effects != (Effects{}) {
+		t.Errorf("Analyze(github.action) = %#v, %v; want unknown value without effects", plain, err)
+	}
+	token, err := engine.Analyze(Site{Source: "${{ github.action == '__run' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}, AbstractValues{})
+	if err != nil || token.Value.Known || token.Effects.GitHubToken != GitHubTokenDirect {
+		t.Errorf("Analyze() = %#v, %v; want unknown value with conservative token authority", token, err)
+	}
+}
+
+func TestEngineAnalysisTreatsRunnerDebugAsKnownDisabled(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		site Site
+		want any
+	}{
+		{name: "condition", site: Site{Source: "runner['debug'] == '1'", Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression}, want: false},
+		{name: "workflow action input", site: Site{Source: "${{ runner.debug == '1' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}, want: ""},
+		{name: "action input default", site: Site{Source: "${{ runner.debug == '1' && github.token || '' }}", Profile: ProfileActionInputDefault, Result: ResultString, Purpose: PurposeExpression}, want: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			analysis, err := NewEngine().Analyze(test.site, AbstractValues{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !analysis.Value.Known || analysis.Value.Value != test.want || analysis.Effects.GitHubToken != 0 {
+				t.Fatalf("Analyze() = %#v, want known %#v without token authority", analysis, test.want)
+			}
+		})
+	}
+}
+
+func TestEngineTemplateAnalysisExcludesKnownFalseTokenBranch(t *testing.T) {
+	engine := NewEngine()
+	site := Site{Source: "${{ false && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}
+	analysis, err := engine.Analyze(site, AbstractValues{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !analysis.Value.Known || analysis.Value.Value != "" {
+		t.Fatalf("Analyze() value = %#v, want known empty string", analysis.Value)
+	}
+	if analysis.Effects.GitHubToken != 0 {
+		t.Fatalf("Analyze() token effects = %v, want none", analysis.Effects.GitHubToken)
+	}
+
+	site.Source = "${{ inputs.enabled && github.token || '' }}"
+	analysis, err = engine.Analyze(site, AbstractValues{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis.Value.Known || analysis.Effects.GitHubToken != GitHubTokenDirect {
+		t.Fatalf("unknown Analyze() = %#v, want unknown direct-token effect", analysis)
+	}
+}
+
+func TestEngineReduceStepControlPreservesTypeAndRuntimeResidual(t *testing.T) {
+	engine := NewEngine()
+	values := Values{Compile: CompileContext{GitHub: map[string]any{"event": map[string]any{
+		"allow_failure": true,
+		"timeout":       json.Number("7"),
+	}}}}
+	tests := []struct {
+		name        string
+		site        Site
+		wantKnown   bool
+		wantLiteral string
+		wantSource  string
+	}{
+		{
+			name:        "known number",
+			site:        Site{Source: "${{ github.event.timeout }}", Profile: ProfileStepControl, Result: ResultNumber},
+			wantKnown:   true,
+			wantLiteral: "7",
+		},
+		{
+			name:       "runtime residual",
+			site:       Site{Source: "${{ github.event.allow_failure && steps.setup.outcome == 'failure' }}", Profile: ProfileStepControl, Result: ResultBoolean},
+			wantSource: "${{ (true && (steps.setup.outcome == 'failure')) }}",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := engine.Reduce(test.site, values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Known != test.wantKnown || got.Source != test.wantSource {
+				t.Fatalf("Reduce() = %#v, want known %v and source %q", got, test.wantKnown, test.wantSource)
+			}
+			if got.Known {
+				literal, literalErr := engine.Literal(got.Value)
+				if literalErr != nil || literal != test.wantLiteral {
+					t.Fatalf("Literal(Reduce().Value) = %q, %v; want %q", literal, literalErr, test.wantLiteral)
+				}
+			}
+		})
+	}
+}
+
+func TestEngineStepControlAdmitsRuntimeHashFiles(t *testing.T) {
+	engine := NewEngine()
+	site := Site{Source: "${{ hashFiles('go.sum') != '' }}", Profile: ProfileStepControl, Result: ResultBoolean}
+	if _, err := engine.Validate(site); err != nil {
+		t.Fatal(err)
+	}
+	reduced, err := engine.Reduce(site, Values{Compile: CompileContext{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reduced.Known || reduced.Source != "${{ (hashFiles('go.sum') != '') }}" {
+		t.Fatalf("Reduce() = %#v, want runtime residual", reduced)
+	}
+}
+
+func TestEngineEventPayloadEffectsFollowLazyBranches(t *testing.T) {
+	engine := NewEngine()
+	tests := []struct {
+		name       string
+		site       Site
+		references map[string]any
+		values     Values
+		wantValue  any
+		wantEvent  bool
+	}{
+		{
+			name:       "template known false",
+			site:       Site{Source: "${{ inputs.enabled == 'yes' && github.event.action || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"inputs.enabled": "no", "github.event.action": "opened"},
+			values:     Values{Runtime: Context{Inputs: map[string]string{"enabled": "no"}, GitHub: map[string]any{"event": map[string]any{"action": "opened"}}}},
+			wantValue:  "",
+		},
+		{
+			name:       "template known true",
+			site:       Site{Source: "${{ inputs.enabled == 'yes' && github.event.action || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"inputs.enabled": "yes", "github.event.action": "opened"},
+			values:     Values{Runtime: Context{Inputs: map[string]string{"enabled": "yes"}, GitHub: map[string]any{"event": map[string]any{"action": "opened"}}}},
+			wantValue:  "opened",
+			wantEvent:  true,
+		},
+		{
+			name:       "condition known false",
+			site:       Site{Source: "env.ENABLED == 'yes' && github.event.action == 'opened'", Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression},
+			references: map[string]any{"env.enabled": "no", "github.event.action": "opened"},
+			values:     Values{Condition: ConditionContext{Env: map[string]string{"ENABLED": "no"}, GitHub: map[string]any{"event": map[string]any{"action": "opened"}}}},
+			wantValue:  false,
+		},
+		{
+			name:       "condition known true",
+			site:       Site{Source: "env.ENABLED == 'yes' && github.event.action == 'opened'", Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression},
+			references: map[string]any{"env.enabled": "yes", "github.event.action": "opened"},
+			values:     Values{Condition: ConditionContext{Env: map[string]string{"ENABLED": "yes"}, GitHub: map[string]any{"event": map[string]any{"action": "opened"}}}},
+			wantValue:  true,
+			wantEvent:  true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			broad, err := engine.Analyze(test.site, AbstractValues{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !broad.Effects.EventPayload {
+				t.Fatal("unknown lazy branch did not conservatively retain event-payload authority")
+			}
+			narrow, err := engine.Analyze(test.site, AbstractValues{References: test.references})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if narrow.Effects.EventPayload != test.wantEvent {
+				t.Fatalf("event-payload effect = %v, want %v", narrow.Effects.EventPayload, test.wantEvent)
+			}
+			concrete, err := engine.Evaluate(test.site, test.values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !narrow.Value.Known || !reflect.DeepEqual(narrow.Value.Value, concrete) || !reflect.DeepEqual(concrete, test.wantValue) {
+				t.Fatalf("known analysis = %#v, concrete = %#v, want %#v", narrow.Value, concrete, test.wantValue)
+			}
+		})
+	}
+}
+
+func FuzzEngineEventPayloadEffectsMatchConcreteReachability(f *testing.F) {
+	f.Add("yes", "opened")
+	f.Add("no", "closed")
+	engine := NewEngine()
+	site := Site{Source: "${{ inputs.enabled == 'yes' && github.event.action || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeExpression}
+	broad, err := engine.Analyze(site, AbstractValues{})
+	if err != nil {
+		f.Fatal(err)
+	}
+	if !broad.Effects.EventPayload {
+		f.Fatal("unknown lazy branch did not retain event-payload authority")
+	}
+	f.Fuzz(func(t *testing.T, enabled, action string) {
+		references := map[string]any{"inputs.enabled": enabled, "github.event.action": action}
+		narrow, err := engine.Analyze(site, AbstractValues{References: references})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantEvent := enabled == "yes"
+		if narrow.Effects.EventPayload != wantEvent || narrow.Effects.EventPayload && !broad.Effects.EventPayload {
+			t.Fatalf("narrow event effect = %v, broad = %v, want %v", narrow.Effects.EventPayload, broad.Effects.EventPayload, wantEvent)
+		}
+		concrete, err := engine.Evaluate(site, Values{Runtime: Context{
+			Inputs: map[string]string{"enabled": enabled},
+			GitHub: map[string]any{"event": map[string]any{"action": action}},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !narrow.Value.Known || !reflect.DeepEqual(narrow.Value.Value, concrete) {
+			t.Fatalf("known analysis = %#v, concrete = %#v", narrow.Value, concrete)
+		}
+	})
+}
+
+func TestConditionServerURL(t *testing.T) {
+	// jetify-com/devbox-install-action@8c6a66ed6273138b1915457069de78cb52fe3bd7/action.yml#L132
+	const guard = "inputs.disable-nix-access-token == 'false' && github.server_url == 'https://github.com'"
+	engine := NewEngine()
+	for _, profile := range []ProfileID{ProfileActionStepCondition, ProfileJobCondition, ProfileStepCondition, ProfileCallCondition} {
+		site := Site{Source: guard, Profile: profile, Result: ResultBoolean}
+		for _, test := range []struct {
+			name, disabled, server string
+			want                   bool
+		}{
+			{"GitHub enabled", "false", "https://github.com", true},
+			{"GitHub disabled", "true", "https://github.com", false},
+			{"Origin enabled", "false", "https://origin.cursor.com", false},
+			{"Origin disabled", "true", "https://origin.cursor.com", false},
+			{"unavailable server", "false", "", false},
+		} {
+			t.Run(string(profile)+"/"+test.name, func(t *testing.T) {
+				values := Values{Condition: ConditionContext{
+					Inputs: map[string]any{"disable-nix-access-token": test.disabled},
+					GitHub: map[string]any{"server_url": test.server},
+				}}
+				got, err := engine.Evaluate(site, values)
+				if err != nil || got != test.want {
+					t.Fatalf("Evaluate() = %v, %v; want %v", got, err, test.want)
+				}
+				analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{
+					"inputs.disable-nix-access-token": test.disabled,
+					"github.server_url":               test.server,
+				}})
+				if err != nil || !analysis.Value.Known || analysis.Value.Value != test.want || analysis.Effects != (Effects{}) {
+					t.Fatalf("known Analyze() = %#v, %v; want %v without effects", analysis, err, test.want)
+				}
+				values.Condition.Unsuccessful = true
+				if got, err := engine.Evaluate(site, values); err != nil || got != false {
+					t.Fatalf("unsuccessful Evaluate() = %v, %v; want implicit success guard", got, err)
+				}
+			})
+		}
+		for _, references := range []map[string]any{
+			nil,
+			{"github.server_url": "https://github.com"},
+			{"inputs.disable-nix-access-token": "false"},
+		} {
+			analysis, err := engine.Analyze(site, AbstractValues{References: references})
+			if err != nil || analysis.Value.Known || analysis.Effects != (Effects{}) {
+				t.Fatalf("unknown Analyze(%v) = %#v, %v", references, analysis, err)
+			}
+		}
+		for _, source := range []string{
+			"github['server_url'] == 'https://github.com'",
+			"GITHUB.SERVER_URL == 'https://github.com'",
+		} {
+			site.Source = source
+			if got, err := engine.Evaluate(site, Values{Condition: ConditionContext{GitHub: map[string]any{"server_url": "https://github.com"}}}); err != nil || got != true {
+				t.Errorf("Evaluate(%q) = %v, %v", source, got, err)
+			}
+		}
+		for _, source := range []string{
+			"false && github.token",
+			"true || github.unsupported",
+			"github.unsupported || true",
+			"case(true, true, github.token)",
+			"case(false, github.unsupported, true)",
+			"false && github.server_url.extra",
+			"false && github[inputs.property]",
+			"true || toJSON(github)",
+		} {
+			site.Source = source
+			if _, err := engine.Evaluate(site, Values{}); err == nil {
+				t.Errorf("Evaluate admitted unreachable reference in %q", source)
+			}
+			if _, err := engine.Analyze(site, AbstractValues{}); err == nil {
+				t.Errorf("Analyze admitted unreachable reference in %q", source)
+			}
+		}
+	}
+	for _, profile := range []ProfileID{
+		ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
+	} {
+		for _, server := range []string{"https://github.com", "https://buildkite-ghe.com"} {
+			site := Site{Profile: profile, Source: "github.server_url == 'https://github.com'", Result: ResultBoolean}
+			got, err := engine.Reduce(site, Values{Compile: CompileContext{GitHub: map[string]any{"server_url": server}}})
+			if err != nil || !got.Known || got.Value != (server == "https://github.com") {
+				t.Errorf("%s Reduce(%s) = %#v, %v", profile, server, got, err)
+			}
+		}
+	}
+	if _, err := engine.Validate(Site{Profile: ProfileActionLifecycle, Source: "false && github.server_url == 'https://github.com'", Result: ResultBoolean}); err == nil {
+		t.Error("admission widened to lifecycle conditions")
+	}
+}
+
+func TestEngineConditionAnalysisResolvesWholeKnownRoots(t *testing.T) {
+	engine := NewEngine()
+	tests := []struct {
+		name       string
+		source     string
+		references map[string]any
+		condition  ConditionContext
+	}{
+		{
+			name:       "env",
+			source:     `env.FLAG == 'yes'`,
+			references: map[string]any{"env": map[string]any{"FLAG": "yes"}},
+			condition:  ConditionContext{Env: map[string]string{"FLAG": "yes"}},
+		},
+		{
+			name:       "vars",
+			source:     `vars.FLAG == 'yes'`,
+			references: map[string]any{"vars": map[string]any{"FLAG": "yes"}},
+			condition:  ConditionContext{Vars: map[string]string{"FLAG": "yes"}},
+		},
+		{
+			name:       "needs",
+			source:     `needs.build.outputs.ready == 'yes'`,
+			references: map[string]any{"needs": map[string]any{"build": map[string]any{"outputs": map[string]any{"ready": "yes"}, "result": "success"}}},
+			condition:  ConditionContext{Needs: map[string]NeedStatus{"build": {Outputs: map[string]string{"ready": "yes"}, Result: "success"}}},
+		},
+		{
+			name:       "steps",
+			source:     `steps.build.outputs.ready == 'yes'`,
+			references: map[string]any{"steps": map[string]any{"build": map[string]any{"conclusion": "success", "outcome": "success", "outputs": map[string]any{"ready": "yes"}}}},
+			condition:  ConditionContext{Steps: map[string]StepStatus{"build": {Conclusion: "success", Outcome: "success", Outputs: map[string]string{"ready": "yes"}}}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			site := Site{Source: test.source, Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression}
+			unknown, err := engine.Analyze(site, AbstractValues{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if unknown.Value.Known {
+				t.Fatalf("analysis without %s = %#v, want unknown", test.name, unknown.Value)
+			}
+			analysis, err := engine.Analyze(site, AbstractValues{References: test.references})
+			if err != nil {
+				t.Fatal(err)
+			}
+			concrete, err := engine.Evaluate(site, Values{Condition: test.condition})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !analysis.Value.Known || !reflect.DeepEqual(analysis.Value.Value, concrete) {
+				t.Fatalf("known analysis = %#v, concrete = %#v", analysis.Value, concrete)
+			}
+		})
+	}
+}
+
+func TestEngineAbstractEvaluationNarrowsMonotonicallyToConcrete(t *testing.T) {
+	engine := NewEngine()
+	tests := []struct {
+		name       string
+		site       Site
+		references map[string]any
+		values     Values
+	}{
+		{
+			name:       "runtime false branch",
+			site:       Site{Source: "${{ env.FLAG == 'yes' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput},
+			references: map[string]any{"env.flag": "no", "github.token": "ghs_scoped"},
+			values:     Values{Runtime: Context{Env: map[string]string{"FLAG": "no"}, GitHub: map[string]any{"token": "ghs_scoped"}}},
+		},
+		{
+			name:       "runtime true branch",
+			site:       Site{Source: "${{ vars.ENABLED == 'yes' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput},
+			references: map[string]any{"vars.enabled": "yes", "github.token": "ghs_scoped"},
+			values:     Values{Runtime: Context{Vars: map[string]string{"ENABLED": "yes"}, GitHub: map[string]any{"token": "ghs_scoped"}}},
+		},
+		{
+			name:       "step name selects token branch",
+			site:       Site{Source: "${{ github.action == '__run' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput},
+			references: map[string]any{"github.action": "__run", "github.token": "ghs_scoped"},
+			values:     Values{Runtime: Context{GitHub: map[string]any{"action": "__run", "token": "ghs_scoped"}}},
+		},
+		{
+			name:       "step name skips token branch",
+			site:       Site{Source: "${{ github.action == '__run' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput},
+			references: map[string]any{"github.action": "__run_2"},
+			values:     Values{Runtime: Context{GitHub: map[string]any{"action": "__run_2"}}},
+		},
+		{
+			name:       "service env uses job value",
+			site:       Site{Source: "${{ env.PASSWORD || secrets.DB_PASSWORD }}", Profile: ProfileServiceEnvironment, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"env.password": "supplied", "secrets.db_password": "secret-value"},
+			values:     Values{Runtime: Context{Env: map[string]string{"PASSWORD": "supplied"}, Secrets: map[string]string{"DB_PASSWORD": "secret-value"}}},
+		},
+		{
+			name:       "service env falls back to named secret",
+			site:       Site{Source: "${{ env.PASSWORD || secrets.DB_PASSWORD }}", Profile: ProfileServiceEnvironment, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"env.password": "", "secrets.db_password": "secret-value"},
+			values:     Values{Runtime: Context{Env: map[string]string{"PASSWORD": ""}, Secrets: map[string]string{"DB_PASSWORD": "secret-value"}}},
+		},
+		{
+			name:       "service env uses variable",
+			site:       Site{Source: "${{ vars.VALUE || secrets.DB_PASSWORD }}", Profile: ProfileServiceEnvironment, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"vars.value": "environment", "secrets.db_password": "secret-value"},
+			values:     Values{Runtime: Context{Vars: map[string]string{"VALUE": "environment"}, Secrets: map[string]string{"DB_PASSWORD": "secret-value"}}},
+		},
+		{
+			name:       "service env missing variable falls back",
+			site:       Site{Source: "${{ vars.VALUE || secrets.DB_PASSWORD }}", Profile: ProfileServiceEnvironment, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"vars.value": nil, "secrets.db_password": "secret-value"},
+			values:     Values{Runtime: Context{Secrets: map[string]string{"DB_PASSWORD": "secret-value"}}},
+		},
+		{
+			name:       "service credential uses supplied value",
+			site:       Site{Source: "${{ env.PASSWORD || github.token }}", Profile: ProfileServiceCredential, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"env.password": "supplied"},
+			values:     Values{Runtime: Context{Env: map[string]string{"PASSWORD": "supplied"}}},
+		},
+		{
+			name:       "service credential falls back",
+			site:       Site{Source: "${{ env.PASSWORD || github.token }}", Profile: ProfileServiceCredential, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"env.password": "", "github.token": "ghs_scoped"},
+			values:     Values{Runtime: Context{Env: map[string]string{"PASSWORD": ""}, GitHub: map[string]any{"token": "ghs_scoped"}}},
+		},
+		{
+			name:       "service credential uses prerequisite output",
+			site:       Site{Source: "${{ needs.auth.outputs.password || github.token }}", Profile: ProfileServiceCredential, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"needs.auth.outputs.password": "supplied"},
+			values:     Values{Runtime: Context{Needs: map[string]NeedStatus{"auth": {Outputs: map[string]string{"password": "supplied"}}}}},
+		},
+		{
+			name:       "service credential missing prerequisite output",
+			site:       Site{Source: "${{ needs.auth.outputs.password || github.token }}", Profile: ProfileServiceCredential, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"needs.auth.outputs.password": nil, "github.token": "ghs_scoped"},
+			values:     Values{Runtime: Context{Needs: map[string]NeedStatus{"auth": {}}, GitHub: map[string]any{"token": "ghs_scoped"}}},
+		},
+		{
+			name:       "known failure status",
+			site:       Site{Source: "failure() && needs.build.result == 'failure'", Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression},
+			references: map[string]any{"failure": true, "needs.build.result": "failure"},
+			values:     Values{Condition: ConditionContext{Failure: true, Needs: map[string]NeedStatus{"build": {Result: "failure"}}}},
+		},
+		{
+			name:       "known cancelled status",
+			site:       Site{Source: "cancelled() && steps.build.outcome == 'cancelled'", Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression},
+			references: map[string]any{"cancelled": true, "steps.build.outcome": "cancelled"},
+			values:     Values{Condition: ConditionContext{Cancelled: true, Steps: map[string]StepStatus{"build": {Outcome: "cancelled"}}}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			broad, err := engine.Analyze(test.site, AbstractValues{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			narrow, err := engine.Analyze(test.site, AbstractValues{References: test.references})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if narrow.Effects.GitHubToken&^broad.Effects.GitHubToken != 0 || narrow.Effects.EventPayload && !broad.Effects.EventPayload {
+				t.Fatalf("narrow effects %#v are not contained by broad effects %#v", narrow.Effects, broad.Effects)
+			}
+			concrete, err := engine.Evaluate(test.site, test.values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !narrow.Value.Known || !reflect.DeepEqual(narrow.Value.Value, concrete) {
+				t.Fatalf("known analysis = %#v, concrete = %#v", narrow.Value, concrete)
+			}
+		})
+	}
+}
+
+func FuzzEngineAbstractRuntimeTemplateMatchesConcrete(f *testing.F) {
+	f.Add("yes", "ghs_scoped")
+	f.Add("no", "")
+	engine := NewEngine()
+	site := Site{Source: "${{ env.FLAG == 'yes' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}
+	broad, err := engine.Analyze(site, AbstractValues{})
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Fuzz(func(t *testing.T, flag, token string) {
+		references := map[string]any{"env.flag": flag, "github.token": token}
+		narrow, err := engine.Analyze(site, AbstractValues{References: references})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if narrow.Effects.GitHubToken&^broad.Effects.GitHubToken != 0 {
+			t.Fatalf("narrow effects %#v are not contained by broad effects %#v", narrow.Effects, broad.Effects)
+		}
+		concrete, err := engine.Evaluate(site, Values{Runtime: Context{Env: map[string]string{"FLAG": flag}, GitHub: map[string]any{"token": token}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !narrow.Value.Known || !reflect.DeepEqual(narrow.Value.Value, concrete) {
+			t.Fatalf("known analysis = %#v, concrete = %#v", narrow.Value, concrete)
+		}
+	})
+}
+
+func FuzzEngineAbstractKnownTemplateShapesMatchConcrete(f *testing.F) {
+	for _, source := range []string{
+		"literal",
+		"${{ env.FLAG }}",
+		"prefix-${{ inputs.name }}-suffix",
+		"${{ github.event_name == 'push' && inputs.name || env.FLAG }}",
+		"${{ format('{0}-{1}', inputs.name, github.event_name) }}",
+	} {
+		f.Add(source)
+	}
+	engine := NewEngine()
+	values := Values{Runtime: Context{
+		Env:     map[string]string{"FLAG": "yes"},
+		GitHub:  map[string]any{"event_name": "push", "token": "ghs_scoped"},
+		Inputs:  map[string]string{"name": "value"},
+		Secrets: map[string]string{"NAME": "secret"},
+	}}
+	abstract := AbstractValues{References: map[string]any{
+		"env.flag":          "yes",
+		"github.event_name": "push",
+		"github.token":      "ghs_scoped",
+		"inputs.name":       "value",
+		"secrets.name":      "secret",
+	}}
+	f.Fuzz(func(t *testing.T, source string) {
+		site := Site{Source: source, Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}
+		if _, err := engine.Validate(site); err != nil {
+			return
+		}
+		concrete, err := engine.Evaluate(site, values)
+		if err != nil {
+			return
+		}
+		analysis, err := engine.Analyze(site, abstract)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if analysis.Value.Known && !reflect.DeepEqual(analysis.Value.Value, concrete) {
+			t.Fatalf("known analysis = %#v, concrete = %#v", analysis.Value, concrete)
+		}
+	})
+}
+
+func TestEngineProfileTokenDeclarationsMatchValidation(t *testing.T) {
+	engine := NewEngine()
+	for id, profile := range Profiles() {
+		if !containsFold(profile.Contexts, "github") {
+			continue
+		}
+		source := "github.token"
+		result := ResultBoolean
+		if profile.Form == FormTemplate {
+			source = "${{ github.token }}"
+			result = ResultString
+		} else if profile.semantics == semanticsStepControl || profile.semantics == semanticsReusableStepControl {
+			source = "${{ github.token }}"
+		}
+		_, err := engine.Validate(Site{Source: source, Profile: id, Result: result, Purpose: PurposeExpression})
+		switch profile.Token {
+		case TokenDenied:
+			if err == nil {
+				t.Errorf("profile %q declares token denied but validates github.token", id)
+			}
+		case TokenDirect, TokenWorkflowContext:
+			if err != nil {
+				t.Errorf("profile %q declares direct token access but rejects github.token: %v", id, err)
+			}
+		}
+	}
+}
+
+func containsFold(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestEngineCaseFunctionPolicyIsClosedByProfile(t *testing.T) {
+	profiles := Profiles()
+	for _, id := range []ProfileID{
+		ProfileCompile, ProfileCompileTemplate, ProfileCompileContainerImage, ProfilePartialTemplate,
+		ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
+		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileStepCondition,
+		ProfileCallCondition, ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault,
+		ProfileJobOutput, ProfileStepTemplate, ProfileStepControl, ProfileReusableStepControl, ProfileDeferredInput, ProfileActionInputDefault, ProfileDockerActionArg,
+		ProfileServiceTemplate, ProfileServiceMap, ProfileCompileServiceCredential, ProfileServiceCredential, ProfileServiceEnvironment,
+	} {
+		if !containsFold(profiles[id].Functions, "case") {
+			t.Errorf("profile %q does not admit case", id)
+		}
+	}
+	for _, id := range []ProfileID{ProfileRuntimeTemplate} {
+		if containsFold(profiles[id].Functions, "case") {
+			t.Errorf("profile %q unexpectedly admits case", id)
+		}
+	}
+}
+
+func TestEngineServiceCredentialReductionBoundaries(t *testing.T) {
+	engine := NewEngine()
+	for _, test := range []struct {
+		source, user, want, wantError string
+	}{
+		{source: "${{ matrix.user }}", user: "${{ secrets.ADMIN }}", wantError: "contains expression syntax"},
+		{source: "${{ matrix.user }}{{ secrets.ADMIN }}", user: "$", wantError: "contains expression syntax"},
+		{source: "${{ format('{0}:{1}', matrix.user, secrets.PASSWORD) }}", user: "${{ secrets.ADMIN }}", want: "${{ secrets.ADMIN }}:private"},
+		{source: "${{ format('{0}:{1}', matrix.user, secrets.PASSWORD) }}", user: "it's ${{ github.token }}", want: "it's ${{ github.token }}:private"},
+	} {
+		t.Run(test.source+test.user, func(t *testing.T) {
+			site := Site{Source: test.source, Profile: ProfileCompileServiceCredential, Result: ResultString}
+			reduced, err := engine.Reduce(site, Values{Compile: CompileContext{Matrix: map[string]any{"user": test.user}}})
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("Reduce() = %#v, %v; want %s", reduced, err, test.wantError)
+				}
+				return
+			}
+			if err != nil || reduced.Known {
+				t.Fatalf("Reduce() = %#v, %v; want residual", reduced, err)
+			}
+			site.Profile, site.Source = ProfileServiceCredential, reduced.Source
+			validation, err := engine.Validate(site)
+			if err != nil || !reflect.DeepEqual(validation.Secrets, []string{"PASSWORD"}) {
+				t.Fatalf("substituted data changed secret inventory: %#v, %v", validation, err)
+			}
+			analysis, err := engine.Analyze(site, AbstractValues{})
+			if err != nil || analysis.Effects.GitHubToken != 0 {
+				t.Fatalf("substituted data introduced token authority: %#v, %v", analysis, err)
+			}
+			got, err := engine.Evaluate(site, Values{Runtime: Context{Secrets: map[string]string{"PASSWORD": "private"}}})
+			if err != nil || got != test.want {
+				t.Fatalf("Evaluate() = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+	// Unknown matrices cannot escape to the unchanged runtime profile.
+	site := Site{Source: "${{ matrix.user || secrets.PASSWORD }}", Profile: ProfileCompileServiceCredential, Result: ResultString}
+	if _, err := engine.Reduce(site, Values{}); err == nil || !strings.Contains(err.Error(), `context "matrix" is unavailable`) {
+		t.Fatalf("unknown matrix Reduce() error = %v", err)
+	}
+	site.Profile = ProfileServiceCredential
+	if _, err := engine.Validate(site); err == nil {
+		t.Fatal("runtime credential profile admitted matrix")
+	}
+}
+
+func TestEngineServiceCredentialUnknownStrategy(t *testing.T) {
+	engine := NewEngine()
+	// Strategy already has runtime support and remains valid when unknown.
+	site := Site{Source: "${{ format('{0}:{1}', matrix.user, strategy.job-index) }}", Profile: ProfileCompileServiceCredential, Result: ResultString}
+	reduced, err := engine.Reduce(site, Values{Compile: CompileContext{Matrix: map[string]any{"user": "known"}}})
+	if err != nil || reduced.Known {
+		t.Fatalf("Reduce() = %#v, %v; want runtime strategy", reduced, err)
+	}
+	site.Profile, site.Source = ProfileServiceCredential, reduced.Source
+	got, err := engine.Evaluate(site, Values{Runtime: Context{Strategy: map[string]any{"job-index": 3}}})
+	if err != nil || got != "known:3" {
+		t.Fatalf("Evaluate() = %q, %v; want known:3", got, err)
+	}
+}
+
+func TestEngineServiceFallbacksRejectUnavailableReferences(t *testing.T) {
+	for _, body := range []string{
+		"'safe' || needs.build.result",
+		"'safe' || secrets.TOKEN",
+		"'safe' || github.token",
+		"'safe' || needs.build.outputs[needs.build.outputs.key]",
+		"'safe' || hashFiles('**')",
+	} {
+		for _, profile := range []ProfileID{ProfileServiceTemplate, ProfileServiceMap} {
+			site := Site{Source: "${{ " + body + " }}", Profile: profile, Result: ResultString}
+			if profile == ProfileServiceMap {
+				site.Source = "${{ fromJSON(" + body + ") }}"
+				site.Result = ResultObject
+			}
+			if _, err := NewEngine().Validate(site); err == nil {
+				t.Errorf("%s accepted %s", profile, site.Source)
+			}
+		}
+	}
+}
+
+func TestEngineCompositeTokenGuidanceIsSpecificToMissingCompositeToken(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		profile ProfileID
+		source  string
+		github  map[string]any
+		want    string
+		wantErr string
+	}{
+		{name: "missing composite token", profile: ProfileActionStepTemplate, source: "${{ github['token'] }}", wantErr: "this job has no available workflow token"},
+		{name: "missing workflow token", profile: ProfileStepTemplate, source: "${{ github.token }}", wantErr: `unavailable github value "token"`},
+		{name: "missing default token", profile: ProfileActionInputDefault, source: "${{ github.token }}", wantErr: `unavailable github value "token"`},
+		{name: "other missing value", profile: ProfileActionStepTemplate, source: "${{ github.actor }}", wantErr: `unavailable github value "actor"`},
+		{name: "available composite token", profile: ProfileActionStepTemplate, source: "${{ github.token }}", github: map[string]any{"token": "available"}, want: "available"},
+		{name: "unreached composite token", profile: ProfileActionStepTemplate, source: "${{ false && github.token || 'safe' }}", want: "safe"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value, err := NewEngine().Evaluate(Site{Source: test.source, Profile: test.profile, Result: ResultString}, Values{Runtime: Context{GitHub: test.github}})
+			if test.wantErr == "" {
+				if err != nil || value != test.want {
+					t.Fatalf("Evaluate() = %v, %v; want %q", value, err, test.want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("Evaluate() error = %v; want %q", err, test.wantErr)
+			}
+			if test.name != "missing composite token" && strings.Contains(err.Error(), "this composite expression") {
+				t.Fatalf("unrelated failure received composite token guidance: %v", err)
+			}
+		})
+	}
+}
+
+func profileIDs() []ProfileID {
+	return []ProfileID{
+		ProfileRunsOn, ProfileRunsOnTemplate,
+		ProfileCompile, ProfileCompileTemplate, ProfileWorkflowConcurrency, ProfileCompileContainerImage, ProfilePartialTemplate, ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
+		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileJobControl, ProfileStepCondition, ProfileCallCondition,
+		ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput, ProfileStepTemplate,
+		ProfileStepControl, ProfileReusableStepControl, ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileDeferredInput, ProfileServiceCredential, ProfileServiceMap,
+		ProfileServiceEnvironment, ProfileCompileServiceCredential,
+		ProfileSchedulingGroup, ProfileSchedulingParallel, ProfileStrategyParallel,
+		ProfileActionInputDefault, ProfileDockerActionArg,
+		ProfileActionStepCondition, ProfileActionStepTemplate, ProfileWorkflowEnvironment,
+	}
+}

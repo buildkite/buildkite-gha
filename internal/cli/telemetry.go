@@ -2,24 +2,26 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"slices"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
-const (
-	maxCommandTelemetryDiagnostics = 20
-	maxCommandErrorCaptureBytes    = 64 << 10
-)
+const maxCommandErrorCaptureBytes = 64 << 10
 
 func emitCommandTelemetry(ctx context.Context, command telemetry.Command, outcome telemetry.Outcome, version string, duration time.Duration, details telemetry.Details) {
 	client, err := telemetry.New(telemetry.Config{
@@ -32,6 +34,7 @@ func emitCommandTelemetry(ctx context.Context, command telemetry.Command, outcom
 	if err != nil || client == nil {
 		return
 	}
+	details.SourceStats = actionsource.SourceStatsSnapshot(ctx)
 	_ = client.EmitContext(context.WithoutCancel(ctx), command, outcome, duration, details)
 }
 
@@ -58,11 +61,61 @@ func telemetryOutcome(code int, conclusion string, contextErr error) telemetry.O
 }
 
 type commandTelemetryDetails struct {
-	failurePhase telemetry.FailurePhase
-	failureCode  telemetry.FailureCode
-	diagnostics  []telemetry.Diagnostic
-	seen         map[string]int
-	errorOutput  boundedTailBuffer
+	failurePhase         telemetry.FailurePhase
+	failureCode          telemetry.FailureCode
+	failureMessage       string
+	blocker              string
+	blockerDetail        string
+	agentAPIStatus       int
+	diagnostics          []telemetry.Diagnostic
+	errorOutput          boundedTailBuffer
+	pathFilters          []telemetry.PathFilter
+	pathFiltersTruncated bool
+}
+
+func (d *commandTelemetryDetails) addPathFilter(input workflowInput, event effectiveEventSelection, selection workflowTriggerSelection, selectionErr error) {
+	if d == nil || input.ReusableOnly || (event.Event.Event != "push" && event.Event.Event != "pull_request") {
+		return
+	}
+	if len(d.pathFilters) == telemetry.MaxPathFilters {
+		d.pathFiltersTruncated = true
+		return
+	}
+	decision := telemetry.PathFilter{
+		WorkflowPath: input.CanonicalPath, WorkflowDigest: fmt.Sprintf("%x", sha256.Sum256(input.Source)),
+		EventName: event.Event.Event, EventOrigin: string(event.Origin), EventRef: event.Event.Ref,
+		HeadSHA: event.Event.SHA, BaseSHA: nestedString(event.Event.Payload, "before"),
+		ComparisonBaseSHA: input.PathFiltersComparisonBase,
+		Outcome:           "not_evaluated", Reason: "no_path_filters",
+	}
+	if event.Event.Event == "pull_request" {
+		decision.BaseSHA = nestedString(event.Event.Payload, "pull_request", "base", "sha")
+	}
+	if input.PathFiltersIdentityVerified {
+		decision.WorkflowSHA = event.Event.SHA
+	}
+	var pathError *buildkitepipeline.UnsupportedPathFiltersError
+	switch {
+	case input.ParseError != nil:
+		decision.Outcome, decision.Reason = "error", "workflow_parse_error"
+	case errors.As(selectionErr, &pathError):
+		decision.Outcome, decision.Reason = "error", "path_evidence_unavailable"
+	case selectionErr != nil:
+		decision.Outcome, decision.Reason = "error", "trigger_error"
+	case !workflowUsesPathFilters(input, event.Event.Event):
+	case event.Event.Event == "push" && event.TriggerSnapshot.Tag != nil:
+		decision.Reason = "tag_push"
+	case !selection.Applicable:
+		// With an active path-filtered trigger and no error, admission is
+		// inapplicable only when the paths did not match. Other exclusions
+		// retain their Buildkite condition and annotation instead.
+		decision.Outcome, decision.Reason = "nonmatch", "paths_do_not_match"
+	case selection.AnnotationReason != "":
+		decision.Reason = "non_path_filter_exclusion"
+	default:
+		decision.Outcome, decision.Reason = "match", "paths_match"
+	}
+	d.pathFilters = append(d.pathFilters, decision)
 }
 
 func (d *commandTelemetryDetails) captureErrors(writer io.Writer) io.Writer {
@@ -84,66 +137,98 @@ func (d *commandTelemetryDetails) setFailurePhase(phase telemetry.FailurePhase) 
 	}
 }
 
+func (d *commandTelemetryDetails) setFailureCode(code telemetry.FailureCode) {
+	if d.failureCode == "" && code != "" {
+		d.failureCode = code
+	}
+}
+
+func (d *commandTelemetryDetails) setAgentAPIHTTPStatus(status int) {
+	switch d.failureCode {
+	case telemetry.FailureCodeWorkflowToken, telemetry.FailureCodeOIDCToken, telemetry.FailureCodeCacheCredential:
+	default:
+		return
+	}
+	if d.agentAPIStatus == 0 && status >= 100 && status <= 599 {
+		d.agentAPIStatus = status
+	}
+}
+
 // addReportDiagnostics records a report's diagnostics. Errors a command
 // handles, such as workflows emitted as failing pipeline steps, belong here so
 // they never attribute an unrelated later failure.
 func (d *commandTelemetryDetails) addReportDiagnostics(report compatibility.ProcessingReport) {
+	var workflowPath string
+	if report.Workflow != "" {
+		workflowPath, _ = processingAnnotationWorkflowPath(report.Workflow, "")
+	}
 	for _, diagnostic := range report.Diagnostics {
 		severity, ok := telemetrySeverity(diagnostic.Level)
 		if !ok || !allowlistedTelemetryDiagnosticCode(diagnostic.Code) {
 			continue
 		}
-		d.addDiagnostic(diagnostic.Code, severity)
+		message := diagnostic.Message
+		if diagnostic.Detail != "" {
+			message += " " + diagnostic.Detail
+		}
+		d.addDiagnostic(telemetry.Diagnostic{
+			Code: diagnostic.Code, Severity: severity,
+			Blocker: diagnostic.Blocker, BlockerDetail: diagnostic.BlockerDetail,
+			Message: message, WorkflowPath: workflowPath,
+		})
+		if diagnostic.Level == "error" {
+			d.setBlocker(diagnostic.Blocker, diagnostic.BlockerDetail)
+		}
 	}
 }
 
 // observe records a report that ends the command, so its first error also
-// attributes the failure.
+// attributes the failure. The attributing diagnostic's message is kept whole:
+// the stderr tail alone can lose it behind later agent output, such as
+// annotation and pipeline-upload chatter.
 func (d *commandTelemetryDetails) observe(report compatibility.ProcessingReport) {
 	d.addReportDiagnostics(report)
 	for _, diagnostic := range report.Diagnostics {
 		if diagnostic.Level == "error" && d.failureCode == "" && allowlistedTelemetryDiagnosticCode(diagnostic.Code) {
 			d.failurePhase = telemetryPhase(diagnostic.Stage)
 			d.failureCode = telemetry.FailureCode(diagnostic.Code)
+			d.failureMessage = diagnostic.Message
+			if diagnostic.Detail != "" {
+				d.failureMessage += " " + diagnostic.Detail
+			}
 		}
 	}
 }
 
-func (d *commandTelemetryDetails) addWarnings(warnings []compiler.Warning) {
-	for _, warning := range warnings {
-		if allowlistedTelemetryDiagnosticCode(warning.Code) {
-			d.addDiagnostic(warning.Code, telemetry.SeverityWarning)
-		}
-	}
+func (d *commandTelemetryDetails) addWarnings(workflowPath string, warnings []compiler.Warning) {
+	report := compatibility.NewProcessingReport(workflowPath, "")
+	report.ApplyWarnings(workflowPath, warnings)
+	d.addReportDiagnostics(report)
 }
 
 // addActionRuntimeUnknown records admitted actions whose runtime behavior was
 // never proven. Upload keeps this in telemetry rather than the processing
 // report, where it would annotate every import that uses actions.
 func (d *commandTelemetryDetails) addActionRuntimeUnknown() {
-	d.addDiagnostic("W_ACTION_RUNTIME_UNKNOWN", telemetry.SeverityWarning)
+	d.addDiagnostic(telemetry.Diagnostic{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning})
 }
 
-func (d *commandTelemetryDetails) addDiagnostic(code string, severity telemetry.Severity) {
-	if d.seen == nil {
-		d.seen = make(map[string]int)
+func (d *commandTelemetryDetails) addDiagnostic(diagnostic telemetry.Diagnostic) {
+	if diagnostics, err := telemetry.BoundedDiagnostics(append(d.diagnostics, diagnostic)); err == nil {
+		d.diagnostics = diagnostics
 	}
-	if index, exists := d.seen[code]; exists {
-		if severity == telemetry.SeverityError {
-			d.diagnostics[index].Severity = severity
-		}
-		return
+}
+
+func (d *commandTelemetryDetails) setBlocker(blocker, detail string) {
+	if d.blocker == "" && blocker != "" {
+		d.blocker, d.blockerDetail = blocker, detail
 	}
-	if len(d.diagnostics) == maxCommandTelemetryDiagnostics {
-		return
-	}
-	d.seen[code] = len(d.diagnostics)
-	d.diagnostics = append(d.diagnostics, telemetry.Diagnostic{Code: code, Severity: severity})
 }
 
 func (d *commandTelemetryDetails) forOutcome(outcome telemetry.Outcome) telemetry.Details {
 	if outcome == telemetry.OutcomeSuccess || outcome == telemetry.OutcomeSkipped {
-		return telemetry.Details{Diagnostics: slices.Clone(d.diagnostics)}
+		return telemetry.Details{Diagnostics: slices.Clone(d.diagnostics), Blocker: d.blocker, BlockerDetail: d.blockerDetail,
+			PathFilters: slices.Clone(d.pathFilters), PathFiltersTruncated: d.pathFiltersTruncated}
 	}
 	phase, code := d.failurePhase, d.failureCode
 	if phase == "" {
@@ -156,14 +241,33 @@ func (d *commandTelemetryDetails) forOutcome(outcome telemetry.Outcome) telemetr
 	if code == "" {
 		code = telemetry.FailureCodeUnknown
 	}
+	errorMessage, errorMessageTruncated := string(d.errorOutput.bytes), d.errorOutput.truncated
+	if d.failureMessage != "" {
+		// An attributed failure message names the rejected feature at its
+		// start, so an over-long message keeps its head, not its tail.
+		errorMessage, errorMessageTruncated = d.failureMessage, false
+		if len(errorMessage) > telemetry.MaxErrorMessageBytes {
+			end := telemetry.MaxErrorMessageBytes
+			for end > 0 && !utf8.RuneStart(errorMessage[end]) {
+				end--
+			}
+			errorMessage, errorMessageTruncated = errorMessage[:end], true
+		}
+	}
 	return telemetry.Details{
 		FailurePhase: phase, FailureCode: code, Diagnostics: slices.Clone(d.diagnostics),
-		ErrorMessage: string(d.errorOutput.bytes), ErrorMessageTruncated: d.errorOutput.truncated,
+		Blocker: d.blocker, BlockerDetail: d.blockerDetail,
+		ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated,
+		AgentAPIHTTPStatus: d.agentAPIStatus,
+		PathFilters:        slices.Clone(d.pathFilters), PathFiltersTruncated: d.pathFiltersTruncated,
 	}
 }
 
 func (d *commandTelemetryDetails) telemetryDetails() telemetry.Details {
-	return telemetry.Details{FailurePhase: d.failurePhase, FailureCode: d.failureCode, Diagnostics: slices.Clone(d.diagnostics)}
+	return telemetry.Details{
+		FailurePhase: d.failurePhase, FailureCode: d.failureCode, Diagnostics: slices.Clone(d.diagnostics),
+		Blocker: d.blocker, BlockerDetail: d.blockerDetail, AgentAPIHTTPStatus: d.agentAPIStatus,
+	}
 }
 
 func telemetrySeverity(level string) (telemetry.Severity, bool) {
@@ -179,28 +283,28 @@ func telemetrySeverity(level string) (telemetry.Severity, bool) {
 
 func allowlistedTelemetryDiagnosticCode(code string) bool {
 	switch code {
-	case compiler.CodeWorkflowSyntax, compiler.CodeEventInvalid, compiler.CodeGraphInvalid,
-		compiler.CodeMatrixInvalid, compiler.CodeExpressionInvalid, compiler.CodeActionDiscovery,
-		compiler.CodeActionResolution, compiler.CodePlanConstruction, compiler.CodePipelineGeneration,
-		compiler.CodeEnvironment, "E_PROFILE", "W_ACTION_RUNTIME_UNKNOWN",
-		"W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED":
+	case workflowprocessing.CodeWorkflowSyntax, workflowprocessing.CodeEventInvalid, workflowprocessing.CodeGraphInvalid,
+		workflowprocessing.CodeMatrixInvalid, workflowprocessing.CodeExpressionInvalid, workflowprocessing.CodeActionDiscovery,
+		workflowprocessing.CodeActionResolution, workflowprocessing.CodePlanConstruction, workflowprocessing.CodePipelineGeneration,
+		workflowprocessing.CodeEnvironment, workflowprocessing.CodeVariableResolution, "E_PROFILE", "W_ACTION_RUNTIME_UNKNOWN",
+		"W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT", "W_TRIGGER_EVENT_UNSUPPORTED", "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED":
 		return true
 	default:
 		return false
 	}
 }
 
-func telemetryPhase(stage string) telemetry.FailurePhase {
-	switch compiler.ProcessingStage(stage) {
-	case compiler.StageWorkflowParsing:
+func telemetryPhase(stage workflowprocessing.Stage) telemetry.FailurePhase {
+	switch stage {
+	case workflowprocessing.StageWorkflowParsing:
 		return telemetry.FailurePhaseParsing
-	case compiler.StageEventValidation, compiler.StageGraph, compiler.StageMatrix, compiler.StageExpressions:
+	case workflowprocessing.StageEventValidation, workflowprocessing.StageGraph, workflowprocessing.StageMatrix, workflowprocessing.StageExpressions:
 		return telemetry.FailurePhaseEvaluation
-	case compiler.StageDiscovery, compiler.StageResolution:
+	case workflowprocessing.StageDiscovery, workflowprocessing.StageResolution:
 		return telemetry.FailurePhaseSourceResolution
-	case compiler.StageAdmission:
+	case workflowprocessing.StageAdmission:
 		return telemetry.FailurePhaseAdmission
-	case compiler.StagePlans, compiler.StagePipeline:
+	case workflowprocessing.StagePlans, workflowprocessing.StagePipeline:
 		return telemetry.FailurePhaseCompilation
 	default:
 		return telemetry.FailurePhaseUnknown

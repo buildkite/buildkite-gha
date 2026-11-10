@@ -16,7 +16,8 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/program"
-	"github.com/buildkite/buildkite-gha/internal/workflow"
+	shellcompat "github.com/buildkite/buildkite-gha/internal/shell"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 // planBuilder lowers expanded job instances into validated execution-plan
@@ -27,39 +28,48 @@ type planBuilder struct {
 	compilerVersion            string
 	compilerDistributionDigest string
 	options                    Options
-	actionSource               ActionSource
+	actionGraphs               *actionGraphCache
 	workflowName               string
+	workflowRunPath            string
 	eventDigest                [sha256.Size]byte
 	planDigests                map[string]string
 }
 
 type builtPlanActions struct {
-	locks               []plan.ActionLock
-	capabilities        []string
-	authorization       PlanAuthorization
-	requiredSecrets     []string
-	inputsInspected     bool
-	requiresGitHubToken bool
-	requiresMise        bool
-	resolved            bool
+	workflowSource       *RemoteWorkflowSource
+	locks                []plan.ActionLock
+	capabilities         []string
+	authorization        PlanAuthorization
+	requiredSecrets      []string
+	inputsInspected      bool
+	requiresGitHubToken  bool
+	requiresEventPayload bool
+	reachableSecrets     []string
+	requiresMise         bool
+	resolved             bool
+	hasInvocations       bool
+	programs             map[string]program.Action
 }
 
-func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, []PlanAuthorization, []JobEvaluation, error) {
+func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options, graphs *actionGraphCache) ([]PlanArtifact, []JobEvaluation, error) {
 	payload, err := json.Marshal(ir.Event.Payload)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("encode event payload: %w", err)
+		return nil, nil, fmt.Errorf("encode event payload: %w", err)
 	}
 	workflowName := ir.Workflow.Name
 	if workflowName == "" {
 		workflowName = canonicalWorkflowName(ir.Workflow.Path)
 	}
+	workflowRunPath, err := canonicalWorkflowRunPath(ir.Workflow.Path)
+	if err != nil {
+		return nil, nil, err
+	}
 	builder := planBuilder{
 		ctx: ctx, ir: ir, compilerVersion: compilerVersion, compilerDistributionDigest: compilerDistributionDigest,
-		options: options, actionSource: newMemoizedActionSource(options.ActionSource), workflowName: workflowName,
+		options: options, actionGraphs: graphs, workflowName: workflowName, workflowRunPath: workflowRunPath,
 		eventDigest: sha256.Sum256(payload), planDigests: make(map[string]string, len(ir.Jobs)),
 	}
-	plans := make([]plan.Job, 0, len(ir.Jobs))
-	authorizations := make([]PlanAuthorization, 0, len(ir.Jobs))
+	plans := make([]PlanArtifact, 0, len(ir.Jobs))
 	evaluations := make([]JobEvaluation, 0, len(ir.Jobs))
 	failedInstances := make(map[string]bool, len(ir.Jobs))
 	var diagnostics []error
@@ -83,13 +93,28 @@ instances:
 			diagnostics = append(diagnostics, planConstructionFinding(instance, err))
 			continue
 		}
-		digest := sha256.Sum256(encoded)
-		builder.planDigests[instance.Key] = "sha256:" + hex.EncodeToString(digest[:])
-		plans = append(plans, job)
-		authorizations = append(authorizations, authorization)
+		digest := transport.Digest(encoded)
+		builder.planDigests[instance.Key] = digest
+		// Keep the exact bytes used by dependent plans; bundle assembly adds
+		// the artifact path without re-encoding the job.
+		plans = append(plans, PlanArtifact{Job: job, Digest: digest, Contents: encoded, Authorization: authorization})
 		evaluations = append(evaluations, JobEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Evaluated: true, Passed: true})
 	}
-	return plans, authorizations, evaluations, errors.Join(diagnostics...)
+	return plans, evaluations, errors.Join(diagnostics...)
+}
+
+func canonicalWorkflowRunPath(workflowPath string) (string, error) {
+	repositoryRoot, canonicalPath, err := workflowRepository(workflowPath)
+	if err != nil {
+		return "", err
+	}
+	if repositoryRoot == "" {
+		if filepath.IsAbs(workflowPath) {
+			return "", nil
+		}
+		return filepath.ToSlash(filepath.Clean(workflowPath)), nil
+	}
+	return repositoryWorkflowPath(repositoryRoot, canonicalPath)
 }
 
 // reducePlanEventExpressions is the phase boundary for compile-time-only event
@@ -104,8 +129,18 @@ func reducePlanEventExpressions(ir IR) (IR, error) {
 	ir.Jobs = append([]JobInstance(nil), ir.Jobs...)
 	var diagnostics []error
 	for i, instance := range ir.Jobs {
+		if err := builder.validateShellCompatibility(instance, lowerWorkflowProgram(instance)); err != nil {
+			if instance.BlockerDetailUnsafe {
+				err = suppressBlockerDetail(err)
+			}
+			diagnostics = append(diagnostics, planConstructionFinding(instance, err))
+			continue
+		}
 		reduced, err := builder.reducePlanInstanceEventExpressions(instance)
 		if err != nil {
+			if instance.BlockerDetailUnsafe {
+				err = suppressBlockerDetail(err)
+			}
 			diagnostics = append(diagnostics, planConstructionFinding(instance, err))
 			continue
 		}
@@ -115,19 +150,13 @@ func reducePlanEventExpressions(ir IR) (IR, error) {
 }
 
 func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest string) (plan.Job, PlanAuthorization, []byte, error) {
-	if runtimeDistributionDigest == "" {
-		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
-	}
 	workflowProgram := lowerWorkflowProgram(instance)
-	steps := projectPlanSteps(workflowProgram.Job.Steps)
-	actionIndexes, actionRefs, actionInputs := programActionInvocations(workflowProgram.Job.Steps)
-	actions, err := b.buildActions(instance, steps, actionIndexes, actionRefs, actionInputs)
+	actions, err := b.buildActions(instance, &workflowProgram)
 	if err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
-	bindProgramActionSelectors(&workflowProgram, steps)
-	steps = projectPlanSteps(workflowProgram.Job.Steps)
-	if err := addContainerCapabilities(instance, actionRefs, &actions); err != nil {
+	workflowProgram.Actions = actions.programs
+	if err := addContainerCapabilities(instance, &actions); err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
 	needSources, err := buildPlanNeedSources(instance, b.planDigests)
@@ -151,10 +180,18 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	}
 	sort.Strings(actions.capabilities)
 	actions.capabilities = slices.Compact(actions.capabilities)
-	if instance.Platform == PlatformDarwinARM64 && slices.Contains(actions.capabilities, "docker") {
-		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on darwin/arm64", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
+	if instance.Platform.OS != OperatingSystemLinux && slices.Contains(actions.capabilities, "docker") {
+		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on %s", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, instance.Platform)
 	}
-	job := b.lowerPlanJob(instance, workflowProgram, runtimeDistributionDigest, steps, actions, needSources, buildPlanNeedOutputs(instance), deferredInputs, callGuards, secrets, secretMappings, githubToken)
+	// Runtime discovery omits failed jobs. Preserve their compatibility error
+	// when upload recompiles without acquiring a runtime for those jobs.
+	if runtimeDistributionDigest == "" {
+		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
+	}
+	job := b.lowerPlanJob(instance, workflowProgram, runtimeDistributionDigest, actions, needSources, buildPlanNeedOutputs(instance), deferredInputs, callGuards, secrets, secretMappings, githubToken)
+	if err := job.ProjectProgram(); err != nil {
+		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+	}
 	if err := job.Validate(); err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -165,191 +202,278 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	return job, actions.authorization, encoded, nil
 }
 
-func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (JobInstance, error) {
-	context := compileContext(b.ir.Event, b.ir.Vars, instance.SourcePath, b.workflowName)
+// validateShellCompatibility checks shells that resolve during compilation.
+// Shells are runner-evaluated, so vars stay residual: the pre-environment map
+// could name a different shell than the environment override the runtime uses.
+func (b planBuilder) validateShellCompatibility(instance JobInstance, workflowProgram program.Program) error {
+	context := compileContext(b.ir.Event, nil, instance.SourcePath, b.workflowName)
 	context.Inputs = instance.Inputs
+	context.InputsComplete = len(instance.DeferredInputs) == 0
 	context.Matrix = instance.Matrix
+	var diagnostics []error
+	validate := func(site program.Site, step int) {
+		if site.Source == "" {
+			return
+		}
+		resolved, err := reduceCompileString(site.Source, context)
+		if err != nil || strings.Contains(resolved, "${{") {
+			return
+		}
+		if err := shellcompat.ValidateCompatibility(resolved); err != nil {
+			command, _ := shellcompat.UnsupportedCommand(err)
+			if strings.Contains(site.Source, "${{") {
+				command = ""
+			}
+			owner := fmt.Sprintf("job %q", instance.LogicalJobID)
+			if step != 0 {
+				owner += fmt.Sprintf(" step %d", step)
+			}
+			diagnostics = append(diagnostics, &ProcessingFinding{
+				Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility",
+				Blocker: "shell", BlockerDetail: command,
+				Path: site.Location.File, Line: site.Location.Start.Line, Column: site.Location.Start.Column,
+				Job: instance.LogicalJobID, Instance: instance.Key, Step: step, Message: err.Error(),
+				Err: fmt.Errorf("%s:%d:%d: %s: %w", site.Location.File, site.Location.Start.Line, site.Location.Start.Column, owner, err),
+			})
+		}
+	}
+	validate(workflowProgram.Job.Defaults.Shell, 0)
+	for i, step := range workflowProgram.Job.Steps {
+		if step.Run != nil {
+			validate(step.Run.Shell, i+1)
+		}
+	}
+	return errors.Join(diagnostics...)
+}
 
-	reduceTemplate := func(value string) (string, error) {
+// reducePlanInstanceEventExpressions resolves event values in the job's
+// runtime program. It keeps vars residual: the runtime evaluates each position
+// with its own vars context (plan.Job.VarsBeforeEnvironment or plan.Job.Vars),
+// and reducing here with the pre-environment map would let a repository
+// variable shadow the environment variable that overrides it at runtime.
+func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (JobInstance, error) {
+	context := compileContext(b.ir.Event, nil, instance.SourcePath, b.workflowName)
+	// Runtime fields evaluate inputs from Job.Inputs; keep them residual.
+	context.Inputs, context.InputsComplete = nil, false
+	context.Matrix = instance.Matrix
+	reduceTemplate := func(value string, profile expression.ProfileID) (string, error) {
 		if value == "" {
 			return value, nil
 		}
-		reduced, err := expression.ReduceAvailableCompileTemplate(value, context)
+		reduced, err := reduceTemplateString(value, profile, context)
 		if err != nil {
 			return "", err
 		}
-		referencesEvent, err := expression.TemplateReferencesGitHubEvent(reduced)
+		referencesEventAlias, err := referencesContext(reduced, profile, "event", false)
 		if err != nil {
 			return "", err
 		}
-		referencesEventAlias, err := expression.TemplateUsesContext(reduced, "event")
-		if err != nil {
-			return "", err
-		}
-		if referencesEvent || referencesEventAlias {
-			return "", fmt.Errorf("github.event cannot be retained in a job plan")
+		if referencesEventAlias {
+			return "", fmt.Errorf("event context access must resolve during compilation; use github.event for whole or runtime-selected event access")
 		}
 		return reduced, nil
 	}
-	reduceCondition := func(value string) (string, error) {
+	reduceCondition := func(value string, profile expression.ProfileID) (string, error) {
 		if value == "" {
 			return value, nil
 		}
-		referencesEvent, err := expression.ReferencesGitHubEvent(value)
+		referencesEvent, err := siteReferencesEvent(value, profile, expression.ResultBoolean, true)
 		if err != nil {
 			return "", err
 		}
 		if !referencesEvent {
 			return value, nil
 		}
-		reduced, err := expression.ReduceCompileCondition(value, context)
+		reduction, err := reduceCompileSite(value, profile, expression.ResultBoolean, context)
 		if err != nil {
 			return "", err
 		}
-		referencesEvent, err = expression.ReferencesGitHubEvent(reduced)
-		if err != nil {
-			return "", err
-		}
-		if referencesEvent {
-			return "", fmt.Errorf("github.event cannot be retained in a job plan")
+		reduced := reduction.Source
+		if reduction.Known {
+			reduced = fmt.Sprint(reduction.Value)
 		}
 		return reduced, nil
 	}
-	reduceTypedExpression := func(value string) (string, error) {
-		referencesEvent, err := expression.ReferencesGitHubEvent(value)
+	reduceTypedExpression := func(site program.Site, profile expression.ProfileID) (string, error) {
+		value := site.Source
+		result := expression.ResultType(site.Result)
+		referencesEvent, err := siteReferencesEvent(value, profile, result, true)
 		if err != nil || !referencesEvent {
 			return value, err
 		}
-		reduced, err := reduceCondition(value)
+		reduced, err := reduceCompileSiteAt(value, profile, result, context, expression.Location{
+			File: site.Location.File, Field: site.Location.Field,
+			Span: expression.Span{
+				Start: expression.Position{Line: site.Location.Start.Line, Column: site.Location.Start.Column},
+				End:   expression.Position{Line: site.Location.End.Line, Column: site.Location.End.Column},
+			},
+		})
 		if err != nil {
 			return "", err
 		}
-		return "${{ " + reduced + " }}", nil
-	}
-	reduceMap := func(values map[string]string) (map[string]string, error) {
-		if values == nil {
-			return nil, nil
-		}
-		result := cloneMap(values)
-		for _, name := range sortedValueKeys(result) {
-			value, err := reduceTemplate(result[name])
+		if reduced.Known {
+			literal, err := expression.NewEngine().Literal(reduced.Value)
 			if err != nil {
-				return nil, err
+				return "", err
 			}
-			result[name] = value
+			return "${{ " + literal + " }}", nil
 		}
-		return result, nil
+		return reduced.Source, nil
 	}
-	reduceSlice := func(values []string) ([]string, error) {
-		if values == nil {
-			return nil, nil
+	workflowProgram := lowerWorkflowProgram(instance)
+	reducedProgram, err := workflowProgram.TransformSites(func(site program.Site) (program.Site, error) {
+		profile, reduceErr := compileReductionProfile(site.Surface)
+		if reduceErr != nil {
+			return site, reduceErr
 		}
-		result := append([]string(nil), values...)
-		for i := range result {
-			value, err := reduceTemplate(result[i])
-			if err != nil {
-				return nil, err
-			}
-			result[i] = value
+		switch site.Surface {
+		case program.SurfaceJobCondition:
+			site.Source, reduceErr = reduceCondition(site.Source, profile)
+		case program.SurfaceCallCondition:
+			site.Source, reduceErr = reduceCondition(site.Source, profile)
+		case program.SurfaceStepCondition:
+			site.Source, reduceErr = reduceCondition(site.Source, profile)
+		case program.SurfaceJobControl, program.SurfaceStepControl:
+			site.Source, reduceErr = reduceTypedExpression(site, profile)
+		case program.SurfaceJobEnvironment:
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
+		case program.SurfaceJobDefault:
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
+		case program.SurfaceJobOutput:
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
+		case program.SurfaceStepTemplate:
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
+		case program.SurfaceRuntimeTemplate:
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
+		case program.SurfaceServiceTemplate:
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
+		case program.SurfaceServiceEnvironment:
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
+		case program.SurfaceServiceCredential:
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
+		case program.SurfaceServiceMap:
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		}
-		return result, nil
-	}
-
-	var err error
-	if instance.If, err = reduceCondition(instance.If); err != nil {
+		return site, reduceErr
+	})
+	if err != nil {
 		return JobInstance{}, err
 	}
-	for _, field := range []*string{&instance.DefaultShell, &instance.DefaultWorkingDirectory, &instance.ServicesExpression} {
-		if *field, err = reduceTemplate(*field); err != nil {
-			return JobInstance{}, err
-		}
-	}
-	if instance.Env, err = reduceMap(instance.Env); err != nil {
-		return JobInstance{}, err
-	}
-	if instance.Outputs, err = reduceMap(instance.Outputs); err != nil {
-		return JobInstance{}, err
-	}
-
-	instance.CallGuards = append([]CallGuard(nil), instance.CallGuards...)
-	for i := range instance.CallGuards {
-		if instance.CallGuards[i].Condition, err = reduceCondition(instance.CallGuards[i].Condition); err != nil {
-			return JobInstance{}, err
-		}
-	}
-
-	instance.Steps = append([]workflow.Step(nil), instance.Steps...)
-	for i := range instance.Steps {
-		step := &instance.Steps[i]
-		if step.If, err = reduceCondition(step.If); err != nil {
-			return JobInstance{}, err
-		}
-		for _, field := range []*string{&step.Name, &step.Run, &step.Shell, &step.WorkingDirectory} {
-			if *field, err = reduceTemplate(*field); err != nil {
-				return JobInstance{}, err
-			}
-		}
-		for _, field := range []*string{&step.ContinueOnErrorExpression, &step.TimeoutMinutesExpression} {
-			if *field, err = reduceTypedExpression(*field); err != nil {
-				return JobInstance{}, err
-			}
-		}
-		if step.Env, err = reduceMap(step.Env); err != nil {
-			return JobInstance{}, err
-		}
-		if step.With, err = reduceMap(step.With); err != nil {
-			return JobInstance{}, err
-		}
-	}
-
-	if instance.Container != nil {
-		container := *instance.Container
-		if container.Image, err = reduceTemplate(container.Image); err != nil {
-			return JobInstance{}, err
-		}
-		if container.Env, err = reduceMap(container.Env); err != nil {
-			return JobInstance{}, err
-		}
-		if container.Ports, err = reduceSlice(container.Ports); err != nil {
-			return JobInstance{}, err
-		}
-		instance.Container = &container
-	}
-
-	instance.Services = append([]workflow.Service(nil), instance.Services...)
-	for i := range instance.Services {
-		container := instance.Services[i].Container
-		for _, field := range []*string{&container.Image, &container.Options, &container.Command, &container.Entrypoint} {
-			if *field, err = reduceTemplate(*field); err != nil {
-				return JobInstance{}, err
-			}
-		}
-		if container.Env, err = reduceMap(container.Env); err != nil {
-			return JobInstance{}, err
-		}
-		if container.Ports, err = reduceSlice(container.Ports); err != nil {
-			return JobInstance{}, err
-		}
-		if container.Volumes, err = reduceSlice(container.Volumes); err != nil {
-			return JobInstance{}, err
-		}
-		if container.Credentials != nil {
-			credentials := *container.Credentials
-			if credentials.Username, err = reduceTemplate(credentials.Username); err != nil {
-				return JobInstance{}, err
-			}
-			if credentials.Password, err = reduceTemplate(credentials.Password); err != nil {
-				return JobInstance{}, err
-			}
-			container.Credentials = &credentials
-		}
-		instance.Services[i].Container = container
-	}
+	projectReducedProgram(&instance, reducedProgram)
 	return instance, nil
 }
 
-func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actionIndexes []int, actionRefs []string, actionInputs []map[string]string) (builtPlanActions, error) {
-	built := builtPlanActions{requiresMise: len(actionRefs) != 0, resolved: b.options.ResolveActions}
+// compileReductionProfile is the single admission policy for event reduction.
+// Program.Validate applies the destination runtime profile to every residual.
+var compileReductionProfiles = map[program.Surface]expression.ProfileID{
+	program.SurfaceJobCondition:       expression.ProfileCompileJobCondition,
+	program.SurfaceJobControl:         expression.ProfileJobControl,
+	program.SurfaceCallCondition:      expression.ProfileCompileCallCondition,
+	program.SurfaceStepCondition:      expression.ProfileCompileStepCondition,
+	program.SurfaceStepControl:        expression.ProfileStepControl,
+	program.SurfaceJobEnvironment:     expression.ProfileJobEnvironment,
+	program.SurfaceJobDefault:         expression.ProfileJobDefault,
+	program.SurfaceJobOutput:          expression.ProfileJobOutput,
+	program.SurfaceStepTemplate:       expression.ProfileStepTemplate,
+	program.SurfaceRuntimeTemplate:    expression.ProfileRuntimeTemplate,
+	program.SurfaceServiceTemplate:    expression.ProfileServiceTemplate,
+	program.SurfaceServiceEnvironment: expression.ProfileServiceEnvironment,
+	program.SurfaceServiceCredential:  expression.ProfileServiceCredential,
+	program.SurfaceServiceMap:         expression.ProfileStepTemplate,
+}
+
+func compileReductionProfile(surface program.Surface) (expression.ProfileID, error) {
+	profile, ok := compileReductionProfiles[surface]
+	if !ok {
+		return "", fmt.Errorf("expression surface %q has no compile reduction profile", surface)
+	}
+	return profile, nil
+}
+
+// projectReducedProgram updates the source-oriented IR after the immutable
+// whole-program pass. Expression traversal remains owned by Program.TransformSites.
+func projectReducedProgram(instance *JobInstance, reduced program.Program) {
+	instance.If = reduced.Job.Condition.Source
+	instance.ContinueOnError = reduced.Job.ContinueOnError.Literal
+	instance.ContinueOnErrorExpression = ""
+	if reduced.Job.ContinueOnError.Expression != nil {
+		instance.ContinueOnErrorExpression = reduced.Job.ContinueOnError.Expression.Source
+	}
+	instance.Env = programBindingMap(reduced.Job.Env)
+	instance.DefaultShell = reduced.Job.Defaults.Shell.Source
+	instance.DefaultWorkingDirectory = reduced.Job.Defaults.WorkingDirectory.Source
+	instance.Outputs = programBindingMap(reduced.Job.Outputs)
+	for i := range instance.CallGuards {
+		instance.CallGuards[i].Condition = reduced.Job.Guards[i].Condition.Source
+	}
+	for i := range instance.Steps {
+		source := reduced.Job.Steps[i]
+		target := &instance.Steps[i]
+		target.Name = source.Name.Source
+		target.If = source.Condition.Source
+		target.Env = programBindingMap(source.Env)
+		if source.ContinueOnError.Expression != nil {
+			target.ContinueOnErrorExpression = source.ContinueOnError.Expression.Source
+		}
+		if source.TimeoutMinutes.Expression != nil {
+			target.TimeoutMinutesExpression = source.TimeoutMinutes.Expression.Source
+		}
+		if source.Run != nil {
+			target.Run = source.Run.Command.Source
+			target.Shell = source.Run.Shell.Source
+			target.WorkingDirectory = source.Run.WorkingDirectory.Source
+		}
+		if source.Invocation != nil {
+			target.Uses = source.Invocation.Uses.Source
+			target.With = programBindingMap(source.Invocation.With)
+		}
+	}
+	if instance.Container != nil && reduced.Job.Container != nil {
+		container := *instance.Container
+		container.Image = reduced.Job.Container.Image.Source
+		container.Env = programBindingMap(reduced.Job.Container.Env)
+		container.Ports = programSiteSources(reduced.Job.Container.Ports)
+		container.Volumes = programSiteSources(reduced.Job.Container.Volumes)
+		container.Options = reduced.Job.Container.Options.Source
+		instance.Container = &container
+	}
+	for i := range instance.Services {
+		source := reduced.Job.Services.Static[i].Container
+		target := instance.Services[i].Container
+		target.Image = source.Image.Source
+		target.Env = programBindingMap(source.Env)
+		target.Ports = programSiteSources(source.Ports)
+		target.Volumes = programSiteSources(source.Volumes)
+		target.Options = source.Options.Source
+		target.Command = source.Command.Source
+		target.Entrypoint = source.Entrypoint.Source
+		if target.Credentials != nil && source.Credentials != nil {
+			credentials := *target.Credentials
+			credentials.Username = source.Credentials.Username.Source
+			credentials.Password = source.Credentials.Password.Source
+			target.Credentials = &credentials
+		}
+		instance.Services[i].Container = target
+	}
+	if reduced.Job.Services.Dynamic != nil {
+		instance.ServicesExpression = reduced.Job.Services.Dynamic.Source
+	}
+}
+
+func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program.Program) (builtPlanActions, error) {
+	steps := workflowProgram.Job.Steps
+	var actionIndexes []int
+	var actionRefs []string
+	var actionInputs []map[string]string
+	for i, step := range steps {
+		if step.Invocation == nil {
+			continue
+		}
+		actionIndexes = append(actionIndexes, i)
+		actionRefs = append(actionRefs, step.Invocation.Uses.Source)
+		actionInputs = append(actionInputs, programBindingMap(step.Invocation.With))
+	}
+	built := builtPlanActions{requiresMise: len(actionRefs) != 0, resolved: b.options.ResolveActions, hasInvocations: len(actionRefs) != 0}
 	if len(actionRefs) != 0 && !built.resolved {
 		built.resolved = true
 		for _, ref := range actionRefs {
@@ -367,27 +491,59 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		built.capabilities = capabilities
 		return built, nil
 	}
-	compiled, err := compileActionInvocations(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs)
+	event := b.ir.Event
+	identityIDs := plan.EventIdentityIDs(event.Provider, event.Repository.Owner+"/"+event.Repository.Name, event.Actor, event.Payload)
+	compiled, err := b.actionGraphs.compile(b.ctx, instance, plan.EventServerURL(event.Provider, event.ServerURL), identityIDs, actionRefs, actionInputs)
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
+	if instance.RemoteWorkflow == nil {
+		built.workflowSource = compiled.workflowSource
+	}
 	built.requiresMise = compiled.requiresMise
-	built.requiresGitHubToken = compiled.requiresGitHubToken
 	built.requiredSecrets = compiled.requiredSecrets
-	built.authorization.GitHubTokenActions = append([]string(nil), compiled.githubTokenActions...)
+	built.programs = compiled.programs
 	built.inputsInspected = true
+	reachability, err := program.WorkflowReachability(*workflowProgram, b.authorityValues(instance))
+	if err != nil {
+		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+	}
+	reachableSecrets := map[string]bool{}
+	for i, authority := range compiled.rootAuthorities {
+		if !reachability.Steps[actionIndexes[i]] {
+			continue
+		}
+		built.requiresGitHubToken = built.requiresGitHubToken || authority.GitHubToken
+		built.requiresEventPayload = built.requiresEventPayload || authority.EventPayload
+		if authority.GitHubToken {
+			built.authorization.GitHubTokenActions = append(built.authorization.GitHubTokenActions, actionRefs[i])
+		}
+		for _, name := range authority.Secrets {
+			reachableSecrets[name] = true
+		}
+		for _, binding := range steps[actionIndexes[i]].Invocation.With {
+			names, err := program.ValidateSite(binding.Value)
+			if err != nil {
+				return built, fmt.Errorf("build plan for job %q: action input %q: %w", instance.LogicalJobID, binding.Name, err)
+			}
+			for _, name := range names {
+				reachableSecrets[name] = true
+			}
+		}
+	}
+	built.reachableSecrets = sortedKeys(reachableSecrets)
 	locksByID := make(map[string]plan.ActionLock, len(compiled.locks))
 	for _, lock := range compiled.locks {
 		locksByID[lock.ID] = lock
 	}
 	for i, selector := range compiled.selectors {
 		stepIndex := actionIndexes[i]
-		steps[stepIndex].Action = &plan.ActionSelector{Lock: selector.Lock}
+		steps[stepIndex].Invocation.Lock = selector.Lock
 		lock, ok := locksByID[selector.Lock]
 		if !ok {
 			return built, fmt.Errorf("build plan for job %q: action lock %q is missing", instance.LogicalJobID, selector.Lock)
 		}
-		if err := b.validateActionAdapter(instance, stepIndex, lock, &built); err != nil {
+		if err := b.validateActionAdapter(instance, stepIndex, lock, reachability.Job, reachability.Steps[stepIndex], &built); err != nil {
 			return built, err
 		}
 	}
@@ -405,34 +561,84 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 	return built, nil
 }
 
-func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, built *builtPlanActions) error {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+// authorityValues are the values token and secret authority planning may
+// resolve. Planning never resolves vars: GitHub evaluates jobs.<id>.if with
+// repository and organization variables but steps with the environment laid
+// over them, so a single map would be wrong in one of the two positions.
+// Unknown vars keep planning conservative: an expression that may reference
+// github.token still requests the token.
+func (b planBuilder) authorityValues(instance JobInstance) expression.AbstractValues {
+	values := expression.AbstractValues{
+		References: map[string]any{
+			"github.server_url": plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL),
+			"matrix":            instance.Matrix,
+			"strategy":          instance.Strategy,
+		},
+		Inputs: instance.inputScope(),
+	}
+	event := b.ir.Event
+	for name, value := range plan.EventIdentityIDs(event.Provider, event.Repository.Owner+"/"+event.Repository.Name, event.Actor, event.Payload) {
+		values.References["github."+name] = value
+	}
+	return values
+}
+
+func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, jobReachable, stepReachable bool, built *builtPlanActions) error {
+	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path})
+	if descriptor.Adapter == "" || !jobReachable {
+		return nil
+	}
+	// Adapters validate a resolved view, never rewriting the emitted source.
+	inputs := cloneMap(instance.Steps[stepIndex].With)
+	readsInputValues := false
+	for _, name := range sortedKeys(inputs) {
+		source := inputs[name]
+		site := compileExpressionSite(source, expression.ProfileStepTemplate, expression.ResultString)
+		readsInputs, err := expression.NewEngine().ReferencesContext(site, "inputs", false)
+		checkoutHost := descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA && strings.EqualFold(name, "github-server-url")
+		if err != nil || !readsInputs && !checkoutHost {
+			continue
+		}
+		readsInputValues = readsInputValues || readsInputs
+		analysis, err := expression.NewEngine().Analyze(site, b.authorityValues(instance))
+		if err != nil {
+			return fmt.Errorf("action input %q: %w", name, err)
+		}
+		if analysis.Value.Known {
+			inputs[name] = analysis.Value.Value.(string)
+		}
+	}
 	switch descriptor.Adapter {
 	case actionintegration.AdapterCheckoutExactEventSHA:
-		checkoutInputs := cloneMap(instance.Steps[stepIndex].With)
+		checkoutInputs := inputs
 		for name, value := range checkoutInputs {
 			if !strings.EqualFold(name, "ref") {
 				continue
 			}
-			root, path, err := expression.ReferencePath(value)
+			root, path, err := staticReference(value)
 			if err == nil && (strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "sha") ||
 				strings.EqualFold(root, "needs") && len(path) == 3 && strings.EqualFold(path[1], "outputs")) {
 				checkoutInputs[name] = b.ir.Event.SHA
 			}
 		}
-		if err := actionintegration.ValidateCheckoutInputs(lock.Commit, checkoutInputs, b.ir.Event.Repository.Owner+"/"+b.ir.Event.Repository.Name, b.ir.Event.SHA); err != nil {
+		if err := actionintegration.ValidateCheckoutInputs(lock.Commit, checkoutInputs, b.ir.Event.Repository.Owner+"/"+b.ir.Event.Repository.Name, plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL)); err != nil {
 			span := instance.Steps[stepIndex].Span.Start
 			return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 		}
-		built.capabilities = append(built.capabilities, "provider-token-read")
-		built.authorization.ProviderTokenReadCapabilitySources = append(built.authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
+		if stepReachable {
+			built.capabilities = append(built.capabilities, "provider-token-read")
+			built.authorization.ProviderTokenReadCapabilitySources = append(built.authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
+		}
 	case actionintegration.AdapterUploadArtifactBuildkite:
-		if err := actionintegration.ValidateUploadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
+		if err := actionintegration.ValidateUploadArtifactInputs(lock.Commit, inputs); err != nil {
 			span := instance.Steps[stepIndex].Span.Start
+			if readsInputValues {
+				err = fmt.Errorf("invalid inputs%s", inputValueHiddenNote)
+			}
 			return fmt.Errorf("%s:%d:%d: bounded upload-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 		}
 	case actionintegration.AdapterDownloadArtifactBuildkite:
-		if err := actionintegration.ValidateDownloadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
+		if err := actionintegration.ValidateDownloadArtifactInputs(lock.Commit, inputs); err != nil {
 			span := instance.Steps[stepIndex].Span.Start
 			return fmt.Errorf("%s:%d:%d: bounded download-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 		}
@@ -444,11 +650,11 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 	return nil
 }
 
-func addContainerCapabilities(instance JobInstance, actionRefs []string, built *builtPlanActions) error {
+func addContainerCapabilities(instance JobInstance, built *builtPlanActions) error {
 	if instance.Container == nil && len(instance.Services) == 0 && instance.ServicesExpression == "" {
 		return nil
 	}
-	if len(actionRefs) != 0 && !built.resolved {
+	if built.hasInvocations && !built.resolved {
 		return fmt.Errorf("build plan for job %q: containers with remote actions require action resolution through upload or profile validation", instance.LogicalJobID)
 	}
 	built.capabilities = append(built.capabilities, "docker", "network")
@@ -464,100 +670,19 @@ func addContainerCapabilities(instance JobInstance, actionRefs []string, built *
 	return nil
 }
 
-func buildPlanNeedSources(instance JobInstance, planDigests map[string]string) (map[string][]plan.NeedSource, error) {
-	needSources := make(map[string][]plan.NeedSource, len(instance.NeedGroups))
-	for _, logicalNeed := range sortedKeys(instance.NeedGroups) {
-		dependencies := instance.NeedGroups[logicalNeed]
-		if len(dependencies) > plan.MaxNeedProducers {
-			return nil, fmt.Errorf("build plan for job %q: prerequisite %q has %d producers, maximum is %d", instance.LogicalJobID, logicalNeed, len(dependencies), plan.MaxNeedProducers)
-		}
-		for _, dependency := range dependencies {
-			digest, ok := planDigests[dependency]
-			if !ok {
-				return nil, fmt.Errorf("build plan for job %q: prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
-			}
-			needSources[logicalNeed] = append(needSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
-		}
-	}
-	return needSources, nil
-}
-
-func buildPlanNeedOutputs(instance JobInstance) map[string][]plan.NeedOutput {
-	if len(instance.NeedOutputs) == 0 {
-		return nil
-	}
-	needOutputs := make(map[string][]plan.NeedOutput, len(instance.NeedOutputs))
-	for _, logicalNeed := range sortedKeys(instance.NeedOutputs) {
-		outputs := instance.NeedOutputs[logicalNeed]
-		needOutputs[logicalNeed] = make([]plan.NeedOutput, len(outputs))
-		for i, output := range outputs {
-			needOutputs[logicalNeed][i] = plan.NeedOutput{Name: output.Name, StepKey: output.StepKey, Output: output.Output}
-		}
-	}
-	return needOutputs
-}
-
-func buildPlanDeferredInputs(inputs map[string]DeferredInput, planDigests map[string]string) (map[string]plan.DeferredInput, error) {
-	if len(inputs) == 0 {
-		return nil, nil
-	}
-	resolved := make(map[string]plan.DeferredInput, len(inputs))
-	for _, name := range sortedKeys(inputs) {
-		input := inputs[name]
-		deferred := plan.DeferredInput{Outputs: make([]plan.NeedOutput, len(input.Outputs))}
-		for _, source := range input.Sources {
-			digest, ok := planDigests[source]
-			if !ok {
-				return nil, fmt.Errorf("deferred input %q source %q has no earlier plan digest", name, source)
-			}
-			deferred.Sources = append(deferred.Sources, plan.NeedSource{StepKey: source, PlanDigest: digest})
-		}
-		for i, output := range input.Outputs {
-			deferred.Outputs[i] = plan.NeedOutput{Name: output.Name, StepKey: output.StepKey, Output: output.Output}
-		}
-		resolved[name] = deferred
-	}
-	return resolved, nil
-}
-
-func buildPlanCallGuards(instance JobInstance, planDigests map[string]string) ([]plan.CallGuard, error) {
-	callGuards := make([]plan.CallGuard, len(instance.CallGuards))
-	for guardIndex, guard := range instance.CallGuards {
-		deferredInputs, err := buildPlanDeferredInputs(guard.DeferredInputs, planDigests)
-		if err != nil {
-			return nil, fmt.Errorf("build plan for job %q call guard %d: %w", instance.LogicalJobID, guardIndex+1, err)
-		}
-		planGuard := plan.CallGuard{Condition: guard.Condition, Inputs: cloneAnyMap(guard.Inputs), DeferredInputs: deferredInputs}
-		if len(guard.NeedGroups) != 0 {
-			planGuard.NeedSources = make(map[string][]plan.NeedSource, len(guard.NeedGroups))
-			for _, logicalNeed := range sortedKeys(guard.NeedGroups) {
-				for _, dependency := range guard.NeedGroups[logicalNeed] {
-					digest, ok := planDigests[dependency]
-					if !ok {
-						return nil, fmt.Errorf("build plan for job %q: call guard prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
-					}
-					planGuard.NeedSources[logicalNeed] = append(planGuard.NeedSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
-				}
-			}
-		}
-		if len(guard.NeedOutputs) != 0 {
-			planGuard.NeedOutputs = make(map[string][]plan.NeedOutput, len(guard.NeedOutputs))
-			for _, logicalNeed := range sortedKeys(guard.NeedOutputs) {
-				for _, output := range guard.NeedOutputs[logicalNeed] {
-					planGuard.NeedOutputs[logicalNeed] = append(planGuard.NeedOutputs[logicalNeed], plan.NeedOutput{Name: output.Name, StepKey: output.StepKey, Output: output.Output})
-				}
-			}
-		}
-		callGuards[guardIndex] = planGuard
-	}
-	return callGuards, nil
-}
-
 func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram program.Program, actions *builtPlanActions) ([]string, map[string]string, *plan.GitHubToken, error) {
-	secrets, mappings, tokenAliases, referencesGitHubToken, err := requiredSecrets(workflowProgram, instance.secretAuthority, actions.requiredSecrets, actions.inputsInspected)
+	serverURL := plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL)
+	secrets, mappings, tokenAliases, referencesGitHubToken, referencesEventPayload, err := requiredSecrets(workflowProgram, instance.secretAuthority, actions.requiredSecrets, actions.reachableSecrets, actions.inputsInspected, serverURL, b.authorityValues(instance))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
+	if instance.Environment != "" && len(instance.environmentSecrets) != 0 {
+		secrets, mappings, err = environmentScopedSecrets(instance.Environment, instance.environmentSecrets, secrets, mappings)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+		}
+	}
+	actions.requiresEventPayload = actions.requiresEventPayload || referencesEventPayload
 	referencesGitHubTokenSecret := len(tokenAliases) != 0
 	tokenAliases = slices.DeleteFunc(tokenAliases, func(name string) bool { return name == "GITHUB_TOKEN" })
 	if !referencesGitHubTokenSecret && !referencesGitHubToken && !actions.requiresGitHubToken {
@@ -568,7 +693,7 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 		policyWorkflow = filepath.Base(instance.SourcePath)
 	}
 	if len(b.ir.Workflow.WorkflowTokenPermissions) == 0 {
-		reference := "an action input default that references github.token"
+		reference := "resolved action metadata that references github.token"
 		if referencesGitHubTokenSecret {
 			reference = "secrets.GITHUB_TOKEN"
 		} else if referencesGitHubToken {
@@ -583,8 +708,11 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 	return secrets, mappings, &plan.GitHubToken{Workflow: policyWorkflow, Permissions: cloneMap(b.ir.Workflow.WorkflowTokenPermissions), Aliases: tokenAliases}, nil
 }
 
-func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.Program, runtimeDistributionDigest string, steps []plan.Step, actions builtPlanActions, needSources map[string][]plan.NeedSource, needOutputs map[string][]plan.NeedOutput, deferredInputs map[string]plan.DeferredInput, callGuards []plan.CallGuard, secrets []string, secretMappings map[string]string, githubToken *plan.GitHubToken) plan.Job {
-	programJob := workflowProgram.Job
+func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.Program, runtimeDistributionDigest string, actions builtPlanActions, needSources map[string][]plan.NeedSource, needOutputs map[string][]plan.NeedOutput, deferredInputs map[string]plan.DeferredInput, callGuards []plan.CallGuard, secrets []string, secretMappings map[string]string, githubToken *plan.GitHubToken) plan.Job {
+	workflowRunPath := b.workflowRunPath
+	if workflowRunPath == instance.SourcePath {
+		workflowRunPath = ""
+	}
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
@@ -592,72 +720,44 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		},
 		Runtime: &plan.Runtime{DistributionDigest: runtimeDistributionDigest},
 		Workflow: plan.Workflow{
-			Path:         instance.SourcePath,
-			Name:         b.workflowName,
-			Digest:       instance.SourceDigest,
-			LogicalJobID: instance.LogicalJobID,
-			Remote:       planRemoteWorkflowSource(instance.RemoteWorkflow),
+			Path:           instance.SourcePath,
+			RunPath:        workflowRunPath,
+			Name:           b.workflowName,
+			Digest:         instance.SourceDigest,
+			LogicalJobID:   instance.LogicalJobID,
+			Remote:         planRemoteWorkflowSource(instance.RemoteWorkflow),
+			SelfRepository: planRemoteWorkflowSource(actions.workflowSource),
 		},
 		Event: plan.Event{
-			Provider: b.ir.Event.Provider, Name: b.ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(b.eventDigest[:]),
+			Provider: b.ir.Event.Provider, ServerURL: b.ir.Event.ServerURL, Name: b.ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(b.eventDigest[:]),
 			Repository: b.ir.Event.Repository.Owner + "/" + b.ir.Event.Repository.Name,
 			Ref:        b.ir.Event.Ref, HeadRef: eventHeadRef(b.ir.Event), BaseRef: eventBaseRef(b.ir.Event), SHA: b.ir.Event.SHA, Actor: b.ir.Event.Actor,
 		},
-		Target:                  plan.Target{StepKey: instance.Key, Queue: instance.Queue},
-		RequiredCapabilities:    actions.capabilities,
-		RequiredSecrets:         secrets,
-		SecretMappings:          secretMappings,
-		GitHubToken:             githubToken,
-		IDTokenPermission:       instance.Permissions["id-token"],
-		OIDC:                    cloneOIDCConfiguration(b.options.OIDC),
-		Matrix:                  instance.Matrix,
-		Inputs:                  cloneAnyMap(instance.Inputs),
-		DeferredInputs:          deferredInputs,
-		Vars:                    cloneMap(b.ir.Vars),
-		Dependencies:            append([]string(nil), instance.Needs...),
-		NeedSources:             needSources,
-		NeedOutputs:             needOutputs,
-		CallGuards:              callGuards,
-		Env:                     programBindingMap(programJob.Env),
-		Condition:               programJob.Condition.Source,
-		ContinueOnError:         programJob.ContinueOnError,
-		TimeoutMinutes:          programJob.TimeoutMinutes,
-		DefaultShell:            programJob.Defaults.Shell.Source,
-		DefaultWorkingDirectory: programJob.Defaults.WorkingDirectory.Source,
-		Outputs:                 programBindingMap(programJob.Outputs),
-		Steps:                   steps,
-		Actions:                 actions.locks,
+		Target:               plan.Target{StepKey: instance.Key, Queue: instance.Queue},
+		RequiredCapabilities: actions.capabilities,
+		RequiredSecrets:      secrets,
+		SecretMappings:       secretMappings,
+		GitHubToken:          githubToken,
+		IDTokenPermission:    instance.Permissions["id-token"],
+		OIDC:                 cloneOIDCConfiguration(b.options.OIDC),
+		CacheMode:            instance.CacheMode,
+		Matrix:               instance.Matrix,
+		Strategy:             cloneAnyMap(instance.Strategy),
+		Inputs:               cloneAnyMap(instance.Inputs),
+		DeferredInputs:       deferredInputs,
+		OrganizationVars:     cloneMap(b.ir.OrganizationVars),
+		RepositoryVars:       cloneMap(b.ir.RepositoryVars),
+		EnvironmentVars:      cloneMap(instance.environmentVariables),
+		Dependencies:         append([]string(nil), instance.Needs...),
+		NeedSources:          needSources,
+		NeedOutputs:          needOutputs,
+		CallGuards:           callGuards,
+		Program:              &workflowProgram,
+		Actions:              actions.locks,
 	}
+	job.Event.PayloadFile = b.options.EventFile
+	job.Event.PayloadArtifact = actions.requiresEventPayload || job.Event.PayloadFile
 	job.RequiresMise = &actions.requiresMise
-	if programJob.Container != nil {
-		job.Container = &plan.Container{
-			Image: programJob.Container.Image.Source,
-			Env:   programBindingMap(programJob.Container.Env),
-			Ports: programSiteSources(programJob.Container.Ports),
-		}
-	}
-	if programJob.Services.Dynamic != nil {
-		job.ServicesExpression = programJob.Services.Dynamic.Source
-	}
-	if len(programJob.Services.Static) != 0 {
-		job.Services = make(map[string]plan.ServiceContainer, len(programJob.Services.Static))
-		job.ServiceOrder = make([]string, 0, len(programJob.Services.Static))
-	}
-	for _, service := range programJob.Services.Static {
-		container := plan.ServiceContainer{
-			Image: service.Container.Image.Source, Env: programBindingMap(service.Container.Env), Ports: programSiteSources(service.Container.Ports),
-			Volumes: programSiteSources(service.Container.Volumes), Options: service.Container.Options.Source,
-			Command: service.Container.Command.Source, Entrypoint: service.Container.Entrypoint.Source,
-		}
-		if service.Container.Credentials != nil {
-			container.Credentials = &plan.ContainerCredentials{
-				Username: service.Container.Credentials.Username.Source,
-				Password: service.Container.Credentials.Password.Source,
-			}
-		}
-		job.Services[service.Name] = container
-		job.ServiceOrder = append(job.ServiceOrder, service.Name)
-	}
 	return job
 }
 
@@ -673,28 +773,38 @@ func cloneOIDCConfiguration(configuration *plan.OIDCConfiguration) *plan.OIDCCon
 }
 
 func planConstructionFinding(instance JobInstance, err error) error {
-	return &ProcessingFinding{
-		Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility",
-		Path: instance.SourcePath, Line: instance.Source.Start.Line, Column: instance.Source.Start.Column,
-		Job: instance.LogicalJobID, Instance: instance.Key, Err: err,
-	}
+	return attributedProcessingFinding(
+		StagePlans, CodePlanConstruction, "compatibility",
+		instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column,
+		instance.LogicalJobID, instance.Key, "", 0, err,
+	)
 }
 
-func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, actionRequired []string, actionInputsInspected bool) ([]string, map[string]string, []string, bool, error) {
-	authority, err := program.InventoryAuthority(workflowProgram, program.AuthorityOptions{ActionInputsInspected: actionInputsInspected})
+func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, actionRequired, reachableActionRequired []string, actionInputsInspected bool, serverURL string, values expression.AbstractValues) ([]string, map[string]string, []string, bool, bool, error) {
+	if values.References == nil {
+		values.References = map[string]any{"github.server_url": serverURL}
+	}
+	authority, err := program.InventoryAuthority(workflowProgram, program.AuthorityOptions{
+		ActionInputsInspected: actionInputsInspected,
+		Values:                values,
+	})
 	if err != nil {
-		return nil, nil, nil, false, err
+		return nil, nil, nil, false, false, err
 	}
 	found := make(map[string]string, len(authority.Secrets)+len(actionRequired))
+	workflowFound := make(map[string]bool, len(authority.ReachableSecrets))
 	for _, name := range authority.Secrets {
 		found[name] = name
+	}
+	for _, name := range authority.ReachableSecrets {
+		workflowFound[name] = true
 	}
 	if actionInputsInspected {
 		err = workflowProgram.VisitSites(func(site program.Site) error {
 			if site.Purpose != program.PurposeActionInput {
 				return nil
 			}
-			names, err := expression.SecretReferences(site.Source)
+			names, err := program.ValidateSite(site)
 			if err != nil {
 				return err
 			}
@@ -707,18 +817,24 @@ func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, 
 			return nil
 		})
 		if err != nil {
-			return nil, nil, nil, false, err
+			return nil, nil, nil, false, false, err
 		}
 	}
 	for _, name := range actionRequired {
 		found[name] = name
+	}
+	reachableActionFound := make(map[string]bool, len(reachableActionRequired))
+	for _, name := range reachableActionRequired {
+		reachableActionFound[name] = true
 	}
 	sources := make(map[string]struct{}, len(found))
 	mappings := map[string]string{}
 	var tokenAliases []string
 	for alias := range found {
 		if alias == "GITHUB_TOKEN" {
-			tokenAliases = append(tokenAliases, alias)
+			if workflowFound[alias] || reachableActionFound[alias] {
+				tokenAliases = append(tokenAliases, alias)
+			}
 			continue
 		}
 		binding, ok := bindings.resolve(alias)
@@ -726,7 +842,14 @@ func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, 
 			continue
 		}
 		if binding.token {
-			tokenAliases = append(tokenAliases, alias)
+			if workflowFound[alias] || reachableActionFound[alias] {
+				tokenAliases = append(tokenAliases, alias)
+			}
+			continue
+		}
+		if !plan.ValidSecretName(binding.source) {
+			// A lookup of a name no secret can have is empty, whether the
+			// name is inherited or mapped by a reusable workflow call.
 			continue
 		}
 		sources[binding.source] = struct{}{}
@@ -739,7 +862,7 @@ func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, 
 	if len(mappings) == 0 {
 		mappings = nil
 	}
-	return names, mappings, tokenAliases, authority.GitHubToken, nil
+	return names, mappings, tokenAliases, authority.GitHubToken, authority.EventPayload, nil
 }
 
 func planRemoteWorkflowSource(source *RemoteWorkflowSource) *plan.RemoteWorkflowSource {
@@ -747,6 +870,6 @@ func planRemoteWorkflowSource(source *RemoteWorkflowSource) *plan.RemoteWorkflow
 		return nil
 	}
 	return &plan.RemoteWorkflowSource{
-		Repository: source.Repository, RequestedRef: source.RequestedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
+		ServerURL: source.ServerURL, Repository: source.Repository, RequestedRef: source.RequestedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
 	}
 }

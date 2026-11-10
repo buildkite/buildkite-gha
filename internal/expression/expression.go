@@ -1,4 +1,3 @@
-// Package expression adapts actionlint's expression parser into owned values.
 package expression
 
 import (
@@ -40,9 +39,7 @@ type StepStatus struct {
 	Outputs    map[string]string
 }
 
-// Parse validates a complete ${{ ... }} expression using actionlint and returns
-// an owned representation.
-func Parse(text string, line, column int) (Expression, error) {
+func parseExpression(text string, line, column int) (Expression, error) {
 	body, err := expressionBody(text)
 	if err != nil {
 		return Expression{}, err
@@ -369,10 +366,10 @@ func decodeJSONValue(source string) (any, error) {
 	decoder.UseNumber()
 	value, err := decodeJSONToken(decoder)
 	if err != nil {
-		return nil, fmt.Errorf("fromJSON argument is invalid JSON")
+		return nil, authoredErrorf("fromJSON argument is invalid JSON")
 	}
 	if _, err := decoder.Token(); err != io.EOF {
-		return nil, fmt.Errorf("fromJSON argument contains multiple JSON values")
+		return nil, authoredErrorf("fromJSON argument contains multiple JSON values")
 	}
 	return normalizeJSONNumbers(value)
 }
@@ -403,7 +400,7 @@ func decodeJSONToken(decoder *json.Decoder) (any, error) {
 			}
 			key, ok := keyToken.(string)
 			if !ok {
-				return nil, fmt.Errorf("fromJSON argument is invalid JSON")
+				return nil, authoredErrorf("fromJSON argument is invalid JSON")
 			}
 			value, err := decodeJSONToken(decoder)
 			if err != nil {
@@ -431,7 +428,7 @@ func decodeJSONToken(decoder *json.Decoder) (any, error) {
 		_, err = decoder.Token()
 		return values, err
 	default:
-		return nil, fmt.Errorf("fromJSON argument is invalid JSON")
+		return nil, authoredErrorf("fromJSON argument is invalid JSON")
 	}
 }
 

@@ -74,6 +74,143 @@ func (s *fakeReusableRepositorySource) references() []actionsource.Reference {
 	return append([]actionsource.Reference(nil), s.calls...)
 }
 
+func TestCompileSelectsEventHostForNewRemoteSources(t *testing.T) {
+	callerRoot, workflowRoot, otherRoot, parentRoot, childRoot := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	caller := writeWorkflow(t, callerRoot, "caller.yml", `on: push
+jobs:
+  direct:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.prepare.outputs.matrix }}
+    steps:
+      - uses: owner/parent@v1
+      - id: prepare
+        run: echo 'matrix={"item":["one"]}' >> "$GITHUB_OUTPUT"
+  deferred:
+    needs: direct
+    strategy:
+      matrix: ${{ fromJSON(needs.direct.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: owner/parent@v1
+  reusable:
+    uses: owner/workflows/.github/workflows/outer.yml@v1
+`)
+	writeWorkflow(t, workflowRoot, "outer.yml", "on: workflow_call\njobs:\n  local:\n    uses: ./.github/workflows/inner.yml\n  remote:\n    uses: owner/more/.github/workflows/inner.yml@v2\n")
+	for _, root := range []string{workflowRoot, otherRoot} {
+		writeWorkflow(t, root, "inner.yml", "on: workflow_call\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/parent@v1\n")
+	}
+	writeAction(t, parentRoot, "", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: owner/child@v2\n")
+	writeAction(t, childRoot, "", "name: child\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo child\n")
+	for _, server := range []string{"", "https://ghe.example"} {
+		t.Run(actionsource.ServerURL(server), func(t *testing.T) {
+			var event map[string]any
+			if err := json.Unmarshal(pushEvent(t), &event); err != nil {
+				t.Fatal(err)
+			}
+			event["server_url"] = server
+			repository := event["repository"].(map[string]any)
+			repository["clone_url"] = actionsource.ServerURL(server) + "/" + repository["owner"].(string) + "/" + repository["name"].(string) + ".git"
+			eventJSON, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := defaultOptions()
+			options.ResolveActions = true
+			options.RepositorySource = newFakeReusableRepositorySource(t, map[string]string{
+				"owner/workflows": workflowRoot, "owner/more": otherRoot, "owner/parent": parentRoot, "owner/child": childRoot,
+			})
+			options.ActionSource = options.RepositorySource
+			report, err := ValidateEventWithOptionsContext(t.Context(), caller, readFile(t, caller), eventJSON, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, source := range report.Sources {
+				if source.Repository != "" && source.ServerURL != server {
+					t.Fatalf("validation selected another host: %#v", source)
+				}
+			}
+			bundle, err := CompileBundlePlansContext(t.Context(), caller, readFile(t, caller), eventJSON, "test", testDistributionDigest, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.Plans) != 3 || len(bundle.IR.Continuations) != 1 {
+				t.Fatalf("plans=%d continuations=%d", len(bundle.Plans), len(bundle.IR.Continuations))
+			}
+			for _, artifact := range bundle.Plans {
+				job := artifact.Job
+				if job.Event.ServerURL != server || len(job.Actions) != 2 {
+					t.Fatalf("caller context or nested actions changed: %#v", job)
+				}
+				if remote := job.Workflow.Remote; remote != nil && remote.ServerURL != server {
+					t.Fatalf("reusable source selected another host: %#v", remote)
+				}
+				for _, lock := range job.Actions {
+					if lock.ServerURL != server {
+						t.Fatalf("action selected another host: %#v", lock)
+					}
+				}
+			}
+			locks := bundle.IR.Continuations[0].ActionLocks
+			if len(locks) != 2 {
+				t.Fatalf("deferred locks = %#v", locks)
+			}
+			for _, lock := range locks {
+				if lock.ServerURL != server {
+					t.Fatalf("deferred action selected another host: %#v", lock)
+				}
+			}
+		})
+	}
+}
+
+func TestLocalDiagnosticSourcesSurviveNestedWorkflowFailure(t *testing.T) {
+	root := t.TempDir()
+	caller := writeWorkflow(t, root, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/broken.yml\n")
+	broken := writeWorkflow(t, root, "broken.yml", "on: workflow_call\njobs: [\n")
+	canonical, err := filepath.EvalSymlinks(broken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := WorkflowSourceReference{LocalPath: canonical, Digest: transport.Digest(readFile(t, broken))}
+	const display = "./.github/workflows/broken.yml"
+	report, err := ValidateWithOptionsContext(t.Context(), caller, readFile(t, caller), defaultOptions())
+	if err == nil || report.Sources[display] != want || report.Sources[caller].Digest != transport.Digest(readFile(t, caller)) {
+		t.Fatalf("validation lost source identity: sources=%v err=%v", report.Sources, err)
+	}
+	ir, err := CompileIRWithOptionsContext(t.Context(), caller, readFile(t, caller), pushEvent(t), defaultOptions())
+	if err == nil || ir.Sources[display] != want || ir.Sources[caller].Digest != transport.Digest(readFile(t, caller)) {
+		t.Fatalf("compilation lost source identity: sources=%v err=%v", ir.Sources, err)
+	}
+}
+
+func TestRemoteDiagnosticSourcesSurviveNestedWorkflowFailure(t *testing.T) {
+	callerRoot, remoteRoot := t.TempDir(), t.TempDir()
+	caller := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  call:\n    uses: owner/shared/.github/workflows/callee.yml@v2\n")
+	writeWorkflow(t, remoteRoot, "callee.yml", "on: workflow_call\njobs:\n  nested:\n    uses: ./.github/workflows/broken.yml\n")
+	writeWorkflow(t, remoteRoot, "broken.yml", "on: workflow_call\njobs: [\n")
+	fake := newFakeReusableRepositorySource(t, map[string]string{"owner/shared": remoteRoot})
+	options := defaultOptions()
+	options.RepositorySource = fake
+	want := WorkflowSourceReference{Repository: "owner/shared", Path: ".github/workflows/broken.yml", Commit: fake.commits["owner/shared"]}
+	const display = "owner/shared/.github/workflows/broken.yml@v2"
+	report, err := ValidateWithOptionsContext(t.Context(), caller, readFile(t, caller), options)
+	if err == nil || !strings.Contains(err.Error(), display) || report.Sources[display] != want {
+		t.Fatalf("validation lost failing source: sources=%v err=%v", report.Sources, err)
+	}
+	ir, err := CompileIRWithOptionsContext(t.Context(), caller, readFile(t, caller), pushEvent(t), options)
+	if err == nil || ir.JobGraphComplete || ir.Sources[display] != want {
+		t.Fatalf("compilation lost failing source: sources=%v err=%v", ir.Sources, err)
+	}
+	encoded, err := json.Marshal(ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), want.Commit) || strings.Contains(string(encoded), `"Sources"`) {
+		t.Fatalf("diagnostic provenance leaked into serialized IR: %s", encoded)
+	}
+}
+
 func TestCompilePublicReusableWorkflowWithNestedPinnedLocalCall(t *testing.T) {
 	callerRoot := t.TempDir()
 	callerPath := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: GaloisInc/.github/.github/workflows/haskell-ci.yml@v2\n")
@@ -138,12 +275,12 @@ jobs:
 	wantRemote := plan.RemoteWorkflowSource{
 		Repository: "galoisinc/.github", RequestedRef: "v2", Commit: fake.commits["galoisinc/.github"], SourceDigest: fake.digests["galoisinc/.github"],
 	}
-	if plans[1].Workflow.Remote == nil || *plans[1].Workflow.Remote != wantRemote || plans[1].Workflow.Path != nested.SourcePath || plans[1].Workflow.Digest != wantNestedDigest {
+	if plans[1].Workflow.Remote == nil || *plans[1].Workflow.Remote != wantRemote || plans[1].Workflow.Path != nested.SourcePath || plans[1].Workflow.RunPath != "./.github/workflows/caller.yml" || plans[1].Workflow.Digest != wantNestedDigest {
 		t.Fatalf("remote plan provenance = %#v", plans)
 	}
 	validateCompiledPlansAgainstSchema(t, plans)
-	if calls := fake.references(); len(calls) != 1 || calls[0].Raw != "GaloisInc/.github@v2" || calls[0].Path != "" {
-		t.Fatalf("repository source calls = %#v, want one repository-root resolution", calls)
+	if calls := fake.references(); len(calls) != 1 || calls[0].Raw != "GaloisInc/.github/.github/workflows/haskell-ci.yml@v2" || calls[0].Path != ".github/workflows/haskell-ci.yml" || !calls[0].RepositoryRoot {
+		t.Fatalf("repository source calls = %#v, want one exact workflow authorization", calls)
 	}
 }
 
@@ -181,26 +318,30 @@ jobs:
 	}
 }
 
-func TestCompileRejectsSecretInheritanceIntoRemoteReusableWorkflows(t *testing.T) {
+func TestCompileRejectsSecretForwardingIntoRemoteReusableWorkflows(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		caller string
-		remote string
+		name        string
+		caller      string
+		remote      string
+		wantMessage string
 	}{
 		{
-			name:   "direct remote call",
-			caller: "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n    secrets: inherit\n",
-			remote: "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			name:        "inherited remote call",
+			caller:      "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n    secrets: inherit\n",
+			remote:      "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			wantMessage: `secrets: inherit cannot forward secrets to a workflow in another repository. Reusable workflow "owner/workflows/.github/workflows/ci.yml@v1" is outside this repository, so no secrets were forwarded. Retrieve each secret by name with buildkite-agent secret get NAME in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use secrets: inherit with a ./ call. If you need secrets: inherit across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
 		},
 		{
-			name:   "explicit remote call",
-			caller: "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n    secrets:\n      token: ${{ secrets.SOURCE }}\n",
-			remote: "on:\n  workflow_call:\n    secrets:\n      token:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			name:        "explicit remote call",
+			caller:      "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n    secrets:\n      token: ${{ secrets.SOURCE }}\n",
+			remote:      "on:\n  workflow_call:\n    secrets:\n      token:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			wantMessage: `A secrets: map cannot forward secrets to a workflow in another repository. Reusable workflow "owner/workflows/.github/workflows/ci.yml@v1" is outside this repository, so no secrets were forwarded. Retrieve each secret by name with buildkite-agent secret get NAME in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use a secrets: map with a ./ call. If you need explicit secret mappings across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
 		},
 		{
-			name:   "local path within remote repository",
-			caller: "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n",
-			remote: "on: workflow_call\njobs:\n  nested:\n    uses: ./.github/workflows/nested.yml\n    secrets: inherit\n",
+			name:        "local path within remote repository",
+			caller:      "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n",
+			remote:      "on: workflow_call\njobs:\n  nested:\n    uses: ./.github/workflows/nested.yml\n    secrets: inherit\n",
+			wantMessage: `secrets: inherit cannot forward secrets to a workflow in another repository. Reusable workflow "owner/workflows/.github/workflows/nested.yml@v1" is outside this repository, so no secrets were forwarded. Retrieve each secret by name with buildkite-agent secret get NAME in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use secrets: inherit with a ./ call. If you need secrets: inherit across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -212,8 +353,12 @@ func TestCompileRejectsSecretInheritanceIntoRemoteReusableWorkflows(t *testing.T
 			options := defaultOptions()
 			options.RepositorySource = MemoizeRepositorySource(newFakeReusableRepositorySource(t, map[string]string{"owner/workflows": remoteRoot}))
 			_, err := CompileWithOptions(callerPath, readFile(t, callerPath), pushEvent(t), options)
-			if err == nil || !strings.Contains(err.Error(), "secret forwarding is supported only for repository-local reusable workflows") {
-				t.Fatalf("CompileWithOptions() error = %v, want remote inheritance rejection", err)
+			var finding *ProcessingFinding
+			if err == nil || !errors.As(err, &finding) {
+				t.Fatalf("CompileWithOptions() error = %v, want remote forwarding finding", err)
+			}
+			if finding.Message != test.wantMessage || finding.Detail != "" || finding.Path != "./.github/workflows/caller.yml" || finding.Line != 4 || finding.Column != 11 || finding.Job != "call" {
+				t.Fatalf("CompileWithOptions() finding = %#v", finding)
 			}
 		})
 	}
@@ -269,17 +414,18 @@ jobs:
 		t.Fatal(err)
 	}
 	deferred, ok := callee.DeferredInputs["base64-subjects"]
-	if !ok || len(deferred.Sources) != 1 || deferred.Sources[0] != (plan.NeedSource{StepKey: producer.Target.StepKey, PlanDigest: transport.Digest(producerPlan)}) {
-		t.Fatalf("deferred input sources = %#v", callee.DeferredInputs)
+	if !ok || deferred.Template != "${{ needs.hash.outputs.hashes }}" || len(deferred.NeedSources["hash"]) != 1 || deferred.NeedSources["hash"][0] != (plan.NeedSource{StepKey: producer.Target.StepKey, PlanDigest: transport.Digest(producerPlan)}) {
+		t.Fatalf("deferred input = %#v", callee.DeferredInputs)
 	}
-	if len(deferred.Outputs) != 1 || deferred.Outputs[0] != (plan.NeedOutput{Name: "value", StepKey: producer.Target.StepKey, Output: "hashes"}) {
-		t.Fatalf("deferred input outputs = %#v", deferred.Outputs)
+	if len(deferred.NeedOutputs["hash"]) != 1 || deferred.NeedOutputs["hash"][0] != (plan.NeedOutput{Name: "hashes", StepKey: producer.Target.StepKey, Output: "hashes"}) {
+		t.Fatalf("deferred input outputs = %#v", deferred.NeedOutputs)
 	}
-	if len(callee.Dependencies) != 1 || callee.Dependencies[0] != producer.Target.StepKey || len(callee.NeedSources["hash"]) != 1 || len(callee.NeedOutputs["hash"]) != 0 {
+	if len(callee.Dependencies) != 1 || callee.Dependencies[0] != producer.Target.StepKey || len(callee.NeedSources) != 0 || len(callee.NeedOutputs) != 0 || len(callee.CallGuards) != 1 || len(callee.CallGuards[0].NeedSources["hash"]) != 1 {
 		t.Fatalf("callee dependencies = %#v, needs = %#v / %#v", callee.Dependencies, callee.NeedSources, callee.NeedOutputs)
 	}
-	if _, exists := callee.Inputs["base64-subjects"]; exists || callee.Steps[0].Env["UNTRUSTED_SUBJECTS"] != "${{ inputs.base64-subjects }}" {
-		t.Fatalf("callee deferred input boundary = inputs %#v, step %#v", callee.Inputs, callee.Steps[0])
+	step := callee.Program.Job.Steps[0]
+	if _, exists := callee.Inputs["base64-subjects"]; exists || testBindingSources(step.Env)["UNTRUSTED_SUBJECTS"] != "${{ inputs.base64-subjects }}" {
+		t.Fatalf("callee deferred input boundary = inputs %#v, step %#v", callee.Inputs, step)
 	}
 	if callee.Workflow.Remote == nil || callee.Workflow.Remote.Repository != "slsa-framework/slsa-github-generator" || callee.Workflow.Remote.RequestedRef != "v2.1.0" {
 		t.Fatalf("remote provenance = %#v", callee.Workflow.Remote)
@@ -287,43 +433,43 @@ jobs:
 }
 
 func TestCompilePinsRemoteWorkflowAndActionToOneCommit(t *testing.T) {
-	callerRoot := t.TempDir()
-	callerPath := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: owner/repository/.github/workflows/ci.yml@v1\n")
-	remoteRoot := t.TempDir()
-	writeWorkflow(t, remoteRoot, "ci.yml", `on: workflow_call
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: owner/repository/action@v1
-`)
-	actionRoot := filepath.Join(remoteRoot, "action")
-	if err := os.MkdirAll(actionRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(actionRoot, "action.yml"), []byte("runs:\n  using: node24\n  main: index.js\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(actionRoot, "index.js"), []byte("console.log('ok')\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fake := newFakeReusableRepositorySource(t, map[string]string{"owner/repository": remoteRoot})
-	shared := MemoizeRepositorySource(fake)
-	options := defaultOptions()
-	options.RepositorySource = shared
-	options.ResolveActions = true
-	options.ActionSource = shared
-	plans, err := compilePlansForTest(t.Context(), callerPath, readFile(t, callerPath), pushEvent(t), "0.0.0-test", testDistributionDigest, options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	commit := fake.commits["owner/repository"]
-	if len(plans) != 1 || plans[0].Workflow.Remote == nil || plans[0].Workflow.Remote.Commit != commit || len(plans[0].Actions) != 1 || plans[0].Actions[0].Commit != commit || plans[0].Actions[0].RequestedRef != "v1" {
-		t.Fatalf("workflow/action pins = %#v", plans)
-	}
-	calls := fake.references()
-	if len(calls) != 2 || calls[0].Raw != "owner/repository@v1" || calls[1].Raw != "owner/repository/action@"+commit {
-		t.Fatalf("repository source calls = %#v, want mutable ref once then exact commit", calls)
+	// GitHub allows repository names that end in a hyphen.
+	for _, repository := range []string{"owner/repository", "owner/repo-"} {
+		t.Run(repository, func(t *testing.T) {
+			callerRoot := t.TempDir()
+			callerPath := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: "+repository+"/.github/workflows/ci.yml@v1\n")
+			remoteRoot := t.TempDir()
+			writeWorkflow(t, remoteRoot, "ci.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: "+repository+"/action@v1\n")
+			actionRoot := filepath.Join(remoteRoot, "action")
+			if err := os.MkdirAll(actionRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(actionRoot, "action.yml"), []byte("runs:\n  using: node24\n  main: index.js\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(actionRoot, "index.js"), []byte("console.log('ok')\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fake := newFakeReusableRepositorySource(t, map[string]string{repository: remoteRoot})
+			shared := MemoizeRepositorySource(fake)
+			options := defaultOptions()
+			options.RepositorySource = shared
+			options.ResolveActions = true
+			options.ActionSource = shared
+			plans, err := compilePlansForTest(t.Context(), callerPath, readFile(t, callerPath), pushEvent(t), "0.0.0-test", testDistributionDigest, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			commit := fake.commits[repository]
+			if len(plans) != 1 || plans[0].Workflow.Remote == nil || plans[0].Workflow.Remote.Commit != commit || len(plans[0].Actions) != 1 || plans[0].Actions[0].Commit != commit || plans[0].Actions[0].RequestedRef != "v1" {
+				t.Fatalf("workflow/action pins = %#v", plans)
+			}
+			calls := fake.references()
+			if len(calls) != 2 || calls[0].Raw != repository+"/.github/workflows/ci.yml@v1" || !calls[0].RepositoryRoot || calls[1].Raw != repository+"/action@"+commit || calls[1].RepositoryRoot {
+				t.Fatalf("repository source calls = %#v, want mutable ref once then exact commit", calls)
+			}
+			validateCompiledPlansAgainstSchema(t, plans)
+		})
 	}
 }
 
@@ -375,7 +521,7 @@ func TestCompileRemoteReusableWorkflowLocalActionUsesCallerWorkspace(t *testing.
 	if len(plans) != 1 || len(plans[0].Actions) != 1 || plans[0].Actions[0].Source != "workspace" || plans[0].Actions[0].Path != ".github/actions/local" {
 		t.Fatalf("remote workflow caller-local action plan = %#v", plans)
 	}
-	if calls := fake.references(); len(calls) != 1 || calls[0].Path != "" {
+	if calls := fake.references(); len(calls) != 1 || calls[0].Path != ".github/workflows/ci.yml" || !calls[0].RepositoryRoot {
 		t.Fatalf("repository source calls = %#v, want only the remote workflow repository", calls)
 	}
 }
@@ -446,11 +592,15 @@ func TestCompileRemoteReusableWorkflowLimitsAndDiagnostics(t *testing.T) {
 	})
 
 	for _, test := range []struct {
-		name string
-		uses string
-		want string
+		name        string
+		uses        string
+		want        string
+		wantMessage string
 	}{
-		{name: "dynamic", uses: "${{ inputs.workflow }}", want: "runtime-dependent"},
+		{
+			name: "dynamic", uses: "${{ inputs.workflow }}", want: "reusable workflow path cannot be an expression",
+			wantMessage: `Reusable workflow path cannot be an expression. "${{ inputs.workflow }}" is only known once the build is running, and the workflow file has to be read before that. Name the file directly, for example ./.github/workflows/ci.yml, or org/shared/.github/workflows/ci.yml@v1. If you need a computed workflow path, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
+		},
 		{name: "nested path", uses: "owner/repo/.github/workflows/nested/ci.yml@v1", want: "directly under .github/workflows"},
 		{name: "wrong directory", uses: "owner/repo/workflows/ci.yml@v1", want: "directly under .github/workflows"},
 		{name: "non YAML", uses: "owner/repo/.github/workflows/ci.json@v1", want: "must end in .yml or .yaml"},
@@ -465,6 +615,12 @@ func TestCompileRemoteReusableWorkflowLimitsAndDiagnostics(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), test.want) || len(fake.references()) != 0 {
 				t.Fatalf("CompileWithOptions() error/calls = %v / %#v, want %q before source access", err, fake.references(), test.want)
 			}
+			if test.wantMessage != "" {
+				var finding *ProcessingFinding
+				if !errors.As(err, &finding) || finding.Message != test.wantMessage || finding.Detail != "" || finding.Path != "./.github/workflows/dynamic.yml" || finding.Line != 4 || finding.Column != 11 || finding.Job != "call" {
+					t.Fatalf("CompileWithOptions() finding = %#v", finding)
+				}
+			}
 		})
 	}
 
@@ -475,8 +631,29 @@ func TestCompileRemoteReusableWorkflowLimitsAndDiagnostics(t *testing.T) {
 		options := defaultOptions()
 		options.RepositorySource = MemoizeRepositorySource(fake)
 		_, err := CompileWithOptions(callerPath, readFile(t, callerPath), event, options)
-		if err == nil || !strings.Contains(err.Error(), `public reusable workflow "owner/private/.github/workflows/ci.yml@v1" was not found or is not public`) {
+		if err == nil || !strings.Contains(err.Error(), `remote reusable workflow "owner/private/.github/workflows/ci.yml@v1" could not be read`) {
 			t.Fatalf("CompileWithOptions() error = %v, want non-enumerating source error", err)
+		}
+		var finding *ProcessingFinding
+		wantMessage := `Reusable workflow could not be read. "owner/private/.github/workflows/ci.yml@v1" is private, is not accessible to this pipeline, or does not exist. Check the path. Public workflows can be called across repositories. Private workflows also need the plugin's private-reusable-workflows setting and Buildkite code access to that repository. Otherwise copy the workflow into this repository's .github/workflows and call it with a ./ path.`
+		if !errors.As(err, &finding) || finding.Message != wantMessage || finding.Detail != "" || finding.Path != "./.github/workflows/private.yml" || finding.Line != 4 || finding.Column != 11 || finding.Job != "call" {
+			t.Fatalf("CompileWithOptions() finding = %#v", finding)
+		}
+	})
+
+	t.Run("missing workflow in public repository", func(t *testing.T) {
+		callerPath := writeWorkflow(t, callerRoot, "missing.yml", "on: push\njobs:\n  call:\n    uses: owner/public/.github/workflows/absent.yml@v1\n")
+		publicRoot := t.TempDir()
+		options := defaultOptions()
+		options.RepositorySource = MemoizeRepositorySource(newFakeReusableRepositorySource(t, map[string]string{"owner/public": publicRoot}))
+		_, err := CompileWithOptions(callerPath, readFile(t, callerPath), event, options)
+		if err == nil || !strings.Contains(err.Error(), `remote reusable workflow "owner/public/.github/workflows/absent.yml@v1" could not be read`) {
+			t.Fatalf("CompileWithOptions() error = %v, want non-enumerating missing workflow error", err)
+		}
+		var finding *ProcessingFinding
+		wantMessage := `Reusable workflow could not be read. "owner/public/.github/workflows/absent.yml@v1" is private, is not accessible to this pipeline, or does not exist. Check the path. Public workflows can be called across repositories. Private workflows also need the plugin's private-reusable-workflows setting and Buildkite code access to that repository. Otherwise copy the workflow into this repository's .github/workflows and call it with a ./ path.`
+		if !errors.As(err, &finding) || finding.Message != wantMessage || finding.Detail != "" || finding.Path != "./.github/workflows/missing.yml" || finding.Line != 4 || finding.Column != 11 || finding.Job != "call" {
+			t.Fatalf("CompileWithOptions() finding = %#v", finding)
 		}
 	})
 

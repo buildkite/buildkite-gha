@@ -34,7 +34,7 @@ func UnsupportedVersionDiagnostic(reference string, err error) (message, detail 
 		"actions/download-artifact": "download-artifact-action",
 		"actions/cache":             "cache-action",
 	}[versionErr.action]
-	docs := "https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#" + anchor
+	docs := "https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#actions-" + anchor
 	if requested == "" {
 		message = fmt.Sprintf("This %s version is unsupported. Use a supported version from %s.", versionErr.action, docs)
 	} else {

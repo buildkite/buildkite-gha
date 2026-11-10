@@ -16,7 +16,14 @@ linters:
     - sloglint
     - thelper
     - contextcheck
+    - godoclint
   settings:
+    godoclint:
+      default: none
+      enable:
+        - pkg-doc
+        - single-pkg-doc
+        - require-pkg-doc
     usetesting:
       context-background: true
       context-todo: true

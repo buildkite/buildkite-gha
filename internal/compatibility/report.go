@@ -1,4 +1,3 @@
-// Package compatibility renders stable human and machine-readable validation reports.
 package compatibility
 
 import (
@@ -7,6 +6,9 @@ import (
 	"io"
 	"sort"
 	"strings"
+
+	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 // ProcessingSchema is the versioned, stage-oriented report shared by all
@@ -26,26 +28,36 @@ type SourceLocation struct {
 	Column int    `json:"column"`
 }
 
+const QueueSetupGuidance = "Create the queue, then run this workflow again with a matching event, or rebuild where supported. GHES workflows require a matching event."
+
 // Diagnostic is one actionable compatibility finding.
 type Diagnostic struct {
-	Level    string          `json:"level"`
-	Code     string          `json:"code"`
-	Category string          `json:"category,omitempty"`
-	Stage    string          `json:"stage,omitempty"`
-	Message  string          `json:"message"`
-	Detail   string          `json:"detail,omitempty"`
-	Location *SourceLocation `json:"location,omitempty"`
-	Job      string          `json:"job,omitempty"`
-	Instance string          `json:"instance,omitempty"`
-	Action   string          `json:"action,omitempty"`
-	Step     int             `json:"step,omitempty"`
+	Level    string                   `json:"level"`
+	Code     string                   `json:"code"`
+	Category string                   `json:"category,omitempty"`
+	Stage    workflowprocessing.Stage `json:"stage,omitempty"`
+	// Blocker attribution is forwarded to telemetry but excluded from the
+	// versioned processing-report schema.
+	Blocker       string `json:"-"`
+	BlockerDetail string `json:"-"`
+	// reportRunnerLabelDetail keeps report compaction independent of the new
+	// runner_policy telemetry attribution.
+	reportRunnerLabelDetail string
+	Message                 string          `json:"message"`
+	Detail                  string          `json:"detail,omitempty"`
+	SetupURL                string          `json:"setup_url,omitempty"`
+	Location                *SourceLocation `json:"location,omitempty"`
+	Job                     string          `json:"job,omitempty"`
+	Instance                string          `json:"instance,omitempty"`
+	Action                  string          `json:"action,omitempty"`
+	Step                    int             `json:"step,omitempty"`
 }
 
 // ProcessingStage is one required workflow-processing boundary.
 type ProcessingStage struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Result string `json:"result"`
+	ID     workflowprocessing.Stage `json:"id"`
+	Name   string                   `json:"name"`
+	Result string                   `json:"result"`
 }
 
 // JobResult retains successfully discovered logical jobs and matrix instances.
@@ -68,6 +80,9 @@ type ActionResult struct {
 // ProcessingReport records all safely discoverable results. Artifacts are
 // deliberately excluded so reports cannot expose event or downloaded content.
 type ProcessingReport struct {
+	// Sources is process-local source evidence, not part of the report schema.
+	Sources map[string]compiler.WorkflowSourceReference `json:"-"`
+
 	Schema      string            `json:"schema"`
 	Workflow    string            `json:"workflow"`
 	Profile     string            `json:"profile,omitempty"`
@@ -83,24 +98,12 @@ type ProcessingReport struct {
 	Diagnostics []Diagnostic      `json:"diagnostics"`
 }
 
-var processingStages = []ProcessingStage{
-	{ID: "workflow-parsing", Name: "Workflow parsing"},
-	{ID: "event-validation", Name: "Event validation"},
-	{ID: "static-graph-construction", Name: "Static graph construction"},
-	{ID: "matrix-expansion", Name: "Matrix expansion"},
-	{ID: "expression-validation", Name: "Expression validation"},
-	{ID: "action-discovery", Name: "Local and public action discovery"},
-	{ID: "action-resolution", Name: "Immutable action resolution"},
-	{ID: "job-plan-construction", Name: "Job-plan construction"},
-	{ID: "hosted-profile-admission", Name: "Hosted-profile admission"},
-	{ID: "pipeline-generation", Name: "Pipeline generation"},
-}
-
 // NewProcessingReport returns a deterministic report with every stage present.
 func NewProcessingReport(workflow, profile string) ProcessingReport {
-	stages := append([]ProcessingStage(nil), processingStages...)
-	for i := range stages {
-		stages[i].Result = NotEvaluated
+	definitions := workflowprocessing.StageDefinitions()
+	stages := make([]ProcessingStage, len(definitions))
+	for i, definition := range definitions {
+		stages[i] = ProcessingStage{ID: definition.ID, Name: definition.Name, Result: NotEvaluated}
 	}
 	return ProcessingReport{
 		Schema: ProcessingSchema, Workflow: workflow, Profile: profile,
@@ -111,7 +114,7 @@ func NewProcessingReport(workflow, profile string) ProcessingReport {
 }
 
 // SetStage records a stage outcome by stable ID.
-func (r *ProcessingReport) SetStage(id, result string) {
+func (r *ProcessingReport) SetStage(id workflowprocessing.Stage, result string) {
 	for i := range r.Stages {
 		if r.Stages[i].ID == id {
 			r.Stages[i].Result = result
@@ -156,10 +159,14 @@ func (r *ProcessingReport) Finalize() {
 		}
 		return r.Actions[i].Reference < r.Actions[j].Reference
 	})
-	stageOrder := make(map[string]int, len(processingStages))
-	for i, stage := range processingStages {
+	definitions := workflowprocessing.StageDefinitions()
+	stageOrder := make(map[workflowprocessing.Stage]int, len(definitions))
+	for i, stage := range definitions {
 		stageOrder[stage.ID] = i
 	}
+	// Rendering may finalize a copy of a report before its caller collects
+	// telemetry. Sort and compact our own slice so no diagnostic is overwritten.
+	r.Diagnostics = append([]Diagnostic{}, r.Diagnostics...)
 	sort.SliceStable(r.Diagnostics, func(i, j int) bool {
 		left, right := r.Diagnostics[i], r.Diagnostics[j]
 		if stageOrder[left.Stage] != stageOrder[right.Stage] {
@@ -187,7 +194,10 @@ func (r *ProcessingReport) Finalize() {
 		if left.Message != right.Message {
 			return left.Message < right.Message
 		}
-		return left.Detail < right.Detail
+		if left.Detail != right.Detail {
+			return left.Detail < right.Detail
+		}
+		return left.SetupURL < right.SetupURL
 	})
 	r.Diagnostics = compactDiagnostics(r.Diagnostics)
 }
@@ -197,8 +207,8 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 		return diagnostics
 	}
 	type diagnosticKey struct {
-		level, code, category, stage, message, detail, job, action, location string
-		step                                                                 int
+		level, code, category, stage, blocker, blockerDetail, message, detail, setupURL, job, action, location string
+		step                                                                                                   int
 	}
 	type matrixDiagnostic struct {
 		index     int
@@ -209,8 +219,12 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 	for _, diagnostic := range diagnostics {
 		key := diagnosticKey{
 			level: diagnostic.Level, code: diagnostic.Code, category: diagnostic.Category,
-			stage: diagnostic.Stage, message: diagnostic.Message, detail: diagnostic.Detail, job: diagnostic.Job,
+			stage: string(diagnostic.Stage), blocker: diagnostic.Blocker, blockerDetail: diagnostic.BlockerDetail,
+			message: diagnostic.Message, detail: diagnostic.Detail, setupURL: diagnostic.SetupURL, job: diagnostic.Job,
 			action: diagnostic.Action, step: diagnostic.Step,
+		}
+		if diagnostic.Blocker == "runner_policy" {
+			key.blocker, key.blockerDetail = "runner_label", diagnostic.reportRunnerLabelDetail
 		}
 		if diagnostic.Location != nil {
 			key.location = fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)
@@ -235,16 +249,13 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 		} else {
 			matrixFindings[key] = &matrixDiagnostic{index: len(out)}
 		}
-		if len(out) != 0 && sameDiagnostic(out[len(out)-1], diagnostic) {
-			continue
-		}
 		out = append(out, diagnostic)
 	}
 	return out
 }
 
 func sameDiagnostic(left, right Diagnostic) bool {
-	return left.Level == right.Level && left.Code == right.Code && left.Category == right.Category && left.Stage == right.Stage && left.Message == right.Message && left.Detail == right.Detail && left.Job == right.Job && left.Instance == right.Instance && left.Action == right.Action && left.Step == right.Step && sameLocation(left.Location, right.Location)
+	return left.Level == right.Level && left.Code == right.Code && left.Category == right.Category && left.Stage == right.Stage && left.Blocker == right.Blocker && left.BlockerDetail == right.BlockerDetail && left.Message == right.Message && left.Detail == right.Detail && left.SetupURL == right.SetupURL && left.Job == right.Job && left.Instance == right.Instance && left.Action == right.Action && left.Step == right.Step && sameLocation(left.Location, right.Location)
 }
 
 func sameLocation(left, right *SourceLocation) bool {
@@ -299,6 +310,11 @@ func WriteProcessing(w io.Writer, format string, report ProcessingReport) error 
 			if _, err := fmt.Fprintf(w, "%s [%s] %s%s%s\n", marker, diagnostic.Code, diagnostic.Message, textLocation(diagnostic.Location), textDiagnosticMetadata(diagnostic)); err != nil {
 				return err
 			}
+			if setupURL := compiler.SafeRunnerSetupURL(diagnostic.SetupURL); setupURL != "" {
+				if _, err := fmt.Fprintf(w, "  Set up queue: %s\n  %s\n", setupURL, QueueSetupGuidance); err != nil {
+					return err
+				}
+			}
 			if diagnostic.Detail != "" {
 				if _, err := fmt.Fprintf(w, "  detail: %s\n", diagnostic.Detail); err != nil {
 					return err
@@ -322,7 +338,7 @@ func textDiagnosticMetadata(diagnostic Diagnostic) string {
 		fields = append(fields, "category="+diagnostic.Category)
 	}
 	if diagnostic.Stage != "" {
-		fields = append(fields, "stage="+diagnostic.Stage)
+		fields = append(fields, "stage="+string(diagnostic.Stage))
 	}
 	if diagnostic.Job != "" {
 		fields = append(fields, "job="+diagnostic.Job)

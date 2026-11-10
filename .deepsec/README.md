@@ -9,30 +9,31 @@ Currently configured project: `buildkite-gha` (target: `..`).
 
 ## Setup
 
-Install the pinned workspace dependency with the repository's Node 24
-toolchain:
+Run the pinned CLI directly with the repository's Node 24 toolchain:
 
 ```bash
 cd .deepsec
-mise exec node@24 -- npm ci
+mise exec node@24 -- npx --yes deepsec@2.3.6 status
 ```
 
 Local AI processing can reuse an authenticated Codex CLI. From the repository
-root, run `cd .deepsec && mise exec node@24 -- npm exec -- codex login status`
-to check authentication with the bundled CLI. DeepSec also supports model
-credentials through environment variables; never commit those values.
+root, run
+`cd .deepsec && mise exec node@24 -- npx --yes --package deepsec@2.3.6 codex login status`
+to check authentication with DeepSec's Codex CLI dependency. DeepSec also
+supports model credentials through environment variables; never commit those
+values.
 
 ## Daily commands
 
 ```bash
 cd .deepsec
-mise exec node@24 -- npm exec -- deepsec scan \
+mise exec node@24 -- npx --yes deepsec@2.3.6 scan \
   --project-id buildkite-gha
-mise exec node@24 -- npm exec -- deepsec process \
+mise exec node@24 -- npx --yes deepsec@2.3.6 process \
   --project-id buildkite-gha --agent codex --concurrency 4
-mise exec node@24 -- npm exec -- deepsec revalidate \
+mise exec node@24 -- npx --yes deepsec@2.3.6 revalidate \
   --project-id buildkite-gha --agent codex --min-severity MEDIUM
-mise exec node@24 -- npm exec -- deepsec export \
+mise exec node@24 -- npx --yes deepsec@2.3.6 export \
   --project-id buildkite-gha --format md-dir --out ./findings
 ```
 
@@ -47,7 +48,7 @@ To scan another codebase from this same `.deepsec/`:
 
 ```bash
 cd .deepsec
-mise exec node@24 -- npm exec -- deepsec init-project ../some-other-package
+mise exec node@24 -- npx --yes deepsec@2.3.6 init-project ../some-other-package
 ```
 
 Appends an entry to `deepsec.config.ts` and writes
@@ -72,10 +73,5 @@ AGENTS.md                Pointer for coding agents
 
 ## Docs
 
-After `npm ci`:
-
-- Skill: `node_modules/deepsec/SKILL.md`
-- Full docs: `node_modules/deepsec/dist/docs/{getting-started,configuration,models,writing-matchers,plugins,architecture,data-layout,vercel-setup,faq}.md`
-
-Or browse on
-[GitHub](https://github.com/vercel/deepsec/tree/main/docs).
+Browse the DeepSec documentation on
+[GitHub](https://github.com/vercel-labs/deepsec/tree/main/docs).

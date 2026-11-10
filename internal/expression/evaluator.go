@@ -33,8 +33,10 @@ type expressionDomain[T any] interface {
 	known(any) T
 	derive(any, ...T) T
 	value(T) (any, bool)
+	truthiness(T, func(any) bool) (bool, bool)
 	unknown(...T) T
-	join(...T) T
+	unknownWithTruthiness(bool, ...T) T
+	join(func(any) bool, ...T) T
 }
 
 type concreteExpressionDomain struct{}
@@ -42,10 +44,16 @@ type concreteExpressionDomain struct{}
 func (concreteExpressionDomain) known(value any) any            { return value }
 func (concreteExpressionDomain) derive(value any, _ ...any) any { return value }
 func (concreteExpressionDomain) value(value any) (any, bool)    { return value, true }
+func (concreteExpressionDomain) truthiness(value any, truthy func(any) bool) (bool, bool) {
+	return truthy(value), true
+}
 func (concreteExpressionDomain) unknown(...any) any {
 	panic("concrete expression evaluation produced an unknown value")
 }
-func (concreteExpressionDomain) join(...any) any {
+func (concreteExpressionDomain) unknownWithTruthiness(bool, ...any) any {
+	panic("concrete expression evaluation produced an unknown value")
+}
+func (concreteExpressionDomain) join(func(any) bool, ...any) any {
 	panic("concrete expression evaluation joined multiple paths")
 }
 
@@ -92,6 +100,9 @@ func (e *expressionEvaluator[T]) result(value T, inputs ...T) T {
 	concrete, known := e.domain.value(value)
 	inputs = append(inputs, value)
 	if !known {
+		if truthy, truthKnown := e.domain.truthiness(value, e.truthy); truthKnown {
+			return e.domain.unknownWithTruthiness(truthy, inputs...)
+		}
 		return e.domain.unknown(inputs...)
 	}
 	return e.domain.derive(concrete, inputs...)
@@ -135,8 +146,8 @@ func (v *semanticValidator) validate(node actionlint.ExprNode) error {
 		return v.referenceError(err)
 	case *actionlint.IndexAccessNode:
 		root, path, err := referencePath(node)
-		staticAuthority := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets")
-		if err == nil && (v.validateAccess == nil || staticAuthority || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
+		staticReference := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets") || strings.EqualFold(root, "runner") || strings.EqualFold(root, "job")
+		if err == nil && (v.validateAccess == nil || staticReference) {
 			return v.validateReference(node, root, path)
 		}
 		if v.validateAccess != nil {
@@ -206,7 +217,8 @@ func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
 	case *actionlint.VariableNode, *actionlint.ObjectDerefNode:
 		root, path, err := referencePath(node)
 		if err == nil {
-			if _, object := node.(*actionlint.ObjectDerefNode); object && e.resolveRoot != nil && expressionReferenceUsesIndex(node) && !e.policy.resolveStaticIndexedReference {
+			// Conditions expose service fields, not a resolvable whole job root.
+			if _, object := node.(*actionlint.ObjectDerefNode); object && e.resolveRoot != nil && expressionReferenceUsesIndex(node) && !e.policy.resolveStaticIndexedReference && !strings.EqualFold(root, "job") {
 				return e.evaluateAccess(node)
 			}
 			if _, whole := node.(*actionlint.VariableNode); whole && e.resolveRoot != nil {
@@ -220,11 +232,11 @@ func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
 		return zero, err
 	case *actionlint.IndexAccessNode:
 		root, path, err := referencePath(node)
-		// Mirror the validator: static bracket references to authority
+		// Mirror the validator: static bracket references to restricted
 		// contexts resolve as ordinary references so evaluation never
-		// exposes the whole context root.
-		staticAuthority := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets")
-		if err == nil && (staticAuthority || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
+		// requires access to the whole context root.
+		staticReference := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets") || strings.EqualFold(root, "runner") || strings.EqualFold(root, "job")
+		if err == nil && (staticReference || e.policy.resolveStaticIndexedReference) {
 			return e.resolve(root, path)
 		}
 		if e.resolveRoot != nil {
@@ -245,11 +257,11 @@ func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
 			if err != nil {
 				return zero, err
 			}
-			concrete, known := e.domain.value(value)
+			truthy, known := e.domain.truthiness(value, e.truthy)
 			if !known {
 				return e.domain.unknown(value), nil
 			}
-			return e.domain.derive(!e.truthy(concrete), value), nil
+			return e.domain.derive(!truthy, value), nil
 		}
 	case *actionlint.LogicalOpNode:
 		if e.policy.allowLogical {
@@ -257,15 +269,29 @@ func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
 			if err != nil {
 				return zero, err
 			}
-			leftValue, leftKnown := e.domain.value(left)
+			leftTruthy, leftKnown := e.domain.truthiness(left, e.truthy)
 			if !leftKnown {
 				right, err := e.evaluate(node.Right)
 				if err != nil {
 					return zero, err
 				}
+				rightTruthy, rightKnown := e.domain.truthiness(right, e.truthy)
+				if rightKnown {
+					switch node.Kind {
+					case actionlint.LogicalOpNodeKindAnd:
+						if !rightTruthy {
+							return e.domain.unknownWithTruthiness(false, left, right), nil
+						}
+					case actionlint.LogicalOpNodeKindOr:
+						if rightTruthy {
+							return e.domain.unknownWithTruthiness(true, left, right), nil
+						}
+					default:
+						return zero, e.logicalError(node.Kind)
+					}
+				}
 				return e.domain.unknown(left, right), nil
 			}
-			leftTruthy := e.truthy(leftValue)
 			switch node.Kind {
 			case actionlint.LogicalOpNodeKindAnd:
 				if !leftTruthy {
@@ -289,11 +315,11 @@ func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
 				return zero, err
 			}
 			if e.policy.logicalBool {
-				rightValue, rightKnown := e.domain.value(right)
+				rightTruthy, rightKnown := e.domain.truthiness(right, e.truthy)
 				if !rightKnown {
 					return e.domain.unknown(left, right), nil
 				}
-				return e.domain.derive(e.truthy(rightValue), left, right), nil
+				return e.domain.derive(rightTruthy, left, right), nil
 			}
 			return e.result(right, left), nil
 		}

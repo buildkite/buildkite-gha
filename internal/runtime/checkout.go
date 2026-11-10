@@ -4,16 +4,20 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
-	"github.com/buildkite/buildkite-gha/internal/expression"
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
+	gitutil "github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 var checkoutRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
@@ -37,7 +41,7 @@ func resolveAgentRepositoryCredentialsBeforeWorkflow(credentials *AgentRepositor
 	if credentials == nil {
 		return nil, nil
 	}
-	if !validBuildkiteJobID(credentials.JobID) {
+	if !agentapi.ValidJobID(credentials.JobID) {
 		return nil, fmt.Errorf("repository-provider credentials require the current Buildkite job ID")
 	}
 	if credentials.JobToken == "" || strings.ContainsAny(credentials.JobToken, "\r\n") {
@@ -70,15 +74,15 @@ func validCheckoutRepository(repository string) bool {
 	return parts[0] != "." && parts[0] != ".." && parts[1] != "." && parts[1] != ".."
 }
 
-func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, commit string, inputs map[string]string) (Result, error) {
+func (r Runner) runCheckout(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, commit string, inputs map[string]string) (Result, error) {
 	result := newResult()
 	const adapter = "checkout adapter"
 	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil
-	url, credentialHost, validProvider := checkoutRepositoryURL(job.Event.Provider, job.Event.Repository)
-	if !validProvider || !actionintegration.ValidCheckoutSHA(job.Event.SHA) {
+	url, credentialHost, validProvider := checkoutRepositoryURL(job.Event.Provider, job.Event.Repository, job.Event.ServerURL)
+	if !validProvider || !gitutil.ValidObjectID(job.Event.SHA) {
 		return result, fmt.Errorf("%s requires a valid GitHub or Origin event repository and exact SHA; other event sources are unsupported", adapter)
 	}
-	if err := actionintegration.ValidateCheckoutInputs(commit, inputs, job.Event.Repository, job.Event.SHA); err != nil {
+	if err := actionintegration.ValidateCheckoutInputs(commit, inputs, job.Event.Repository, plan.EventServerURL(job.Event.Provider, job.Event.ServerURL)); err != nil {
 		return result, fmt.Errorf("%s: %w", adapter, err)
 	}
 	inputs = checkoutInputsWithReleaseDefaults(commit, inputs)
@@ -100,13 +104,19 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if err != nil {
 		return result, fmt.Errorf("%s discover Git: %w", adapter, err)
 	}
-	if lfs && (!filepath.IsAbs(git) || filepath.Base(git) != "git") {
+	canonicalGitName := filepath.Base(git) == "git"
+	if runtime.GOOS == "windows" {
+		canonicalGitName = strings.EqualFold(filepath.Base(git), "git.exe")
+	}
+	if lfs && (!filepath.IsAbs(git) || !canonicalGitName) {
 		return result, fmt.Errorf("checkout adapter requires Git LFS to use a canonical Git executable named git")
 	}
+	// Git maps /dev/null to the null device on every platform. Go's os.DevNull
+	// is NUL on Windows, which Git for Windows 2.56.0.windows.1 rejects.
 	env := map[string]string{
 		"HOME":                   filepath.Join(checkoutDirectory, ".no-home"),
 		"GIT_CONFIG_NOSYSTEM":    "1",
-		"GIT_CONFIG_GLOBAL":      os.DevNull,
+		"GIT_CONFIG_GLOBAL":      "/dev/null",
 		"GIT_TERMINAL_PROMPT":    "0",
 		"GIT_ASKPASS":            "",
 		"SSH_ASKPASS":            "",
@@ -202,7 +212,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	}
 	head, err := os.ReadFile(filepath.Join(checkoutDirectory, ".git", "HEAD"))
 	headSHA := strings.TrimSpace(string(head))
-	if err != nil || !actionintegration.ValidCheckoutSHA(headSHA) || actionintegration.ValidCheckoutSHA(checkoutTarget) && headSHA != checkoutTarget {
+	if err != nil || !gitutil.ValidObjectID(headSHA) || gitutil.ValidObjectID(checkoutTarget) && headSHA != checkoutTarget {
 		return result, fmt.Errorf("%s did not produce the requested detached revision", adapter)
 	}
 	setCheckoutOutputs(result.Outputs, commit, checkoutRefOutput(inputs, job.Event.Ref), headSHA)
@@ -232,13 +242,18 @@ func checkoutInputsWithReleaseDefaults(commit string, inputs map[string]string) 
 	return defaulted
 }
 
-func checkoutRepositoryURL(provider, repository string) (url, credentialHost string, ok bool) {
+func checkoutRepositoryURL(provider, repository, serverURL string) (cloneURL, credentialHost string, ok bool) {
 	if !validCheckoutRepository(repository) {
 		return "", "", false
 	}
 	switch provider {
 	case "github":
-		return "https://github.com/" + repository + ".git", "github.com", true
+		serverURL = plan.EventServerURL(provider, serverURL)
+		if plan.ValidateGitHubServerURL(serverURL) != nil {
+			return "", "", false
+		}
+		u, _ := url.Parse(serverURL)
+		return serverURL + "/" + repository + ".git", u.Host, true
 	case "cursor-origin":
 		return "https://origin.cursor.com/git/" + repository + ".git", "origin.cursor.com", true
 	default:
@@ -246,12 +261,12 @@ func checkoutRepositoryURL(provider, repository string) (url, credentialHost str
 	}
 }
 
-func validateCheckoutRefProvenance(sourceInputs, evaluatedInputs map[string]string, eventSHA string) error {
-	for name, value := range sourceInputs {
-		if !strings.EqualFold(name, "ref") {
+func validateCheckoutRefProvenance(sourceInputs []program.Binding, evaluatedInputs map[string]string, eventSHA string) error {
+	for _, input := range sourceInputs {
+		if !strings.EqualFold(input.Name, "ref") {
 			continue
 		}
-		root, path, err := expression.ReferencePath(value)
+		root, path, err := program.StaticReference(input.Value)
 		if err != nil {
 			return nil
 		}
@@ -350,8 +365,8 @@ func (w *checkoutSubmoduleStatusWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (r Runner) runCheckoutSubmodules(ctx context.Context, processor *commandProcessor, workspace string, git string, env map[string]string, base []string, depth string, recursive, credentialed bool, credentialHost string) error {
-	policy := append(append([]string{}, base...), "-c", "url.https://github.com/.insteadOf=git@github.com:")
+func (r Runner) runCheckoutSubmodules(ctx context.Context, processor *commandOutputProcessor, workspace string, git string, env map[string]string, base []string, depth string, recursive, credentialed bool, credentialHost string) error {
+	policy := append(append([]string{}, base...), "-c", "url.https://"+credentialHost+"/.insteadOf=git@"+credentialHost+":")
 	run := func(withCredentials bool, args ...string) error {
 		if withCredentials {
 			if err := r.runRepositoryProviderCheckoutGit(ctx, processor, workspace, env, git, policy, args, credentialHost); err != nil {
@@ -384,7 +399,7 @@ func (r Runner) runCheckoutSubmodules(ctx context.Context, processor *commandPro
 	}
 
 	status := &checkoutSubmoduleStatusWriter{}
-	statusProcessor := newCommandProcessor(status, processor.stderr)
+	statusProcessor := newCommandOutputProcessor(status, processor.stderr)
 	if err := r.runStreaming(ctx, statusProcessor, workspace, env, git, append(policy, statusArgs...)...); err != nil {
 		return fmt.Errorf("git submodule status: %w", err)
 	}
@@ -470,7 +485,7 @@ func checkoutRefOutput(inputs map[string]string, eventRef string) string {
 	if ref == "" {
 		return eventRef
 	}
-	if actionintegration.ValidCheckoutSHA(ref) {
+	if gitutil.ValidObjectID(ref) {
 		return ""
 	}
 	return ref
@@ -505,7 +520,9 @@ func checkoutFetchArgs(inputs map[string]string, sha string) []string {
 			"+refs/tags/*:refs/tags/*",
 		)
 		revision, branch := checkoutSelectedRevision(inputs, sha)
-		if !branch {
+		if !branch && strings.HasPrefix(revision, "refs/pull/") {
+			args = append(args, checkoutFetchRevision(inputs, sha))
+		} else if !branch {
 			namespace := "selected"
 			if revision == sha {
 				namespace = "event"
@@ -533,6 +550,9 @@ func checkoutFilter(inputs map[string]string) string {
 
 func checkoutFetchRevision(inputs map[string]string, sha string) string {
 	revision, branch := checkoutSelectedRevision(inputs, sha)
+	if pull, ok := strings.CutPrefix(revision, "refs/pull/"); ok && !branch {
+		return "+" + revision + ":refs/remotes/pull/" + pull
+	}
 	if !branch {
 		return revision
 	}
@@ -541,6 +561,9 @@ func checkoutFetchRevision(inputs map[string]string, sha string) string {
 
 func checkoutRevision(inputs map[string]string, sha string) string {
 	revision, branch := checkoutSelectedRevision(inputs, sha)
+	if pull, ok := strings.CutPrefix(revision, "refs/pull/"); ok && !branch {
+		return "refs/remotes/pull/" + pull
+	}
 	if !branch {
 		return revision
 	}
@@ -552,7 +575,7 @@ func checkoutSelectedRevision(inputs map[string]string, sha string) (revision st
 	if ref == "" || ref == sha {
 		return sha, false
 	}
-	if actionintegration.ValidCheckoutSHA(ref) {
+	if gitutil.ValidObjectID(ref) || strings.HasPrefix(ref, "refs/pull/") {
 		return ref, false
 	}
 	return strings.TrimPrefix(ref, "refs/heads/"), true
@@ -579,7 +602,7 @@ func repositoryProviderCheckoutCredentialArgs(base []string, agent, host string)
 	)
 }
 
-func (r Runner) runRepositoryProviderCheckoutGit(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, git string, base, commandArgs []string, credentialHost string) error {
+func (r Runner) runRepositoryProviderCheckoutGit(ctx context.Context, processor *commandOutputProcessor, workspace string, env map[string]string, git string, base, commandArgs []string, credentialHost string) error {
 	credentialEnv, err := r.repositoryProviderCheckoutCredentialEnvironment(processor, env, credentialHost)
 	if err != nil {
 		return err
@@ -591,7 +614,7 @@ func (r Runner) runRepositoryProviderCheckoutGit(ctx context.Context, processor 
 	return processor.scrubError(r.runStreamingCommand(ctx, processor, cmd))
 }
 
-func (r Runner) runRepositoryProviderCheckoutLFS(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, gitLFS string, commandArgs []string, credentialHost string) error {
+func (r Runner) runRepositoryProviderCheckoutLFS(ctx context.Context, processor *commandOutputProcessor, workspace string, env map[string]string, gitLFS string, commandArgs []string, credentialHost string) error {
 	credentialEnv, err := r.repositoryProviderCheckoutCredentialEnvironment(processor, env, credentialHost)
 	if err != nil {
 		return err
@@ -604,12 +627,12 @@ func (r Runner) runRepositoryProviderCheckoutLFS(ctx context.Context, processor 
 	return processor.scrubError(r.runStreamingCommand(ctx, processor, cmd))
 }
 
-func (r Runner) repositoryProviderCheckoutCredentialEnvironment(processor *commandProcessor, env map[string]string, credentialHost string) (map[string]string, error) {
+func (r Runner) repositoryProviderCheckoutCredentialEnvironment(processor *commandOutputProcessor, env map[string]string, credentialHost string) (map[string]string, error) {
 	credentials := r.RepositoryCredentials
 	if credentials == nil || credentials.Agent == "" || !filepath.IsAbs(credentials.Agent) {
 		return nil, fmt.Errorf("repository-provider credentials were not resolved before workflow execution")
 	}
-	if credentialHost != "github.com" && credentialHost != "origin.cursor.com" {
+	if plan.ValidateGitHubServerURL("https://"+credentialHost) != nil {
 		return nil, fmt.Errorf("repository-provider credentials require a supported event repository host")
 	}
 	processor.addMask(credentials.JobToken)

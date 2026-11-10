@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/buildkite/buildkite-gha/internal/git"
 )
 
 type cacheEntry struct {
@@ -75,6 +77,7 @@ func (s *Store) cachedManifest(base string, resolved Resolved) (manifest, error)
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&cached) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
 		cached.Schema != "buildkite-gha-action-source/v1" ||
+		ServerURL(cached.ServerURL) != ServerURL(resolved.Reference.ServerURL) ||
 		cached.Owner != strings.ToLower(resolved.Reference.Owner) ||
 		cached.Repository != strings.ToLower(resolved.Reference.Repository) ||
 		cached.Commit != resolved.Commit || cached.Digest == "" ||
@@ -126,8 +129,10 @@ func (s *Store) maintainLocked(ctx context.Context) error {
 		if lockErr != nil {
 			continue
 		}
-		_ = os.RemoveAll(partial)
+		// The maintenance lock prevents new partial writers while we remove it.
+		// Windows cannot remove a directory containing an open lock file.
 		lock.unlock()
+		_ = os.RemoveAll(partial)
 	}
 	var total int64
 	for _, entry := range entries {
@@ -164,12 +169,15 @@ func (s *Store) maintainLocked(ctx context.Context) error {
 	return s.writeCacheSize(total)
 }
 
-func (s *Store) publishCacheEntry(ctx context.Context, temporary, base string) error {
+func (s *Store) publishCacheEntry(ctx context.Context, temporary, base string, partialLock *actionCacheLock) error {
 	maintenance, err := lockActionCache(ctx, filepath.Join(s.root, ".maintenance.lock"), actionCacheLockExclusive, false)
 	if err != nil {
 		return err
 	}
 	defer maintenance.unlock()
+	// Keep cleanup excluded while closing the partial's handle: Windows cannot
+	// rename a directory containing an open file without delete sharing.
+	partialLock.unlock()
 	if err := os.Rename(temporary, base); err != nil {
 		return err
 	}
@@ -241,7 +249,33 @@ func (s *Store) writeCacheSize(size int64) error {
 }
 
 func (s *Store) cacheEntries() ([]cacheEntry, []string, error) {
-	owners, err := os.ReadDir(s.root)
+	entries, partials, err := cacheEntriesAt(s.root)
+	if err != nil {
+		return nil, nil, err
+	}
+	servers, err := os.ReadDir(filepath.Join(s.root, ".servers"))
+	if errors.Is(err, os.ErrNotExist) {
+		return entries, partials, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, server := range servers {
+		if !server.IsDir() {
+			continue
+		}
+		serverEntries, serverPartials, err := cacheEntriesAt(filepath.Join(s.root, ".servers", server.Name()))
+		if err != nil {
+			return nil, nil, err
+		}
+		entries = append(entries, serverEntries...)
+		partials = append(partials, serverPartials...)
+	}
+	return entries, partials, nil
+}
+
+func cacheEntriesAt(root string) ([]cacheEntry, []string, error) {
+	owners, err := os.ReadDir(root)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -251,7 +285,7 @@ func (s *Store) cacheEntries() ([]cacheEntry, []string, error) {
 		if !owner.IsDir() || strings.HasPrefix(owner.Name(), ".") {
 			continue
 		}
-		ownerPath := filepath.Join(s.root, owner.Name())
+		ownerPath := filepath.Join(root, owner.Name())
 		repositories, readErr := os.ReadDir(ownerPath)
 		if readErr != nil {
 			return nil, nil, readErr
@@ -271,7 +305,7 @@ func (s *Store) cacheEntries() ([]cacheEntry, []string, error) {
 					partials = append(partials, path)
 					continue
 				}
-				if !commit.IsDir() || !shaRE.MatchString(commit.Name()) {
+				if !commit.IsDir() || !git.ValidObjectID(commit.Name()) {
 					continue
 				}
 				size, sizeErr := cacheEntrySize(path)

@@ -2,23 +2,27 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"os"
+	"os/exec"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
+	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 const (
@@ -31,11 +35,20 @@ const (
 
 var runnerQueuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var runnerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
+var providerLinuxARM64RunnerPattern = regexp.MustCompile(`^(?:` +
+	`depot-ubuntu-(?:22\.04|24\.04)-arm(?:-(?:4|8|16|32|64))?|` +
+	`blacksmith-(?:2|4|8|16|32)vcpu-ubuntu-(?:22|24|26)04-arm|` +
+	`warp-ubuntu-(?:latest|2404|2604)-arm64-(?:2|4|8|16|32)x|` +
+	`warp-ubuntu-2604-arm64-(?:6|12)x-xfast|` +
+	`ubicloud(?:-standard-(?:2|4|8|16|30))?-arm|` +
+	`ubicloud-standard-(?:2|4|8|16|30)-arm-ubuntu-(?:22|24|26)04` +
+	`)$`)
 
 type hostedCompilation struct {
-	Bundle     compiler.Bundle
-	HasActions bool
-	Admitted   bool
+	Bundle           compiler.Bundle
+	JobGraphComplete bool
+	HasActions       bool
+	Admitted         bool
 }
 
 type hostedFailureKind string
@@ -177,9 +190,21 @@ func hostedOptions(groupLabel string, configuredTargets map[string]compiler.Runn
 	return options
 }
 
-func applyRunnerSelectors(options *compiler.Options, selectors []compiler.RunnerSelector) {
-	options.Runners.Selectors = selectors
-	for _, selector := range selectors {
+// candidateWorkflowSource is not provenance. The compiler must fetch the exact
+// workflow path and match its bytes before resolving $/. Synthetic validation
+// events use an all-zero placeholder SHA and cannot identify source.
+func candidateWorkflowSource(eventSource []byte) *compiler.WorkflowSourceReference {
+	event, err := compiler.ParseEvent(eventSource)
+	if err != nil || plan.EventServerURL(event.Provider, event.ServerURL) != "https://github.com" || strings.Trim(event.SHA, "0") == "" {
+		return nil
+	}
+	return &compiler.WorkflowSourceReference{Repository: event.Repository.Owner + "/" + event.Repository.Name, Commit: event.SHA}
+}
+
+func applyRunnerResolution(options *compiler.Options, resolution agentRunnerResolution) {
+	options.Runners.Selectors = resolution.selectors
+	options.Runners.Rejections = resolution.rejections
+	for _, selector := range resolution.selectors {
 		if selector.Target.Queue != "" && !slices.Contains(options.Runners.UntrustedQueues, selector.Target.Queue) {
 			options.Runners.UntrustedQueues = append(options.Runners.UntrustedQueues, selector.Target.Queue)
 		}
@@ -198,74 +223,67 @@ func hostedRunnerTargets() map[string]compiler.RunnerTarget {
 	}
 }
 
-func compileHosted(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespaced(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", nil, actionAuthentication)
-}
-
-func compileHostedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, nil, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication)
-}
-
-func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, nil, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication)
-}
-
-func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerSelectors []compiler.RunnerSelector, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
-	applyRunnerSelectors(&options, runnerSelectors)
-	options.StepKeyNamespace = stepKeyNamespace
-	options.OIDC = oidc
-	repositorySource := sharedActionSource
-	cleanup := func() {}
-	if repositorySource == nil {
-		var sourceOptions []actionsource.Option
-		if event, eventErr := compiler.ParseEvent(eventSource); eventErr == nil && event.Provider == "github" {
-			authenticationOption := actionAuthentication.option(event.Repository.Owner + "/" + event.Repository.Name)
-			if authenticationOption != nil {
-				sourceOptions = append(sourceOptions, authenticationOption)
-			}
-		}
-		var err error
-		repositorySource, cleanup, err = newHostedActionSource(ctx, actionCacheDir, version, sourceOptions, nil)
-		if err != nil {
-			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, err)
-		}
+func failedPartialBundle(bundle compiler.Bundle) compiler.Bundle {
+	bundle.Plans = nil
+	bundle.EventArtifact = nil
+	bundle.GeneratedWorkflow = buildkitepipeline.Workflow{}
+	bundle.JobOutcomes = make(map[string]compiler.JobOutcome, len(bundle.IR.Jobs))
+	for _, instance := range bundle.IR.Jobs {
+		bundle.JobOutcomes[instance.Key] = compiler.JobFailed
 	}
-	defer cleanup()
-	options.RepositorySource = repositorySource
-	preflight, err := compiler.CompileWithOptionsContext(ctx, workflowPath, workflowSource, eventSource, options)
-	if err != nil {
-		return hostedCompilation{}, hostedError(hostedEvaluationFailure, err)
-	}
-	var ir compiler.IR
-	if err := json.Unmarshal(preflight, &ir); err != nil {
-		return hostedCompilation{}, hostedError(hostedEvaluationFailure, fmt.Errorf("decode compiler preflight: %w", err))
-	}
-	hasActions := irUsesActions(ir)
-	if hasActions {
-		options.ResolveActions = true
-		options.ActionSource = repositorySource
-	}
-	bundle, err := compiler.CompileBundlePlansContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, options)
-	if err != nil {
-		return hostedCompilation{Bundle: bundle, HasActions: hasActions}, hostedError(hostedEvaluationFailure, err)
-	}
-	if err := validateUnprivilegedBundle(bundle); err != nil {
-		return hostedCompilation{Bundle: bundle, HasActions: hasActions}, hostedError(hostedAdmissionFailure, err)
-	}
-	bundle, err = compiler.GenerateBundlePipeline(bundle, distributionDigest, importerStep, options)
-	if err != nil {
-		return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedError(hostedEvaluationFailure, err)
-	}
-	if !hasActions && bundleUsesActions(bundle) {
-		return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedError(hostedEvaluationFailure, fmt.Errorf("final compilation introduced actions absent from preflight"))
-	}
-	return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, nil
+	return bundle
 }
 
 func newHostedActionSource(ctx context.Context, actionCacheDir, clientVersion string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
 	actionSource, cleanup, _, err := newHostedActionSourceWithSnapshot(ctx, actionCacheDir, clientVersion, resolverOptions, storeOptions)
 	return actionSource, cleanup, err
+}
+
+// repositorySourceSetupError retains the original error for local logs and
+// typed cause checks. Only the fixed operation and recognized causes enter
+// reports: arbitrary error text can contain paths, credentials or backend data.
+type repositorySourceSetupError struct {
+	operation string
+	err       error
+}
+
+func (e *repositorySourceSetupError) Error() string { return e.operation + ": " + e.err.Error() }
+func (e *repositorySourceSetupError) Unwrap() error { return e.err }
+
+func repositorySourceSetupReport(path, message string, err error) compatibility.ProcessingReport {
+	report := compatibility.EnvironmentProcessingReport(path, hostedProfile, message)
+	detail := "Repository source setup failed; the cause is unrecognized."
+	advice := "Contact Buildkite support with the build/job URL; for local validation, include the command and a sanitized error log."
+	var setupErr *repositorySourceSetupError
+	if errors.As(err, &setupErr) {
+		detail = setupErr.operation + " failed; the cause is unrecognized."
+		fix := ""
+		switch {
+		case setupErr.operation == "resolve Git executable" && errors.Is(err, exec.ErrNotFound):
+			detail = "Resolve Git executable failed: Git was not found on PATH. Private reusable workflows require Git."
+			fix = "install Git and make it available on PATH to the agent running the importer"
+		case setupErr.operation == "create action source store":
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				detail = "Create action source store failed: the temporary directory does not exist."
+				fix = "check the temporary-directory setting (such as TMPDIR) and create the directory or select an existing one"
+			case errors.Is(err, syscall.ENOTDIR):
+				detail = "Create action source store failed: the temporary-directory path is not a directory."
+				fix = "set the temporary-directory setting (such as TMPDIR) to a directory"
+			case errors.Is(err, os.ErrPermission):
+				detail = "Create action source store failed: access to temporary storage was denied."
+				fix = "check the temporary-directory setting (such as TMPDIR) and grant the importer user access to create directories there"
+			case errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EDQUOT):
+				detail = "Create action source store failed: temporary storage is full or its quota is exhausted."
+				fix = "free temporary-storage capacity or select a temporary directory with available capacity"
+			}
+		}
+		if fix != "" {
+			advice = "If you manage the environment running this command, " + fix + ". On Buildkite-hosted agents, contact Buildkite support with the build/job URL."
+		}
+	}
+	report.Diagnostics[0].Detail = detail + " " + advice
+	return report
 }
 
 func newHostedActionSourceWithSnapshot(ctx context.Context, actionCacheDir, clientVersion string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), string, error) {
@@ -277,19 +295,19 @@ func newHostedActionSourceWithSnapshot(ctx context.Context, actionCacheDir, clie
 		var err error
 		actionRoot, err = os.MkdirTemp("", "buildkite-gha-action-source-")
 		if err != nil {
-			return nil, cleanup, "", fmt.Errorf("create action source store: %w", err)
+			return nil, cleanup, "", &repositorySourceSetupError{operation: "create action source store", err: err}
 		}
 		cleanup = func() { _ = os.RemoveAll(actionRoot) }
 	}
 	resolver, err := actionsource.NewResolver(nil, resolverOptions...)
 	if err != nil {
 		cleanup()
-		return nil, func() {}, "", fmt.Errorf("configure public action resolver: %w", err)
+		return nil, func() {}, "", &repositorySourceSetupError{operation: "configure public action resolver", err: err}
 	}
 	store, err := actionsource.NewStoreContext(ctx, actionRoot, nil, storeOptions...)
 	if err != nil {
 		cleanup()
-		return nil, func() {}, "", fmt.Errorf("configure public action source store: %w", err)
+		return nil, func() {}, "", &repositorySourceSetupError{operation: "configure public action source store", err: err}
 	}
 	return compiler.MemoizeActionSource(compiler.PublicActionSource{Resolver: resolver, Store: store}), cleanup, resolver.ResolutionSnapshotID(), nil
 }
@@ -302,7 +320,7 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	var diagnostics []error
 	addFailure := func(artifact compiler.PlanArtifact, message, detail string, err error) {
 		finding := &compiler.ProcessingFinding{
-			Stage: compiler.StageAdmission, Code: "E_PROFILE", Category: "admission",
+			Stage: workflowprocessing.StageAdmission, Code: "E_PROFILE", Category: "admission",
 			Job: artifact.Job.Workflow.LogicalJobID, Instance: artifact.Job.Target.StepKey,
 			Message: message, Detail: detail, Err: err,
 		}
@@ -352,7 +370,7 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 			}
 		}
 		for _, action := range artifact.Job.Actions {
-			identity := actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path}
+			identity := actionintegration.Identity{Source: action.Source, ServerURL: action.ServerURL, Repository: action.Repository, Path: action.Path}
 			descriptor, _ := actionintegration.Lookup(identity)
 			if descriptor.Service == actionintegration.ServiceCache {
 				if _, _, err := actionintegration.Admit(identity, action.Commit); err != nil {
@@ -429,7 +447,7 @@ func githubTokenAdmissionDiagnostic(artifact compiler.PlanArtifact, reason strin
 		if len(quoted) > 1 {
 			actionLabel = "actions"
 		}
-		causes = append(causes, actionLabel+" "+strings.Join(quoted, ", ")+" defaults an input to github.token")
+		causes = append(causes, actionLabel+" "+strings.Join(quoted, ", ")+" references github.token in metadata")
 	}
 	if len(causes) == 0 {
 		causes = append(causes, "the compiled job requests a workflow token")
@@ -470,8 +488,8 @@ func irUsesActions(ir compiler.IR) bool {
 func bundleRunsUnprovenActions(bundle compiler.Bundle) bool {
 	for _, artifact := range bundle.Plans {
 		for _, lock := range artifact.Job.Actions {
-			identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
-			if !actionintegration.UsesNativeAdapter(identity) {
+			identity := actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path}
+			if _, native, err := actionintegration.AdmitNativeAdapter(identity, lock.Commit); err != nil || !native {
 				return true
 			}
 		}
@@ -484,8 +502,11 @@ func bundleUsesActions(bundle compiler.Bundle) bool {
 		if len(artifact.Job.Actions) != 0 {
 			return true
 		}
-		for _, step := range artifact.Job.Steps {
-			if step.Uses != "" || step.Action != nil || step.Kind == "uses" {
+		if artifact.Job.Program == nil {
+			continue
+		}
+		for _, step := range artifact.Job.ExecutionJob().Steps {
+			if step.Invocation != nil || step.Kind == "uses" {
 				return true
 			}
 		}
@@ -504,8 +525,8 @@ func configuredRunnerTarget(label, queue, image string) (string, compiler.Runner
 	if image != "" && !runnerImagePattern.MatchString(image) {
 		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q must be an immutable registry sha256 reference", canonical)
 	}
-	if image != "" && platform == compiler.PlatformDarwinARM64 {
-		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q is unsupported on darwin/arm64", canonical)
+	if image != "" && platform != compiler.PlatformLinuxAMD64 {
+		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q is unsupported on %s", canonical, platform)
 	}
 	if image == "" {
 		if preset, ok := hostedRunnerTargets()[canonical]; ok {
@@ -527,7 +548,18 @@ func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
 	case "macos-15", "macos-14":
 		// These remain available as local fallbacks when the Agent API is absent.
 		return canonical, compiler.PlatformDarwinARM64, nil
+	case "ubuntu-26.04-arm", "ubuntu-24.04-arm", "ubuntu-22.04-arm", "ubuntu-26.04-arm64", "ubuntu-24.04-arm64", "ubuntu-22.04-arm64":
+		// Automatic ARM Linux routing is server-owned, with no local Hosted preset.
+		return canonical, compiler.PlatformLinuxARM64, nil
+	case "windows-latest", "windows-2022":
+		return canonical, compiler.PlatformWindowsAMD64, nil
 	default:
+		if canonical == "windows" || strings.HasPrefix(canonical, "windows-") {
+			return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q; Windows mappings support windows-latest and windows-2022", label)
+		}
+		if providerLinuxARM64RunnerPattern.MatchString(canonical) || canonical == "arm64" || canonical == "aarch64" || strings.HasSuffix(canonical, "-arm64") || strings.HasSuffix(canonical, "-aarch64") {
+			return canonical, compiler.PlatformLinuxARM64, nil
+		}
 		// Configuring an otherwise unknown selector explicitly maps it to the
 		// supported Linux/amd64 platform. The Agent API owns compatibility
 		// policy for every selector that is not configured locally.

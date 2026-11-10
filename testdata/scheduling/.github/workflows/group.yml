@@ -1,0 +1,35 @@
+name: Output-derived concurrency proof
+on: push
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      group: ${{ steps.plan.outputs.group }}
+    steps:
+      - id: plan
+        run: |
+          echo 'matrix=[{"target":"one"},{"target":"two"},{"target":"three"}]' >> "$GITHUB_OUTPUT"
+          echo 'group=scheduling-proof' >> "$GITHUB_OUTPUT"
+  zz-prerequisite:
+    needs: plan
+    concurrency: scheduling-proof
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 10
+  build:
+    needs: [plan, zz-prerequisite]
+    runs-on: ubuntu-latest
+    concurrency: ${{ needs.plan.outputs.group }}
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - run: |
+          echo "group consumer ${{ matrix.target }}"
+          sleep 10
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'All group consumers finished'

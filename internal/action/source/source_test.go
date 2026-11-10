@@ -5,14 +5,19 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,15 +30,29 @@ import (
 const testSHA = "0123456789abcdef0123456789abcdef01234567"
 
 func TestParse(t *testing.T) {
-	for _, good := range []string{"owner/repo@v1", "owner/repo/sub/action@feature/slash", "o/r@deadbeef"} {
+	for _, good := range []string{"owner/repo@v1", "owner/repo/sub/action@feature/slash", "o/r@deadbeef", "owner/mon-projet-complet-sant-@v1", "owner/-repo@v1", "owner/_repo_@v1", "owner/repo.@v1"} {
 		r, err := Parse(good)
 		if err != nil || r.Raw != good {
 			t.Errorf("Parse(%q) = %#v, %v", good, r, err)
 		}
 	}
-	for _, bad := range []string{"", "./local@v1", "owner@v1", "owner/repo", "owner/repo@", "owner//repo@v1", "owner/./x@v1", "owner/../x@v1", "owner/..github/x@v1", "owner/.github/../x@v1", `owner/repo\x@v1`, "owner/repo@a?b", "owner/repo@${{ x }}", "-owner/repo@v1", "owner/repo.git@v1", "owner/repo@a//b"} {
+	for _, bad := range []string{"", "./local@v1", "owner@v1", "owner/repo", "owner/repo@", "owner//repo@v1", "owner/./x@v1", "owner/../x@v1", "owner/..github/x@v1", "owner/.github/../x@v1", `owner/repo\x@v1`, "owner/repo@a?b", "owner/repo@${{ x }}", "-owner/repo@v1", "owner/repo.git@v1", "owner/repo@a//b", "owner/" + strings.Repeat("r", 101) + "@v1"} {
 		if _, err := Parse(bad); err == nil {
 			t.Errorf("Parse(%q) succeeded", bad)
+		}
+	}
+}
+
+func TestGitHubActionSourceTokenProviderAcceptsGitHubRepositoryNames(t *testing.T) {
+	provider := func(context.Context) (string, error) { return "", nil }
+	for _, repository := range []string{"owner/mon-projet-complet-sant-", "owner/-repo", "owner/_repo_"} {
+		if _, err := makeConfig([]Option{WithGitHubActionSourceTokenProvider(repository, provider)}); err != nil {
+			t.Errorf("token provider for %q: %v", repository, err)
+		}
+	}
+	for _, repository := range []string{"owner/.", "owner/..", "owner/repo.git", "owner/repo/extra"} {
+		if _, err := makeConfig([]Option{WithGitHubActionSourceTokenProvider(repository, provider)}); err == nil {
+			t.Errorf("token provider for %q succeeded", repository)
 		}
 	}
 }
@@ -54,6 +73,133 @@ func TestParseExplainsUnsupportedContainerActions(t *testing.T) {
 		if _, err := Parse(reference); err == nil || err.Error() != UnsupportedContainerActionReason {
 			t.Errorf("Parse(%q) error = %v, want %q", reference, err, UnsupportedContainerActionReason)
 		}
+	}
+}
+
+func TestReferenceSourceServer(t *testing.T) {
+	resolver, err := NewResolver(nil, WithGitHubActionSourceTokenProvider("event/repo", func(context.Context) (string, error) {
+		t.Fatal("exact source requested credentials")
+		return "", nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, server := range []string{"", "https://github.com", "https://github.example:8443"} {
+		ref, _ := Parse("owner/repo/action@main")
+		ref.ServerURL = server
+		pinned, err := PinReference(ref, testSHA)
+		if err != nil || pinned.ServerURL != server || pinned.Ref != testSHA || pinned.Path != "action" {
+			t.Fatalf("pin source %q = %#v, %v", server, pinned, err)
+		}
+		resolved, err := resolver.Resolve(t.Context(), pinned)
+		if err != nil || resolved.Reference.ServerURL != server || resolved.Commit != testSHA {
+			t.Fatalf("resolve source %q = %#v, %v", server, resolved, err)
+		}
+	}
+}
+
+func TestGHESResolutionKeepsHostsCredentialsAndBudgetsSeparate(t *testing.T) {
+	enterpriseSHA := strings.Repeat("e", 40)
+	var provisions atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enterprise := strings.HasPrefix(r.URL.Path, "/api/v3/")
+		wantToken := ""
+		if !enterprise && strings.HasPrefix(r.URL.Path, "/repos/o/other") {
+			wantToken = "Bearer github-com-only"
+		}
+		if r.Header.Get("Authorization") != wantToken || r.Header.Get("Cookie") != "" {
+			t.Error("wrong credentials for source host and repository")
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/limited"):
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+		case r.URL.Path == "/repos/o/r" || r.URL.Path == "/repos/o/other":
+			_, _ = fmt.Fprint(w, `{"private":false,"visibility":"public"}`)
+		case strings.Contains(r.URL.Path, "/git/ref/tags/"):
+			sha := testSHA
+			if enterprise {
+				sha = enterpriseSHA
+			}
+			_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, sha)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), WithGitHubActionSourceTokenProvider("o/r", func(context.Context) (string, error) {
+		provisions.Add(1)
+		return "github-com-only", nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver.cfg.mutableRefs, err = newMutableRefCache(t.TempDir(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r@v1")
+	ref.ServerURL = server.URL
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != enterpriseSHA || provisions.Load() != 0 {
+		t.Fatalf("GHES resolution = %#v, %v; provisions=%d", resolved, err, provisions.Load())
+	}
+	limited, _ := Parse("o/r@limited")
+	limited.ServerURL = server.URL
+	var rate *RateLimitError
+	if _, err := resolver.Resolve(t.Context(), limited); !errors.As(err, &rate) {
+		t.Fatalf("GHES rate limit = %v", err)
+	}
+	ref.ServerURL = ""
+	resolved, err = resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != testSHA || provisions.Load() != 1 {
+		t.Fatalf("GitHub.com resolution = %#v, %v; provisions=%d", resolved, err, provisions.Load())
+	}
+	other, _ := Parse("o/other@v1")
+	if resolved, err := resolver.Resolve(t.Context(), other); err != nil || resolved.Commit != testSHA {
+		t.Fatalf("authenticated GitHub.com resolution = %#v, %v", resolved, err)
+	}
+	ref.ServerURL = server.URL
+	resolved, err = resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != enterpriseSHA {
+		t.Fatalf("GHES ref cache = %#v, %v", resolved, err)
+	}
+}
+
+func TestGHESDenialsDoNotFallBackToGitHubCredentialsOrGit(t *testing.T) {
+	git, _, remote, commit := configureGitRepositorySource(t, map[string]string{"action.yml": "name: private\n"})
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasPrefix(r.URL.Path, "/api/v3/repos/o/r/") || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+					t.Error("wrong host path or credentials")
+				}
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			options := []Option{WithTestEndpoints(server.URL, server.URL), withGitFixtureSource(git, remote), WithGitHubAPITokenProvider(func(context.Context) (string, error) {
+				t.Error("GHES requested GitHub.com credentials")
+				return "github-com-only", nil
+			})}
+			resolver, err := NewResolver(server.Client(), options...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := NewStore(t.TempDir(), server.Client(), options...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref, _ := Parse("o/r@main")
+			ref.ServerURL, ref.RepositoryRoot = server.URL, true
+			var denied *NotPublicError
+			if _, err := resolver.Resolve(t.Context(), ref); !errors.As(err, &denied) {
+				t.Fatalf("GHES resolution denial = %v", err)
+			}
+			if _, err := store.Materialize(t.Context(), Resolved{Reference: ref, Commit: commit}); !errors.As(err, &denied) {
+				t.Fatalf("GHES archive denial = %v", err)
+			}
+		})
 	}
 }
 
@@ -361,7 +507,11 @@ func TestExtractRejectsUnsafeArchives(t *testing.T) {
 		{"link", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
 		{"absolute link", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "/root/y"}}},
 		{"escaping link", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "../../y"}}},
-		{"directory link", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
+		{"directory link chain", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/z", Typeflag: tar.TypeSymlink, Linkname: "x"}}},
+		{"link cycle", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/y", Typeflag: tar.TypeSymlink, Linkname: "x"}}},
+		{"directory link collision", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/X/", Typeflag: tar.TypeDir}}},
+		{"directory link ancestor first", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/X/child", Typeflag: tar.TypeReg}}},
+		{"directory link ancestor last", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/X/child", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
 		{"link ancestor first", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/x/child", Typeflag: tar.TypeReg}}},
 		{"link ancestor last", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y", Typeflag: tar.TypeReg}, {Name: "root/x/child", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
 		{"hardlink", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeLink, Linkname: "root/y"}}},
@@ -371,6 +521,7 @@ func TestExtractRejectsUnsafeArchives(t *testing.T) {
 		{"mixed roots", []tar.Header{{Name: "one/", Typeflag: tar.TypeDir}, {Name: "two/", Typeflag: tar.TypeDir}}},
 		{"file size", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeReg, Size: 4}}},
 		{"count", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/a", Typeflag: tar.TypeDir}, {Name: "root/b", Typeflag: tar.TypeDir}, {Name: "root/c", Typeflag: tar.TypeDir}, {Name: "root/d", Typeflag: tar.TypeDir}}},
+		{"omitted links count", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/a", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/b", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/c", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -416,6 +567,59 @@ func TestExtractOmitsSafeRepositorySymlinks(t *testing.T) {
 	}
 	if digests[0] != digests[1] {
 		t.Fatalf("omitted symlink changed digest by archive order: %q != %q", digests[0], digests[1])
+	}
+}
+
+func TestExtractOmitsSafeDirectorySymlinks(t *testing.T) {
+	// TruffleHog e28360875917c9c730f9c64aae29fb93aa6c359e has these two
+	// directory aliases; its action does not use either path.
+	files := []tar.Header{
+		{Name: "root/.cursor/skills/dep-updates/", Typeflag: tar.TypeDir},
+		{Name: "root/.cursor/skills/dep-updates/SKILL.md", Typeflag: tar.TypeReg, Size: 7},
+	}
+	links := []tar.Header{
+		{Name: "root/.claude/skills/dep-updates", Typeflag: tar.TypeSymlink, Linkname: "../../.cursor/skills/dep-updates"},
+		{Name: "root/.codex/skills/dep-updates", Typeflag: tar.TypeSymlink, Linkname: "../../.cursor/skills/dep-updates"},
+	}
+	baseline := filepath.Join(t.TempDir(), "baseline")
+	if err := extractTar(bytes.NewReader(tarBytes(t, files)), baseline, defaults()); err != nil {
+		t.Fatal(err)
+	}
+	wantDigest, err := DigestTree(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, order := range []string{"aliases first", "aliases last"} {
+		t.Run(order, func(t *testing.T) {
+			entries := []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}}
+			if order == "aliases first" {
+				entries = append(entries, links...)
+			}
+			entries = append(entries, files...)
+			if order == "aliases last" {
+				entries = append(entries, links...)
+			}
+			out := filepath.Join(t.TempDir(), "out")
+			if err := extractTar(bytes.NewReader(tarBytes(t, entries)), out, defaults()); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(out, ".cursor", "skills", "dep-updates", "SKILL.md"))
+			if err != nil || !bytes.Equal(data, make([]byte, 7)) {
+				t.Fatalf("target contents = %q, %v", data, err)
+			}
+			for _, parent := range []string{".claude", ".codex"} {
+				if _, err := os.Lstat(filepath.Join(out, parent, "skills", "dep-updates")); !os.IsNotExist(err) {
+					t.Fatalf("omitted directory alias exists: %s: %v", parent, err)
+				}
+			}
+			digest, err := DigestTree(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if digest != wantDigest {
+				t.Fatalf("omitted aliases changed digest: %q != %q", digest, wantDigest)
+			}
+		})
 	}
 }
 
@@ -579,6 +783,82 @@ func TestDigestTreeExcludesGitMetadata(t *testing.T) {
 	}
 }
 
+func TestDigestTreeExecutablePathProvenance(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix executable bits")
+	}
+	for _, mutation := range []string{"none", "content", "addition", "removal", "symlink"} {
+		t.Run(mutation, func(t *testing.T) {
+			root := t.TempDir()
+			entry := filepath.Join(root, "runner.js")
+			if err := os.WriteFile(entry, []byte("console.log('ok')"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			want, paths, err := DigestTreeAndExecutablePaths(root)
+			if err != nil || !slices.Equal(paths, []string{"runner.js"}) {
+				t.Fatalf("digest and paths = %q, %v, %v", want, paths, err)
+			}
+			if err := os.Chmod(entry, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := DigestTreeWithExecutablePaths(root, nil); err != nil || got == want {
+				t.Fatalf("absent provenance digest = %q, %v; want mode mismatch", got, err)
+			}
+			switch mutation {
+			case "content":
+				err = os.WriteFile(entry, []byte("console.log('no')"), 0o644)
+			case "addition":
+				err = os.WriteFile(filepath.Join(root, "extra"), []byte("extra"), 0o644)
+			case "removal":
+				err = os.Remove(entry)
+			case "symlink":
+				err = os.Symlink("runner.js", filepath.Join(root, "link"))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := DigestTreeWithExecutablePaths(root, paths)
+			if mutation == "none" {
+				if err != nil || got != want {
+					t.Fatalf("restored digest = %q, %v; want %q", got, err, want)
+				}
+			} else if err == nil && got == want {
+				t.Fatal("provenance hid source tampering")
+			}
+		})
+	}
+}
+
+func TestDigestTreeEmptyAndInvalidExecutablePaths(t *testing.T) {
+	root := t.TempDir()
+	entry := filepath.Join(root, "runner.js")
+	if err := os.WriteFile(entry, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want, paths, err := DigestTreeAndExecutablePaths(root)
+	if err != nil || paths == nil || len(paths) != 0 {
+		t.Fatalf("empty provenance = %v, %v", paths, err)
+	}
+	if err := os.Chmod(entry, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DigestTreeWithExecutablePaths(root, paths); err != nil || got != want {
+		t.Fatalf("explicit empty provenance digest = %q, %v; want %q", got, err, want)
+	}
+	for _, paths := range [][]string{
+		{"missing"}, {"."}, {".."}, {"../runner.js"}, {"/runner.js"}, {"a/../runner.js"},
+		{`a\runner.js`}, {"runner.js", "runner.js"}, {"z", "runner.js"}, {""}, {"a\x00"},
+		{strings.Repeat("a", 256)}, {strings.Repeat("a/", 513)}, make([]string, 50001),
+	} {
+		if _, err := DigestTreeWithExecutablePaths(root, paths); err == nil {
+			t.Fatalf("invalid executable list accepted (length %d)", len(paths))
+		}
+	}
+	if _, err := DigestTreeWithExecutablePaths(entry, []string{}); err == nil {
+		t.Fatal("file accepted as tree root")
+	}
+}
+
 func tarBytes(t *testing.T, entries []tar.Header) []byte {
 	t.Helper()
 	var b bytes.Buffer
@@ -609,16 +889,25 @@ func tgz(t *testing.T, entries []tar.Header) []byte {
 
 func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 	archive := tgz(t, []tar.Header{{Name: "repo-root/", Typeflag: tar.TypeDir}, {Name: "repo-root/action/", Typeflag: tar.TypeDir}, {Name: "repo-root/action/action.yml", Typeflag: tar.TypeReg, Size: 2, Mode: 0o755}})
+	enterpriseArchive := tgz(t, []tar.Header{{Name: "repo-root/", Typeflag: tar.TypeDir}, {Name: "repo-root/action/", Typeflag: tar.TypeDir}, {Name: "repo-root/action/enterprise", Typeflag: tar.TypeReg, Size: 3, Mode: 0o644}})
 	var requests atomic.Int32
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if r.URL.Path != "/Owner/Repo/tar.gz/"+testSHA {
-			t.Errorf("URL = %s", r.URL.Path)
-		}
 		if r.Header.Get("User-Agent") != "buildkite-gha/1.2.3" {
 			t.Errorf("User-Agent = %q", r.Header.Get("User-Agent"))
 		}
-		_, _ = w.Write(archive)
+		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+			t.Error("archive received credentials")
+		}
+		switch r.URL.Path {
+		case "/Owner/Repo/tar.gz/" + testSHA:
+			_, _ = w.Write(archive)
+		case "/api/v3/repos/Owner/Repo/tarball/" + testSHA:
+			_, _ = w.Write(enterpriseArchive)
+		default:
+			t.Errorf("URL = %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
 	}))
 	defer ts.Close()
 	store, err := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, ts.URL), WithUserAgentVersion("1.2.3"))
@@ -643,6 +932,37 @@ func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 	}
 	first.Release()
 	second.Release()
+	// Hostless trees are GitHub.com-only, including when the same commit
+	// exists on another server. Explicit GitHub.com still reuses that tree.
+	resolved.Reference.ServerURL = "https://github.com"
+	explicit, err := store.Materialize(t.Context(), resolved)
+	if err != nil || explicit.RepositoryRoot != first.RepositoryRoot {
+		t.Fatalf("explicit GitHub.com cache reuse = %#v, %v", explicit, err)
+	}
+	explicit.Release()
+	resolved.Reference.ServerURL = ts.URL
+	enterprise, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enterprise.RepositoryRoot == first.RepositoryRoot || enterprise.SourceDigest == first.SourceDigest {
+		t.Fatal("GHES source reused GitHub.com tree")
+	}
+	if data, err := os.ReadFile(filepath.Join(enterprise.ActionRoot, "enterprise")); err != nil || len(data) != 3 {
+		t.Fatalf("GHES content = %q, %v", data, err)
+	}
+	enterprise.Release()
+	for range 2 {
+		cached, err := store.Materialize(t.Context(), resolved)
+		if err != nil || cached.SourceDigest != enterprise.SourceDigest || requests.Load() != 2 {
+			t.Fatalf("GHES cache reuse = %#v, %v; requests=%d", cached, err, requests.Load())
+		}
+		cached.Release()
+	}
+	resolved.SourceDigest = first.SourceDigest
+	if _, err := store.Materialize(t.Context(), resolved); err == nil {
+		t.Fatal("GHES source accepted GitHub.com digest")
+	}
 }
 
 func TestStoreRejectsInvalidUTF8ArchiveMetadataOnEveryMaterialization(t *testing.T) {
@@ -757,6 +1077,43 @@ func TestStoreExpectedDigestAndManifestRejectTampering(t *testing.T) {
 	}
 }
 
+func TestStoreExecutableProvenanceDoesNotHideUnixModeTampering(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix executable bits")
+	}
+	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1, Mode: 0o755}})
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) }))
+	defer ts.Close()
+	store, err := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, ts.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("owner/repo@v1")
+	resolved := Resolved{Reference: ref, Commit: testSHA, ExecutablePaths: []string{"action.yml"}}
+	if _, err := store.Materialize(t.Context(), resolved); err == nil {
+		t.Fatal("unbound executable provenance accepted")
+	}
+	resolved.ExecutablePaths = nil
+	first, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Release()
+	resolved.SourceDigest = first.SourceDigest
+	resolved.ExecutablePaths = []string{"action.yml"}
+	cached, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatalf("pre-provenance cache is incompatible: %v", err)
+	}
+	cached.Release()
+	if err := os.Chmod(filepath.Join(first.RepositoryRoot, "action.yml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Materialize(t.Context(), resolved); err == nil || !strings.Contains(err.Error(), "cache verification failed") {
+		t.Fatalf("mode tamper with matching provenance error = %v", err)
+	}
+}
+
 func TestStoreArchiveHTTPClassification(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -785,6 +1142,10 @@ func TestStoreArchiveHTTPClassification(t *testing.T) {
 				if !errors.As(err, &notPublic) {
 					t.Fatalf("error = %v", err)
 				}
+			}
+			_, partials, err := store.cacheEntries()
+			if err != nil || len(partials) != 0 {
+				t.Fatalf("partials after failed download = %v, error %v", partials, err)
 			}
 		})
 	}
@@ -829,6 +1190,998 @@ func TestStoreExactCommitDownloadsDirectlyFromCodeloadWithoutCredentials(t *test
 	}
 }
 
+func TestGitRepositorySourceUsesExistingConfigurationOnlyForRepositoryRoots(t *testing.T) {
+	git, _, remote, commit := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml":    "on: workflow_call\njobs: {}\n",
+		".github/workflows/child.yml": "on: workflow_call\njobs: {}\n",
+		"action/action.yml":           "runs:\n  using: composite\n  steps: []\n",
+	})
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	option := withGitFixtureSource(git, remote)
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	resolver, err := NewResolver(server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := t.TempDir()
+	store, err := NewStore(cache, server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != commit {
+		t.Fatalf("Resolve() = %#v, %v, want %s", resolved, err, commit)
+	}
+	resolved.Reference, err = PinReference(ref, resolved.Commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized.Release()
+	if materialized.ActionRoot != materialized.RepositoryRoot || materialized.SourceDigest == "" {
+		t.Fatalf("materialized Git repository = %#v", materialized)
+	}
+	if source, readErr := os.ReadFile(filepath.Join(materialized.RepositoryRoot, ".github", "workflows", "child.yml")); readErr != nil || !strings.Contains(string(source), "workflow_call") {
+		t.Fatalf("nested workflow source = %q, %v", source, readErr)
+	}
+
+	action, _ := Parse("o/r/action@" + commit)
+	if _, err := store.Materialize(t.Context(), Resolved{Reference: action, Commit: commit}); err == nil {
+		t.Fatal("private action read a Git-authenticated repository cache")
+	} else {
+		var notPublic *NotPublicError
+		if !errors.As(err, &notPublic) {
+			t.Fatalf("private action error = %v, want non-enumerating denial", err)
+		}
+	}
+	disabledStore, err := NewStore(cache, server.Client(), endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := disabledStore.Materialize(t.Context(), resolved); err == nil {
+		t.Fatal("disabled Git source read a Git-authenticated repository cache")
+	}
+	if _, err := os.Stat(remote); err != nil {
+		t.Fatalf("Git fixture remote: %v", err)
+	}
+}
+
+func TestGitRepositorySourceReauthorizesAuthenticatedCacheEntries(t *testing.T) {
+	git, _, remote, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	option := withGitFixtureSource(git, remote)
+	resolver, err := NewResolver(server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := t.TempDir()
+	store, err := NewStore(cache, server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized.Release()
+
+	const secret = "other-tenant-git-output"
+	wrapper := filepath.Join(t.TempDir(), "git")
+	script := "#!/bin/sh\ncase \" $* \" in *\" fetch \"*) echo '" + secret + "' >&2; exit 1;; esac\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	denied, err := NewStore(cache, server.Client(), endpoint, WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = denied.Materialize(t.Context(), resolved)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) || strings.Contains(err.Error(), secret) {
+		t.Fatalf("cached repository error = %v, want reauthorization denial without Git output", err)
+	}
+}
+
+func TestGitRepositorySourceRejectsMutableRefDrift(t *testing.T) {
+	git, work, remote, first := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	option := withGitFixtureSource(git, remote)
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	resolver, err := NewResolver(server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != first {
+		t.Fatalf("Resolve() = %#v, %v", resolved, err)
+	}
+	advanceGitRepositorySource(t, git, work)
+	store, err := NewStore(t.TempDir(), server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Materialize(t.Context(), resolved); err == nil || !strings.Contains(err.Error(), "changed while resolving immutable commit") {
+		t.Fatalf("Materialize() drift error = %v", err)
+	}
+}
+
+// TestGitRepositorySourceSkipsMutableRefCache covers a persistent importer
+// whose one-hour mutable-ref cache pinned a private branch before it moved.
+// Materialize rejects the stale commit as drift, so Git-backed repository roots
+// must resolve the branch again on every operation instead of reusing the
+// cache; other references keep using it.
+func TestGitRepositorySourceSkipsMutableRefCache(t *testing.T) {
+	git, work, remote, first := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/p/q/git/ref/") {
+			_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, testSHA)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	cache := t.TempDir()
+	option := withGitFixtureSource(git, remote)
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	newResolver := func() *Resolver {
+		t.Helper()
+		resolver, err := NewResolver(server.Client(), endpoint, option)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolver.cfg.mutableRefs, err = newMutableRefCache(cache, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resolver
+	}
+	root, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	root.RepositoryRoot = true
+	resolved, err := newResolver().Resolve(t.Context(), root)
+	if err != nil || resolved.Commit != first {
+		t.Fatalf("Resolve() = %#v, %v, want commit %s", resolved, err, first)
+	}
+	advanceGitRepositorySource(t, git, work)
+	second := strings.TrimSpace(runSourceGit(t, git, work, "rev-parse", "HEAD"))
+	resolver := newResolver()
+	resolved, err = resolver.Resolve(t.Context(), root)
+	if err != nil || resolved.Commit != second {
+		t.Fatalf("Resolve() after branch moved = %#v, %v, want commit %s", resolved, err, second)
+	}
+	store, err := NewStore(t.TempDir(), server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatalf("Materialize() after branch moved = %v", err)
+	}
+	materialized.Release()
+
+	action, _ := Parse("p/q@main")
+	if resolved, err := resolver.Resolve(t.Context(), action); err != nil || resolved.Commit != testSHA {
+		t.Fatalf("Resolve() action = %#v, %v", resolved, err)
+	}
+	entries := 0
+	if err := filepath.WalkDir(cache, func(path string, entry os.DirEntry, err error) error {
+		if err == nil && !entry.IsDir() && filepath.Ext(path) != ".lock" {
+			entries++
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if entries != 1 {
+		t.Fatalf("mutable ref cache entries = %d, want only the action reference", entries)
+	}
+}
+
+// TestGitRepositorySourceIgnoresInheritedInitTemplates covers an importer init
+// template (init.templateDir or GIT_TEMPLATE_DIR) that seeds new repositories
+// with a refs/replace entry and a replacement commit for the fetched commit.
+// The archive must contain the pinned commit's tree, not the replacement.
+func TestGitRepositorySourceIgnoresInheritedInitTemplates(t *testing.T) {
+	const original = "on: workflow_call\njobs: {}\n"
+	git, work, remote, commit := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": original,
+	})
+	filename := filepath.Join(work, ".github", "workflows", "ci.yml")
+	if err := os.WriteFile(filename, []byte("on: workflow_call\n# replaced\njobs: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runSourceGit(t, git, work, "add", ".github/workflows/ci.yml")
+	runSourceGit(t, git, work, "commit", "--quiet", "-m", "replacement")
+	replacement := strings.TrimSpace(runSourceGit(t, git, work, "rev-parse", "HEAD"))
+	template := filepath.Join(t.TempDir(), "template")
+	if err := os.MkdirAll(filepath.Join(template, "refs", "replace"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(template, "refs", "replace", commit), []byte(replacement+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.CopyFS(filepath.Join(template, "objects"), os.DirFS(filepath.Join(work, ".git", "objects"))); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"init.templateDir", "GIT_TEMPLATE_DIR"} {
+		t.Run(name, func(t *testing.T) {
+			if name == "GIT_TEMPLATE_DIR" {
+				t.Setenv("GIT_TEMPLATE_DIR", template)
+			} else {
+				runSourceGit(t, git, "", "config", "--global", "init.templateDir", template)
+				t.Cleanup(func() { runSourceGit(t, git, "", "config", "--global", "--unset", "init.templateDir") })
+			}
+			server := httptest.NewTLSServer(http.NotFoundHandler())
+			defer server.Close()
+			option := withGitFixtureSource(git, remote)
+			endpoint := WithTestEndpoints(server.URL, server.URL)
+			resolver, err := NewResolver(server.Client(), endpoint, option)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+			ref.RepositoryRoot = true
+			resolved, err := resolver.Resolve(t.Context(), ref)
+			if err != nil || resolved.Commit != commit {
+				t.Fatalf("Resolve() = %#v, %v", resolved, err)
+			}
+			store, err := NewStore(t.TempDir(), server.Client(), endpoint, option)
+			if err != nil {
+				t.Fatal(err)
+			}
+			materialized, err := store.Materialize(t.Context(), resolved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contents, err := os.ReadFile(filepath.Join(materialized.RepositoryRoot, ".github", "workflows", "ci.yml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(contents) != original {
+				t.Fatalf("archived workflow = %q, want the pinned commit's content %q", contents, original)
+			}
+		})
+	}
+}
+
+func TestGitRepositorySourceFailuresAreNonEnumeratingAndDoNotLeakOutput(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	const secret = "credential-that-must-not-leak"
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\ncase \" $* \" in *\" fetch \"*) echo '" + secret + "' >&2; exit 1;; esac\nexec '" + realGit + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("other/missing/.github/workflows/secret.yml@secret-ref")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "secret-ref") {
+		t.Fatalf("Resolve() error = %v, want non-enumerating denial without Git output", err)
+	}
+}
+
+func TestGitRepositorySourceEnvironmentDisablesInteractionAndTracing(t *testing.T) {
+	t.Setenv("BUILDKITE_GHA_PRESERVED", "yes")
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	t.Setenv("GIT_ASKPASS", "/importer/askpass")
+	t.Setenv("SSH_ASKPASS", "/importer/askpass")
+	t.Setenv("GCM_INTERACTIVE", "always")
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_TRACE_CURL", "/tmp/git-trace")
+	t.Setenv("GIT_CURL_VERBOSE", "1")
+	t.Setenv("GCM_TRACE", "1")
+	t.Setenv("GCM_TRACE_SECRETS", "1")
+	t.Setenv("GIT_SSL_NO_VERIFY", "1")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file:https")
+	t.Setenv("GIT_PROTOCOL_FROM_USER", "1")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'http.followRedirects=true'")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "http.https://github.com/o/r.git.sslVerify")
+	t.Setenv("GIT_CONFIG_VALUE_0", "false")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/importer/.gitconfig")
+	t.Setenv("GIT_EXEC_PATH", "/importer/git-core")
+	t.Setenv("GIT_TEMPLATE_DIR", "/importer/git-template")
+	t.Setenv("GIT_DIR", "/importer/.git")
+	t.Setenv("GIT_COMMON_DIR", "/importer/.git")
+	t.Setenv("GIT_WORK_TREE", "/importer")
+	t.Setenv("GIT_OBJECT_DIRECTORY", "/importer/.git/objects")
+	t.Setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/importer/.git/objects")
+	t.Setenv("GIT_INDEX_FILE", "/importer/.git/index")
+	t.Setenv("GIT_NAMESPACE", "importer")
+
+	environment := make(map[string]string)
+	for _, entry := range gitEnvironment() {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			environment[key] = value
+		}
+	}
+	for key, want := range map[string]string{
+		"BUILDKITE_GHA_PRESERVED": "yes",
+		"GIT_CONFIG_GLOBAL":       "/importer/.gitconfig",
+		"GIT_TERMINAL_PROMPT":     "0",
+		"GIT_ASKPASS":             "",
+		"SSH_ASKPASS":             "",
+		"GCM_INTERACTIVE":         "never",
+	} {
+		if got, exists := environment[key]; !exists || got != want {
+			t.Errorf("Git environment %s = %q (present %t), want %q", key, got, exists, want)
+		}
+	}
+	for _, key := range []string{"GIT_TRACE", "GIT_TRACE_CURL", "GIT_CURL_VERBOSE", "GCM_TRACE", "GCM_TRACE_SECRETS"} {
+		if _, exists := environment[key]; exists {
+			t.Errorf("Git environment retained tracing variable %s", key)
+		}
+	}
+	for _, key := range []string{"GIT_SSL_NO_VERIFY", "GIT_ALLOW_PROTOCOL", "GIT_PROTOCOL_FROM_USER", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} {
+		if _, exists := environment[key]; exists {
+			t.Errorf("Git environment retained policy override variable %s", key)
+		}
+	}
+	for _, key := range []string{"GIT_EXEC_PATH", "GIT_TEMPLATE_DIR", "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_NAMESPACE"} {
+		if _, exists := environment[key]; exists {
+			t.Errorf("Git environment retained program or repository location variable %s", key)
+		}
+	}
+}
+
+// TestGitRepositorySourceEnvironmentCannotReplaceRemoteHelper covers an
+// importer environment whose GIT_EXEC_PATH names a directory with a replacement
+// git-remote-https. The bounded fetch must run the helper from Git's compiled-in
+// executable directory instead, so the replacement is never executed.
+func TestGitRepositorySourceEnvironmentCannotReplaceRemoteHelper(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	marker := filepath.Join(root, "replacement-ran")
+	execPath := filepath.Join(root, "git-core")
+	if err := os.Mkdir(execPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := "#!/bin/sh\n: > '" + marker + "'\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(execPath, "git-remote-https"), []byte(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_EXEC_PATH", execPath)
+
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	remote := server.URL + "/o/r.git"
+	scratch := t.TempDir()
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", scratch)
+	args := append(gitRemoteArgs(remote), "fetch", "--quiet", "--", remote, "main")
+	if err := runGitEnvironment(t.Context(), git, scratch, io.Discard, io.Discard, os.Environ(), args...); err == nil {
+		t.Fatal("fetch through the replacement helper succeeded")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("GIT_EXEC_PATH should select the replacement helper without the filter: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), func(c *config) error {
+		c.gitTestRemoteBase = server.URL + "/"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) {
+		t.Fatalf("Resolve() error = %v, want non-enumerating denial", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bounded fetch ran the replacement git-remote-https from the inherited GIT_EXEC_PATH (stat error %v)", err)
+	}
+}
+
+// TestGitRepositorySourceDeniedAuthenticationDoesNotRunAskpass covers a
+// private repository that rejects the importer's credentials. Git must fail
+// without running the inherited GIT_ASKPASS, core.askPass, or SSH_ASKPASS
+// programs, which could block on a prompt or run arbitrary code.
+func TestGitRepositorySourceDeniedAuthenticationDoesNotRunAskpass(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	marker := filepath.Join(root, "askpass-ran")
+	askpass := filepath.Join(root, "askpass")
+	if err := os.WriteFile(askpass, []byte("#!/bin/sh\n: > '"+marker+"'\necho token\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	if err := os.Mkdir(filepath.Join(root, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runSourceGit(t, git, "", "config", "--global", "core.askPass", askpass)
+	t.Setenv("GIT_ASKPASS", askpass)
+	t.Setenv("SSH_ASKPASS", askpass)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/info/refs") {
+			w.Header().Set("WWW-Authenticate", `Basic realm="private"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	certificate := filepath.Join(root, "server.pem")
+	if err := os.WriteFile(certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trust := []string{"-c", "http.sslCAInfo=" + certificate}
+	remote := server.URL + "/o/r.git"
+
+	// Without the fetch boundary, Git asks the inherited program for
+	// credentials even when terminal prompts are disabled.
+	scratch := t.TempDir()
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", scratch)
+	control := exec.CommandContext(t.Context(), git, append(append([]string{"-C", scratch}, trust...), "fetch", "--quiet", "--", remote, "main")...)
+	control.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if err := control.Run(); err == nil {
+		t.Fatal("fetch from a denying server succeeded")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("inherited askpass should run without the fetch boundary: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	// Git 2.46 and earlier ignore credential.interactive, so the askpass
+	// sources must be neutralized even when that setting is turned back on.
+	permissive := append(append(trust, gitRemoteArgs(remote)...), "-c", "credential.interactive=true", "fetch", "--quiet", "--", remote, "main")
+	if err := runGitEnvironment(t.Context(), git, scratch, io.Discard, io.Discard, gitEnvironment(), permissive...); err == nil {
+		t.Fatal("fetch from a denying server succeeded")
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fetch boundary relied on credential.interactive to stop askpass (stat error %v)", err)
+	}
+
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), func(c *config) error {
+		c.gitTestRemoteBase = server.URL + "/"
+		c.gitTestArgs = trust
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) {
+		t.Fatalf("Resolve() error = %v, want non-enumerating denial", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("denied fetch ran an inherited askpass program (stat error %v)", err)
+	}
+}
+
+// TestGitRepositorySourceDropsInheritedExtraHeadersAndCookies covers an
+// importer whose global configuration attaches an Authorization header and a
+// cookie file to every request for a host. Git would send both to any
+// repository named by workflow YAML without consulting the credential helper,
+// so the fetch boundary must reset the generic and URL-scoped header lists and
+// cookie files.
+func TestGitRepositorySourceDropsInheritedExtraHeadersAndCookies(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	if err := os.Mkdir(filepath.Join(root, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var authorizations, cookies atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			authorizations.Add(1)
+		}
+		if r.Header.Get("Cookie") != "" {
+			cookies.Add(1)
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	certificate := filepath.Join(root, "server.pem")
+	if err := os.WriteFile(certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trust := []string{"-c", "http.sslCAInfo=" + certificate}
+	remote := server.URL + "/o/r.git"
+	runSourceGit(t, git, "", "config", "--global", "http."+server.URL+"/.extraHeader", "Authorization: Bearer inherited-token")
+	runSourceGit(t, git, "", "config", "--global", "--add", "http.extraHeader", "Authorization: Bearer generic-token")
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookieFile := filepath.Join(root, "cookies.txt")
+	if err := os.WriteFile(cookieFile, []byte(serverURL.Hostname()+"\tFALSE\t/\tTRUE\t0\tprivate-auth\tinherited-cookie\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runSourceGit(t, git, "", "config", "--global", "http."+server.URL+"/.cookieFile", cookieFile)
+
+	// Without the fetch boundary, Git sends the inherited header and cookie.
+	scratch := t.TempDir()
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", scratch)
+	control := exec.CommandContext(t.Context(), git, append(append([]string{"-C", scratch}, trust...), "fetch", "--quiet", "--", remote, "main")...)
+	control.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if err := control.Run(); err == nil {
+		t.Fatal("fetch from a denying server succeeded")
+	}
+	if authorizations.Load() == 0 || cookies.Load() == 0 {
+		t.Fatalf("inherited credentials without the fetch boundary: Authorization %d, Cookie %d, want both", authorizations.Load(), cookies.Load())
+	}
+	authorizations.Store(0)
+	cookies.Store(0)
+
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), func(c *config) error {
+		c.gitTestRemoteBase = server.URL + "/"
+		c.gitTestArgs = trust
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) {
+		t.Fatalf("Resolve() error = %v, want non-enumerating denial", err)
+	}
+	if authorizations.Load() != 0 || cookies.Load() != 0 {
+		t.Fatalf("requests carrying inherited credentials: Authorization %d, Cookie %d, want 0", authorizations.Load(), cookies.Load())
+	}
+}
+
+func TestGitRepositorySourceEnvironmentCannotDisableTLSVerification(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_SSL_NO_VERIFY", "1")
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	repository := t.TempDir()
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", repository)
+	remote := server.URL + "/o/r.git"
+	fetch := func(environment []string) string {
+		var stderr bytes.Buffer
+		args := append(gitRemoteArgs(remote), "fetch", "--quiet", "--", remote, "main")
+		if err := runGitEnvironment(t.Context(), git, repository, io.Discard, &stderr, environment, args...); err == nil {
+			t.Fatalf("fetch from a self-signed server succeeded")
+		}
+		return strings.ToLower(stderr.String())
+	}
+	if filtered := fetch(gitEnvironment()); !strings.Contains(filtered, "certificate") {
+		t.Fatalf("filtered environment did not fail on TLS verification: %s", filtered)
+	}
+	if inherited := fetch(os.Environ()); strings.Contains(inherited, "certificate") {
+		t.Fatalf("GIT_SSL_NO_VERIFY should bypass verification without the filter, got: %s", inherited)
+	}
+}
+
+func TestGitRepositorySourcePreservesArchiveLimits(t *testing.T) {
+	git, _, remote, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": strings.Repeat("x", 256),
+	})
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	option := withGitFixtureSource(git, remote)
+	limits := WithLimits(1<<20, 128, 128, 100)
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	resolver, err := NewResolver(server.Client(), endpoint, option, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(t.TempDir(), server.Client(), endpoint, option, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Materialize(t.Context(), resolved); err == nil || !strings.Contains(err.Error(), "archive size exceeds limit") {
+		t.Fatalf("Materialize() size error = %v", err)
+	}
+}
+
+func TestGitRepositorySourceRejectsRefspecBeforeFetch(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	invocations := filepath.Join(root, "invocations")
+	t.Setenv("GIT_INVOCATIONS", invocations)
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_INVOCATIONS\"\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// check-ref-format accepts a leading "+", which git fetch would treat as
+	// the force marker rather than part of the requested ref.
+	for _, maliciousRef := range []string{"refs/heads/*:refs/heads/*", "+refs/heads/main", "+main"} {
+		ref, err := Parse("o/r/.github/workflows/ci.yml@" + maliciousRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref.RepositoryRoot = true
+		_, err = resolver.Resolve(t.Context(), ref)
+		var notPublic *NotPublicError
+		if !errors.As(err, &notPublic) || strings.Contains(err.Error(), maliciousRef) {
+			t.Fatalf("Resolve(%q) error = %v, want non-enumerating invalid-ref denial", maliciousRef, err)
+		}
+	}
+	log, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), " fetch ") {
+		t.Fatalf("invalid ref reached Git fetch: %s", log)
+	}
+}
+
+// TestGitRepositorySourceFetchesLiteralRefOnly proves a "+main" request does
+// not resolve the fixture's main branch: without the prefix check, git fetch
+// strips "+" as the force marker and fetches main.
+func TestGitRepositorySourceFetchesLiteralRefOnly(t *testing.T) {
+	git, _, remote, commit := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), withGitFixtureSource(git, remote))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	if resolved, err := resolver.Resolve(t.Context(), ref); err != nil || resolved.Commit != commit {
+		t.Fatalf("Resolve(main) = %#v, %v, want %s", resolved, err, commit)
+	}
+	forced, _ := Parse("o/r/.github/workflows/ci.yml@+main")
+	forced.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), forced)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) || resolved.Commit != "" {
+		t.Fatalf("Resolve(+main) = %#v, %v, want non-enumerating denial", resolved, err)
+	}
+}
+
+// TestGitRepositorySourceFallsBackWhenAnonymousAPIIsRateLimited covers the
+// event repository: it never receives the action-source token, so its shared
+// anonymous API quota can be exhausted while the importer's Git credentials
+// still authorize the fetch. Rate limits stay visible when the Git source is
+// disabled or the reference is not a repository root.
+func TestGitRepositorySourceFallsBackWhenAnonymousAPIIsRateLimited(t *testing.T) {
+	git, _, remote, commit := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	var authorized atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			authorized.Add(1)
+		}
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	option := withGitFixtureSource(git, remote)
+	eventRepository := WithGitHubActionSourceTokenProvider("o/r", func(context.Context) (string, error) { return "action-source-token", nil })
+
+	resolver, err := NewResolver(server.Client(), endpoint, option, eventRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != commit {
+		t.Fatalf("Resolve() = %#v, %v, want Git fallback to %s", resolved, err, commit)
+	}
+	if authorized.Load() != 0 {
+		t.Fatalf("event repository requests carried the action-source token %d times", authorized.Load())
+	}
+	resolved.Reference, err = PinReference(ref, resolved.Commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(t.TempDir(), server.Client(), endpoint, option, eventRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatalf("Materialize() error = %v, want Git fallback after rate-limited archive download", err)
+	}
+	materialized.Release()
+
+	var rate *RateLimitError
+	disabled, err := NewResolver(server.Client(), endpoint, eventRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := disabled.Resolve(t.Context(), ref); !errors.As(err, &rate) || rate.Reset.IsZero() {
+		t.Fatalf("disabled Git source error = %v, want rate limit", err)
+	}
+	action, _ := Parse("o/r/action@v1")
+	if _, err := resolver.Resolve(t.Context(), action); !errors.As(err, &rate) {
+		t.Fatalf("action reference error = %v, want rate limit without Git fallback", err)
+	}
+}
+
+func TestGitRepositorySourceBoundsFetchPackInput(t *testing.T) {
+	git, _, remote, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": strings.Repeat("x", 256),
+	})
+	root := t.TempDir()
+	invocations := filepath.Join(root, "invocations")
+	t.Setenv("GIT_INVOCATIONS", invocations)
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_INVOCATIONS\"\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), withGitFixtureSource(wrapper, remote), WithLimits(100, 1<<20, 1<<20, 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	if _, err := resolver.Resolve(t.Context(), ref); err == nil || !strings.Contains(err.Error(), "compressed size limit") {
+		t.Fatalf("Resolve() error = %v, want acquisition-time compressed limit", err)
+	}
+	log, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "index-pack --max-input-size=100") {
+		t.Fatalf("Git pack input was not bounded: %s", log)
+	}
+}
+
+// withGitFixtureSource enables Git fallback against the local bare fixture
+// remote and reopens the file transport that the production policy denies.
+func withGitFixtureSource(executable, remote string) Option {
+	return func(c *config) error {
+		if err := WithGitRepositorySource(executable)(c); err != nil {
+			return err
+		}
+		if err := withGitFixtureRemote(remote)(c); err != nil {
+			return err
+		}
+		c.gitTestArgs = []string{"-c", "protocol.file.allow=always"}
+		return nil
+	}
+}
+
+// withGitFixtureRemote points fetches at the fixture's file:// remote root
+// instead of github.com without changing the transport policy.
+func withGitFixtureRemote(remote string) Option {
+	return func(c *config) error {
+		c.gitTestRemoteBase = "file://" + filepath.ToSlash(filepath.Dir(filepath.Dir(remote))) + "/"
+		return nil
+	}
+}
+
+func TestGitRepositorySourceDeniesNonHTTPSTransports(t *testing.T) {
+	git, _, remote, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	runSourceGit(t, git, "", "config", "--global", "protocol.file.allow", "always")
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), withGitFixtureRemote(remote))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) {
+		t.Fatalf("Resolve() error = %v, want denial of a non-HTTPS transport even when inherited configuration allows it", err)
+	}
+}
+
+func TestGitRepositorySourcePinsURLScopedHTTPSettings(t *testing.T) {
+	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	const remote = "https://github.com/o/r.git"
+	runSourceGit(t, git, "", "config", "--global", "http.https://github.com/.followRedirects", "true")
+	runSourceGit(t, git, "", "config", "--global", "http.https://github.com/o/.sslVerify", "false")
+	runSourceGit(t, git, "", "config", "--global", "credential.https://github.com/.useHttpPath", "false")
+	args := append(gitBaseArgs(), gitRemoteArgs(remote)...)
+	for key, want := range map[string]string{"http.followRedirects": "false", "http.sslVerify": "true", "credential.useHttpPath": "true"} {
+		got := strings.TrimSpace(runSourceGit(t, git, "", append(args, "config", "--get-urlmatch", key, remote)...))
+		if got != want {
+			t.Fatalf("effective %s for %s = %q, want %q despite inherited URL-scoped override", key, remote, got, want)
+		}
+	}
+
+	root := t.TempDir()
+	invocations := filepath.Join(root, "invocations")
+	t.Setenv("GIT_INVOCATIONS", invocations)
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_INVOCATIONS\"\ncase \" $* \" in *\" fetch \"*) exit 1;; esac\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	if _, err := resolver.Resolve(t.Context(), ref); err == nil {
+		t.Fatal("Resolve() succeeded against a failing fetch wrapper")
+	}
+	log, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "http."+remote+".followRedirects=false") || !strings.Contains(string(log), " fetch ") {
+		t.Fatalf("fetch did not pin URL-scoped settings for %s: %s", remote, log)
+	}
+}
+
+func TestGitRepositorySourceRefusesInheritedURLRewrites(t *testing.T) {
+	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	runSourceGit(t, git, "", "config", "--global", "url.https://mirror.example/.insteadOf", "https://github.com/")
+	root := t.TempDir()
+	invocations := filepath.Join(root, "invocations")
+	t.Setenv("GIT_INVOCATIONS", invocations)
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_INVOCATIONS\"\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	if err == nil || !strings.Contains(err.Error(), "rewritten by inherited Git configuration") || strings.Contains(err.Error(), "mirror.example") {
+		t.Fatalf("Resolve() error = %v, want rewrite refusal without the rewritten URL", err)
+	}
+	log, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), " fetch ") {
+		t.Fatalf("rewritten URL reached Git fetch: %s", log)
+	}
+}
+
+func configureGitRepositorySource(t *testing.T, files map[string]string) (git, work, remote, commit string) {
+	t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	work = filepath.Join(root, "work")
+	remoteRoot := filepath.Join(root, "remotes")
+	remote = filepath.Join(remoteRoot, "o", "r.git")
+	for _, directory := range []string{home, work, filepath.Dir(remote)} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	runSourceGit(t, git, "", "init", "--quiet", work)
+	runSourceGit(t, git, work, "config", "user.name", "Repository Source Test")
+	runSourceGit(t, git, work, "config", "user.email", "repository-source@example.invalid")
+	for name, contents := range files {
+		filename := filepath.Join(work, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filename, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runSourceGit(t, git, work, "add", ".")
+	runSourceGit(t, git, work, "commit", "--quiet", "-m", "initial")
+	runSourceGit(t, git, work, "branch", "-M", "main")
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", remote)
+	runSourceGit(t, git, work, "remote", "add", "origin", remote)
+	runSourceGit(t, git, work, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+	commit = strings.TrimSpace(runSourceGit(t, git, work, "rev-parse", "HEAD"))
+	return git, work, remote, commit
+}
+
+func advanceGitRepositorySource(t *testing.T, git, work string) {
+	t.Helper()
+	filename := filepath.Join(work, ".github", "workflows", "ci.yml")
+	if err := os.WriteFile(filename, []byte("on: workflow_call\n# moved\njobs: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runSourceGit(t, git, work, "add", ".github/workflows/ci.yml")
+	runSourceGit(t, git, work, "commit", "--quiet", "-m", "move branch")
+	runSourceGit(t, git, work, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+}
+
+func runSourceGit(t *testing.T, git, directory string, args ...string) string {
+	t.Helper()
+	if directory != "" {
+		args = append([]string{"-C", directory}, args...)
+	}
+	output, err := exec.Command(git, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+	return string(output)
+}
+
 func TestStoreCodeloadRedirectPolicy(t *testing.T) {
 	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
 	ref, _ := Parse("o/r@v1")
@@ -853,11 +2206,17 @@ func TestStoreCodeloadRedirectPolicy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.Materialize(t.Context(), resolved); err != nil {
-			t.Fatal(err)
+		for _, origin := range []string{"", server.URL} {
+			resolved := resolved
+			resolved.Reference.ServerURL = origin
+			materialized, err := store.Materialize(t.Context(), resolved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			materialized.Release()
 		}
-		if requests != 2 {
-			t.Fatalf("requests = %d, want 2", requests)
+		if requests != 4 {
+			t.Fatalf("requests = %d, want 4", requests)
 		}
 	})
 	t.Run("cross host denied before request", func(t *testing.T) {
@@ -874,8 +2233,12 @@ func TestStoreCodeloadRedirectPolicy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.Materialize(t.Context(), resolved); err == nil || !strings.Contains(err.Error(), "archive redirect denied") {
-			t.Fatalf("Materialize() error = %v, want denied redirect", err)
+		for _, origin := range []string{"", server.URL} {
+			resolved := resolved
+			resolved.Reference.ServerURL = origin
+			if _, err := store.Materialize(t.Context(), resolved); err == nil || !strings.Contains(err.Error(), "archive redirect denied") {
+				t.Fatalf("Materialize() error = %v, want denied redirect", err)
+			}
 		}
 		if deniedRequests != 0 {
 			t.Fatalf("denied host requests = %d, want 0", deniedRequests)
@@ -925,6 +2288,66 @@ func TestStoreConcurrentMaterialize(t *testing.T) {
 	}
 }
 
+func TestStorePublishClosesPartialUnderMaintenanceLock(t *testing.T) {
+	for _, failAccounting := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failAccounting=%t", failAccounting), func(t *testing.T) {
+			store, err := NewStore(t.TempDir(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tmp, partialLock, err := store.createPartial(t.Context(), store.root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer partialLock.unlock()
+			if failAccounting {
+				if err := os.WriteFile(filepath.Join(store.root, ".size-v1"), []byte("invalid"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			base := filepath.Join(store.root, testSHA)
+			file := partialLock.file.file
+			release := partialLock.release
+			releases := 0
+			partialLock.release = func() {
+				if release != nil {
+					defer release()
+				}
+				releases++
+				if _, err := file.Stat(); !errors.Is(err, os.ErrClosed) {
+					t.Errorf("partial handle is not closed: %v", err)
+				}
+				if _, err := os.Stat(tmp); err != nil {
+					t.Errorf("partial was moved before closing its handle: %v", err)
+				}
+				maintenance, err := lockActionCache(t.Context(), filepath.Join(store.root, ".maintenance.lock"), actionCacheLockExclusive, true)
+				maintenance.unlock()
+				if !errors.Is(err, errActionCacheLockUnavailable) {
+					t.Errorf("maintenance lock not held while closing partial: %v", err)
+				}
+			}
+			err = store.publishCacheEntry(t.Context(), tmp, base, partialLock)
+			if (err != nil) != failAccounting {
+				t.Fatalf("publish error = %v, want error %t", err, failAccounting)
+			}
+			if releases != 1 {
+				t.Fatalf("partial releases at publication = %d, want 1", releases)
+			}
+			partialLock.unlock()
+			if releases != 1 {
+				t.Fatalf("partial released again during cleanup: %d", releases)
+			}
+			if _, err := os.Stat(tmp); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("partial still exists after rename: %v", err)
+			}
+			_, err = os.Stat(base)
+			if failAccounting && !errors.Is(err, os.ErrNotExist) || !failAccounting && err != nil {
+				t.Fatalf("published entry after accounting (failed=%t): %v", failAccounting, err)
+			}
+		})
+	}
+}
+
 func TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease(t *testing.T) {
 	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) }))
@@ -935,34 +2358,37 @@ func TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref, _ := Parse("o/r@v1")
-	materialized, err := store.Materialize(t.Context(), Resolved{Reference: ref, Commit: testSHA})
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := filepath.Dir(materialized.RepositoryRoot)
-	if err := store.maintain(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(base); err != nil {
-		t.Fatalf("leased entry was evicted: %v", err)
-	}
-	retained, err := materialized.Retain(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	materialized.Release()
-	if err := store.maintain(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(base); err != nil {
-		t.Fatalf("retained entry was evicted: %v", err)
-	}
-	retained.Release()
-	if err := store.maintain(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(base); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("released entry still exists: %v", err)
+	for _, origin := range []string{"", ts.URL} {
+		ref.ServerURL = origin
+		materialized, err := store.Materialize(t.Context(), Resolved{Reference: ref, Commit: testSHA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := filepath.Dir(materialized.RepositoryRoot)
+		if err := store.maintain(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(base); err != nil {
+			t.Fatalf("leased entry was evicted: %v", err)
+		}
+		retained, err := materialized.Retain(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		materialized.Release()
+		if err := store.maintain(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(base); err != nil {
+			t.Fatalf("retained entry was evicted: %v", err)
+		}
+		retained.Release()
+		if err := store.maintain(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(base); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("released entry still exists: %v", err)
+		}
 	}
 }
 
@@ -1161,7 +2587,7 @@ func TestActionResolutionSnapshotRetriesStorageFailures(t *testing.T) {
 			t.Run(operation, func(t *testing.T) {
 				actionResolutionSnapshotStorage = original
 				root := t.TempDir()
-				prior, err := newActionResolutionSnapshot(root, false)
+				prior, err := newActionResolutionSnapshot(t.Context(), root, false)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1170,11 +2596,11 @@ func TestActionResolutionSnapshotRetriesStorageFailures(t *testing.T) {
 				if operation == "short write" {
 					wantErr = io.ErrShortWrite
 				}
-				if _, err := newActionResolutionSnapshot(root, true); !errors.Is(err, wantErr) {
+				if _, err := newActionResolutionSnapshot(t.Context(), root, true); !errors.Is(err, wantErr) {
 					t.Fatalf("refresh error = %v, want %v", err, wantErr)
 				}
 				actionResolutionSnapshotStorage = original
-				retried, err := newActionResolutionSnapshot(root, false)
+				retried, err := newActionResolutionSnapshot(t.Context(), root, false)
 				if err != nil || retried.generation != prior.generation {
 					t.Fatalf("retry = %#v, %v; want generation %q", retried, err, prior.generation)
 				}
@@ -1192,11 +2618,11 @@ func TestActionResolutionSnapshotRetriesStorageFailures(t *testing.T) {
 				if operation == "short write" {
 					wantErr = io.ErrShortWrite
 				}
-				if _, err := newActionResolutionSnapshot(root, false); !errors.Is(err, wantErr) {
+				if _, err := newActionResolutionSnapshot(t.Context(), root, false); !errors.Is(err, wantErr) {
 					t.Fatalf("initialization error = %v, want %v", err, wantErr)
 				}
 				actionResolutionSnapshotStorage = original
-				if _, err := newActionResolutionSnapshot(root, false); err != nil {
+				if _, err := newActionResolutionSnapshot(t.Context(), root, false); err != nil {
 					t.Fatalf("retry: %v", err)
 				}
 			})
@@ -1207,7 +2633,7 @@ func TestActionResolutionSnapshotRetriesStorageFailures(t *testing.T) {
 		for _, operation := range []string{"claim create", "claim close", "entry create", "entry write", "entry short write", "entry close", "entry rename"} {
 			t.Run(operation, func(t *testing.T) {
 				actionResolutionSnapshotStorage = original
-				snapshot, err := newActionResolutionSnapshot(t.TempDir(), false)
+				snapshot, err := newActionResolutionSnapshot(t.Context(), t.TempDir(), false)
 				if err != nil {
 					t.Fatal(err)
 				}

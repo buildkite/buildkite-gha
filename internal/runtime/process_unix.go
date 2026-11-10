@@ -9,9 +9,14 @@ import (
 	"time"
 )
 
+func prepareProcessCommand(_ *exec.Cmd) error { return nil }
+
 func configureProcessGroup(command *exec.Cmd) {
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
+
+func processStarted(_ *exec.Cmd) error { return nil }
+func processFinished(_ int)            {}
 
 func terminateProcessGroup(ctx context.Context, pid int, interruptGrace, terminateGrace time.Duration, finished <-chan struct{}) {
 	select {

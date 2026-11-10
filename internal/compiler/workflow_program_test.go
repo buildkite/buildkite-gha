@@ -2,8 +2,10 @@ package compiler
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
@@ -20,6 +22,7 @@ func TestWorkflowProgramInventoriesEveryExecutionField(t *testing.T) {
 		DefaultWorkingDirectory: "job-directory",
 		Container: &workflow.Container{
 			Image: "container-image", Env: map[string]string{"C": "container-env"}, Ports: []string{"container-port"}, Span: span,
+			Volumes: []string{"container-volume"}, Options: "container-options",
 		},
 		Services: []workflow.Service{{Name: "db", Container: workflow.ServiceContainer{
 			Image: "service-image", Env: map[string]string{"S": "service-env"}, Ports: []string{"service-port"}, Volumes: []string{"service-volume"},
@@ -44,7 +47,7 @@ func TestWorkflowProgramInventoriesEveryExecutionField(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"job.call-guards[0].if|job-condition|boolean|expression",
+		"job.call-guards[0].if|call-condition|boolean|expression",
 		"job.if|job-condition|boolean|expression",
 		"job.env.A|job-environment|string|expression",
 		"job.env.Z|job-environment|string|expression",
@@ -53,15 +56,17 @@ func TestWorkflowProgramInventoriesEveryExecutionField(t *testing.T) {
 		"job.container.image|runtime-template|string|expression",
 		"job.container.env.C|runtime-template|string|expression",
 		"job.container.ports[0]|runtime-template|string|expression",
-		"job.services.db.image|runtime-template|string|expression",
+		"job.container.volumes[0]|runtime-template|string|expression",
+		"job.container.options|runtime-template|string|expression",
+		"job.services.db.image|service-template|string|expression",
 		"job.services.db.credentials.username|service-credential|string|expression",
 		"job.services.db.credentials.password|service-credential|string|expression",
-		"job.services.db.env.S|runtime-template|string|expression",
-		"job.services.db.ports[0]|runtime-template|string|expression",
-		"job.services.db.volumes[0]|runtime-template|string|expression",
-		"job.services.db.options|runtime-template|string|expression",
-		"job.services.db.command|runtime-template|string|expression",
-		"job.services.db.entrypoint|runtime-template|string|expression",
+		"job.services.db.env.S|service-environment|string|expression",
+		"job.services.db.ports[0]|service-template|string|expression",
+		"job.services.db.volumes[0]|service-template|string|expression",
+		"job.services.db.options|service-template|string|expression",
+		"job.services.db.command|service-template|string|expression",
+		"job.services.db.entrypoint|service-template|string|expression",
 		"job.services|service-map|object|expression",
 		"job.steps[0].env.R|step-template|string|expression",
 		"job.steps[0].if|step-condition|boolean|expression",
@@ -93,41 +98,70 @@ func TestWorkflowProgramInventoriesEveryExecutionField(t *testing.T) {
 	}
 }
 
-func TestWorkflowProgramProjectsLegacyPlanSteps(t *testing.T) {
+func TestWorkflowProgramNormalizesExecutionSteps(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 3, Column: 5}, End: workflow.Position{Line: 8, Column: 1}}
 	instance := JobInstance{SourcePath: "workflow.yml", Steps: []workflow.Step{
 		{Kind: "run", Name: "name", Run: "echo hi", Shell: "bash", WorkingDirectory: "src", Env: map[string]string{}, If: "success()", ContinueOnErrorExpression: "${{ matrix.experimental }}", TimeoutMinutes: 5, Span: span},
 		{Kind: "uses", Uses: "owner/action@v1", With: map[string]string{"name": "value"}, Span: span},
 	}}
-	workflowProgram := lowerWorkflowProgram(instance)
-	steps := projectPlanSteps(workflowProgram.Job.Steps)
-	indexes, references, inputs := programActionInvocations(workflowProgram.Job.Steps)
-	if len(steps) != 2 || steps[0].ID != "step-1" || steps[0].Command != "echo hi" || steps[0].Shell != "bash" || steps[0].WorkingDirectory != "src" || steps[0].Condition != "success()" || steps[0].ContinueOnErrorExpression != "${{ matrix.experimental }}" || steps[0].TimeoutMinutes != 5 {
-		t.Fatalf("projected run step = %#v", steps[0])
+	steps := lowerWorkflowProgram(instance).Job.Steps
+	if len(steps) != 2 || steps[0].ID != "step-1" || steps[0].Run.Command.Source != "echo hi" || steps[0].Run.Shell.Source != "bash" || steps[0].Run.WorkingDirectory.Source != "src" || steps[0].Condition.Source != "success()" || steps[0].ContinueOnError.Expression.Source != "${{ matrix.experimental }}" || steps[0].TimeoutMinutes.Literal != 5 {
+		t.Fatalf("normalized run step = %#v", steps[0])
 	}
-	if len(indexes) != 1 || indexes[0] != 1 || !reflect.DeepEqual(references, []string{"owner/action@v1"}) || !reflect.DeepEqual(inputs, []map[string]string{{"name": "value"}}) {
-		t.Fatalf("projected invocation metadata = %#v, %#v, %#v", indexes, references, inputs)
+	if steps[1].Invocation == nil || steps[1].Invocation.Uses.Source != "owner/action@v1" || !reflect.DeepEqual(testBindingSources(steps[1].Invocation.With), map[string]string{"name": "value"}) {
+		t.Fatalf("normalized invocation = %#v", steps[1])
 	}
-	if steps[0].Env == nil || steps[1].With["name"] != "value" || steps[0].Source.Start.Line != 3 {
-		t.Fatalf("projected step details = %#v", steps)
+	if steps[0].Env == nil || testBindingSources(steps[1].Invocation.With)["name"] != "value" || steps[0].Source.Start.Line != 3 {
+		t.Fatalf("normalized step details = %#v", steps)
+	}
+}
+
+func TestWorkflowProgramNamesStepsLikeGitHub(t *testing.T) {
+	owner, repository := strings.Repeat("o", 39), strings.Repeat("r", 100)
+	steps := []workflow.Step{
+		{Kind: "run", Run: "a"},
+		{Kind: "uses", ID: "metrics", Uses: "lowlighter/metrics@latest"},
+		{Kind: "run", Run: "b"},
+		{Kind: "uses", Uses: "Actions/Checkout@v4"},
+		{Kind: "uses", Uses: "actions/checkout/sub/path@v3"},
+		{Kind: "uses", Uses: "./.github/actions/local"},
+		{Kind: "uses", Uses: "$/.github/actions/local"},
+		{Kind: "uses", Uses: "my.org/tool@v1"},
+		{Kind: "uses", Uses: owner + "/" + repository + "@v1"},
+		{Kind: "uses", Uses: owner + "/" + repository + "/path@v2"},
+		{Kind: "run", ID: "__parallel_4_7_1", Background: true, Run: "c"},
+		{Kind: "wait", ID: "__parallel_4_7_wait", Targets: []string{"__parallel_4_7_1"}},
+		{Kind: "run", ID: "Run", Run: "d"},
+	}
+	var got []string
+	for _, step := range lowerWorkflowProgram(JobInstance{Steps: steps}).Job.Steps {
+		got = append(got, step.GitHubAction)
+	}
+	truncated := ("__" + owner + "_" + repository)[:100]
+	want := []string{
+		"__run", "metrics", "__run_2", "__Actions_Checkout", "__actions_checkout_2", "__self", "__selfRepository",
+		"__my_org_tool", truncated, truncated[:98] + "_2", "__run_3", "", "Run",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("github.action names:\n got: %q\nwant: %q", got, want)
 	}
 }
 
 func TestProgramOwnedSecretInventory(t *testing.T) {
 	instance := JobInstance{
 		secretAuthority: secretAuthority{unrestricted: true},
-		If:              "secrets.CONDITION != ''",
+		If:              "github.ref != ''",
 		Env:             map[string]string{"VALUE": "${{ secrets.JOB_ENV }}"},
 		Outputs:         map[string]string{"value": "${{ secrets.JOB_OUTPUT }}"},
 		Services: []workflow.Service{{Name: "db", Container: workflow.ServiceContainer{
-			Image: "postgres", Command: "start --token=${{ github.token }}",
+			Image: "postgres", Command: "start",
 		}}},
 		Steps: []workflow.Step{
-			{Kind: "run", Run: "echo ${{ secrets.RUN }}", Name: "${{ toJSON(github) }}"},
+			{Kind: "run", Run: "echo ${{ secrets.RUN }}", Name: "${{ toJSON(github) }}", Env: map[string]string{"CONDITION": "${{ secrets.CONDITION }}"}},
 			{Kind: "uses", Uses: "owner/action@v1", With: map[string]string{"ignored": "${{ secrets.INSPECTED_INPUT }}"}},
 		},
 	}
-	secrets, mappings, aliases, token, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, []string{"ACTION_DEFAULT"}, true)
+	secrets, mappings, aliases, token, _, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, []string{"ACTION_DEFAULT"}, []string{"ACTION_DEFAULT"}, true, "https://github.com", expression.AbstractValues{})
 	if err != nil {
 		t.Fatal(err)
 	}

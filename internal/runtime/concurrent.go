@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
 
 const maxActiveBackgroundSteps = 10
@@ -16,7 +18,7 @@ const maxActiveBackgroundSteps = 10
 var errExplicitBackgroundCancel = errors.New("background step explicitly cancelled")
 
 type stepExecution struct {
-	step       plan.Step
+	id         string
 	result     Result
 	err        error
 	outcome    string
@@ -175,7 +177,7 @@ func (s *backgroundSupervisor) commitCompleted(tasks []*backgroundTask) []stepEx
 
 func stepContext(parent context.Context, timeoutMinutes float64) (context.Context, context.CancelFunc) {
 	if timeoutMinutes > 0 {
-		return context.WithTimeout(parent, durationMinutes(timeoutMinutes))
+		return context.WithTimeoutCause(parent, durationMinutes(timeoutMinutes), errWorkflowDeadline)
 	}
 	return context.WithCancel(parent)
 }
@@ -188,13 +190,14 @@ func bindHashFilesContext(ctx context.Context, eval *expression.Context) {
 	}
 }
 
-func (r *jobRun) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
-	result, err := r.runJobStep(runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
+func (r *jobRun) executePlanStep(jobCtx, runCtx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step executionprogram.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
+	result, err := r.runJobStep(jobCtx, runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
 	return classifyStepExecutionWithControls(jobCtx, runCtx, step, result, err, eval)
 }
 
-func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, result Result, err error) stepExecution {
-	execution := stepExecution{step: step, result: result, err: err, outcome: "success", conclusion: "success"}
+func classifyStepExecution(jobCtx, runCtx context.Context, id string, continueOnError bool, result Result, err error) stepExecution {
+	err = markWorkflowTimeout(runCtx, err)
+	execution := stepExecution{id: id, result: result, err: err, outcome: "success", conclusion: "success"}
 	if err == nil {
 		return execution
 	}
@@ -203,42 +206,43 @@ func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, resul
 		execution.outcome = "cancelled"
 	}
 	execution.conclusion = execution.outcome
-	if step.ContinueOnError && execution.outcome == "failure" && !isHardJobFailure(err) {
+	if continueOnError && execution.outcome == "failure" && !isHardJobFailure(err) {
 		execution.conclusion = "success"
 	}
 	return execution
 }
 
-func classifyStepExecutionWithControls(jobCtx, runCtx context.Context, step plan.Step, result Result, err error, eval expression.Context) stepExecution {
-	execution := classifyStepExecution(jobCtx, runCtx, step, result, err)
-	if execution.outcome == "failure" && !isHardJobFailure(err) && step.ContinueOnErrorExpression != "" {
+func classifyStepExecutionWithControls(jobCtx, runCtx context.Context, step executionprogram.Step, result Result, err error, eval expression.Context) stepExecution {
+	execution := classifyStepExecution(jobCtx, runCtx, step.ID, step.ContinueOnError.Literal, result, err)
+	if execution.outcome == "failure" && !isHardJobFailure(err) && step.ContinueOnError.Expression != nil {
 		resolved, controlErr := evaluateStepContinueOnError(step, eval)
 		if controlErr != nil {
-			return classifyStepExecution(jobCtx, runCtx, step, result, errors.Join(err, fmt.Errorf("controls: %w", controlErr)))
+			return classifyStepExecution(jobCtx, runCtx, step.ID, false, result, errors.Join(err, fmt.Errorf("controls: %w", controlErr)))
 		}
-		return classifyStepExecution(jobCtx, runCtx, resolved, result, err)
+		return classifyStepExecution(jobCtx, runCtx, step.ID, resolved, result, err)
 	}
 	return execution
 }
 
-func cancelledStepExecution(jobCtx, runCtx context.Context, step plan.Step) stepExecution {
+func cancelledStepExecution(jobCtx, runCtx context.Context, step executionprogram.Step) stepExecution {
 	err := context.Cause(runCtx)
 	if err == nil {
 		err = context.Canceled
 	}
-	return classifyStepExecution(jobCtx, runCtx, step, newResult(), err)
+	return classifyStepExecution(jobCtx, runCtx, step.ID, step.ContinueOnError.Literal, newResult(), err)
 }
 
-func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *expression.Context) error {
-	id := strings.ToLower(execution.step.ID)
+func commitStepExecution(execution stepExecution, processor *commandOutputProcessor, jobResult *JobResult, eval *expression.Context) error {
+	id := strings.ToLower(execution.id)
 	eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
 	commitResultEnvironment(jobResult.Env, execution.result)
 	eval.Env = jobResult.Env
-	mergeInto(jobResult.State, execution.result.State)
+	maps.Copy(jobResult.State, execution.result.State)
 	appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, execution.result.Summary, execution.result.summaryTruncated)
 	jobResult.Artifacts = append(jobResult.Artifacts, execution.result.Artifacts...)
+	processor.warnToleratedFailure(execution, fmt.Sprintf("step %q", execution.id))
 	if execution.conclusion != "success" {
-		return fmt.Errorf("step %q: %w", execution.step.ID, execution.err)
+		return fmt.Errorf("step %q: %w", execution.id, execution.err)
 	}
 	return nil
 }
@@ -246,14 +250,14 @@ func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *ex
 func commitResultEnvironment(env map[string]string, result Result) {
 	effects := result.Env
 	if len(result.Paths) > 0 {
-		effects = cloneStrings(effects)
+		effects = mergeStringMaps(effects)
 		if result.pathBaseSet {
-			effects["PATH"] = result.pathBase
+			mergeEnvironmentInto(effects, map[string]string{"PATH": result.pathBase})
 		} else {
-			delete(effects, "PATH")
+			deleteEnvironment(effects, "PATH")
 		}
 	}
-	mergeInto(env, effects)
+	mergeEnvironmentInto(env, effects)
 	applyPaths(env, result.Paths)
 }
 
@@ -266,6 +270,7 @@ func cloneExpressionContext(in expression.Context) expression.Context {
 		Inputs:           inputs,
 		WorkflowInputs:   cloneAnyMap(in.WorkflowInputs),
 		Matrix:           cloneAnyMap(in.Matrix),
+		Strategy:         cloneAnyMap(in.Strategy),
 		Steps:            cloneStepStatuses(in.Steps),
 		Needs:            cloneNeedStatuses(in.Needs),
 		Secrets:          cloneStrings(in.Secrets),

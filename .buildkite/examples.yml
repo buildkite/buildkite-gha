@@ -19,6 +19,8 @@ steps:
             value: "artifacts"
           - label: "Advanced delivery"
             value: "advanced"
+          - label: "Node.js concurrency"
+            value: "nodejs-concurrency"
 
   - label: ":pipeline: Load example workflow"
     key: "example-loader"
@@ -32,44 +34,4 @@ steps:
       if [[ -z "$$example" ]]; then
         example="$$(buildkite-agent meta-data get example)"
       fi
-
-      case "$$example" in
-        basic)
-          workflow=".github/workflows/example-basic.yml"
-          ;;
-        artifacts)
-          workflow=".github/workflows/example-artifacts.yml"
-          ;;
-        advanced)
-          workflow=".github/workflows/example-advanced.yml"
-          ;;
-        *)
-          echo "unknown example: $$example" >&2
-          exit 2
-          ;;
-      esac
-
-      commit="$${EXAMPLE_COMMIT:-$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}}"
-      [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
-      test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
-      test -f "$$workflow"
-
-      cat <<YAML | buildkite-agent pipeline upload --no-interpolation --reject-secrets
-      agents:
-        queue: "hosted"
-
-      steps:
-        - group: ":github: Run workflow"
-          key: "example-$$example-workflow"
-          steps:
-            - label: "Prepare workflow"
-              key: "example-$$example-importer"
-              timeout_in_minutes: 20
-              retry:
-                automatic: false
-              cache: "/cache/bkcache/mise"
-              plugins:
-                - github-actions#latest:
-                    workflow: "$$workflow"
-                    source-ref: "$$commit"
-      YAML
+      .buildkite/upload-examples.sh "$$example"

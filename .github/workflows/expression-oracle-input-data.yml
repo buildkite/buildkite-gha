@@ -1,0 +1,77 @@
+name: Expression differential oracle reusable input data
+
+on:
+  workflow_call:
+    inputs:
+      payload:
+        type: string
+        required: true
+      secret-name:
+        type: string
+        required: true
+      depth:
+        type: string
+        required: true
+    outputs:
+      payload:
+        value: ${{ jobs.verify-input-data.outputs.payload }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify-input-data:
+    # A reparsed payload would be the commit SHA and skip this job, leaving
+    # the caller's output check empty.
+    if: inputs.payload == format('{0}{{{{ github.sha }}}}', '$')
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        payload:
+          - ${{ inputs.payload }}
+    outputs:
+      payload: ${{ inputs.payload }}
+    env:
+      JOB_VALUE: ${{ inputs.payload }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Pass payload through with
+        id: composite
+        uses: ./.github/actions/oracle-composite
+        with:
+          message: ${{ inputs.payload }}
+
+      - name: Verify input values stay data
+        shell: bash
+        env:
+          DEPTH: ${{ inputs.depth }}
+          ENV_VALUE: ${{ inputs.payload }}
+          MATRIX_VALUE: ${{ matrix.payload }}
+          WITH_VALUE: ${{ steps.composite.outputs.result }}
+          SELECTED_SECRET: ${{ secrets[inputs.secret-name] }}
+          CONTROL_SECRET: ${{ secrets[format('{0}', 'GITHUB_TOKEN')] }}
+        run: |
+          run_value='${{ inputs.payload }}'
+          expected="$"'{{ github.sha }}'
+          selected_empty=false
+          control_empty=false
+          test -n "$SELECTED_SECRET" || selected_empty=true
+          test -n "$CONTROL_SECRET" || control_empty=true
+          printf '%s\n' \
+            "DEPTH=$DEPTH" \
+            "RUN_VALUE=$run_value" \
+            "ENV_VALUE=$ENV_VALUE" \
+            "JOB_VALUE=$JOB_VALUE" \
+            "MATRIX_VALUE=$MATRIX_VALUE" \
+            "WITH_VALUE=$WITH_VALUE" \
+            "SELECTED_SECRET_EMPTY=$selected_empty" \
+            "CONTROL_SECRET_EMPTY=$control_empty"
+          test "$run_value" = "$expected"
+          test "$ENV_VALUE" = "$expected"
+          test "$JOB_VALUE" = "$expected"
+          test "$MATRIX_VALUE" = "$expected"
+          test "$WITH_VALUE" = "$expected-composite"
+          test "$selected_empty" = "true"
+          test "$control_empty" = "false"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,104 @@ import (
 )
 
 const testJobID = "22222222-2222-4222-8222-222222222222"
+
+func TestPathFilterPayloadBounds(t *testing.T) {
+	var body []byte
+	client, err := New(Config{Endpoint: "https://agent.example/v3", JobID: testJobID, JobToken: "token",
+		Client: &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			body, _ = io.ReadAll(r.Body)
+			return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+		})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := PathFilter{WorkflowPath: ".github/workflows/ci.yml", WorkflowDigest: strings.Repeat("a", 64),
+		EventName: "push", EventOrigin: "buildkite-webhook", Outcome: "match", Reason: "paths_match",
+		HeadSHA: strings.Repeat("b", 40), WorkflowSHA: strings.Repeat("b", 40), ComparisonBaseSHA: strings.Repeat("c", 40)}
+	for _, test := range []struct {
+		name      string
+		decisions []PathFilter
+		count     int
+		truncated bool
+	}{
+		{name: "new branch without prior base", decisions: []PathFilter{decision}, count: 1},
+		{name: "duplicate", decisions: []PathFilter{decision, decision}, count: 1, truncated: true},
+		{name: "empty", decisions: []PathFilter{}, count: 0},
+		{name: "invalid path", decisions: []PathFilter{func() PathFilter { d := decision; d.WorkflowPath = "bad\npath"; return d }()}, truncated: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := client.Emit(CommandPluginImport, OutcomeSuccess, 0, Details{PathFilters: test.decisions}); err != nil {
+				t.Fatal(err)
+			}
+			var event struct {
+				Properties Properties `json:"properties"`
+			}
+			if err := json.Unmarshal(body, &event); err != nil {
+				t.Fatal(err)
+			}
+			p := event.Properties
+			if p.PathFilters == nil || p.PathFiltersTruncated == nil || len(*p.PathFilters) != test.count || *p.PathFiltersTruncated != test.truncated {
+				t.Fatalf("payload=%s", body)
+			}
+			if test.count > 0 && (*p.PathFilters)[0] != decision {
+				t.Fatalf("identity changed: %s", body)
+			}
+		})
+	}
+	if err := client.Emit(CommandRunJob, OutcomeSuccess, 0, Details{PathFilters: []PathFilter{decision}}); err == nil {
+		t.Fatal("run_job accepted path decisions")
+	}
+	if err := client.Emit(CommandPluginImport, OutcomeSuccess, 0, Details{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "path_filters") {
+		t.Fatalf("absent coverage changed legacy payload: %s", body)
+	}
+
+	// HTML-sensitive ASCII expands sixfold with Go's JSON encoder. Exercise
+	// maximum text in every existing diagnostic field alongside new identities.
+	text := strings.Repeat("<", 1024)
+	details := Details{ErrorMessage: text, Blocker: "path_filter", BlockerDetail: text}
+	for i := range 20 {
+		details.Diagnostics = append(details.Diagnostics, Diagnostic{Code: "E_EVENT_INVALID", Severity: SeverityError,
+			Blocker: "path_filter", BlockerDetail: text, Message: text, WorkflowPath: fmt.Sprintf("%02d", i) + text[2:]})
+	}
+	for i := range 101 {
+		d := decision
+		d.WorkflowPath, d.EventRef = fmt.Sprintf("%03d", i)+text[3:], text
+		details.PathFilters = append(details.PathFilters, d)
+	}
+	if err := client.Emit(CommandPluginImport, OutcomeFailure, time.Hour, details); err != nil {
+		t.Fatal(err)
+	}
+	var event struct {
+		Properties Properties `json:"properties"`
+	}
+	if err := json.Unmarshal(body, &event); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(event.Properties.PathFilters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > 512<<10 || len(encoded) > 96<<10 || !*event.Properties.PathFiltersTruncated || len(*event.Properties.PathFilters) == 0 {
+		t.Fatalf("body=%d array=%d truncated=%v", len(body), len(encoded), event.Properties.PathFiltersTruncated)
+	}
+	t.Logf("maximum-escaped fixture: body=%d bytes array=%d bytes entries=%d", len(body), len(encoded), len(*event.Properties.PathFilters))
+	for i := range details.PathFilters {
+		details.PathFilters[i].WorkflowPath = fmt.Sprintf("%d.yml", i)
+		details.PathFilters[i].EventRef = ""
+	}
+	if err := client.Emit(CommandPluginImport, OutcomeSuccess, 0, details); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(body, &event); err != nil {
+		t.Fatal(err)
+	}
+	if len(*event.Properties.PathFilters) != 100 || !*event.Properties.PathFiltersTruncated {
+		t.Fatalf("count bound=%s", body)
+	}
+}
 
 func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 	var request struct {
@@ -50,8 +149,15 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 	if err := client.Emit(CommandRunJob, OutcomeFailure, duration, Details{
 		FailurePhase:          FailurePhaseParsing,
 		FailureCode:           FailureCodeWorkflowSyntax,
+		AgentAPIHTTPStatus:    http.StatusUnprocessableEntity,
 		ErrorMessage:          "  buildkite-gha: run-job:\ninvalid workflow\tvalue  ",
 		ErrorMessageTruncated: true,
+		Blocker:               "shell",
+		BlockerDetail:         "pwsh",
+		Diagnostics: []Diagnostic{{
+			Code: string(FailureCodeExpressionInvalid), Severity: SeverityError,
+			Blocker: "runner_label", BlockerDetail: "windows-latest",
+		}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +167,13 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 	want := Properties{
 		Command: CommandRunJob, Outcome: OutcomeFailure, ClientVersion: "1.2.3", DurationMS: 1234,
 		FailurePhase: FailurePhaseParsing, FailureCode: FailureCodeWorkflowSyntax,
-		ErrorMessage: "buildkite-gha: run-job: invalid workflow value", ErrorMessageTruncated: true,
+		AgentAPIHTTPStatus: http.StatusUnprocessableEntity,
+		ErrorMessage:       "buildkite-gha: run-job: invalid workflow value", ErrorMessageTruncated: true,
+		Blocker: "shell", BlockerDetail: "pwsh",
+		Diagnostics: []Diagnostic{{
+			Code: string(FailureCodeExpressionInvalid), Severity: SeverityError,
+			Blocker: "runner_label", BlockerDetail: "windows-latest",
+		}},
 	}
 	if !reflect.DeepEqual(request.Properties, want) {
 		t.Fatalf("properties = %#v, want %#v", request.Properties, want)
@@ -213,16 +325,21 @@ func TestPropertiesAreBounded(t *testing.T) {
 	if err := client.Emit(CommandRunJob, OutcomeFailure, 0, Details{FailurePhase: FailurePhaseUnknown, FailureCode: FailureCode("arbitrary")}); err == nil {
 		t.Fatal("Emit() accepted an unknown failure code")
 	}
+	for _, status := range []int{-1, 99, 600} {
+		if err := client.Emit(CommandRunJob, OutcomeFailure, 0, Details{AgentAPIHTTPStatus: status}); err == nil {
+			t.Errorf("Emit() accepted Agent API HTTP status %d", status)
+		}
+	}
 }
 
 func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
-	message := "earlier output\n\t" + strings.Repeat("界", maxErrorMessageBytes) + "\n immediate failure"
+	message := "earlier output\n\t" + strings.Repeat("界", MaxErrorMessageBytes) + "\n immediate failure"
 	bounded, truncated := boundedErrorMessage(message)
 	if !truncated {
 		t.Fatal("boundedErrorMessage() did not report truncation")
 	}
-	if len(bounded) > maxErrorMessageBytes {
-		t.Fatalf("boundedErrorMessage() returned %d bytes, want at most %d", len(bounded), maxErrorMessageBytes)
+	if len(bounded) > MaxErrorMessageBytes {
+		t.Fatalf("boundedErrorMessage() returned %d bytes, want at most %d", len(bounded), MaxErrorMessageBytes)
 	}
 	if !utf8.ValidString(bounded) {
 		t.Fatalf("boundedErrorMessage() returned invalid UTF-8: %q", bounded)
@@ -235,14 +352,28 @@ func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
 	}
 }
 
+func TestRuntimeClassificationCodesAreFailureCodesOnly(t *testing.T) {
+	for _, code := range []FailureCode{
+		FailureCodeStepProcessExit, FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable,
+		FailureCodeWorkflowToken, FailureCodeOIDCToken, FailureCodeCacheCredential,
+	} {
+		if !validFailureCode(code) {
+			t.Errorf("validFailureCode(%q) = false", code)
+		}
+		if _, ok := diagnosticSeverity(string(code)); ok {
+			t.Errorf("diagnosticSeverity(%q) accepted a failure-only code as a diagnostic", code)
+		}
+	}
+}
+
 func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 	errorCodes := []string{
 		string(FailureCodeWorkflowSyntax), string(FailureCodeEventInvalid), string(FailureCodeGraphInvalid),
 		string(FailureCodeMatrixInvalid), string(FailureCodeExpressionInvalid), string(FailureCodeActionDiscovery),
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
-		string(FailureCodeEnvironment), string(FailureCodeProfile),
+		string(FailureCodeEnvironment), string(FailureCodeVariableResolution), string(FailureCodeProfile),
 	}
-	warningCodes := []string{"W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED"}
+	warningCodes := []string{"W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT", "W_TRIGGER_EVENT_UNSUPPORTED"}
 	input := make([]Diagnostic, 0, len(errorCodes)+len(warningCodes)+2)
 	for _, code := range errorCodes {
 		input = append(input, Diagnostic{Code: code, Severity: SeverityError})
@@ -251,15 +382,158 @@ func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 		input = append(input, Diagnostic{Code: code, Severity: SeverityWarning})
 	}
 	input = append(input, input[0], input[len(errorCodes)])
-	bounded, err := boundedDiagnostics(input)
+	bounded, err := BoundedDiagnostics(input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(bounded) != len(errorCodes)+len(warningCodes) {
 		t.Fatalf("diagnostics = %d, want %d unique codes", len(bounded), len(errorCodes)+len(warningCodes))
 	}
-	if _, err := boundedDiagnostics([]Diagnostic{{Code: "CUSTOMER_VALUE", Severity: SeverityError}}); err == nil {
-		t.Fatal("boundedDiagnostics() accepted non-allowlisted code")
+	if _, err := BoundedDiagnostics([]Diagnostic{{Code: "CUSTOMER_VALUE", Severity: SeverityError}}); err == nil {
+		t.Fatal("BoundedDiagnostics() accepted non-allowlisted code")
+	}
+}
+
+func TestDiagnosticsPreserveDistinctBlockersForOneCode(t *testing.T) {
+	common := strings.Repeat("x", maxBlockerDetailBytes)
+	input := []Diagnostic{
+		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "expression", BlockerDetail: common + "first"},
+		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "expression", BlockerDetail: common + "second"},
+	}
+	bounded, err := BoundedDiagnostics(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 2 || bounded[0].BlockerDetail == bounded[1].BlockerDetail {
+		t.Fatalf("bounded diagnostics collapsed distinct details: %#v", bounded)
+	}
+	for _, diagnostic := range bounded {
+		if len(diagnostic.BlockerDetail) > maxBlockerDetailBytes || !strings.Contains(diagnostic.BlockerDetail, "…#") {
+			t.Fatalf("bounded diagnostic detail = %q", diagnostic.BlockerDetail)
+		}
+	}
+}
+
+func TestBlockerDetailsAreNormalizedAndBounded(t *testing.T) {
+	blocker, detail, err := boundedBlocker("shell", "  pwsh\n"+strings.Repeat("界", maxBlockerDetailBytes))
+	if err != nil || blocker != "shell" || len(detail) > maxBlockerDetailBytes || !utf8.ValidString(detail) || !strings.HasPrefix(detail, "pwsh ") {
+		t.Fatalf("boundedBlocker() = %q, %q, %v", blocker, detail, err)
+	}
+	for _, test := range []struct{ blocker, detail string }{
+		{"path_filter", "push"},
+		{"runner_policy", "untrusted_default"},
+	} {
+		if gotBlocker, gotDetail, err := boundedBlocker(test.blocker, test.detail); err != nil || gotBlocker != test.blocker || gotDetail != test.detail {
+			t.Fatalf("boundedBlocker(%q, %q) = %q, %q, %v", test.blocker, test.detail, gotBlocker, gotDetail, err)
+		}
+	}
+	if _, _, err := boundedBlocker("customer-value", "detail"); err == nil {
+		t.Fatal("boundedBlocker() accepted an unknown blocker")
+	}
+}
+
+func TestDiagnosticTextBounds(t *testing.T) {
+	for _, test := range []struct {
+		name, message, path, wantMessage, wantPath string
+		truncated, wantTruncated                   bool
+	}{
+		{name: "normalize", message: " \xff\nproblem\u0085 details\t", path: "two  spaces.yml", wantMessage: "� problem details", wantPath: "two  spaces.yml"},
+		{name: "exact bound", message: strings.Repeat("é", 512), path: strings.Repeat("é", 512), wantMessage: strings.Repeat("é", 512), wantPath: strings.Repeat("é", 512)},
+		{name: "retain head", message: "cause " + strings.Repeat("界", 340) + " tail", wantMessage: "cause " + strings.Repeat("界", 339), wantTruncated: true},
+		{name: "overlong path", message: "problem", path: strings.Repeat("é", 512) + "x", wantMessage: "problem"},
+		{name: "control in path", message: "problem", path: "private\u0085file.yml", wantMessage: "problem"},
+		{name: "invalid path encoding", message: "problem", path: "invalid\xff.yml", wantMessage: "problem"},
+		{name: "empty message clears flag", message: "\n\t", truncated: true},
+		{name: "preserve flag", message: "already shortened", truncated: true, wantMessage: "already shortened", wantTruncated: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := BoundedDiagnostics([]Diagnostic{{Code: string(FailureCodePipelineGeneration), Severity: SeverityError, Message: test.message, MessageTruncated: test.truncated, WorkflowPath: test.path}})
+			if err != nil || len(got) != 1 {
+				t.Fatalf("BoundedDiagnostics() = %#v, %v", got, err)
+			}
+			if got[0].Message != test.wantMessage || got[0].WorkflowPath != test.wantPath || got[0].MessageTruncated != test.wantTruncated {
+				t.Fatalf("diagnostic = %#v", got[0])
+			}
+		})
+	}
+}
+
+func TestDiagnosticsDeduplicateByWireIdentity(t *testing.T) {
+	first := Diagnostic{Code: string(FailureCodePipelineGeneration), Severity: SeverityError, Message: "filter failed", WorkflowPath: "first.yml"}
+	otherPath, otherMessage, duplicate := first, first, first
+	otherPath.WorkflowPath = "second.yml"
+	otherMessage.Message = "another filter failed"
+	duplicate.Message = " filter\nfailed "
+	duplicate.MessageTruncated = true
+	got, err := BoundedDiagnostics([]Diagnostic{first, otherPath, otherMessage, duplicate})
+	first.MessageTruncated = true
+	want := []Diagnostic{first, otherPath, otherMessage}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("BoundedDiagnostics() = %#v, %v; want %#v", got, err, want)
+	}
+
+	// Truncation can make previously distinct messages identical to the API.
+	first.Message, first.MessageTruncated = strings.Repeat("x", 1024), false
+	duplicate = first
+	duplicate.Message += " extra"
+	got, err = BoundedDiagnostics([]Diagnostic{first, duplicate})
+	if err != nil || len(got) != 1 || !got[0].MessageTruncated {
+		t.Fatalf("post-truncation diagnostics = %#v, %v", got, err)
+	}
+
+	// After the budget fills, ignore new identities but still merge duplicate flags.
+	input := []Diagnostic{first}
+	for i := range 20 {
+		other := first
+		other.WorkflowPath = strconv.Itoa(i) + ".yml"
+		input = append(input, other)
+	}
+	input = append(input, duplicate, first)
+	want = append([]Diagnostic(nil), input[:20]...)
+	want[0].MessageTruncated = true
+	got, err = BoundedDiagnostics(input)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("full-budget diagnostics = %#v, %v; want %#v", got, err, want)
+	}
+}
+
+func TestClientEmitsDiagnosticTextWithinServerRequestLimit(t *testing.T) {
+	var body []byte
+	client, err := New(Config{Endpoint: "https://agent.example/v3", JobID: testJobID, JobToken: "token", Client: &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		body, _ = io.ReadAll(request.Body)
+		return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostics := make([]Diagnostic, 21)
+	for i := range diagnostics {
+		diagnostics[i] = Diagnostic{
+			Code: string(FailureCodeExpressionInvalid), Severity: SeverityError,
+			Blocker: "expression", BlockerDetail: strings.Repeat("<", 1024),
+			Message: strings.Repeat("<", 1025), WorkflowPath: strconv.Itoa(i) + strings.Repeat("<", 1022),
+		}
+	}
+	if err := client.Emit(CommandPluginImport, OutcomeSuccess, 0, Details{Diagnostics: diagnostics}); err != nil {
+		t.Fatal(err)
+	}
+	if len(body) <= 360_000 || len(body) > 512*1024 {
+		t.Fatalf("request length = %d", len(body))
+	}
+	var event struct {
+		Properties struct {
+			Diagnostics []map[string]any `json:"diagnostics"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(body, &event); err != nil {
+		t.Fatal(err)
+	}
+	if len(event.Properties.Diagnostics) != 20 {
+		t.Fatalf("sent %d diagnostics", len(event.Properties.Diagnostics))
+	}
+	first := event.Properties.Diagnostics[0]
+	if first["message"] != strings.Repeat("<", 1024) || first["message_truncated"] != true || first["workflow_path"] != "0"+strings.Repeat("<", 1022) {
+		t.Fatalf("wire diagnostic = %#v", first)
 	}
 }
 
@@ -268,8 +542,8 @@ func TestDiagnosticsRejectMismatchedSeverity(t *testing.T) {
 		{Code: string(FailureCodeWorkflowSyntax), Severity: SeverityWarning},
 		{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: SeverityError},
 	} {
-		if _, err := boundedDiagnostics([]Diagnostic{diagnostic}); err == nil {
-			t.Fatalf("boundedDiagnostics(%#v) accepted mismatched severity", diagnostic)
+		if _, err := BoundedDiagnostics([]Diagnostic{diagnostic}); err == nil {
+			t.Fatalf("BoundedDiagnostics(%#v) accepted mismatched severity", diagnostic)
 		}
 	}
 }

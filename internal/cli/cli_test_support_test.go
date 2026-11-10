@@ -25,8 +25,15 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	_ = os.Unsetenv("BUILDKITE")
-	_ = os.Unsetenv("BUILDKITE_JOB_ID")
+	// Ordinary CLI tests must never reach the ambient Agent API that a
+	// Buildkite job inherits or enable skipped-workflow annotations through its
+	// build URL; tests that need these set them explicitly.
+	for _, name := range []string{"BUILDKITE", "BUILDKITE_JOB_ID", "BUILDKITE_BUILD_URL", "BUILDKITE_AGENT_ENDPOINT", "BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_BUILD_CHECKOUT_PATH"} {
+		_ = os.Unsetenv(name)
+	}
+	// Event artifacts bind to an exact importer job, including file-only readers.
+	// Keep a deterministic producer without configuring an Agent API connection.
+	_ = os.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	os.Exit(m.Run())
 }
 
@@ -64,6 +71,26 @@ func writeUploadWorkflowRepository(t *testing.T, sources map[string]string) stri
 		}
 	}
 	return repository
+}
+
+// commitUploadWorkflows commits everything staged in a repository written by
+// writeUploadWorkflowRepository, so the workflows exist at the checked-out
+// commit as they do in a Buildkite build checkout.
+func commitUploadWorkflows(t *testing.T, repository string) {
+	t.Helper()
+	args := []string{"-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "workflows"}
+	if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+}
+
+// writeCommittedUploadWorkflows is writeUploadWorkflows for workflows that
+// defer a matrix to a job output: upload requires those to be committed.
+func writeCommittedUploadWorkflows(t *testing.T, sources map[string]string) []string {
+	t.Helper()
+	repository := writeUploadWorkflowRepository(t, sources)
+	commitUploadWorkflows(t, repository)
+	return enterUploadWorkflows(t, repository, sources)
 }
 
 func writeUploadEvent(t *testing.T, directory, event, ref string, payload map[string]any) string {
@@ -112,6 +139,7 @@ type cliCaptureRunner struct {
 	failAt         int
 	failMetadata   bool
 	failAnnotation bool
+	failStepUpdate bool
 	gitOutput      []byte
 	gitErr         error
 	webhook        []byte
@@ -120,6 +148,18 @@ type cliCaptureRunner struct {
 	dataByPath     map[string][]byte
 	uploaded       map[string][]byte
 	contextErrors  []error
+	// pipelineUploadErr fails every `pipeline upload`, as Buildkite does when
+	// a step key in the upload already exists in the build.
+	pipelineUploadErr error
+	// pipelineUploadHook sees every `pipeline upload` before it succeeds and
+	// may reject it, for example to stand in for another job whose upload
+	// landed first.
+	pipelineUploadHook func(pipeline []byte) error
+	// stepAttributes answers `step get <attribute> --step <key>` for steps
+	// that already exist in the build; unknown steps fail.
+	stepAttributes map[string]map[string]string
+	// stepSnapshots answers full JSON step reads scoped to the fixture build.
+	stepSnapshots map[string][]byte
 }
 
 type cliActionSourceTokenProvider struct {
@@ -160,6 +200,30 @@ func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []str
 	if name == "git" && slices.Equal(args, []string{"rev-parse", "HEAD"}) {
 		return bytes.Clone(r.gitOutput), r.gitErr
 	}
+	if slices.Equal(args, []string{"pipeline", "upload", "--no-interpolation"}) {
+		if r.pipelineUploadErr != nil {
+			return nil, r.pipelineUploadErr
+		}
+		if r.pipelineUploadHook != nil {
+			if err := r.pipelineUploadHook(stdin); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(args) == 5 && args[0] == "step" && args[1] == "get" && args[3] == "--step" {
+		value, ok := r.stepAttributes[args[4]][args[2]]
+		if !ok {
+			return nil, errors.New("step not found")
+		}
+		return []byte(value + "\n"), nil
+	}
+	if len(args) == 8 && slices.Equal(args[:3], []string{"step", "get", "--step"}) && args[4] == "--build" && args[5] == cliTestBuildID && slices.Equal(args[6:], []string{"--format", "json"}) {
+		snapshot, ok := r.stepSnapshots[args[3]]
+		if !ok {
+			return nil, errors.New("step not found")
+		}
+		return bytes.Clone(snapshot), nil
+	}
 	if slices.Equal(args, []string{"meta-data", "get", "buildkite:webhook"}) {
 		if r.webhookErr != nil {
 			return nil, r.webhookErr
@@ -170,9 +234,20 @@ func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []str
 		return bytes.Clone(r.webhook), nil
 	}
 	if len(args) >= 2 && args[0] == "artifact" && args[1] == "search" {
-		return []byte(r.jobByStep[args[4]] + "\n"), nil
+		jobID := r.jobByStep[args[4]]
+		if jobID == "" {
+			return nil, nil
+		}
+		return []byte(jobID + "\n"), nil
 	}
 	if len(args) >= 2 && args[0] == "artifact" && args[1] == "download" {
+		info, err := os.Stat(args[3])
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			return nil, errors.New("artifact destination is not a directory")
+		}
 		contents, ok := r.dataByPath[args[2]]
 		if !ok {
 			return nil, errors.New("missing fixture artifact")
@@ -184,20 +259,44 @@ func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []str
 		return nil, os.WriteFile(path, contents, 0o600)
 	}
 	if len(args) >= 3 && args[0] == "artifact" && args[1] == "upload" {
-		contents, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(args[2])))
-		if err != nil {
-			return nil, err
-		}
 		if r.uploaded == nil {
 			r.uploaded = map[string][]byte{}
 		}
-		r.uploaded[args[2]] = contents
+		if args[2] == ".buildkite-gha/**/*" {
+			err := filepath.WalkDir(filepath.Join(dir, ".buildkite-gha"), func(path string, entry os.DirEntry, err error) error {
+				if err != nil || entry.IsDir() {
+					return err
+				}
+				relative, err := filepath.Rel(dir, path)
+				if err != nil {
+					return err
+				}
+				contents, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				r.uploaded[filepath.ToSlash(relative)] = contents
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			contents, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(args[2])))
+			if err != nil {
+				return nil, err
+			}
+			r.uploaded[args[2]] = contents
+		}
 	}
 	if r.failMetadata && len(args) >= 2 && args[0] == "meta-data" && args[1] == "set" {
 		return nil, errors.New("metadata unavailable")
 	}
 	if r.failAnnotation && len(args) > 0 && args[0] == "annotate" {
 		return nil, errors.New("annotation unavailable")
+	}
+	if r.failStepUpdate && len(args) > 1 && args[0] == "step" && args[1] == "update" {
+		return nil, errors.New("step update unavailable")
 	}
 	return nil, nil
 }

@@ -1,5 +1,3 @@
-// Package integration classifies and admits actions with Buildkite-specific
-// execution or service requirements.
 package integration
 
 // Identity is the canonical, resolved portion of an action lock used for
@@ -7,6 +5,7 @@ package integration
 // verification evidence rather than catalog selectors.
 type Identity struct {
 	Source     string
+	ServerURL  string
 	Repository string
 	Path       string
 }
@@ -58,15 +57,15 @@ var catalog = map[Identity]catalogEntry{
 	},
 	{Source: "github", Repository: "actions/cache"}: {
 		descriptor:     Descriptor{Service: ServiceCache},
-		validateCommit: validateCacheCommit,
+		validateCommit: validateCacheCommitFor(""),
 	},
 	{Source: "github", Repository: "actions/cache", Path: "restore"}: {
 		descriptor:     Descriptor{Service: ServiceCache},
-		validateCommit: validateCacheCommit,
+		validateCommit: validateCacheCommitFor("restore"),
 	},
 	{Source: "github", Repository: "actions/cache", Path: "save"}: {
 		descriptor:     Descriptor{Service: ServiceCache},
-		validateCommit: validateCacheCommit,
+		validateCommit: validateCacheCommitFor("save"),
 	},
 	{Source: "github", Repository: "actions/upload-artifact"}: {
 		descriptor:     Descriptor{Adapter: AdapterUploadArtifactBuildkite},
@@ -90,14 +89,24 @@ var catalog = map[Identity]catalogEntry{
 // It does not admit the resolved commit; callers handling action locks should
 // use Admit instead.
 func Lookup(identity Identity) (Descriptor, bool) {
-	entry, ok := catalog[identity]
+	entry, ok := lookupEntry(identity)
 	return entry.descriptor, ok
+}
+
+func lookupEntry(identity Identity) (catalogEntry, bool) {
+	// Empty hosts in legacy locks and the catalog mean github.com. Never
+	// match another host's repository against an audited github.com action.
+	if identity.ServerURL == "https://github.com" {
+		identity.ServerURL = ""
+	}
+	entry, ok := catalog[identity]
+	return entry, ok
 }
 
 // Admit returns the integration for an exact canonical action identity and
 // atomically enforces any audited-commit policy attached to it.
 func Admit(identity Identity, commit string) (Descriptor, bool, error) {
-	entry, ok := catalog[identity]
+	entry, ok := lookupEntry(identity)
 	if !ok {
 		return Descriptor{}, false, nil
 	}
@@ -109,9 +118,17 @@ func Admit(identity Identity, commit string) (Descriptor, bool, error) {
 	return entry.descriptor, true, nil
 }
 
-// UsesNativeAdapter reports whether the resolved identity replaces the
-// upstream action lifecycle with Buildkite-native execution.
-func UsesNativeAdapter(identity Identity) bool {
-	descriptor, _ := Lookup(identity)
-	return descriptor.Adapter != ""
+// AdmitNativeAdapter reports whether an exact action release replaces the
+// upstream lifecycle with Buildkite-native execution. It applies the same
+// audited-commit policy as Admit.
+func AdmitNativeAdapter(identity Identity, commit string) (Adapter, bool, error) {
+	descriptor, known := Lookup(identity)
+	if !known || descriptor.Adapter == "" {
+		return "", false, nil
+	}
+	descriptor, _, err := Admit(identity, commit)
+	if err != nil {
+		return descriptor.Adapter, false, err
+	}
+	return descriptor.Adapter, true, nil
 }

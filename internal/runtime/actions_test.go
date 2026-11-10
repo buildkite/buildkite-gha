@@ -9,18 +9,22 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
 
 type fakeActionMaterializer struct {
@@ -87,12 +91,12 @@ func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.
 	commit := strings.Repeat("a", 40)
 	job := plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{{ID: "lock", Source: "github", Repository: "owner/repo", RequestedRef: "do-not-use", Commit: commit, Path: "nested", SourceDigest: digest}}}
 	fake := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: repo, ActionRoot: filepath.Join(repo, "wrong"), SourceDigest: digest}}
-	r := newActionLockResolver(job, "", fake)
+	r := testActionLockResolver(t, job, "", fake)
 
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
-			if _, _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err != nil {
+			if _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err != nil {
 				t.Errorf("resolve: %v", err)
 			}
 		})
@@ -106,8 +110,50 @@ func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.
 	if err := os.WriteFile(filepath.Join(repo, "nested", "index.js"), []byte("tampered\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err == nil {
+	if _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err == nil {
 		t.Fatal("resolve after repository tampering succeeded")
+	}
+}
+
+func TestActionLockResolverProvenanceDoesNotHideUnixModeTampering(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix executable bits")
+	}
+	for _, kind := range []string{"workspace", "github"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			writeAction(t, root, "nested")
+			entry := filepath.Join(root, "nested", "index.js")
+			if err := os.Chmod(entry, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			job := workflowJob(t, root)
+			lock := plan.ActionLock{ID: "lock", Source: kind, Path: "nested"}
+			if kind == "workspace" {
+				lock.SourceDigest = digestTree(t, filepath.Join(root, "nested"))
+				lock.ExecutablePaths = []string{"index.js"}
+			} else {
+				lock.Repository, lock.Commit = "owner/repo", strings.Repeat("a", 40)
+				lock.SourceDigest = digestTree(t, root)
+				lock.ExecutablePaths = []string{"nested/index.js"}
+				job.RequiredCapabilities = []string{"network"}
+			}
+			job.Actions = []plan.ActionLock{lock}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: root, SourceDigest: lock.SourceDigest}}
+			resolver := testActionLockResolver(t, job, root, materializer)
+			if _, err := resolver.resolve(t.Context(), plan.ActionSelector{Lock: lock.ID}); err != nil {
+				t.Fatal(err)
+			}
+			if materializer.resolved.ExecutablePaths != nil {
+				t.Fatal("Unix runtime supplied mode overrides to materializer")
+			}
+			if err := os.Chmod(entry, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := resolver.resolve(t.Context(), plan.ActionSelector{Lock: lock.ID}); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+				t.Fatalf("mode tamper error = %v", err)
+			}
+		})
 	}
 }
 
@@ -127,7 +173,7 @@ func TestActionLockResolverHardensOnlyNonContextMaterializationFailures(t *testi
 			defer cancel()
 			materializer := &fakeActionMaterializer{err: tc.err}
 
-			_, _, err := newActionLockResolver(plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock}}, "", materializer).resolve(ctx, plan.ActionSelector{Lock: lock.ID})
+			_, err := testActionLockResolver(t, plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock}}, "", materializer).resolve(ctx, plan.ActionSelector{Lock: lock.ID})
 			if !errors.Is(err, tc.err) || isHardJobFailure(err) != tc.wantHard {
 				t.Fatalf("resolve() error = %v, want hard = %t", err, tc.wantHard)
 			}
@@ -151,7 +197,7 @@ func TestActionLockResolverAllowsOnlyAuditedCacheCommitsAndEntryPoints(t *testin
 				lock := plan.ActionLock{ID: "cache", Source: "github", Repository: "actions/cache", Commit: commit, Path: path, SourceDigest: digest}
 				job := plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock}}
 				materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: repo, SourceDigest: digest}}
-				if _, resolved, err := newActionLockResolver(job, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: lock.ID}); err != nil || !reflect.DeepEqual(resolved, lock) {
+				if resolved, err := testActionLockResolver(t, job, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: lock.ID}); err != nil || !reflect.DeepEqual(resolved.lock, lock) {
 					t.Fatalf("resolve() = %#v, %v", resolved, err)
 				}
 				if materializer.calls != 1 || materializer.resolved.Commit != commit || materializer.resolved.Reference.Path != path || materializer.resolved.SourceDigest != digest {
@@ -163,11 +209,82 @@ func TestActionLockResolverAllowsOnlyAuditedCacheCommitsAndEntryPoints(t *testin
 
 	lock := plan.ActionLock{ID: "cache", Source: "github", Repository: "actions/cache", Commit: strings.Repeat("0", 40), SourceDigest: digest}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: repo, SourceDigest: digest}}
-	if _, _, err := newActionLockResolver(plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock}}, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: lock.ID}); err == nil {
+	if _, err := testActionLockResolver(t, plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock}}, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: lock.ID}); err == nil {
 		t.Fatal("unproved cache commit resolved")
 	}
 	if materializer.calls != 0 {
 		t.Fatalf("unproved cache commit reached materializer %d times", materializer.calls)
+	}
+}
+
+func TestActionLockResolverBindsProgramAndIntegration(t *testing.T) {
+	repo := canonicalTempDir(t)
+	writeAction(t, repo, "")
+	writeAction(t, repo, "nested")
+	digest := digestTree(t, repo)
+	program := executionprogram.Action{Name: "planned, not source metadata", Runtime: "node24", Main: "index.js"}
+	for _, test := range []struct {
+		name, repository, path, commit string
+		serverURL                      string
+		omitProgram                    bool
+		want                           actionintegration.Descriptor
+		wantError                      bool
+	}{
+		{name: "ordinary nested action", repository: "owner/action", path: "nested"},
+		{name: "cache service", repository: "actions/cache", commit: actionintegration.CacheCommit, want: actionintegration.Descriptor{Service: actionintegration.ServiceCache}},
+		{name: "cache client", repository: "actions/setup-node", want: actionintegration.Descriptor{CacheClientCompatibility: true}},
+		{name: "unrecognized subpath", repository: "actions/setup-node", path: "nested"},
+		{name: "native without program", repository: "actions/checkout", commit: actionintegration.CheckoutV4Commit, omitProgram: true, want: actionintegration.Descriptor{Adapter: actionintegration.AdapterCheckoutExactEventSHA}},
+		{name: "explicit github.com native", serverURL: "https://github.com", repository: "actions/checkout", commit: actionintegration.CheckoutV4Commit, omitProgram: true, want: actionintegration.Descriptor{Adapter: actionintegration.AdapterCheckoutExactEventSHA}},
+		{name: "other host checkout executes program", serverURL: "https://ghe.example", repository: "actions/checkout", commit: actionintegration.CheckoutV4Commit},
+		{name: "other host checkout requires program", serverURL: "https://ghe.example", repository: "actions/checkout", commit: actionintegration.CheckoutV4Commit, omitProgram: true, wantError: true},
+		{name: "other host cache client", serverURL: "https://ghe.example", repository: "actions/setup-node"},
+		{name: "ordinary missing program", repository: "owner/action", omitProgram: true, wantError: true},
+		{name: "known non-native missing program", repository: "actions/setup-node", omitProgram: true, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			commit := test.commit
+			if commit == "" {
+				commit = strings.Repeat("a", 40)
+			}
+			lock := plan.ActionLock{ID: "selected", Source: "github", ServerURL: test.serverURL, Repository: test.repository, Path: test.path, Commit: commit, SourceDigest: digest}
+			job := plan.Job{
+				RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock},
+				Program: &executionprogram.Program{Actions: map[string]executionprogram.Action{
+					"other": {Name: "wrong program", Runtime: "composite"},
+				}},
+			}
+			if !test.omitProgram {
+				job.Program.Actions[lock.ID] = program
+			}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: repo, SourceDigest: digest}}
+			resolved, err := newActionLockResolver(job, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: lock.ID})
+			if materializer.calls != 1 || materializer.resolved.Reference.ServerURL != test.serverURL {
+				t.Fatalf("source host not propagated: calls=%d, reference=%#v", materializer.calls, materializer.resolved.Reference)
+			}
+			if test.wantError {
+				if err == nil || !isHardJobFailure(err) || !strings.Contains(err.Error(), "action program is missing") {
+					t.Fatalf("resolve() error = %v, want hard missing-program failure", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(resolved.lock, lock) || resolved.integration != test.want {
+				t.Fatalf("resolved lock/integration = %#v / %#v, want %#v / %#v", resolved.lock, resolved.integration, lock, test.want)
+			}
+			if resolved.metadata.Path != filepath.Join(repo, test.path) || resolved.metadata.SourceRoot != repo {
+				t.Fatalf("resolved source paths = %q / %q", resolved.metadata.Path, resolved.metadata.SourceRoot)
+			}
+			if test.omitProgram {
+				if resolved.program != nil {
+					t.Fatalf("native action unexpectedly acquired a program: %#v", resolved.program)
+				}
+			} else if !reflect.DeepEqual(resolved.program, &program) || resolved.metadata.Name != program.Name {
+				t.Fatalf("resolved program/metadata = %#v / %#v", resolved.program, resolved.metadata)
+			}
+		})
 	}
 }
 
@@ -193,7 +310,7 @@ func TestActionLockResolverAllowsSymlinkedRepositoryAncestor(t *testing.T) {
 		ActionRoot:     filepath.Join(repository, "nested"),
 		SourceDigest:   digest,
 	}}
-	resolved, _, err := newActionLockResolver(job, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: "lock"})
+	resolved, err := testActionLockResolver(t, job, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: "lock"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,14 +318,14 @@ func TestActionLockResolverAllowsSymlinkedRepositoryAncestor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.SourceRoot != canonicalRepository {
-		t.Fatalf("resolved source root = %q, want %q", resolved.SourceRoot, canonicalRepository)
+	if resolved.metadata.SourceRoot != canonicalRepository {
+		t.Fatalf("resolved source root = %q, want %q", resolved.metadata.SourceRoot, canonicalRepository)
 	}
-	actionRuntime, err := resolved.Runtime()
+	actionRuntime, err := resolved.metadata.Runtime()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := resolved.ValidateEntrypoints(actionRuntime); err != nil {
+	if err := resolved.metadata.ValidateEntrypoints(actionRuntime); err != nil {
 		t.Fatalf("validate entry points through aliased ancestor: %v", err)
 	}
 	linkedRepository := filepath.Join(base, "linked-repository")
@@ -216,7 +333,7 @@ func TestActionLockResolverAllowsSymlinkedRepositoryAncestor(t *testing.T) {
 		t.Fatal(err)
 	}
 	materializer.result.RepositoryRoot = linkedRepository
-	if _, _, err := newActionLockResolver(job, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err == nil || !strings.Contains(err.Error(), "non-symlink directory") {
+	if _, err := testActionLockResolver(t, job, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err == nil || !strings.Contains(err.Error(), "non-symlink directory") {
 		t.Fatalf("resolver accepted symlink repository root: %v", err)
 	}
 }
@@ -259,12 +376,127 @@ func TestActionLockResolverDownloadsExactCommitDirectlyFromCodeload(t *testing.T
 			RequestedRef: "v1", Commit: commit, SourceDigest: digest,
 		}},
 	}
-	resolver := newActionLockResolver(job, "", store)
-	if _, _, err := resolver.resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err != nil {
+	resolver := testActionLockResolver(t, job, "", store)
+	if _, err := resolver.resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err != nil {
 		t.Fatal(err)
 	}
 	if apiRequests != 0 || archiveRequests != 1 || tokenProvisions != 0 {
 		t.Fatalf("API/archive/token-provision requests = %d / %d / %d, want 0 / 1 / 0", apiRequests, archiveRequests, tokenProvisions)
+	}
+}
+
+func TestGHESPublicReusableAndNestedActionsCompileAndRun(t *testing.T) {
+	const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	files := map[string]string{
+		".github/workflows/reuse.yml": "on: workflow_call\njobs:\n  call:\n    uses: ./.github/workflows/nested.yml\n",
+		".github/workflows/nested.yml": `on: workflow_call
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    outputs:
+      marker: ${{ steps.parent.outputs.marker }}
+    steps:
+      - id: parent
+        uses: o/r/parent@v1
+`,
+		"parent/action.yml": `name: Parent
+outputs:
+  marker:
+    value: ${{ steps.child.outputs.marker }}
+runs:
+  using: composite
+  steps:
+    - id: child
+      uses: o/r/child@` + commit + "\n",
+		"child/action.yml": `name: Child
+outputs:
+  marker:
+    value: ${{ steps.write.outputs.marker }}
+runs:
+  using: composite
+  steps:
+    - id: write
+      shell: bash
+      run: echo 'marker=enterprise-source' >> "$GITHUB_OUTPUT"
+`,
+	}
+	var archive bytes.Buffer
+	gz := gzip.NewWriter(&archive)
+	tw := tar.NewWriter(gz)
+	for name, body := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: "root/" + name, Mode: 0o644, Size: int64(len(body))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var archives int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+			t.Error("GHES received credentials")
+		}
+		switch r.URL.Path {
+		case "/api/v3/repos/o/r/git/ref/tags/v1":
+			_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, commit)
+		case "/api/v3/repos/o/r/tarball/" + commit:
+			archives++
+			_, _ = w.Write(archive.Bytes())
+		default:
+			t.Errorf("unexpected GHES request: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	resolver, err := source.NewResolver(server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := source.NewStore(t.TempDir(), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositorySource := compiler.MemoizeRepositorySource(compiler.PublicActionSource{Resolver: resolver, Store: store})
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/caller.yml"
+	workflow := "on: push\njobs:\n  reuse:\n    uses: o/r/.github/workflows/reuse.yml@v1\n"
+	writeFixtureFile(t, workspace, workflowPath, workflow)
+	event := []byte(fmt.Sprintf(`{"provider":"github","server_url":%q,"event":"push","repository":{"owner":"caller","name":"project","default_branch":"main"},"ref":"refs/heads/main","sha":%q,"actor":"test"}`, server.URL, commit))
+	bundle, err := compiler.CompileBundlePlansContext(t.Context(), filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("1", 64), compiler.Options{
+		EventTrust:     compiler.EventUntrusted,
+		Runners:        compiler.RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+		ResolveActions: true, ActionSource: repositorySource, RepositorySource: repositorySource,
+	})
+	if err != nil || len(bundle.Plans) != 1 {
+		t.Fatalf("compile: %v; plans=%d", err, len(bundle.Plans))
+	}
+	job := bundle.Plans[0].Job
+	if len(job.Actions) != 2 {
+		t.Fatalf("action locks = %#v", job.Actions)
+	}
+	for _, lock := range job.Actions {
+		if lock.ServerURL != server.URL || lock.Commit != commit || lock.SourceDigest == "" {
+			t.Fatalf("lost immutable source identity: %#v", lock)
+		}
+	}
+	// Runtime starts with a cold cache, as it does on another hosted agent.
+	runtimeStore, err := source.NewStore(t.TempDir(), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	result, err := (Runner{Actions: runtimeStore, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Outputs["marker"] != "enterprise-source" {
+		t.Fatalf("run: %v; result=%#v\n%s", err, result, logs.String())
+	}
+	if archives != 2 {
+		t.Fatalf("archive downloads = %d, want compile and cold runtime", archives)
 	}
 }
 
@@ -305,26 +537,26 @@ func TestActionLockResolverWorkspaceLazyAndReverified(t *testing.T) {
 	fixture := t.TempDir()
 	writeAction(t, fixture, "")
 	job.Actions = []plan.ActionLock{{ID: "local", Source: "workspace", Path: "actions/local", SourceDigest: digestTree(t, fixture)}}
-	r := newActionLockResolver(job, workspace, nil)
-	if _, _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "local"}); err == nil {
+	r := testActionLockResolver(t, job, workspace, nil)
+	if _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "local"}); err == nil {
 		t.Fatal("missing workspace action succeeded")
 	}
 	writeAction(t, workspace, "actions/local")
-	if _, _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "local"}); err != nil {
+	if _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "local"}); err != nil {
 		t.Fatalf("populated workspace action: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(action, "index.js"), []byte("tampered\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "local"}); err == nil {
+	if _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "local"}); err == nil {
 		t.Fatal("tampered workspace action succeeded")
 	}
 }
 
 func TestActionLockResolverFailsClosed(t *testing.T) {
-	r := newActionLockResolver(plan.Job{Actions: []plan.ActionLock{{ID: "x", Source: "github", Repository: "owner/other", Commit: strings.Repeat("b", 40), SourceDigest: "sha256:" + strings.Repeat("0", 64)}}}, "", nil)
+	r := testActionLockResolver(t, plan.Job{Actions: []plan.ActionLock{{ID: "x", Source: "github", Repository: "owner/other", Commit: strings.Repeat("b", 40), SourceDigest: "sha256:" + strings.Repeat("0", 64)}}}, "", nil)
 	for _, selector := range []plan.ActionSelector{{}, {Lock: "missing"}, {Lock: "x"}} {
-		if _, _, err := r.resolve(t.Context(), selector); err == nil {
+		if _, err := r.resolve(t.Context(), selector); err == nil {
 			t.Fatalf("selector %#v unexpectedly succeeded", selector)
 		}
 	}
@@ -376,10 +608,10 @@ runs:
 		},
 		Target:               plan.Target{StepKey: "gha-v3", Queue: "trusted"},
 		RequiredCapabilities: []string{"network"},
-		Steps: []plan.Step{
+		Program: runtimeTestProgram([]runtimeTestStep{
 			{ID: "checkout", Kind: "uses", Uses: "owner/repo@v1", Action: &plan.ActionSelector{Lock: remoteID}},
 			{ID: "verify", Kind: "run", Shell: "sh", Command: `test "$V3_LOCAL_CHILD" = seen`},
-		},
+		}),
 		Actions: []plan.ActionLock{
 			{
 				ID: remoteID, Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: commit, SourceDigest: remoteDigest,
@@ -390,7 +622,14 @@ runs:
 		RequiresMise: &requiresMise,
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
-	result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, "")
+	attachTestProgram(&job)
+	if err := attachTestActionProgramFromRoot(&job, remoteID, remote, "."); err != nil {
+		t.Fatal(err)
+	}
+	if err := attachTestActionProgramFromRoot(&job, localID, localFixture, "."); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (Runner{Actions: materializer}).runTestJob(t.Context(), job, "")
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}

@@ -1,4 +1,3 @@
-// Command validate-public-workflow-corpus validates the public workflow dataset.
 package main
 
 import (
@@ -34,12 +33,30 @@ const (
 )
 
 var supportedEvents = map[string]bool{
-	"push":              true,
-	"pull_request":      true,
-	"merge_group":       true,
-	"release":           true,
-	"workflow_dispatch": true,
-	"schedule":          true,
+	"push":                        true,
+	"pull_request":                true,
+	"pull_request_review":         true,
+	"pull_request_review_comment": true,
+	"merge_group":                 true,
+	"release":                     true,
+	"deployment":                  true,
+	"deployment_status":           true,
+	"create":                      true,
+	"delete":                      true,
+	"label":                       true,
+	"issues":                      true,
+	"issue_comment":               true,
+	"workflow_dispatch":           true,
+	"schedule":                    true,
+	"fork":                        true,
+	"public":                      true,
+	"gollum":                      true,
+	"page_build":                  true,
+	"watch":                       true,
+	"milestone":                   true,
+	"branch_protection_rule":      true,
+	"discussion":                  true,
+	"discussion_comment":          true,
 }
 
 var supportedWorkflowResults = map[string]bool{

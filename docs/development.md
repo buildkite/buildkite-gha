@@ -2,15 +2,19 @@
 
 ## Set up the development toolchain
 
-The repository pins Go, Node, lint, and release tools with `mise`:
+The repository pins Go, Node, PowerShell, lint, and release tools with `mise`:
 
 ```sh
 mise trust mise.toml
 mise install
 ```
 
+Runtime tests require the pinned `pwsh` executable on `PATH`. Run them through
+`mise` to use the installed PowerShell; missing PowerShell fails rather than
+skips its execution tests. CI uses the same toolchain on Linux and macOS.
+
 `mise.lock` lets CI install tools without looking up releases. After changing a
-tool version, regenerate the lock with `mise` 2026.5.12 or newer:
+tool version, regenerate the lock with `mise` 2026.10.17 or newer:
 
 ```sh
 mise lock --platform linux-x64,linux-x64-musl,linux-arm64,linux-arm64-musl,macos-x64,macos-arm64,windows-x64
@@ -45,6 +49,161 @@ mise run smoke:local
 mise run release:check
 ```
 
+## Configure Bugsnag
+
+GoReleaser embeds `BUGSNAG_API_KEY` when it is present in the build environment.
+Leave it unset for local builds without a key. The release pipeline runs
+`scripts/release-pipeline`, which validates the checked-out main commit before
+retrieving the ingestion key from the Buildkite cluster secret
+named by `RELEASE_BUGSNAG_API_KEY_SECRET`. It supplies `BUGSNAG_API_KEY` to GoReleaser and fails
+before creating a tag if secret retrieval fails or the key is empty.
+
+Create the secret in the release agent's cluster. See
+[release pipeline configuration](#configure-the-release-pipeline)
+for its access policy. Other jobs admitted by that policy can also request it.
+The script reads credentials without shell tracing. GoReleaser's
+generated configuration, binaries, and Go build metadata can contain the key;
+do not treat them as secret storage.
+
+For a direct Go build, supply the same linker variable:
+
+```sh
+go build -trimpath \
+  -ldflags "-X github.com/buildkite/buildkite-gha/internal/telemetry.BugsnagAPIKey=${BUGSNAG_API_KEY}" \
+  -o buildkite-gha ./cmd/buildkite-gha
+```
+
+An embedded key is extractable by anyone who downloads the client. Use only a
+Bugsnag project ingestion key, never an account-management credential. Runtime
+configuration and report contents are documented in
+[Bugsnag error reports](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/cli#disable-telemetry-bugsnag-error-reports).
+
+## Source telemetry contract
+
+Deploy Agent API support for the optional `source_stats` completion property
+before releasing this CLI. Older servers reject unknown properties and would
+drop the entire event. Older clients remain accepted. The existing telemetry
+opt-out and best-effort delivery apply; source observation never changes cache,
+authentication, retry, or command-exit behavior.
+
+`plugin_import` and `run_job` include a source summary even when it is empty.
+The server marks these completions with `source_stats_version=1`, records totals,
+and emits grouped `gha.source_request` and `gha.source_cache` logs with the same
+server-resolved build/job context. Query distinct job/build UUIDs, not log rows,
+for affected-build counts. A successful partial import can still have source
+errors. Missing telemetry is not evidence of zero requests.
+
+Requests distinguish action sources from repository-root sources (including
+reusable workflows), REST operations from codeload archives, and actual HTTP
+attempts from suppressed cooldown lookups. Results distinguish throttles from
+permission denials, missing sources, timeouts, and other failures. Counts,
+consumed response bytes, and duration are summed per group. Duration includes
+body consumption/extraction, not later tree-digest verification. An archive
+attempt can follow redirects; it is not a count of every wire request.
+
+Only numeric rate-limit hints are retained: maximum `Retry-After` (capped at a
+day), minimum known remaining quota (`-1` means unknown), and latest reset
+timestamp (`0` means unknown). These aggregates do not establish that a primary
+or secondary limit was the sole cause of a build failure. Repository names,
+refs, URLs, credentials, response text, and arbitrary headers are excluded.
+
+There are at most 64 request groups per command; omitted attempts increment
+`dropped_requests`. Cache hits cover the existing named resolution caches and
+verified source-tree reuse, not dependency caches. `materializations` counts
+store calls, not unique repositories or runtime action invocations. Git
+fallback traffic and API calls made by executed actions are not observed.
+The opt-in `BUILDKITE_GHA_GITHUB_API_STATS` stderr diagnostic remains REST-only.
+
+## Runner-resolution API contract
+
+The CLI posts to `POST /v3/jobs/:job_id/github-actions/runners` with the
+job's Agent API credentials. It advertises support for opaque agent tags:
+
+```json
+{
+  "supports_agent_tags": true,
+  "supports_macos_agent_tags": true,
+  "requirements": [
+    {"id": "r1", "selector": {"labels": ["ubuntu-latest"]}}
+  ]
+}
+```
+
+The additive target fields are `agents` (a string map) and `tool_cache`
+(an optional boolean). For example:
+
+```json
+{
+  "resolutions": [{
+    "id": "r1",
+    "target": {
+      "queue": "linux-medium",
+      "platform": "linux/amd64",
+      "agents": {"nsc-gha-image": "ubuntu-24.04"},
+      "tool_cache": false
+    }
+  }]
+}
+```
+
+The client accepts either an immutable `image`, non-empty `agents`, or neither;
+it rejects targets with both and reserves `agents.queue` for the separate
+`queue` field. Agent tags are supported on `linux/amd64` and `darwin/arm64`
+and pass through unchanged. See
+[runner tools](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#runtime-behavior-and-limits-runner-tools) for `tool_cache` semantics.
+Deferred stages retain both fields, including explicit `false` values.
+
+Linux selection has no version header or feature flag. Older backends ignore the request
+extension and return images; newer backends retain image-only responses when
+the capability is absent or `false`. Either side can ship first. Native
+selection requires both implementations, including the
+[companion backend change](https://github.com/buildkite/buildkite/pull/34514).
+
+macOS selection also requires `supports_macos_agent_tags: true` and the backend
+organization flag `GitHubActionsMacOSRunnerImages`. Older Linux tag-capable
+clients reject Darwin tags, so `supports_agent_tags` alone is not sufficient.
+Either side can ship first; flag-off requests retain the queue's existing image.
+Eligible Namespace-registered macOS queues receive, for example:
+
+```json
+{
+  "queue": "macos-medium",
+  "platform": "darwin/arm64",
+  "agents": {"nsc-image-selectors": "macos.version=15.x,macos.purpose=githubrunner"},
+  "tool_cache": false
+}
+```
+
+The backend maps `macos-14`, `macos-15`, `macos-26`, and `macos-27` to their
+corresponding major versions, including recognized provider aliases.
+`macos-latest` selects 26, Buildkite's current default major version, not
+GitHub's rolling latest alias. Queue selection is unchanged: versioned queue
+first, then `macos-medium`; the image selector still uses the requested version.
+Other selectors retain the existing queue image. `tool_cache: false` skips
+the legacy cache-directory bootstrap and uses the job-private `RUNNER_TOOL_CACHE`;
+it does not claim or select Namespace's preinstalled tool-cache path.
+The image selector does not guarantee the queue's pinned Xcode configuration.
+Image/tool parity and Hosted execution evidence are tracked in
+[PB-3888](https://linear.app/buildkite/issue/PB-3888).
+
+Explicit client mappings override automatic selection, but the backend validates
+their queue and platform before upload. Backend eligibility and label mapping
+remain server-owned.
+
+## Prerequisite status API contract
+
+Recovery uses public commands supported by agent v3.129. `artifact search
+--allow-empty-results --format '%j\n'` establishes absence only on success
+with zero stdout bytes; recovery also searches `--include-retried-jobs=true`.
+`step get --step <key> --build <build-id> --format json` provides the
+[step attributes](https://buildkite.com/docs/agent/cli/reference/step), including
+the generated `env.BUILDKITE_GHA_PLAN_DIGEST`. This evidence describes a step,
+not a REST job or individual retry. See the
+[result contract](compatibility-contract.md#deferred-jobs-outputs-and-results)
+for accepted states and receipt boundaries, and the
+[bootstrap-failure evidence](compatibility-contract.md#prerequisite-bootstrap-failures)
+for reported observations and their limits.
+
 ## Monitor dependency security
 
 Renovate uses the shared `buildkite/renovate-config` preset and runs every four
@@ -56,8 +215,8 @@ release age and receive the `security` label. Failed Renovate builds notify
 Every pull request runs `govulncheck` as part of the required repository checks.
 The aggregate `buildkite/buildkite-gha` status is required on the default
 branch. A daily 06:00 UTC default-branch build sets `VULNERABILITY_SCAN=1` and
-runs only the vulnerability task. A failure blocks dependency updates or marks
-the scheduled build failed.
+runs the vulnerability task and [runtime regression check](#measure-runtime-regressions).
+A failure blocks dependency updates or marks the scheduled build failed.
 
 The following controls require GitHub or security-product administration. Check
 them when onboarding the repository and after changing app access:
@@ -139,9 +298,10 @@ indeterminate repositories separately and excludes them from the compatibility
 percentage. The tally records workflow result counts; each workflow report
 keeps its diagnostics.
 
-Windows execution is [outside the initial product scope](compatibility.md#outside-the-initial-scope),
-not a compatibility gap on Linux or macOS. Keep Windows workflows in raw corpus
-results so the benchmark still describes the full sample.
+Windows jobs require a [configured Windows runner](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#windows-jobs-configure-a-windows-runner).
+Corpus validation has no Windows preset, so it still rejects unmapped Windows
+labels. Keep those workflows in raw results so the benchmark describes the full
+sample; a rejected mapping is not proof of runtime incompatibility.
 
 An in-scope view must classify each record and account for overlapping
 findings. Do not calculate its denominator by subtracting aggregate diagnostic
@@ -155,7 +315,7 @@ actions, construct plans, and apply hosted policy.
 When linked-webhook and local-diff evidence is the only missing input, the
 result is `context-required`. This does not claim admission. Malformed filters
 and workflows with another incompatibility remain incompatible. See
-[Names and triggers](compatibility.md#names-and-triggers) for the current
+[Names and triggers](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#workflow-names-and-triggers) for the current
 admission rules.
 
 Sample metadata is written to `records/<record-id>/samples/<sample-key>/validate-tally.json`; per-workflow v3 reports are under `reports/<record-id>/samples/<sample-key>/<validator-digest>/`. Full-corpus tallies and reports retain their existing paths.
@@ -165,20 +325,161 @@ action execution. In particular:
 
 - Generated release validation uses one stable `published` event. It does not
   prove every supported release activity.
-- Bare and broader release triggers remain incompatible.
+- Generated issues validation uses `opened`. It does not prove every supported
+  issue activity.
+- Generated issue-comment validation uses `created`. It does not prove every
+  supported comment activity or payload shape.
+- Pipeline Triggers cover all release activities. Native release builds cover three and emit a compatibility warning for the others.
 - The action-resolution snapshot pins action revisions only.
 
 Preserve the snapshot, corpus record, sample seed, and sample size when
 comparing commits.
 
+## Resolve workflow repository roots
+
+The compiler infers a repository root from `.github/workflows/<file>` for
+standalone fixtures. For other top-level locations, such as
+`.buildkite/mirrors/speed-budgets.yml`, it asks Git for the enclosing checkout
+root. Directory symlinks inside a checkout cannot select another repository;
+the canonical workflow path must stay within that root. A symlink alias for
+the checkout itself remains valid. Local actions resolve from the checkout
+root, not the workflow's directory or the process working directory.
+Workflow names and plan paths remain repository-relative.
+
+Root discovery grants no source identity or token authority. Keep the
+[self-repository verification](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#step-syntax-self-repository-actions)
+and workflow-token policy checks separate from filesystem root discovery.
+
+## Path-filter telemetry
+
+`plugin_import` completion telemetry includes `path_filters` for top-level
+workflows reaching push or pull-request admission. It reuses the authenticated
+`/jobs/:id/posthog/events` request, opt-out, timeout, and best-effort delivery.
+Deploy receiver support before distributing this CLI: older receivers reject
+the entire enriched completion with HTTP 400. No compatibility retry is sent.
+
+| Outcome | Stable reasons |
+| --- | --- |
+| `match` | `paths_match` |
+| `nonmatch` | `paths_do_not_match` |
+| `error` | `workflow_parse_error`, `trigger_error`, `path_evidence_unavailable` |
+| `not_evaluated` | `no_path_filters`, `tag_push`, `non_path_filter_exclusion` |
+
+Records contain `workflow_path`, the loaded bytes' SHA-256 `workflow_digest`,
+`event_name`, and `event_origin`. Optional `event_ref`, `head_sha`, and `base_sha`
+describe the effective event and webhook's pinned base. `workflow_sha` appears
+only after the loaded bytes match the head commit's Git blob.
+`comparison_base_sha` records the actual local diff ancestor: the previous push
+commit, new-branch ancestor, or PR merge base. `head_sha` is the comparison head.
+Unavailable identities are omitted, never shortened or replaced. New-branch
+pushes omit the zero `base_sha`. The digest is not a workflow commit SHA, and
+runtime-reported source verification is not server attestation.
+
+The collection is bounded to 100 records and 96 KiB of encoded JSON. Paths and
+refs are control-free UTF-8, at most 1,024 bytes. `path_filters_truncated` always
+accompanies the array, including `false`; omitted records set it to `true`.
+An absent collection means no coverage, not success. Reusable-only workflows
+are excluded. No workflow bodies, event bodies, or changed-file lists are added.
+
+Join structured logs using authenticated build/job identity and verified source
+and comparison identities, not workflow path alone. Keep high-cardinality
+identities out of metrics. Command success can mean error steps uploaded;
+path-filter match does not establish compilation or execution success. Backend
+nonmatches never run and cannot be validated through runtime telemetry.
+
+Run the focused tests to check admission payloads, successful error-step
+uploads, unavailable history, opt-out, rejected delivery, and the combined
+512 KiB request bound:
+
+```sh
+mise exec -- go test ./internal/cli ./internal/telemetry \
+  -run 'TestPluginPathFilterTelemetry|TestPathFilterPayloadBounds' -v
+```
+
 ## Verify runtime behavior
 
-Every normal Buildkite build runs repository checks, Test Engine-split Go tests, native macOS tests, the starter workflow compatibility report, and the shell and public-action smoke workflows against the build's exact CLI source. The public-action proof executes pinned checkout, Node, Go, Python, and Java setup actions. Test Engine records the Linux test results; the repository checks retain the race-enabled suite. GitHub Actions differential oracles run only when manually dispatched.
+Service readiness failures emit `E_SERVICE_READINESS` in `run_job` completion
+telemetry. The error identifies the service and includes Docker's container
+state and latest health-check exit code and output. Evidence collection shares
+a three-second budget with the existing bounded container log tail. Registered
+secrets and service registry passwords are masked; full container configuration
+and health-check commands are not printed. Failed or truncated evidence does
+not replace the readiness error. Cancellation and workflow timeouts retain
+their existing attribution, and cleanup failures retain integrity precedence.
+Completion telemetry keeps the beginning of the masked readiness error within
+its 1,024-byte limit; job logs retain the complete bounded evidence.
+
+The Agent API accepts only allowlisted failure codes. Deploy backend support
+for `E_SERVICE_READINESS` before distributing a CLI that emits it; otherwise,
+the Agent API rejects the entire completion event with HTTP 400. The allowlist
+lives in
+[`GitHubActions::TelemetryRecorder`](https://github.com/buildkite/buildkite/blob/main/app/models/github_actions/telemetry_recorder.rb).
+
+Service `options` already forwards Docker health flags, including
+`--health-interval`, `--health-timeout`, `--health-retries`, and
+`--health-start-period`. Docker controls health-check timing; the runtime polls
+with a two-to-32-second backoff until readiness fails, succeeds, or the job is
+cancelled or times out. See the
+[container compatibility reference](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility)
+for supported workflow configuration.
+
+The compiler writes a normalized execution program into every v2 job plan.
+The runtime rejects plans without that program and executes its typed sites;
+it does not reconstruct expressions from projected plan fields or action
+metadata. Compiler versions identify the producer; they need not match the
+runtime release. Plans still bind an exact runtime executable digest and must
+pass schema, program, capability, and execution-target validation. Ship runtime
+support before producers emit new program features; the v2 label alone does not
+guarantee compatibility across releases.
+The program's positional walker defines each expression site's profile, result
+type, provenance, and authority purpose. Site objects serialize only source
+text and diagnostic location; decoders derive their semantics from position.
+See [Expression authority architecture](expression-authority.md) for the design
+rationale, security invariants, and remaining design work.
+
+Every normal Buildkite build runs repository checks, Test Engine-split Go tests, native macOS tests, the starter workflow compatibility report, and the shell, public-action, and [composite hashFiles](../.github/workflows/composite-hash-files.yml) smoke workflows against the build's exact CLI source. The public-action proof executes pinned checkout, Node, Go, Python, and Java setup actions. The composite hashFiles importer supplies a dispatch snapshot pinned to the build commit, so the manual workflow also executes in Buildkite CI. Test Engine records the Linux test results; the repository checks retain the race-enabled suite. GitHub Actions differential oracles run only when manually dispatched.
+
+Workflow commands and managed Node's mise install and lookup commands share
+runtime process-tree supervision. On Windows, the runtime assigns each suspended
+process to a kill-on-close Job Object before resuming it. Cancellation terminates
+the object; parent exit closes it before output draining completes. Tool output
+is captured without interpreting workflow commands. Keep new installer processes
+under this supervision: the agent's enclosing Job Object and hosted VM teardown
+do not replace cancellation within a running workflow.
+
+The [Windows process proof](../.buildkite/windows-process-proof.yml) cross-builds
+the runtime tests on `linux-small` and runs them on the lab's hosted
+`windows-medium` queue. It checks cancellation, parent exit, inherited output
+pipes, raw tool output, and native and batch-wrapped commands before VM teardown.
+Run it against a pushed commit:
+
+```sh
+bk build create --pipeline sj26-testier/buildkite-gha-windows-process \
+  --branch "$(git branch --show-current)" --commit "$(git rev-parse HEAD)" --yes
+```
+
+The **Windows runtime** GitHub Actions workflow checks cache credential lifecycle
+isolation and local GNU tar round trips with zstd and gzip. It poisons tool
+environment variables and places decoy executables in the working directory.
+The tests use the image's installed zstd without copying it into Program Files.
+These checks do not prove Buildkite cache-service persistence or cross-OS restores.
+
+Before a Windows hosted cache proof, verify the [cache tool installation
+paths](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#actions-cache-action), record GNU tar and zstd versions, and run
+`TestWindowsCacheArchiveTools` with `BUILDKITE_GHA_TEST_NODE24` set to an absolute
+Node 24 executable. Then use a unique key in a root `actions/cache` producer:
+assert a miss, write known file contents, and confirm post-save completes. In a
+separate clean Windows job, assert an exact restore hit and compare the restored
+contents. Repeat with `actions/cache/save` and `actions/cache/restore`. A passing
+compile or job without these assertions is not a cache round-trip proof.
 
 The **Expression differential oracle** records hosted GitHub expression results
-for the conformance fixtures in `internal/expression/conformance_test.go`. Run it
-manually when expression semantics change; it is not part of the local check
-gate.
+for the conformance fixtures in `internal/expression/conformance_test.go`. It
+also checks that reusable workflow input values containing `${{` reach `run`,
+`env`, `with`, and secret selectors as data through one and two `workflow_call`
+levels. Run it manually when expression semantics change; it is not part of the
+local check gate. Dispatch a branch with
+`gh workflow run expression-oracle.yml --ref <branch>`.
 
 Run the complete hosted smoke suite for a pushed commit with:
 
@@ -192,6 +493,15 @@ bk build create --pipeline buildkite/buildkite-gha \
 
 This suite covers shell jobs, concurrent steps, public and Docker actions, container runtime behavior, summaries, annotations, artifact upload, and artifact roundtrip. Use `COMPATIBILITY_PROOF=<target>` with `COMPATIBILITY_PROOF_COMMIT=<commit>` only when diagnosing one target. The available target names are in [`.buildkite/pipeline.yml`](../.buildkite/pipeline.yml).
 
+Use `COMPATIBILITY_PROOF=scheduling` to probe output-derived matrix concurrency
+and parallel limits. Check job start and finish times: the group consumers must
+not overlap, the parallel consumers must run at most two at a time, and each
+publish job must follow all its consumers. A hosted replay probe needs a failed
+deferred upload step: generated steps do not enable
+[`permit_on_passed`](https://buildkite.com/docs/pipelines/configure/retry#retry-attributes-manual-retry-attributes),
+so Buildkite rejects retries of passed steps. A successful initial run does not
+verify replay against the hosted scheduler's attributes.
+
 Some Buildkite APIs are advisory, so a passing job does not prove that the result was persisted. Check those results independently after the build:
 
 ```sh
@@ -200,6 +510,75 @@ scripts/verify-workflow-annotations <build-number> <commit>
 scripts/verify-upload-artifact <build-number> <commit>
 scripts/verify-artifact-roundtrip <build-number> <commit>
 ```
+
+## Measure runtime regressions
+
+The **Runtime regression check** runs on main builds, tagged release builds,
+and the existing daily scheduled scan. It gates release publication rather than
+detecting a slowdown after shipping. Pull requests run fixture correctness and
+comparison-policy tests, without a timing gate. Set `RUNTIME_BENCHMARK=1` on a
+branch build to run the full comparison before merging.
+
+Run locally on Linux with Python 3 and the mise toolchain:
+
+```sh
+mise run test:runtime-benchmark
+mise exec -- scripts/benchmark-runtime --output /tmp/runtime-comparison
+```
+
+The output directory must not exist. Avoid other CPU-heavy work during a run.
+The script builds the candidate working tree and the fixed source baseline in
+[`scripts/benchmark-runtime`](../scripts/benchmark-runtime), using identical
+benchmark code, Go, Node 24, build flags, and `GOMAXPROCS=2`. The initial
+baseline is the main revision before this check was added. It does not move
+automatically, so a series of small slowdowns cannot silently reset the budget.
+
+The [workloads](../testdata/runtime-benchmark/runtime_test.go) call production
+`Runner.RunJob` with real compiled plans, processes, and files:
+
+| Case | Work per job | Correctness checks |
+| --- | --- | --- |
+| Shell | 12 chained Bash steps | Chained outputs and final environment match expected values. |
+| Composite | 12 local actions, each with two Bash steps | Action inputs, nested outputs, and environment reach the final job output. |
+| JavaScript | 12 local Node 24 actions with pre, main, and post scripts | All lifecycle phases run; main state reaches post; outputs propagate and secrets are masked. |
+
+Timing includes runtime preparation, step execution, and cleanup. Compilation,
+binary builds, fixture creation, and assertions are outside the timer. Tools are
+already installed; two warm-up pairs per case warm filesystem caches. The script
+then measures 12 baseline/candidate pairs, alternating which runs first. Each
+sample starts a fresh benchmark process and workspace on the same host.
+Shell and composite samples average 20 complete jobs to reduce interruption
+noise in these short workloads; JavaScript samples run one longer job. Results
+and budgets are always per job, not per batch. Each job gets a fresh runner and
+runtime-managed temporary files; jobs within a batch reuse the fixture workspace.
+
+The initial budget requires **both >20% and >25 ms added per job in at least
+11 of 12 pairs** to report a regression. Passing requires at least **11 of 12
+pairs within budget**; 2–10 over-budget pairs are **inconclusive**. This applies
+the same consistency requirement to both outcomes and tolerates one outlier.
+Each pair must exceed both limits to count as over budget. Median absolute
+deviation (MAD) remains diagnostic: shared host drift can increase both sides'
+timings without changing their paired budget decisions. These are controlled
+runtime-overhead budgets, not customer latency targets or a claimed statistical
+confidence interval. Small absolute changes below 25 ms are not gated.
+
+Exit codes are zero for pass, one for regression, and two for inconclusive or
+execution/setup failure. Both nonzero outcomes block release publication. Inspect
+the build annotation and artifacts before manually rerunning an inconclusive
+result; do not retry until green or increase a budget to hide a failure.
+Artifacts retain raw nanosecond pairs, warm-up and sample logs, summary Markdown,
+the exact harness, binary hashes, source revisions, tool versions, and host details.
+Download evidence needed for long-term comparisons before Buildkite's artifact
+retention expires. The Pipelines team owns investigation and baseline changes.
+
+Advance the baseline only in a reviewed PR with the old comparison, the accepted
+performance change, and a new unchanged control. If an API change prevents the
+baseline harness from building, the check fails explicitly; preserve the old
+evidence before changing the harness or baseline. Tool upgrades apply to both
+versions, so this does not isolate toolchain regressions or certify a released
+archive. It also excludes CLI startup, imports, scheduling, network downloads,
+Agent API publication, Docker/services, and native macOS/Windows performance.
+Cross-offering whole-job comparisons remain separate from this check.
 
 ## Test released and native entry points
 
@@ -214,6 +593,15 @@ bk build create --pipeline buildkite/buildkite-gha \
 
 Add `--env DEMO_CACHE=1` to include the optional cache producer and consumer workflow. Every workflow must use a public CLI release; the demo must not fall back to a source build or local binary.
 
+Plugin binary-acquisition tests in `internal/cli/plugin_runtime_test.go` use local
+HTTPS servers. They check optional URL-fragment checksums, platform validation,
+missing-platform failures, and deferred runtime availability. The mixed-platform
+plugin test checks release downloads, legacy source-build runtime paths, and binary
+URLs through the same importer-to-job artifact contract. Older plugin metadata
+and runtime paths remain supported while producers migrate to binary URLs.
+The plugin repository tests the importer's download and execution boundary;
+these CLI tests do not replace that coverage.
+
 For a side-by-side GitHub Actions and Buildkite UX check, run:
 
 ```sh
@@ -224,23 +612,126 @@ scripts/compare-example advanced
 
 The branch must be pushed, and its remote commit must match `HEAD`. Use `--github-only` or `--buildkite-only` to launch one side.
 
+The Buildkite example launchers use `.buildkite/upload-examples.sh` to build and
+invoke the checked-out CLI directly. Compilation stays in this source-testing
+pipeline; the GitHub Actions plugin does not build it.
+
 ## Publish a release
 
-From a clean, up-to-date `main`, run:
+Configured main CI builds automatically trigger the release pipeline after all
+gates pass, including native macOS tests, runtime proofs, and the runtime
+regression gate. A declarative asynchronous trigger passes the exact source SHA.
+PR, tag, and specialized test builds do not trigger releases.
+
+The release pipeline trusts CI and branch protection. It does not run tests,
+poll checks (including the separate Windows workflow), trigger CI, or download CI
+artifacts. One serialized job chooses the version, creates the tag, and runs
+GoReleaser to build and publish versioned binaries. Release builds have no cache
+volume and do not use artifacts or caches from branch builds.
+
+To start a standalone release, set `RELEASE_PIPELINE` to its organization and
+pipeline slug. With the [Buildkite CLI](https://buildkite.com/docs/platform/cli)
+authenticated, release the current remote main commit:
 
 ```sh
-mise run release -- <next-v0-tag>
+mise run release
 ```
 
-Before running the task, inspect every commit and the complete diff since the latest release. Choose a minor bump for additive compatibility, features, or breaking changes. Because the project is pre-1.0, breaking changes increment the minor version rather than creating v1. Choose a patch bump only for fixes and internal-only changes. Do not derive the bump from commit-message prefixes.
+Starting this build authorizes publication; there is no separate approval step.
+Local changes and local tags are not released. Standalone runs also trust main;
+the operator must choose a commit whose required checks have passed.
 
-The task runs `check`, fetches `origin/main` and tags, and accepts only the next pre-1.0 patch or minor tag. It then requires you to type the exact proposed tag before creating and pushing it. Stop without running the task when the changes do not warrant a release or the correct bump is ambiguous.
+The job passes every commit's metadata and the complete aggregate diff since
+the highest reachable stable pre-1.0 tag to the
+[Buildkite Anthropic model provider](https://buildkite.com/docs/apis/model-providers/anthropic).
+GitHub's merged-PR associations supply titles and canonical links, including for
+rebase merges whose commit subjects contain no PR number. The same PR set drives
+release comments.
+It authenticates with the job token. The model
+can return only a bump decision, rationale, and release notes; it cannot run
+tools. The request uses schema-constrained JSON; the script also validates the
+response and saves it as an artifact. Inputs are not truncated. Provider errors
+or incomplete responses fail the build rather than releasing from partial evidence.
 
-The tag build reruns checks and publishes the GitHub release, paired Linux/amd64 and Darwin/arm64 archives, and checksum file. Published assets are immutable; a failed publication must not replace an existing archive for the same stable tag.
+The version policy is minor for additive compatibility, features, or breaking
+changes, and patch for fixes and internal-only changes. The script computes the
+next version; the model cannot supply an arbitrary tag. No changes, or a decision
+that no release is warranted, finish without publication. Ambiguity fails for
+human review. A queued run keeps its source SHA if main advances; a commit already
+covered by a newer release is skipped. Existing tags and incomplete releases are
+never overwritten.
 
-`GHA_GITHUB_RELEASE_TOKEN` must be a fine-grained, repository-scoped token with Contents read and write access. Store it as a Buildkite secret restricted to this release pipeline and webhook-created `v*` tag builds, with no access from ordinary branch or pull request builds. The publisher verifies the remote tag, checkout, and Buildkite commit before requesting the secret.
+GoReleaser retains the exact drafted notes and publishes the Linux/amd64,
+Linux/arm64, Darwin/arm64, and Windows/amd64 archives plus `checksums.txt`.
+Final archives are built once the model chooses the version, since each binary
+embeds that version. Packaging checks belong to CI's `mise run release:check`,
+not the publisher. After GoReleaser succeeds, the job posts deduplicated comments on
+PRs merged into main within the release delta and queues a Buildkite Slack
+notification to the configured destination if the build passes. The message
+contains the version, a single-line highlight capped at 180 characters, and a
+release link. It uses Buildkite's Slack bot, not a personal identity or token.
+Dry runs, no-release decisions, and failed builds send no release notification.
+The build retains the proposal, exact notes, and publication result as artifacts.
+
+To exercise the model call without publishing or notifying
+anyone, run:
+
+```sh
+RELEASE_DRY_RUN=1 mise run release
+```
+
+The launcher forwards this setting to the build for the current remote main SHA.
+Dry runs still create Buildkite annotations and artifacts.
+
+### Configure the release pipeline
+
+Keep deployment-specific values in private pipeline configuration, not this
+repository. Run `buildkite-agent pipeline upload .buildkite/release.yml` in the release
+pipeline's bootstrap job with these variables:
+
+| Variable | Value |
+| --- | --- |
+| `RELEASE_PIPELINE` | Release pipeline in `organization/pipeline` form; also required by the local launcher |
+| `RELEASE_QUEUE` | Linux amd64 agent queue |
+| `RELEASE_MODEL` | Model identifier available through the Anthropic provider |
+| `RELEASE_APP_ID`, `RELEASE_APP_INSTALLATION_ID` | GitHub App and repository installation identifiers |
+| `RELEASE_APP_PRIVATE_KEY_SECRET` | Buildkite Secret name holding the App private key |
+| `RELEASE_BUGSNAG_API_KEY_SECRET` | Buildkite Secret name holding the ingestion key |
+| `RELEASE_SLACK_CHANNEL` | Destination supported by the configured Buildkite Slack integration |
+
+In the main CI bootstrap, set `RELEASE_PIPELINE_SLUG` to the release pipeline slug to
+enable the automatic handoff. It defaults to publication; set `RELEASE_DRY_RUN=1`
+in that private configuration while validating the handoff. CI does not need
+the release pipeline's GitHub App credential, model settings, or Slack destination.
+
+The pipeline requires Python 3, OpenSSL, Git, and the Buildkite agent; mise
+supplies Go and GoReleaser. Permit main CI to trigger release, not the reverse. Restrict release
+execution to main, disable its direct webhook/PR/fork/tag triggers, and disable
+its commit-status publishing so release results do not replace CI results.
+Required tests must be enforced by CI or branch protection, not release jobs.
+
+Limit the GitHub App installation to this repository, with Contents and Pull
+requests write access. Installation
+tokens are repository-scoped, registered for log redaction, and revoked on exit.
+Store credential values only in secret storage. Restrict secret access and
+pipeline editing to trusted release jobs and maintainers; script guards alone
+do not isolate credentials.
+
+Before enabling publication, run an automatic dry run and verify the handoff, proposal,
+and provider access. Confirm Slack delivery after the first verified release.
+
+### Recover a failed release
+
+Never delete, move, recreate, or reuse an existing tag, or replace published
+assets. A failed API request can have succeeded remotely. Inspect the tag,
+draft, assets, and build artifacts before taking action; do not blindly retry.
+The script does not automatically resume a partial release. An existing draft
+or tag blocks publication, including after a failed GoReleaser run. If only
+PR comments or notifications failed, verify the existing release
+and complete missing comments without republishing. Obtain separate approval
+for any recovery that changes remote state.
 
 ## Related documents
 
-- [Compatibility reference](compatibility.md)
-- [Security model](security.md)
+- [Compatibility reference](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility)
+- [Security model](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/security)

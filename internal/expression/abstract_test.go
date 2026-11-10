@@ -110,6 +110,9 @@ func TestActionInputDefaultAuthorityPreservesRuntimeErrorFallback(t *testing.T) 
 func TestAbstractActionInputDefaultIsSoundAsValuesBecomeKnown(t *testing.T) {
 	for _, source := range []string{
 		"matrix.enabled && github.token || ''",
+		"matrix.enabled && false && github.token || ''",
+		"case(matrix.enabled, false, '') && github.token || ''",
+		"case(matrix.enabled && false, github.token, '')",
 		"case(matrix.enabled, '', true, github.token, '')",
 		"format(case(matrix.enabled, '{0}', 'constant'), github.token)",
 		"contains(case(matrix.enabled, fromJSON('[]'), fromJSON('[1]')), github.token)",

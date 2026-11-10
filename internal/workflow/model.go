@@ -1,4 +1,3 @@
-// Package workflow owns the parsed workflow model used by the compiler.
 package workflow
 
 import "github.com/buildkite/buildkite-gha/internal/expression"
@@ -18,6 +17,7 @@ type Span struct {
 // Workflow is the actionlint-independent syntax needed by the workflow compiler.
 type Workflow struct {
 	Name                    string                `json:"name,omitempty"`
+	CacheMode               string                `json:"cache_mode,omitempty"`
 	RunName                 string                `json:"run_name,omitempty"`
 	RunNameSpan             Span                  `json:"-"`
 	Triggers                []Trigger             `json:"triggers,omitempty"`
@@ -53,6 +53,7 @@ func (w Workflow) ReusableOnly() bool {
 type Trigger struct {
 	Event          string           `json:"event"`
 	Position       Position         `json:"position"`
+	FilterSpans    map[string]Span  `json:"-"`
 	Types          []string         `json:"types,omitempty"`
 	Branches       []string         `json:"branches,omitempty"`
 	BranchesIgnore []string         `json:"branches_ignore,omitempty"`
@@ -124,38 +125,46 @@ type CallSecret struct {
 
 // Job is one logical GitHub Actions job.
 type Job struct {
-	ID                      string                 `json:"id"`
-	Name                    string                 `json:"name,omitempty"`
-	Needs                   []string               `json:"needs,omitempty"`
-	RunsOn                  []string               `json:"runs_on,omitempty"`
-	RunsOnExpr              *expression.Expression `json:"runs_on_expression,omitempty"`
-	Matrix                  *Matrix                `json:"matrix,omitempty"`
-	FailFast                *bool                  `json:"fail_fast,omitempty"`
-	MaxParallel             *int                   `json:"max_parallel,omitempty"`
-	Concurrency             *Concurrency           `json:"concurrency,omitempty"`
-	Reusable                *ReusableWorkflowCall  `json:"reusable_workflow,omitempty"`
-	Env                     map[string]string      `json:"env,omitempty"`
-	Permissions             *Permissions           `json:"permissions,omitempty"`
-	If                      string                 `json:"if,omitempty"`
-	IfSpan                  Span                   `json:"-"`
-	ContinueOnError         bool                   `json:"continue_on_error,omitempty"`
-	TimeoutMinutes          float64                `json:"timeout_minutes,omitempty"`
-	Outputs                 map[string]string      `json:"outputs,omitempty"`
-	Container               *Container             `json:"container,omitempty"`
-	Services                []Service              `json:"services,omitempty"`
-	ServicesExpression      string                 `json:"services_expression,omitempty"`
-	DefaultShell            string                 `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string                 `json:"default_working_directory,omitempty"`
-	Steps                   []Step                 `json:"steps"`
-	Span                    Span                   `json:"span"`
+	CacheMode                 string                 `json:"cache_mode,omitempty"`
+	ID                        string                 `json:"id"`
+	Name                      string                 `json:"name,omitempty"`
+	Needs                     []string               `json:"needs,omitempty"`
+	RunsOn                    []string               `json:"runs_on,omitempty"`
+	RunsOnExpr                *expression.Expression `json:"runs_on_expression,omitempty"`
+	Matrix                    *Matrix                `json:"matrix,omitempty"`
+	FailFast                  *bool                  `json:"fail_fast,omitempty"`
+	MaxParallel               *int                   `json:"max_parallel,omitempty"`
+	MaxParallelExpression     *expression.Expression `json:"max_parallel_expression,omitempty"`
+	Concurrency               *Concurrency           `json:"concurrency,omitempty"`
+	Environment               string                 `json:"environment,omitempty"`
+	Reusable                  *ReusableWorkflowCall  `json:"reusable_workflow,omitempty"`
+	Env                       map[string]string      `json:"env,omitempty"`
+	Permissions               *Permissions           `json:"permissions,omitempty"`
+	If                        string                 `json:"if,omitempty"`
+	IfSpan                    Span                   `json:"-"`
+	ContinueOnError           bool                   `json:"continue_on_error,omitempty"`
+	ContinueOnErrorExpression string                 `json:"continue_on_error_expression,omitempty"`
+	ContinueOnErrorSpan       Span                   `json:"-"`
+	TimeoutMinutes            float64                `json:"timeout_minutes,omitempty"`
+	TimeoutMinutesExpression  *expression.Expression `json:"timeout_minutes_expression,omitempty"`
+	Outputs                   map[string]string      `json:"outputs,omitempty"`
+	Container                 *Container             `json:"container,omitempty"`
+	Services                  []Service              `json:"services,omitempty"`
+	ServicesExpression        string                 `json:"services_expression,omitempty"`
+	DefaultShell              string                 `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory   string                 `json:"default_working_directory,omitempty"`
+	Steps                     []Step                 `json:"steps"`
+	Span                      Span                   `json:"span"`
 }
 
 // Container is the statically owned subset of a GitHub Actions container.
 type Container struct {
-	Image string            `json:"image"`
-	Env   map[string]string `json:"env,omitempty"`
-	Ports []string          `json:"ports,omitempty"`
-	Span  Span              `json:"span"`
+	Image   string            `json:"image"`
+	Env     map[string]string `json:"env,omitempty"`
+	Ports   []string          `json:"ports,omitempty"`
+	Volumes []string          `json:"volumes,omitempty"`
+	Options string            `json:"options,omitempty"`
+	Span    Span              `json:"span"`
 }
 
 // Service is a named service container. Services retain workflow declaration

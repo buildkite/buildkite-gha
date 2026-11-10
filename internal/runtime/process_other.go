@@ -1,4 +1,4 @@
-//go:build !linux && !darwin
+//go:build !linux && !darwin && !windows
 
 package runtime
 
@@ -9,7 +9,11 @@ import (
 	"time"
 )
 
+func prepareProcessCommand(_ *exec.Cmd) error { return nil }
+
 func configureProcessGroup(_ *exec.Cmd) {}
+func processStarted(_ *exec.Cmd) error  { return nil }
+func processFinished(_ int)             {}
 
 func terminateProcessGroup(ctx context.Context, pid int, _, _ time.Duration, finished <-chan struct{}) {
 	select {

@@ -1,9 +1,9 @@
-// Package telemetry emits bounded, best-effort buildkite-gha product events.
 package telemetry
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,18 +15,27 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
 	EventCommandCompleted = "pipelines:buildkite_gha:command_completed"
 
-	defaultTimeout        = 1500 * time.Millisecond
-	responseDrainLimit    = 32 << 10
-	maxClientVersionBytes = 64
-	maxErrorMessageBytes  = 1024
-	maxDurationMS         = int64(1<<31 - 1)
-	maxDiagnostics        = 20
+	defaultTimeout         = 1500 * time.Millisecond
+	responseDrainLimit     = 32 << 10
+	maxClientVersionBytes  = 64
+	maxBlockerDetailBytes  = 1024
+	maxDiagnosticTextBytes = 1024
+	maxDurationMS          = int64(1<<31 - 1)
+	maxDiagnostics         = 20
+	MaxPathFilters         = 100
+	maxPathFiltersBytes    = 96 << 10
+
+	// MaxErrorMessageBytes bounds the error message sent on unsuccessful
+	// commands. Over-long messages keep their final bytes, where a failing
+	// command's last error output lands.
+	MaxErrorMessageBytes = 1024
 )
 
 type Command string
@@ -77,7 +86,16 @@ const (
 	FailureCodePlanConstruction   FailureCode = "E_PLAN_CONSTRUCTION"
 	FailureCodePipelineGeneration FailureCode = "E_PIPELINE_GENERATION"
 	FailureCodeEnvironment        FailureCode = "E_ENVIRONMENT"
+	FailureCodeVariableResolution FailureCode = "E_VARIABLE_RESOLUTION"
 	FailureCodeProfile            FailureCode = "E_PROFILE"
+	FailureCodeStepProcessExit    FailureCode = "E_STEP_PROCESS_EXIT"
+	FailureCodeUnsupportedFeature FailureCode = "E_UNSUPPORTED_FEATURE"
+	FailureCodeRuntimeIntegrity   FailureCode = "E_RUNTIME_INTEGRITY"
+	FailureCodeSecretUnavailable  FailureCode = "E_SECRET_UNAVAILABLE"
+	FailureCodeWorkflowToken      FailureCode = "E_WORKFLOW_TOKEN_UNAVAILABLE"
+	FailureCodeOIDCToken          FailureCode = "E_OIDC_TOKEN_UNAVAILABLE"
+	FailureCodeCacheCredential    FailureCode = "E_CACHE_CREDENTIAL_UNAVAILABLE"
+	FailureCodeServiceReadiness   FailureCode = "E_SERVICE_READINESS"
 )
 
 type Severity string
@@ -88,8 +106,13 @@ const (
 )
 
 type Diagnostic struct {
-	Code     string   `json:"code"`
-	Severity Severity `json:"severity"`
+	Code             string   `json:"code"`
+	Severity         Severity `json:"severity"`
+	Blocker          string   `json:"blocker,omitempty"`
+	BlockerDetail    string   `json:"blocker_detail,omitempty"`
+	Message          string   `json:"message,omitempty"`
+	MessageTruncated bool     `json:"message_truncated,omitempty"`
+	WorkflowPath     string   `json:"workflow_path,omitempty"`
 }
 
 type Details struct {
@@ -98,18 +121,46 @@ type Details struct {
 	ErrorMessage          string
 	ErrorMessageTruncated bool
 	Diagnostics           []Diagnostic
+	Blocker               string
+	BlockerDetail         string
+	AgentAPIHTTPStatus    int
+	PathFilters           []PathFilter
+	PathFiltersTruncated  bool
+	SourceStats           *source.SourceStatsSummary
+}
+
+// PathFilter describes admission, not compilation or command success. Commit
+// identities are omitted when unavailable; WorkflowDigest hashes loaded bytes.
+type PathFilter struct {
+	WorkflowPath      string `json:"workflow_path"`
+	WorkflowDigest    string `json:"workflow_digest"`
+	EventName         string `json:"event_name"`
+	EventOrigin       string `json:"event_origin"`
+	Outcome           string `json:"outcome"`
+	Reason            string `json:"reason"`
+	EventRef          string `json:"event_ref,omitempty"`
+	HeadSHA           string `json:"head_sha,omitempty"`
+	BaseSHA           string `json:"base_sha,omitempty"`
+	WorkflowSHA       string `json:"workflow_sha,omitempty"`
+	ComparisonBaseSHA string `json:"comparison_base_sha,omitempty"`
 }
 
 type Properties struct {
-	Command               Command      `json:"command"`
-	Outcome               Outcome      `json:"outcome"`
-	ClientVersion         string       `json:"client_version"`
-	DurationMS            int64        `json:"duration_ms,omitempty"`
-	FailurePhase          FailurePhase `json:"failure_phase,omitempty"`
-	FailureCode           FailureCode  `json:"failure_code,omitempty"`
-	ErrorMessage          string       `json:"error_message,omitempty"`
-	ErrorMessageTruncated bool         `json:"error_message_truncated,omitempty"`
-	Diagnostics           []Diagnostic `json:"diagnostics,omitempty"`
+	Command               Command                    `json:"command"`
+	Outcome               Outcome                    `json:"outcome"`
+	ClientVersion         string                     `json:"client_version"`
+	DurationMS            int64                      `json:"duration_ms,omitempty"`
+	FailurePhase          FailurePhase               `json:"failure_phase,omitempty"`
+	FailureCode           FailureCode                `json:"failure_code,omitempty"`
+	ErrorMessage          string                     `json:"error_message,omitempty"`
+	ErrorMessageTruncated bool                       `json:"error_message_truncated,omitempty"`
+	Diagnostics           []Diagnostic               `json:"diagnostics,omitempty"`
+	Blocker               string                     `json:"blocker,omitempty"`
+	BlockerDetail         string                     `json:"blocker_detail,omitempty"`
+	AgentAPIHTTPStatus    int                        `json:"agent_api_http_status,omitempty"`
+	PathFilters           *[]PathFilter              `json:"path_filters,omitempty"`
+	PathFiltersTruncated  *bool                      `json:"path_filters_truncated,omitempty"`
+	SourceStats           *source.SourceStatsSummary `json:"source_stats,omitempty"`
 }
 
 type Config struct {
@@ -190,7 +241,24 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	if details.FailureCode != "" && !validFailureCode(details.FailureCode) {
 		return fmt.Errorf("invalid telemetry failure code")
 	}
-	diagnostics, err := boundedDiagnostics(details.Diagnostics)
+	if details.AgentAPIHTTPStatus != 0 && (details.AgentAPIHTTPStatus < 100 || details.AgentAPIHTTPStatus > 599) {
+		return fmt.Errorf("invalid telemetry Agent API HTTP status")
+	}
+	diagnostics, err := BoundedDiagnostics(details.Diagnostics)
+	if err != nil {
+		return err
+	}
+	var pathFilters *[]PathFilter
+	var pathFiltersTruncated *bool
+	if details.PathFilters != nil || details.PathFiltersTruncated {
+		if command != CommandPluginImport {
+			return fmt.Errorf("path filter telemetry requires plugin_import")
+		}
+		bounded, truncated := BoundedPathFilters(details.PathFilters)
+		truncated = truncated || details.PathFiltersTruncated
+		pathFilters, pathFiltersTruncated = &bounded, &truncated
+	}
+	blocker, blockerDetail, err := boundedBlocker(details.Blocker, details.BlockerDetail)
 	if err != nil {
 		return err
 	}
@@ -211,6 +279,9 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 			Command: command, Outcome: outcome, ClientVersion: c.clientVersion, DurationMS: durationMS,
 			FailurePhase: details.FailurePhase, FailureCode: details.FailureCode,
 			ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated, Diagnostics: diagnostics,
+			Blocker: blocker, BlockerDetail: blockerDetail, AgentAPIHTTPStatus: details.AgentAPIHTTPStatus,
+			PathFilters: pathFilters, PathFiltersTruncated: pathFiltersTruncated,
+			SourceStats: details.SourceStats,
 		},
 	})
 	if err != nil {
@@ -237,6 +308,60 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	return nil
 }
 
+// BoundedPathFilters preserves identities exactly or omits the record. The
+// encoded-byte bound leaves room for the existing maximum diagnostics payload.
+func BoundedPathFilters(in []PathFilter) ([]PathFilter, bool) {
+	out := make([]PathFilter, 0, min(len(in), MaxPathFilters))
+	seen := make(map[string]bool)
+	truncated, size := false, 2
+	for _, decision := range in {
+		valid := false
+		switch decision.Outcome {
+		case "match":
+			valid = decision.Reason == "paths_match"
+		case "nonmatch":
+			valid = decision.Reason == "paths_do_not_match"
+		case "error":
+			valid = decision.Reason == "workflow_parse_error" || decision.Reason == "trigger_error" || decision.Reason == "path_evidence_unavailable"
+		case "not_evaluated":
+			valid = decision.Reason == "no_path_filters" || decision.Reason == "tag_push" || decision.Reason == "non_path_filter_exclusion"
+		}
+		valid = valid && (decision.EventName == "push" || decision.EventName == "pull_request") &&
+			(decision.EventOrigin == "buildkite-webhook" || decision.EventOrigin == "buildkite-environment" || decision.EventOrigin == "event-path") &&
+			validTelemetryIdentity(decision.WorkflowPath) && len(decision.WorkflowDigest) == 64 && strings.Trim(decision.WorkflowDigest, "0123456789abcdef") == ""
+		if !valid || seen[decision.WorkflowPath] || len(out) == MaxPathFilters {
+			truncated = true
+			continue
+		}
+		if !validTelemetryIdentity(decision.EventRef) {
+			decision.EventRef = ""
+		}
+		for _, sha := range []*string{&decision.HeadSHA, &decision.BaseSHA, &decision.WorkflowSHA, &decision.ComparisonBaseSHA} {
+			if (len(*sha) != 40 && len(*sha) != 64) || strings.Trim(*sha, "0123456789abcdef") != "" || strings.Trim(*sha, "0") == "" {
+				*sha = ""
+			}
+		}
+		if (decision.Outcome == "match" || decision.Outcome == "nonmatch") &&
+			(decision.HeadSHA == "" || decision.WorkflowSHA == "" || decision.ComparisonBaseSHA == "") {
+			truncated = true
+			continue
+		}
+		encoded, _ := json.Marshal(decision)
+		if size+len(encoded)+1 > maxPathFiltersBytes {
+			truncated = true
+			continue
+		}
+		size += len(encoded) + 1
+		seen[decision.WorkflowPath] = true
+		out = append(out, decision)
+	}
+	return out, truncated
+}
+
+func validTelemetryIdentity(value string) bool {
+	return value != "" && len(value) <= maxDiagnosticTextBytes && utf8.ValidString(value) && !strings.ContainsFunc(value, unicode.IsControl)
+}
+
 func validFailurePhase(phase FailurePhase) bool {
 	switch phase {
 	case FailurePhaseConfiguration, FailurePhaseSourceResolution, FailurePhaseParsing, FailurePhaseEvaluation,
@@ -253,31 +378,83 @@ func validFailureCode(code FailureCode) bool {
 	case FailureCodeUnknown, FailureCodeWorkflowSyntax, FailureCodeEventInvalid, FailureCodeGraphInvalid,
 		FailureCodeMatrixInvalid, FailureCodeExpressionInvalid, FailureCodeActionDiscovery,
 		FailureCodeActionResolution, FailureCodePlanConstruction, FailureCodePipelineGeneration,
-		FailureCodeEnvironment, FailureCodeProfile:
+		FailureCodeEnvironment, FailureCodeVariableResolution, FailureCodeProfile, FailureCodeStepProcessExit,
+		FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable,
+		FailureCodeWorkflowToken, FailureCodeOIDCToken, FailureCodeCacheCredential, FailureCodeServiceReadiness:
 		return true
 	default:
 		return false
 	}
 }
 
-func boundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
-	seen := make(map[string]bool, min(len(in), maxDiagnostics))
+// BoundedDiagnostics normalizes diagnostic text and deduplicates by wire identity
+// before applying the diagnostic count limit. It does not modify in.
+func BoundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
+	seen := make(map[Diagnostic]int, min(len(in), maxDiagnostics))
 	out := make([]Diagnostic, 0, min(len(in), maxDiagnostics))
 	for _, diagnostic := range in {
 		severity, ok := diagnosticSeverity(diagnostic.Code)
 		if !ok || diagnostic.Severity != severity {
 			return nil, fmt.Errorf("invalid telemetry diagnostic")
 		}
-		if seen[diagnostic.Code] {
+		blocker, blockerDetail, err := boundedBlocker(diagnostic.Blocker, diagnostic.BlockerDetail)
+		if err != nil {
+			return nil, err
+		}
+		diagnostic.Blocker, diagnostic.BlockerDetail = blocker, blockerDetail
+		diagnostic.Message = normalizedTelemetryText(diagnostic.Message)
+		if len(diagnostic.Message) > maxDiagnosticTextBytes {
+			end := maxDiagnosticTextBytes
+			for !utf8.RuneStart(diagnostic.Message[end]) {
+				end--
+			}
+			diagnostic.Message = strings.TrimSpace(diagnostic.Message[:end])
+			diagnostic.MessageTruncated = true
+		}
+		if diagnostic.Message == "" {
+			diagnostic.MessageTruncated = false
+		}
+		// A shortened or normalized path could name a different workflow.
+		if len(diagnostic.WorkflowPath) > maxDiagnosticTextBytes || !utf8.ValidString(diagnostic.WorkflowPath) || strings.ContainsFunc(diagnostic.WorkflowPath, unicode.IsControl) {
+			diagnostic.WorkflowPath = ""
+		}
+		identity := diagnostic
+		identity.MessageTruncated = false
+		if index, exists := seen[identity]; exists {
+			out[index].MessageTruncated = out[index].MessageTruncated || diagnostic.MessageTruncated
 			continue
 		}
-		seen[diagnostic.Code] = true
-		out = append(out, diagnostic)
 		if len(out) == maxDiagnostics {
-			break
+			continue
 		}
+		seen[identity] = len(out)
+		out = append(out, diagnostic)
 	}
 	return out, nil
+}
+
+func boundedBlocker(blocker, detail string) (string, string, error) {
+	switch blocker {
+	case "":
+		if detail != "" {
+			return "", "", fmt.Errorf("telemetry blocker detail requires a blocker")
+		}
+		return "", "", nil
+	case "runner_label", "runner_policy", "environment", "shell", "working_directory", "action_ref", "expression", "trigger", "path_filter":
+	default:
+		return "", "", fmt.Errorf("invalid telemetry blocker")
+	}
+	detail = normalizedTelemetryText(detail)
+	if len(detail) > maxBlockerDetailBytes {
+		digest := sha256.Sum256([]byte(detail))
+		suffix := fmt.Sprintf("…#%x", digest[:6])
+		detail = detail[:maxBlockerDetailBytes-len(suffix)]
+		for !utf8.ValidString(detail) {
+			detail = detail[:len(detail)-1]
+		}
+		detail += suffix
+	}
+	return blocker, detail, nil
 }
 
 func diagnosticSeverity(code string) (Severity, bool) {
@@ -285,9 +462,9 @@ func diagnosticSeverity(code string) (Severity, bool) {
 	case string(FailureCodeWorkflowSyntax), string(FailureCodeEventInvalid), string(FailureCodeGraphInvalid),
 		string(FailureCodeMatrixInvalid), string(FailureCodeExpressionInvalid), string(FailureCodeActionDiscovery),
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
-		string(FailureCodeEnvironment), string(FailureCodeProfile):
+		string(FailureCodeEnvironment), string(FailureCodeVariableResolution), string(FailureCodeProfile):
 		return SeverityError, true
-	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED":
+	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT", "W_TRIGGER_EVENT_UNSUPPORTED", "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED":
 		return SeverityWarning, true
 	default:
 		return "", false
@@ -322,18 +499,22 @@ func boundedClientVersion(version string) string {
 	return version
 }
 
-func boundedErrorMessage(message string) (string, bool) {
+func normalizedTelemetryText(message string) string {
 	message = strings.Map(func(character rune) rune {
 		if unicode.IsControl(character) {
 			return ' '
 		}
 		return character
 	}, strings.ToValidUTF8(message, "�"))
-	message = strings.Join(strings.Fields(message), " ")
-	if len(message) <= maxErrorMessageBytes {
+	return strings.Join(strings.Fields(message), " ")
+}
+
+func boundedErrorMessage(message string) (string, bool) {
+	message = normalizedTelemetryText(message)
+	if len(message) <= MaxErrorMessageBytes {
 		return message, false
 	}
-	start := len(message) - maxErrorMessageBytes
+	start := len(message) - MaxErrorMessageBytes
 	for !utf8.RuneStart(message[start]) {
 		start++
 	}

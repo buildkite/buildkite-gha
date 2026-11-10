@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -15,8 +17,13 @@ import (
 type jobGraphExpansionResult struct {
 	instances             []JobInstance
 	candidates            []JobInstance
+	sources               map[string]WorkflowSourceReference
 	runtimeMatrixBoundary bool
-	runtimeMatrices       []RuntimeMatrixDescriptor
+	referencesVars        bool
+	runtimeMatrices       []RuntimeOutputDescriptor
+	continuations         []RuntimeContinuation
+	skippedJobs           map[string]bool
+	deferredActions       map[string][]deferredAction
 	jobs                  []ParsedJob
 	notEvaluatedJobs      map[string]bool
 	notEvaluatedInstances map[string]bool
@@ -26,17 +33,40 @@ type jobGraphExpansionResult struct {
 // jobGraphExpansion carries state while a flattened logical job graph is
 // ordered, expanded into matrix instances, and bound to instance dependencies.
 type jobGraphExpansion struct {
-	path           string
-	context        expression.CompileContext
-	options        Options
-	result         jobGraphExpansionResult
-	accepted       []sourcedJob
-	acceptedIndex  map[string]int
+	path    string
+	context expression.CompileContext
+	options Options
+	// workflowConcurrency records that the root workflow declares
+	// `concurrency`. Its finishing marker can wait only for the steps of the
+	// initial upload, so it would release the group before jobs a deferred
+	// upload adds have finished; such a workflow cannot hold a deferred upload.
+	workflowConcurrency bool
+	result              jobGraphExpansionResult
+	accepted            []sourcedJob
+	acceptedIndex       map[string]int
+	// prerequisites holds jobPrerequisites for every accepted job by flattened
+	// logical ID. Ordering, blocked-job classification, and any later split of
+	// the graph into compilation stages read this one map.
+	prerequisites map[string][]string
+	// topologyJobs is the accepted graph with Needs replaced by prerequisites.
+	// It is the ordering view of the graph and the producer lookup for
+	// runtime-matrix descriptions; it is not any job's needs scope.
 	topologyJobs   map[string]workflow.Job
 	order          []string
 	matricesByJob  map[string][]map[string]any
 	failedMatrices map[string]bool
 	failedJobs     map[string]bool
+	// deferred maps each job compiled by a continuation upload, rather than
+	// by this compilation, to its index in result.continuations.
+	deferred map[string]int
+	// owners maps every job downstream of a needs-derived matrix to the
+	// representative of its component: the roots whose forward closures
+	// intersect, with everything they reach. mergeContinuations computes it
+	// from the whole graph, so a continuation upload that compiles part of a
+	// component from supplied rows sees the same components as the initial
+	// compilation and reproduces its budgets.
+	owners         map[string]string
+	runsOnContexts map[string]expression.CompileContext
 	byLogicalID    map[string][]JobInstance
 	instanceKeys   map[string]string
 	diagnostics    []error
@@ -68,39 +98,45 @@ func processingJobs(path string, parsed *workflow.Workflow, resolved []sourcedJo
 
 func jobGraphExpansionReport(expanded jobGraphExpansionResult, warnings []Warning) Report {
 	return Report{
+		Sources:     expanded.sources,
 		LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates),
-		Jobs: expanded.candidates, RuntimeMatrixBoundary: expanded.runtimeMatrixBoundary,
-		RuntimeMatrices: expanded.runtimeMatrices, ParsedJobs: expanded.jobs, Warnings: append(warnings, expanded.warnings...),
+		Jobs: expanded.candidates, RuntimeMatrixBoundary: expanded.runtimeMatrixBoundary, ReferencesVars: expanded.referencesVars,
+		RuntimeMatrices: expanded.runtimeMatrices, Continuations: expanded.continuations, ParsedJobs: expanded.jobs, Warnings: append(warnings, expanded.warnings...),
 		NotEvaluatedJobs: expanded.notEvaluatedJobs, NotEvaluatedInstances: expanded.notEvaluatedInstances,
 	}
 }
 
 // expandJobGraph resolves reusable workflow calls, then turns the parsed
 // logical job graph into deterministic JobInstance values and report data.
-func expandJobGraph(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (jobGraphExpansionResult, error) {
-	resolved, warnings, runtimeMatrixBoundary, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource)
+func expandJobGraph(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options, sourceServerURL string) (jobGraphExpansionResult, error) {
+	resolved, warnings, scan, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource, options.WorkflowSource, sourceServerURL)
 	if err != nil {
 		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
 		for _, job := range parsed.Jobs {
 			notEvaluatedJobs[job.ID] = true
 		}
-		return jobGraphExpansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: runtimeMatrixBoundary, warnings: warnings}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
+		return jobGraphExpansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: scan.runtimeMatrixBoundary, referencesVars: scan.referencesVars, sources: scan.sources, warnings: warnings}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
 	}
 	expansion := jobGraphExpansion{
-		path: path, context: context, options: options,
+		path: path, context: context, options: options, workflowConcurrency: parsed.Concurrency != nil,
 		result: jobGraphExpansionResult{
-			jobs: processingJobs(path, parsed, resolved), runtimeMatrixBoundary: runtimeMatrixBoundary, warnings: warnings,
+			sources: scan.sources,
+			jobs:    processingJobs(path, parsed, resolved), runtimeMatrixBoundary: scan.runtimeMatrixBoundary, referencesVars: scan.referencesVars, warnings: warnings,
 			notEvaluatedJobs: make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
 		},
 		acceptedIndex:  make(map[string]int, len(resolved)),
 		failedJobs:     make(map[string]bool, len(resolved)),
 		failedMatrices: make(map[string]bool),
+		deferred:       make(map[string]int),
+		runsOnContexts: make(map[string]expression.CompileContext),
 		instanceKeys:   make(map[string]string),
 	}
 	expansion.acceptJobs(resolved)
 	expansion.orderJobs()
 	expansion.expandMatrices()
+	expansion.mergeContinuations()
 	expansion.expandInstances()
+	expansion.assignContinuationKeys()
 	return expansion.result, errors.Join(expansion.diagnostics...)
 }
 
@@ -115,23 +151,58 @@ func (e *jobGraphExpansion) acceptJobs(resolved []sourcedJob) {
 		e.acceptedIndex[job.ID] = len(e.accepted)
 		e.accepted = append(e.accepted, sourced)
 		if err := supported(sourced.path, job); err != nil {
+			if sourced.blockerDetailUnsafe {
+				err = suppressBlockerDetail(err)
+			}
 			e.diagnostics = append(e.diagnostics, err)
 			e.failedJobs[job.ID] = true
 		}
 	}
 }
 
+// jobPrerequisites returns the flattened logical jobs that must be compiled
+// before this job, sorted and without duplicates:
+//
+//   - the members of every source-visible need bound to the job;
+//   - the caller needs whose outputs feed a deferred reusable-workflow input;
+//   - for each enclosing call guard, the caller needs the guard condition
+//     reads and the caller needs feeding that call's deferred inputs.
+//
+// The list decides ordering and whether a failed earlier job blocks this one.
+// It is not the job's needs scope: bindInstanceDependencies derives that from
+// needBindings alone, so caller needs reached only through a guard or a
+// deferred input never become `needs.<id>` inside the callee.
+func jobPrerequisites(sourced sourcedJob) []string {
+	seen := make(map[string]struct{})
+	addBindings := func(bindings map[string]needBinding) {
+		for _, binding := range bindings {
+			for _, member := range binding.members {
+				seen[member] = struct{}{}
+			}
+		}
+	}
+	addDeferred := func(inputs map[string]deferredInput) {
+		for _, input := range inputs {
+			addBindings(input.needs)
+		}
+	}
+	addBindings(sourced.needBindings)
+	addDeferred(sourced.inputs.deferred)
+	for _, guard := range sourced.callGuards {
+		addBindings(guard.needBindings)
+		addDeferred(guard.inputs.deferred)
+	}
+	return sortedKeys(seen)
+}
+
 func (e *jobGraphExpansion) orderJobs() {
+	e.prerequisites = make(map[string][]string, len(e.accepted))
 	e.topologyJobs = make(map[string]workflow.Job, len(e.accepted))
 	for _, sourced := range e.accepted {
+		prerequisites := jobPrerequisites(sourced)
+		e.prerequisites[sourced.ID] = prerequisites
 		job := sourced.Job
-		for _, guard := range sourced.callGuards {
-			job.Needs = append(job.Needs, bindingMembers(guard.needBindings)...)
-			job.Needs = append(job.Needs, bindingMembers(guard.inputs.deferred)...)
-		}
-		job.Needs = append(job.Needs, bindingMembers(sourced.inputs.deferred)...)
-		sort.Strings(job.Needs)
-		job.Needs = slices.Compact(job.Needs)
+		job.Needs = prerequisites
 		e.topologyJobs[sourced.ID] = job
 	}
 	order, err := topologicalOrder(e.path, e.topologyJobs)
@@ -146,30 +217,139 @@ func (e *jobGraphExpansion) expandMatrices() {
 	e.matricesByJob = make(map[string][]map[string]any, len(e.accepted))
 	for _, id := range e.order {
 		sourced := e.accepted[e.acceptedIndex[id]]
-		job := sourced.Job
+		job, err := resolveJobMaxParallel(sourced.Job, e.frameContext(sourced))
+		if err != nil {
+			position := sourced.MaxParallelExpression.Span.Start
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", sourced.path, position.Line, position.Column, id, "", "", 0, locatedJobError(sourced.path, sourced.Job, position.Line, position.Column, fmt.Sprintf("resolve strategy.max-parallel: %v", err))))
+			e.failedMatrices[id], e.failedJobs[id] = true, true
+			continue
+		}
+		sourced.Job = job
+		e.accepted[e.acceptedIndex[id]] = sourced
+		continuation := e.deferredContinuation(sourced)
 		descriptor, deferred, err := describeRuntimeMatrix(job, sourced.path, sourced.digest, sourced.needBindings, e.topologyJobs, e.matricesByJob)
+		scheduling, schedulingErr := e.validateRuntimeScheduling(sourced, descriptor, deferred)
+		if schedulingErr != nil && err == nil {
+			e.rejectRuntimeMatrix(sourced, schedulingErr)
+			continue
+		}
+		if hasRuntimeRunsOn(sourced) {
+			var output *string
+			if value, provided := e.options.RuntimeRunsOnOutputs[id]; provided {
+				output = &value
+			}
+			descriptor, runnerContext, err := describeRuntimeRunsOn(sourced, e.context, e.topologyJobs, e.matricesByJob, output)
+			if err == nil && continuation >= 0 {
+				err = errors.New("job-output-derived runs-on cannot depend on a deferred upload")
+			}
+			if err == nil && (e.workflowConcurrency || len(sourced.concurrencyGates) != 0) {
+				e.rejectRuntimeRunsOnConcurrency(sourced)
+				continue
+			}
+			if err != nil {
+				e.rejectRuntimeRunsOn(sourced, err)
+				continue
+			}
+			e.result.runtimeMatrices = append(e.result.runtimeMatrices, descriptor)
+			if output == nil {
+				producerKey, err := namespacedInstanceKey(e.options.StepKeyNamespace, descriptor.ProducerJob, e.matricesByJob[descriptor.ProducerJob][0])
+				if err != nil {
+					e.rejectRuntimeRunsOn(sourced, err)
+					continue
+				}
+				e.result.continuations = append(e.result.continuations, RuntimeContinuation{
+					Descriptor: descriptor, ProducerStepKey: producerKey, Labels: make(map[string]string), Sources: make(map[string]RuntimeMatrixJobSource),
+				})
+				e.deferJob(sourced, len(e.result.continuations)-1, nil)
+				continue
+			}
+			e.runsOnContexts[id] = runnerContext
+		}
 		var matrices []map[string]any
 		if deferred {
 			e.result.runtimeMatrixBoundary = true
-			line, column := matrixErrorPosition(job, err)
-			if err == nil {
-				e.result.runtimeMatrices = append(e.result.runtimeMatrices, descriptor)
-				err = errors.New("runtime matrix source is valid, but continuation upload is disabled because Buildkite transport has no authoritative current-attempt fence and durable idempotency boundary")
+			switch {
+			case err != nil:
+			case len(sourced.concurrencyGates) != 0:
+				err = deferredConcurrencyError("reusable-workflow", "a needs-derived matrix", "matrix")
 			}
-			err = locatedJobError(sourced.path, job, line, column, err.Error())
+			if err != nil {
+				e.rejectRuntimeMatrix(sourced, err)
+				continue
+			}
+			// Every root is recorded, including the ones this compilation
+			// skips or leaves to a later stage, so each compilation of the
+			// workflow sees the same components and shares the budget the
+			// same way.
+			e.result.runtimeMatrices = append(e.result.runtimeMatrices, descriptor)
+			rows, provided := e.options.RuntimeMatrixRows[id]
+			producerStage, producerDeferred := e.deferred[descriptor.ProducerJob]
+			switch {
+			case e.skippedPrerequisite(id):
+				// A job this matrix needs is skipped, so the matrix is
+				// skipped like any other dependent, whatever its own
+				// producer published.
+				e.skip(id)
+			case producerDeferred:
+				// The producer is itself deferred, so the rows exist only
+				// after the continuation that compiles it has uploaded: that
+				// upload writes the child continuation whose step expands
+				// this matrix. Rows supplied for it without its producer's
+				// rows leave the component partly unresolved, which
+				// mergeContinuations rejects.
+				owner := &e.result.continuations[producerStage]
+				owner.LaterMatrices = append(owner.LaterMatrices, id)
+				e.deferJob(sourced, producerStage, nil)
+				continue
+			case !provided:
+				// describeRuntimeMatrix guarantees exactly one producer instance.
+				producerKey, keyErr := namespacedInstanceKey(e.options.StepKeyNamespace, descriptor.ProducerJob, e.matricesByJob[descriptor.ProducerJob][0])
+				if keyErr != nil {
+					e.rejectRuntimeMatrix(sourced, fmt.Errorf("runtime matrix producer %q: %w", descriptor.ProducerJob, keyErr))
+					continue
+				}
+				e.result.continuations = append(e.result.continuations, RuntimeContinuation{
+					Descriptor: descriptor, ProducerStepKey: producerKey, Labels: make(map[string]string), Sources: make(map[string]RuntimeMatrixJobSource),
+					Scheduling: scheduling,
+				})
+				e.deferJob(sourced, len(e.result.continuations)-1, nil)
+				continue
+			case e.options.RuntimeMatrixSkipped[id] && len(rows) == 0:
+				e.skip(id)
+			case len(rows) == 0 || e.options.RuntimeMatrixSkipped[id]:
+				e.rejectRuntimeMatrix(sourced, fmt.Errorf("output %q of job %q expanded to no matrix instances", descriptor.ProducerOutput, descriptor.ProducerJob))
+				continue
+			default:
+				matrices = make([]map[string]any, len(rows))
+				for i, row := range rows {
+					matrices[i] = cloneAnyMap(row)
+				}
+			}
 		} else {
-			matrixContext := e.context
-			matrixContext.Inputs = sourced.inputs.values
-			matrixContext.Matrix = nil
-			matrixContext.Strategy = nil
-			matrices, err = expandMatrix(sourced.path, job, matrixContext)
+			if continuation >= 0 && len(sourced.concurrencyGates) != 0 {
+				e.rejectRuntimeMatrix(sourced, errors.New("reusable-workflow concurrency cannot depend on a needs-derived matrix"))
+				continue
+			}
+			if e.skippedPrerequisite(id) {
+				e.skip(id)
+			}
+			matrices, err = expandMatrix(sourced.path, job, e.frameContext(sourced))
+			if err == nil && continuation >= 0 {
+				e.deferJob(sourced, continuation, matrices)
+			}
 		}
 		if err != nil {
 			line, column := matrixErrorPosition(job, err)
+			message, detail := "matrix could not be expanded or validated", ""
+			if sourced.matrixDetailUnsafe {
+				message += inputValueHiddenNote
+			} else {
+				detail = matrixErrorDetail(err)
+			}
 			e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 				Path: sourced.path, Line: line, Column: column, Job: job.ID,
-				Message: "matrix could not be expanded or validated", Err: err,
+				Message: message, Detail: detail, Err: err,
 			})
 			e.failedMatrices[id] = true
 			e.failedJobs[id] = true
@@ -177,6 +357,371 @@ func (e *jobGraphExpansion) expandMatrices() {
 		}
 		e.matricesByJob[id] = matrices
 	}
+}
+
+// skippedPrerequisite reports whether a job needs a job this compilation
+// skips because a matrix producer did not succeed.
+func (e *jobGraphExpansion) skippedPrerequisite(id string) bool {
+	for _, member := range e.prerequisites[id] {
+		if e.result.skippedJobs[member] {
+			return true
+		}
+	}
+	return false
+}
+
+// skip marks a job the continuation upload records as skipped instead of
+// compiling, because its matrix producer, or a job it needs, did not succeed.
+func (e *jobGraphExpansion) skip(id string) {
+	if e.result.skippedJobs == nil {
+		e.result.skippedJobs = make(map[string]bool)
+	}
+	e.result.skippedJobs[id] = true
+}
+
+// frameContext scopes compile-time evaluation to the workflow that declared
+// the job: its own inputs, never the root workflow's.
+func (e *jobGraphExpansion) frameContext(sourced sourcedJob) expression.CompileContext {
+	context := e.context
+	context.Inputs = sourced.inputs.values
+	context.InputsComplete = len(sourced.inputs.deferred) == 0
+	context.Matrix = nil
+	context.Strategy = nil
+	return context
+}
+
+// deferJob hands a job to the continuation at index, which compiles it once
+// the rows of its roots are known. matrices are the instances the job's
+// static matrix expands to; a root whose rows the producer supplies has none.
+func (e *jobGraphExpansion) deferJob(sourced sourcedJob, index int, matrices []map[string]any) {
+	id, job := sourced.ID, sourced.Job
+	e.deferred[id] = index
+	deferred := &e.result.continuations[index]
+	deferred.Jobs = append(deferred.Jobs, id)
+	deferred.Labels[id] = instanceLabel(job, nil, e.frameContext(sourced))
+	deferred.Sources[id] = deferredJobSource(sourced)
+	e.recordDeferredActions(deferred.Descriptor.Job, sourced)
+	for _, matrix := range matrices {
+		// reserveDeferredKeys reports keys that cannot be derived.
+		key, err := namespacedInstanceKey(e.options.StepKeyNamespace, id, matrix)
+		if err != nil {
+			continue
+		}
+		if deferred.Instances == nil {
+			deferred.Instances = make(map[string][]RuntimeMatrixInstance)
+		}
+		deferred.Instances[id] = append(deferred.Instances[id], RuntimeMatrixInstance{
+			Key: key, Label: instanceLabel(job, matrix, e.frameContext(sourced)), CheckLabel: instanceCheckLabel(JobInstance{LogicalJobID: id, Matrix: matrix}),
+		})
+	}
+}
+
+// recordDeferredActions keeps the `uses` steps of a deferred job under its
+// continuation's consumer so the bundle can resolve and record their locks.
+func (e *jobGraphExpansion) recordDeferredActions(consumer string, sourced sourcedJob) {
+	actions := deferredJobActions(sourced)
+	if len(actions) == 0 {
+		return
+	}
+	if e.result.deferredActions == nil {
+		e.result.deferredActions = make(map[string][]deferredAction)
+	}
+	e.result.deferredActions[consumer] = append(e.result.deferredActions[consumer], actions...)
+}
+
+// deferredJobSource records the workflow file a deferred job came from, with
+// the same fields newJobCandidate gives an expanded instance so the deferred
+// upload can compare them.
+func deferredJobSource(sourced sourcedJob) RuntimeMatrixJobSource {
+	return RuntimeMatrixJobSource{Path: sourced.path, Digest: sourced.digest, Remote: cloneRemoteWorkflowSource(sourced.remote)}
+}
+
+// deferredContinuation assigns a provisional owner. mergeContinuations merges
+// intersecting forward closures after every matrix boundary is known.
+func (e *jobGraphExpansion) deferredContinuation(sourced sourcedJob) int {
+	continuation := -1
+	for _, member := range e.prerequisites[sourced.ID] {
+		index, deferred := e.deferred[member]
+		if !deferred {
+			continue
+		}
+		continuation = index
+	}
+	return continuation
+}
+
+// mergeContinuations computes ownership from forward reachability, including
+// supplied roots so a continuation reproduces the original component budgets.
+// Outside prerequisites never acquire an owner merely by feeding a component.
+func (e *jobGraphExpansion) mergeContinuations() {
+	owners := make(map[string]string)
+	for _, descriptor := range e.result.runtimeMatrices {
+		owners[descriptor.Job] = descriptor.Job
+	}
+	for _, id := range e.order {
+		for _, need := range e.prerequisites[id] {
+			owner := owners[need]
+			if owner == "" {
+				continue
+			}
+			if prior := owners[id]; prior != "" && prior != owner {
+				// Pick a stable representative and relabel the entire component,
+				// including branches seen before this transitive intersection.
+				keep, drop := min(prior, owner), max(prior, owner)
+				for job, component := range owners {
+					if component == drop {
+						owners[job] = keep
+					}
+				}
+				owner = keep
+			}
+			owners[id] = owner
+		}
+	}
+	e.owners = owners
+	// Output-derived runner selection and matrix scheduling remain single-root,
+	// single-stage subsets. Ordinary matrix components retain joins and chains.
+	// Check the complete component even when its rows were supplied by an earlier
+	// stage, so joins and chains cannot silently lose scheduling inputs on replay.
+	rootsByOwner := make(map[string]int)
+	for _, descriptor := range e.result.runtimeMatrices {
+		rootsByOwner[owners[descriptor.Job]]++
+	}
+	for _, descriptor := range e.result.runtimeMatrices {
+		sourced := e.accepted[e.acceptedIndex[descriptor.Job]]
+		if sites, _ := runtimeSchedulingSites(sourced.Job); len(sites) != 0 && rootsByOwner[owners[descriptor.Job]] > 1 {
+			e.rejectRuntimeMatrix(sourced, errors.New("needs-derived scheduling cannot be combined with joined or chained matrices in the same deferred component"))
+		}
+		if descriptor.Shape == RuntimeRunsOnShape && rootsByOwner[owners[descriptor.Job]] != 1 {
+			e.rejectRuntimeRunsOn(sourced, errors.New("job-output-derived runs-on cannot join or feed another deferred stage"))
+		}
+	}
+	// A continuation upload supplies rows for every root of its stage at
+	// once. A root of the same component without rows must belong to a later
+	// stage: one whose producer the component compiles, so its rows cannot
+	// exist yet.
+	provided := make(map[string]bool)
+	unresolved := make(map[string]bool)
+	for _, descriptor := range e.result.runtimeMatrices {
+		owner := owners[descriptor.Job]
+		_, matrixProvided := e.options.RuntimeMatrixRows[descriptor.Job]
+		_, runnerProvided := e.options.RuntimeRunsOnOutputs[descriptor.Job]
+		if matrixProvided || runnerProvided {
+			provided[owner] = true
+		} else if owners[descriptor.ProducerJob] == "" {
+			unresolved[owner] = true
+		}
+	}
+	for owner := range provided {
+		if unresolved[owner] {
+			e.rejectRuntimeMatrix(e.accepted[e.acceptedIndex[owner]], errors.New("all intersecting deferred matrices must be expanded by the same continuation"))
+		}
+	}
+	var merged []RuntimeContinuation
+	indices := make(map[string]int)
+	for _, original := range e.result.continuations {
+		owner := owners[original.Descriptor.Job]
+		index, exists := indices[owner]
+		if !exists {
+			index = len(merged)
+			indices[owner] = index
+			merged = append(merged, original)
+			continue
+		}
+		target := &merged[index]
+		target.Joined = append(target.Joined, RuntimeMatrixRoot{Descriptor: original.Descriptor, ProducerStepKey: original.ProducerStepKey})
+		for job, label := range original.Labels {
+			target.Labels[job] = label
+			target.Sources[job] = original.Sources[job]
+		}
+		if target.Instances == nil {
+			target.Instances = make(map[string][]RuntimeMatrixInstance)
+		}
+		for job, instances := range original.Instances {
+			target.Instances[job] = instances
+		}
+		target.LaterMatrices = append(target.LaterMatrices, original.LaterMatrices...)
+		if actions := e.result.deferredActions[original.Descriptor.Job]; len(actions) != 0 {
+			e.result.deferredActions[target.Descriptor.Job] = append(e.result.deferredActions[target.Descriptor.Job], actions...)
+		}
+	}
+	for i := range merged {
+		merged[i].Jobs = nil
+	}
+	for _, id := range e.order {
+		if _, deferred := e.deferred[id]; deferred {
+			index := indices[owners[id]]
+			e.deferred[id] = index
+			merged[index].Jobs = append(merged[index].Jobs, id)
+		}
+	}
+	e.result.continuations = merged
+}
+
+// rejectRuntimeMatrix records why a needs-derived matrix, or a job that
+// depends on one, cannot be compiled. The reason quotes job and output
+// identifiers from the workflow source, so it travels in Detail unless the
+// matrix reads inputs, whose values the reason could quote.
+func (e *jobGraphExpansion) rejectRuntimeMatrix(sourced sourcedJob, err error) {
+	job := sourced.Job
+	line, column := matrixErrorPosition(job, err)
+	message, detail := runtimeMatrixDeferredMessage, err.Error()
+	if sourced.matrixDetailUnsafe {
+		message, detail = runtimeMatrixDeferredMessage+inputValueHiddenNote, ""
+	}
+	e.diagnostics = append(e.diagnostics, &ProcessingFinding{
+		Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
+		Blocker: "expression",
+		Path:    sourced.path, Line: line, Column: column, Job: job.ID,
+		Message: message, Detail: detail,
+		Err: locatedJobError(sourced.path, job, line, column, err.Error()),
+	})
+	e.failedMatrices[job.ID] = true
+	e.failedJobs[job.ID] = true
+}
+
+// reserveDeferredKeys registers the step keys deferred jobs take when their
+// continuation uploads them: the logical key the consumer uses as a skipped
+// placeholder (its expanded keys are unknown until the producer runs), one
+// key per known static instance of every dependent (an empty row takes the
+// logical key, so duplicate empty rows collide here), and the approval gate
+// key of every environment a deferred job declares. A collision with a key
+// the initial upload creates is reported now, because the later upload would
+// otherwise be rejected for a duplicate key with no way to recover, and a
+// static job that owned a deferred gate's key would let the continuation take
+// that job for the approval block and run protected jobs unapproved.
+func (e *jobGraphExpansion) reserveDeferredKeys() {
+	// Gates the initial upload may create for static jobs take their keys
+	// first, so deferred keys cannot land on them. Static jobs that collide
+	// with their own gates already fail the initial upload loudly.
+	gates := make(map[string]bool)
+	for _, id := range e.order {
+		if _, deferred := e.deferred[id]; deferred {
+			continue
+		}
+		if environment := e.accepted[e.acceptedIndex[id]].Environment; environment != "" {
+			key := environmentGateKey(e.options.StepKeyNamespace, environment)
+			gates[key] = true
+			if _, exists := e.instanceKeys[key]; !exists {
+				e.instanceKeys[key] = id
+			}
+		}
+	}
+	for _, id := range e.order {
+		if _, deferred := e.deferred[id]; !deferred {
+			continue
+		}
+		sourced := e.accepted[e.acceptedIndex[id]]
+		var keys []string
+		continuation := e.result.continuations[e.deferred[id]]
+		for _, root := range continuation.Roots() {
+			if root.Descriptor.Job == id {
+				keys = []string{LogicalJobStepKey(e.options.StepKeyNamespace, id)}
+			}
+		}
+		if slices.Contains(continuation.LaterMatrices, id) {
+			// A later matrix takes its placeholder key and the key of the
+			// child step that expands it.
+			keys = []string{LogicalJobStepKey(e.options.StepKeyNamespace, id), continuationStepKey(e.options.StepKeyNamespace, id)}
+		}
+		for _, matrix := range e.matricesByJob[id] {
+			key, err := namespacedInstanceKey(e.options.StepKeyNamespace, id, matrix)
+			if err != nil {
+				e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", sourced.path, 0, 0, id, "", "", 0, jobError(sourced.path, sourced.Job, fmt.Sprintf("create deterministic instance key: %v", err))))
+				continue
+			}
+			keys = append(keys, key)
+		}
+		for _, key := range keys {
+			if owner, exists := e.instanceKeys[key]; exists {
+				e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", sourced.path, 0, 0, id, "", "", 0, jobError(sourced.path, sourced.Job, fmt.Sprintf("deferred instance key %q collides with a step from job %q", key, owner))))
+				continue
+			}
+			e.instanceKeys[key] = id
+		}
+		if sourced.Environment == "" {
+			continue
+		}
+		key := environmentGateKey(e.options.StepKeyNamespace, sourced.Environment)
+		// Deferred jobs that share an environment share its gate.
+		if gates[key] {
+			continue
+		}
+		if owner, exists := e.instanceKeys[key]; exists {
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", sourced.path, 0, 0, id, "", "", 0, jobError(sourced.path, sourced.Job, fmt.Sprintf("approval gate key %q for environment %q collides with a step from job %q", key, sourced.Environment, owner))))
+			continue
+		}
+		gates[key] = true
+		e.instanceKeys[key] = id
+	}
+}
+
+// assignContinuationKeys gives each continuation its deferred upload step key
+// once every static and deferred instance key is known, so collisions are
+// reported.
+func (e *jobGraphExpansion) assignContinuationKeys() {
+	e.reserveDeferredKeys()
+	// The components share the jobs the graph bound leaves after the static
+	// graph equally, so together they cannot exceed it whatever the producers
+	// publish. Each share must at least hold the jobs the continuation already
+	// promised: one row per root and every dependent instance.
+	// A continuation upload recompiles with rows supplied for the roots of
+	// its stage. The instances that compiles belong to the component, not to
+	// the static graph, so every compilation of the workflow derives the same
+	// shares. A stage that leaves later matrices to a child continuation
+	// passes on the share it did not use itself.
+	staticJobs := 0
+	for _, candidate := range e.result.candidates {
+		if e.owners[candidate.LogicalJobID] == "" {
+			staticJobs++
+		}
+	}
+	components := make(map[string]bool)
+	for _, descriptor := range e.result.runtimeMatrices {
+		components[e.owners[descriptor.Job]] = true
+	}
+	uploads := len(components)
+	budget := 0
+	if uploads != 0 {
+		budget = (MaxRuntimeMatrixGraphJobs - staticJobs) / uploads
+	}
+	for i := range e.result.continuations {
+		continuation := &e.result.continuations[i]
+		consumer := continuation.Descriptor.Job
+		sourced := e.accepted[e.acceptedIndex[consumer]]
+		if promised := len(continuation.Roots()) + continuation.DependentInstances(); budget < promised {
+			e.rejectRuntimeMatrix(sourced, fmt.Errorf("the graph bound of %d jobs leaves %d for each of the workflow's %d deferred uploads after its %d static jobs, but jobs %s already need %d", MaxRuntimeMatrixGraphJobs, max(budget, 0), uploads, staticJobs, quotedList(continuation.Jobs), promised))
+			continue
+		}
+		continuation.JobBudget = budget
+		key := LogicalJobStepKey(e.options.StepKeyNamespace, consumer) + "-" + continuation.Descriptor.Kind()
+		if owner, exists := e.instanceKeys[key]; exists {
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", sourced.path, 0, 0, consumer, "", "", 0, jobError(sourced.path, sourced.Job, fmt.Sprintf("deferred upload step key %q collides with a step from job %q", key, owner))))
+			continue
+		}
+		e.instanceKeys[key] = consumer
+		continuation.StepKey = key
+		line, column := matrixErrorPosition(sourced.Job, nil)
+		code, subject := "W_MATRIX_DEFERRED", "matrix values"
+		if continuation.Descriptor.Shape == RuntimeRunsOnShape {
+			code, subject = "W_RUNS_ON_DEFERRED", "runs-on values"
+			position := runsOnPosition(sourced.Job)
+			line, column = position.Line, position.Column
+		}
+		message := fmt.Sprintf("%s come from output %q of job %q; jobs %s are compiled and uploaded by step %q after that job finishes, so this report leaves them not-evaluated", subject, continuation.Descriptor.ProducerOutput, continuation.Descriptor.ProducerJob, quotedList(continuation.Jobs), key)
+		if len(continuation.LaterMatrices) != 0 {
+			message += fmt.Sprintf("; the matrices of jobs %s come from jobs that upload compiles, so later steps expand them in turn", quotedList(continuation.LaterMatrices))
+		}
+		e.result.warnings = append(e.result.warnings, Warning{Code: code, Path: sourced.path, Line: line, Column: column, Job: consumer, Message: message})
+	}
+}
+
+func quotedList(items []string) string {
+	quoted := make([]string, len(items))
+	for i, item := range items {
+		quoted[i] = fmt.Sprintf("%q", item)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func matrixErrorPosition(job workflow.Job, err error) (int, int) {
@@ -204,7 +749,11 @@ func matrixErrorPosition(job workflow.Job, err error) (int, int) {
 func (e *jobGraphExpansion) expandInstances() {
 	e.byLogicalID = make(map[string][]JobInstance, len(e.accepted))
 	for _, id := range e.order {
-		if e.failedMatrices[id] {
+		if e.failedMatrices[id] || e.result.skippedJobs[id] {
+			continue
+		}
+		if _, deferred := e.deferred[id]; deferred {
+			e.result.notEvaluatedJobs[id] = true
 			continue
 		}
 		e.expandJobInstances(id)
@@ -216,27 +765,35 @@ func (e *jobGraphExpansion) expandInstances() {
 
 func (e *jobGraphExpansion) expandJobInstances(id string) {
 	sourced := e.accepted[e.acceptedIndex[id]]
-	job := sourced.Job
+	job, schedulingGroup, schedulingErr := resolveRuntimeScheduling(sourced, e.options.RuntimeSchedulingOutputs[id])
+	if schedulingErr != nil {
+		e.rejectRuntimeMatrix(sourced, schedulingErr)
+		return
+	}
 	jobPath := sourced.path
-	jobBlocked := e.jobBlocked(sourced)
+	jobBlocked := e.jobBlocked(id)
 	jobFailed := e.failedJobs[id]
 	matrices := e.matricesByJob[id]
 	concurrencyGroups := make(map[string]struct{}, len(matrices))
-	jobContext := e.context
-	jobContext.Inputs = sourced.inputs.values
+	jobContext := e.frameContext(sourced)
 	for matrixIndex, matrix := range matrices {
 		strategy := matrixStrategy(job, matrixIndex, len(matrices))
 		instanceContext := jobContext
 		instanceContext.Matrix = matrix
 		instanceContext.Strategy = strategy
-		compileConditionErr := supportedCompileTimeConditions(jobPath, job, jobContext, matrix)
-		instanceJob := resolveCompileTimeConditions(job, jobContext, matrix)
-		conditionValidationJob := instanceJob
+		// Conditions keep vars residual; see resolveCompileTimeConditions.
 		conditionContext := jobContext
+		conditionContext.Vars = nil
+		conditionContext.Inputs, conditionContext.InputsComplete = nil, false
+		compileConditionErr := supportedCompileTimeConditions(jobPath, job, conditionContext)
+		if sourced.blockerDetailUnsafe {
+			compileConditionErr = suppressBlockerDetail(compileConditionErr)
+		}
+		instanceJob := resolveCompileTimeConditions(job, conditionContext, matrix)
+		conditionValidationJob := instanceJob
 		conditionContext.Matrix = matrix
-		if resolved, err := expression.EvaluateCompileCondition(instanceJob.If, conditionContext); err == nil && !resolved {
+		if value, err := evaluateCompileSite(instanceJob.If, expression.ProfileCompileJobCondition, expression.ResultBoolean, conditionContext); err == nil && !value.(bool) {
 			instanceJob.If = "false"
-			instanceJob.Steps = []workflow.Step{{Name: "Statically disabled job", Kind: "run", Run: ":", If: "false", Span: job.Span}}
 		}
 		key, err := namespacedInstanceKey(e.options.StepKeyNamespace, job.ID, matrix)
 		if err != nil {
@@ -253,25 +810,53 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		resolvedContainer, containerErr := resolveCompileContainer(instanceJob.Container, instanceContext)
 		instanceJob.Container = resolvedContainer
 		resolvedServices, serviceErr := resolveCompileServices(instanceJob.Services, instanceContext)
+		controlContext := instanceContext
+		controlContext.Vars = nil
+		resolvedContinueOnError, continueOnErrorErr := resolveJobContinueOnError(instanceJob, controlContext)
+		instanceJob = resolvedContinueOnError
+		instanceJob, timeoutErr := resolveJobTimeout(instanceJob, instanceContext)
 		candidate := newJobCandidate(sourced, instanceJob, matrix, key, resolvedServices)
+		candidate.Strategy = strategy
 
 		valid := true
-		if containerErr != nil {
+		if timeoutErr != nil {
+			position := job.TimeoutMinutesExpression.Span.Start
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, key, "", 0, locatedJobError(jobPath, job, position.Line, position.Column, fmt.Sprintf("resolve job timeout-minutes: %v", timeoutErr))))
+			valid = false
+		} else if containerErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve job container: %v", containerErr))))
 			valid = false
 		} else if serviceErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve service containers: %v", serviceErr))))
 			valid = false
+		} else if continueOnErrorErr != nil {
+			position := job.ContinueOnErrorSpan.Start
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, key, "", 0, locatedJobError(jobPath, job, position.Line, position.Column, fmt.Sprintf("resolve job continue-on-error: %v", continueOnErrorErr))))
+			valid = false
 		} else if compileConditionErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, compileConditionErr))
 			valid = false
-		} else if err := supportedConditions(jobPath, conditionValidationJob, matrix, true); err != nil {
+		} else if err := supportedConditions(jobPath, conditionValidationJob); err != nil {
+			if sourced.blockerDetailUnsafe {
+				err = suppressBlockerDetail(err)
+			}
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
 			valid = false
 		}
-		labels, runsOnErr := resolveRunsOn(job, jobContext, matrix)
+		runnerContext := instanceContext
+		_, outputBacked := e.runsOnContexts[id]
+		if outputBacked {
+			runnerContext = e.runsOnContexts[id]
+			runnerContext.Strategy = strategy
+		}
+		labels, runsOnErr := resolveRunsOn(job, runnerContext, matrix)
 		if runsOnErr != nil {
-			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, key, "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, runsOnErr.Error())))
+			unsafe := sourced
+			unsafe.Job, unsafe.path = job, jobPath
+			// An evaluation error can quote the producer output the runs-on
+			// expression read, as well as input values.
+			unsafe.runsOnDetailUnsafe = unsafe.runsOnDetailUnsafe || outputBacked
+			e.diagnostics = append(e.diagnostics, runsOnFinding(unsafe, key, runsOnErr))
 			valid = false
 		}
 		candidate.RunsOn = labels
@@ -280,11 +865,22 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		if runsOnErr == nil {
 			target, err = e.options.Runners.resolve(labels, e.options.EventTrust)
 			if err != nil {
-				message, detail := runnerRejectionDiagnostic(err, reportableRunnerLabels(job, labels), e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
+				reportableLabels := reportableRunnerLabels(job, labels)
+				if sourced.blockerDetailUnsafe {
+					reportableLabels = nil
+				}
+				message, detail, setupURL := runnerRejectionDiagnostic(err, reportableLabels, e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
+				blocker, blockerDetail := runnerRejectionBlocker(err, reportableLabels)
+				reportRunnerLabelDetail := ""
+				if len(reportableLabels) == 1 {
+					reportRunnerLabelDetail = reportableLabels[0]
+				}
 				e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 					Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
-					Path: jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
-					Job: job.ID, Instance: key, Message: message, Detail: detail,
+					Blocker: blocker, BlockerDetail: blockerDetail,
+					ReportRunnerLabelDetail: reportRunnerLabelDetail,
+					Path:                    jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
+					Job: job.ID, Instance: key, Message: message, Detail: detail, SetupURL: setupURL,
 					Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
 				})
 				valid = false
@@ -293,12 +889,19 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 				valid = false
 			}
 		}
-		concurrencyGroup, concurrencyErr := resolveConcurrency(jobPath, job.ID, job.Concurrency, jobContext, matrix)
+		var concurrencyGroup string
+		var concurrencyErr error
+		if schedulingGroup != nil {
+			concurrencyGroup = *schedulingGroup
+		} else {
+			concurrencyGroup, concurrencyErr = resolveConcurrency(jobPath, job.ID, job.Concurrency, instanceContext, matrix)
+		}
 		if concurrencyErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, concurrencyErr))
 			valid = false
 		}
-		if cancellationErr := rejectJobCancellation(jobPath, job); cancellationErr != nil {
+		cancelInProgress, cancellationErr := resolveCancellation(jobPath, job.ID, job.Concurrency, instanceContext)
+		if cancellationErr != nil {
 			position := job.Concurrency.CancelInProgressPosition
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, key, "", 0, cancellationErr))
 			valid = false
@@ -316,12 +919,17 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			continue
 		}
 		instance := candidate
-		instance.Label = instanceLabel(job, matrix, e.context)
+		instance.Label = instanceLabel(job, matrix, instanceContext)
 		instance.Queue = target.Queue
 		instance.Platform = target.Platform
 		instance.RuntimeImage = target.Image
+		instance.Agents = target.Agents
+		instance.ToolCache = target.ToolCache
 		instance.Cache = target.Cache
 		instance.ConcurrencyGroup = concurrencyGroup
+		guardKnown, guardValue := staticCallGuardValue(sourced.callGuards)
+		// Buildkite enforces concurrency before run-job can skip this job.
+		instance.CancelInProgress = cancelInProgress && instanceJob.If != "false" && (!guardKnown || guardValue)
 		if e.bindInstanceDependencies(sourced, job, key, &instance) {
 			jobFailed = true
 			continue
@@ -334,6 +942,23 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		jobFailed = true
 	}
 	e.failedJobs[id] = jobFailed || jobBlocked
+}
+
+func resolveJobContinueOnError(job workflow.Job, context expression.CompileContext) (workflow.Job, error) {
+	if job.ContinueOnErrorExpression == "" {
+		return job, nil
+	}
+	reduced, err := reduceCompileSite(job.ContinueOnErrorExpression, expression.ProfileJobControl, expression.ResultBoolean, context)
+	if err != nil {
+		return job, err
+	}
+	if reduced.Known {
+		job.ContinueOnError = reduced.Value.(bool)
+		job.ContinueOnErrorExpression = ""
+	} else {
+		job.ContinueOnErrorExpression = reduced.Source
+	}
+	return job, nil
 }
 
 func matrixStrategy(job workflow.Job, index, total int) map[string]any {
@@ -350,14 +975,16 @@ func matrixStrategy(job workflow.Job, index, total int) map[string]any {
 func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any, key string, services []workflow.Service) JobInstance {
 	candidate := JobInstance{
 		Key: key, LogicalJobID: job.ID, Matrix: matrix, Inputs: cloneAnyMap(sourced.inputs.values),
-		FailFast: job.FailFast, MaxParallel: job.MaxParallel, Steps: append([]workflow.Step(nil), job.Steps...),
-		Env: cloneMap(job.Env), Permissions: permissionScopes(job.Permissions), If: job.If,
-		ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
+		CacheMode: job.CacheMode,
+		FailFast:  job.FailFast, MaxParallel: job.MaxParallel, Steps: append([]workflow.Step(nil), job.Steps...),
+		Env: cloneMap(job.Env), Permissions: permissionScopes(job.Permissions), If: job.If, Environment: job.Environment,
+		ContinueOnError: job.ContinueOnError, ContinueOnErrorExpression: job.ContinueOnErrorExpression, ContinueOnErrorSpan: job.ContinueOnErrorSpan, TimeoutMinutes: job.TimeoutMinutes,
 		DefaultShell: job.DefaultShell, DefaultWorkingDirectory: job.DefaultWorkingDirectory,
 		Outputs: cloneMap(job.Outputs), Container: job.Container, Services: services,
 		ConcurrencyGates:   append([]WorkflowConcurrencyGate(nil), sourced.concurrencyGates...),
 		ServicesExpression: job.ServicesExpression, SourcePath: sourced.path, SourceDigest: sourced.digest,
-		RemoteWorkflow: cloneRemoteWorkflowSource(sourced.remote), RepositoryRoot: sourced.root, Source: job.Span,
+		RemoteWorkflow: cloneRemoteWorkflowSource(sourced.remote), BlockerDetailUnsafe: sourced.blockerDetailUnsafe,
+		RepositoryRoot: sourced.root, Source: job.Span,
 		secretAuthority: sourced.secretAuthority, tokenPolicyNarrowed: sourced.tokenPolicyNarrowed,
 		jobPermissionsIgnored: sourced.jobPermissionsIgnored, reusableCall: sourced.reusableCall,
 	}
@@ -367,24 +994,12 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 	return candidate
 }
 
-func (e *jobGraphExpansion) jobBlocked(sourced sourcedJob) bool {
-	if bindingsFailed(sourced.needBindings, e.failedJobs) || bindingsFailed(sourced.inputs.deferred, e.failedJobs) {
-		return true
-	}
-	for _, guard := range sourced.callGuards {
-		if bindingsFailed(guard.needBindings, e.failedJobs) || bindingsFailed(guard.inputs.deferred, e.failedJobs) {
+// jobBlocked reports whether any prerequisite of the job failed, in which
+// case the job's instances are recorded but not evaluated.
+func (e *jobGraphExpansion) jobBlocked(id string) bool {
+	for _, prerequisite := range e.prerequisites[id] {
+		if e.failedJobs[prerequisite] {
 			return true
-		}
-	}
-	return false
-}
-
-func bindingsFailed(bindings map[string]needBinding, failedJobs map[string]bool) bool {
-	for _, binding := range bindings {
-		for _, member := range binding.members {
-			if failedJobs[member] {
-				return true
-			}
 		}
 	}
 	return false
@@ -464,50 +1079,22 @@ func (e *jobGraphExpansion) projectNeedOutputs(sourced sourcedJob, need string, 
 	instance.NeedOutputs[need] = projected
 }
 
-func resolveDeferredInputBindings(bindings map[string]needBinding, byLogicalID map[string][]JobInstance) (map[string]DeferredInput, []string, error) {
-	if len(bindings) == 0 {
+func resolveDeferredInputBindings(inputs map[string]deferredInput, byLogicalID map[string][]JobInstance) (map[string]DeferredInput, []string, error) {
+	if len(inputs) == 0 {
 		return nil, nil, nil
 	}
-	resolved := make(map[string]DeferredInput, len(bindings))
+	resolved := make(map[string]DeferredInput, len(inputs))
 	var dependencies []string
-	for _, name := range sortedKeys(bindings) {
-		input, err := resolveDeferredInputBinding(bindings[name], byLogicalID)
+	for _, name := range sortedKeys(inputs) {
+		input := inputs[name]
+		groups, outputs, inputDependencies, err := resolveCallGuardBindings(input.needs, byLogicalID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("input %q: %w", name, err)
 		}
-		resolved[name] = input
-		dependencies = append(dependencies, input.Sources...)
+		resolved[name] = DeferredInput{Template: input.template, Type: input.inputType, Inputs: maps.Clone(input.inputs), NeedGroups: groups, NeedOutputs: outputs}
+		dependencies = append(dependencies, inputDependencies...)
 	}
 	return resolved, dependencies, nil
-}
-
-func resolveDeferredInputBinding(binding needBinding, byLogicalID map[string][]JobInstance) (DeferredInput, error) {
-	var deferred DeferredInput
-	for _, member := range binding.members {
-		producers := byLogicalID[member]
-		if len(producers) == 0 {
-			return DeferredInput{}, fmt.Errorf("source job %q has no expanded instances", member)
-		}
-		for _, producer := range producers {
-			deferred.Sources = append(deferred.Sources, producer.Key)
-		}
-	}
-	sort.Strings(deferred.Sources)
-	deferred.Sources = slices.Compact(deferred.Sources)
-	if len(deferred.Sources) > plan.MaxNeedProducers {
-		return DeferredInput{}, fmt.Errorf("has %d producers, maximum is %d", len(deferred.Sources), plan.MaxNeedProducers)
-	}
-	for _, output := range binding.outputs {
-		producers := byLogicalID[output.member]
-		if len(deferred.Outputs)+len(producers) > plan.MaxNeedOutputs {
-			return DeferredInput{}, fmt.Errorf("output %q expands beyond the maximum of %d projections", output.output, plan.MaxNeedOutputs)
-		}
-		for _, producer := range producers {
-			deferred.Outputs = append(deferred.Outputs, NeedOutput{Name: output.name, StepKey: producer.Key, Output: output.output})
-		}
-	}
-	sortNeedOutputs(deferred.Outputs)
-	return deferred, nil
 }
 
 func resolveCallGuardBindings(bindings map[string]needBinding, byLogicalID map[string][]JobInstance) (map[string][]string, map[string][]NeedOutput, []string, error) {

@@ -2,8 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -55,7 +57,7 @@ func TestPluginTelemetryReportsUnprovenActionRuntime(t *testing.T) {
 			}
 			resolutions := make([]map[string]any, len(body.Requirements))
 			for i, requirement := range body.Requirements {
-				resolutions[i] = map[string]any{"id": requirement.ID, "error": map[string]string{"code": "unmapped_labels", "message": "No compatible runner is configured."}}
+				resolutions[i] = map[string]any{"id": requirement.ID, "target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": resolutions})
 			return
@@ -107,15 +109,589 @@ func TestPluginTelemetryReportsUnprovenActionRuntime(t *testing.T) {
 
 func TestPluginRequiresConfigurationWithoutSideEffects(t *testing.T) {
 	requireImporterHost(t)
-	t.Setenv(pluginConfigurationEnvironment, "")
-	t.Setenv("BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW", "legacy.yml")
+	for _, name := range []string{pipelineTriggerWorkflowPathEnvironment, githubEventNameEnvironment, githubWorkflowEnvironment, githubWorkflowRefEnvironment, githubWorkflowSHAEnvironment} {
+		t.Setenv(name, "")
+	}
+	for _, test := range []struct {
+		name          string
+		configuration string
+		want          string
+	}{
+		{name: "missing plugin configuration", want: pluginConfigurationEnvironment + " is required"},
+		{name: "ordinary empty plugin configuration", configuration: `{}`, want: "workflow or workflows is required"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(pluginConfigurationEnvironment, test.configuration)
+			t.Setenv("BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW", "legacy.yml")
+			t.Setenv("BUILDKITE_GITHUB_EVENT", "push")
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 2 {
+				t.Fatalf("run() code = %d, want 2; stderr = %q", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), test.want) || stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+				t.Fatalf("stdout = %q, stderr = %q, commands = %#v, uploads = %#v", stdout.String(), stderr.String(), runner.commands, runner.uploaded)
+			}
+		})
+	}
+}
+
+func TestPluginUsesKeylessPipelineTriggerSelectedWorkflow(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"selected.yml": "on: push\njobs:\n  pipeline-trigger-importer:\n    runs-on: ubuntu-latest\n    steps:\n      - id: selector\n        run: echo 'key=ref' >> \"$GITHUB_OUTPUT\"\n      - run: echo '${{ github.event[steps.selector.outputs.key] }}'\n",
+	})
+	t.Chdir(t.TempDir())
+	t.Setenv(pluginConfigurationEnvironment, `{}`)
+	setCLIPluginBuildkiteEnvironment(t, "")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	t.Setenv("BUILDKITE_COMMIT", "HEAD")
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/selected.yml", ".github/workflows/selected.yml", "push", "buildkite/buildkite-gha/.github/workflows/selected.yml@refs/heads/main")
+	commit := "0123456789abcdef0123456789abcdef01234567"
+	t.Setenv(githubWorkflowSHAEnvironment, commit)
+
+	runner := &cliCaptureRunner{gitOutput: []byte(commit + "\n")}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Uploaded 1 job") || stderr.Len() != 0 || len(runner.commands) == 0 {
+		t.Fatalf("stdout/stderr/commands = %q / %q / %#v", stdout.String(), stderr.String(), runner.commands)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Label     string     `yaml:"label"`
+			DependsOn *yaml.Node `yaml:"depends_on"`
+			Key       string     `yaml:"key"`
+			Command   string     `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	pipelineCommand := runner.commands[len(runner.commands)-1]
+	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Label != ":github: job · pipeline-trigger-importer" || pipeline.Steps[0].DependsOn != nil || !strings.HasSuffix(pipeline.Steps[0].Key, "-pipeline-trigger-importer") {
+		t.Fatalf("pipeline steps = %#v", pipeline.Steps)
+	}
+	if command := pipeline.Steps[0].Command; strings.Count(command, "--step '"+cliTestJobID+"'") != 2 || !strings.Contains(command, "--artifact-producer '"+cliTestJobID+"'") || strings.Contains(command, "--step ''") {
+		t.Fatalf("keyless generated job does not scope artifacts to importer job %q:\n%s", cliTestJobID, command)
+	}
+	artifactUpload := -1
+	for index, command := range runner.commands {
+		if len(command.args) >= 3 && slices.Equal(command.args[:3], []string{"step", "update", "label"}) {
+			t.Fatalf("importer changed its configured label: %#v", command.args)
+		}
+		if len(command.args) >= 2 && command.args[0] == "artifact" && command.args[1] == "upload" {
+			artifactUpload = index
+		}
+	}
+	if artifactUpload < 0 || artifactUpload+1 != len(runner.commands)-1 || len(pipelineCommand.args) < 2 || pipelineCommand.args[0] != "pipeline" || pipelineCommand.args[1] != "upload" {
+		t.Fatalf("commands = %#v, want artifact upload immediately before pipeline upload", runner.commands)
+	}
+	foundEventArtifact := false
+	foundPlanArtifact := false
+	for path, contents := range runner.uploaded {
+		if strings.HasPrefix(path, ".buildkite-gha/events/") && strings.HasSuffix(path, ".json") {
+			foundEventArtifact = true
+			continue
+		}
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") || !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.Workflow.Path != "./.github/workflows/selected.yml" || job.Workflow.LogicalJobID != "pipeline-trigger-importer" || !job.Event.PayloadArtifact {
+			t.Fatalf("selected workflow plan = %#v", job.Workflow)
+		}
+		foundPlanArtifact = true
+	}
+	if !foundPlanArtifact || !foundEventArtifact {
+		t.Fatalf("uploaded artifacts = %#v, want selected workflow job plan and event snapshot", runner.uploaded)
+	}
+}
+
+func TestPluginServerSelectedWorkflowKeepsDeferredStepsUngrouped(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{"build.yml": "name: Build\n" + continueDeferredMatrixWorkflow})
+	commitUploadWorkflows(t, repository)
+	t.Chdir(repository)
+	commit, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, `{}`)
+	setCLIPluginBuildkiteEnvironment(t, "continue-importer")
+	t.Setenv("BUILDKITE_COMMIT", strings.TrimSpace(string(commit)))
+	t.Setenv("BUILDKITE_JOB_ID", continueImporterJobID)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/build.yml", "Build", "push", "buildkite/buildkite-gha/.github/workflows/build.yml@refs/heads/main")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 2 {
-		t.Fatalf("run() code = %d, want 2; stderr = %q", code, stderr.String())
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("plugin code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), pluginConfigurationEnvironment+" is required") || len(runner.commands) != 0 {
-		t.Fatalf("stderr = %q, commands = %#v", stderr.String(), runner.commands)
+	initials := readContinueInitialUploads(t, runner)
+	if len(initials) != 1 || !initials[0].artifact.Workflow.Ungrouped {
+		t.Fatalf("server-selected workflow continuations = %+v", initials)
+	}
+	initial := initials[0]
+	var pipeline struct {
+		Steps []continuePipelineStep `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal([]byte(initial.pipeline), &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 3 {
+		t.Fatalf("initial pipeline must have three flat steps:\n%s", initial.pipeline)
+	}
+	for _, step := range pipeline.Steps {
+		if len(step.DependsOn) == 0 || step.DependsOn[0].Step != "continue-importer" {
+			t.Fatalf("step %q lost importer dependency: %#v", step.Key, step.DependsOn)
+		}
+	}
+	runner = initial.continueRunner(initial.producerManifest(t, "success", `[{"target":"amd64","runner":"ubuntu-latest"},{"target":"arm64","runner":"ubuntu-latest"}]`))
+	if code, _, stderr := runContinue(t, runner, initial.digest); code != 0 {
+		t.Fatalf("continue code = %d, stderr = %q", code, stderr)
+	}
+	if err := yaml.Unmarshal(lastPipelineUpload(t, runner), &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 3 {
+		t.Fatalf("deferred pipeline must have three flat steps:\n%s", lastPipelineUpload(t, runner))
+	}
+}
+
+func TestPluginPrefersGitHubPipelineTriggerIdentity(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"preferred.yml":     "name: Preferred\non: push\njobs:\n  preferred:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"compatibility.yml": "name: Compatibility\non: pull_request\njobs:\n  compatibility:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{}`)
+	setCLIPluginBuildkiteEnvironment(t, "preferred-pipeline-trigger-importer")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/compatibility.yml", "Preferred", "push", "buildkite/buildkite-gha/.github/workflows/preferred.yml@refs/heads/main")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "pull_request")
+
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Label     string `yaml:"label"`
+			Condition string `yaml:"if"`
+			DependsOn []struct {
+				Step string `yaml:"step"`
+			} `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Label != ":github: job · preferred" || len(pipeline.Steps[0].DependsOn) != 1 || pipeline.Steps[0].DependsOn[0].Step != "preferred-pipeline-trigger-importer" || !strings.Contains(pipeline.Steps[0].Condition, "GITHUB_EVENT_NAME") {
+		t.Fatalf("pipeline steps = %#v, want the GITHUB_* workflow and event", pipeline.Steps)
+	}
+}
+
+func TestPluginUsesPipelineTriggerWorkflowDispatch(t *testing.T) {
+	requireImporterHost(t)
+	for _, test := range []struct {
+		name, ref, webhook, target string
+	}{
+		{name: "branch with default inputs", ref: "refs/heads/main", target: "staging"},
+		{name: "tag with supplied inputs", ref: "refs/tags/v1.2.3", webhook: `{"ref":"refs/tags/v1.2.3","inputs":{"target":"production"}}`, target: "production"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := writeUploadWorkflowRepository(t, map[string]string{
+				"ci.yml": "name: CI\non:\n  workflow_dispatch:\n    inputs:\n      target:\n        type: string\n        default: staging\njobs:\n  test:\n    name: Test ${{ inputs.target }}\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			})
+			t.Chdir(repository)
+			t.Setenv(pluginConfigurationEnvironment, `{}`)
+			setCLIPluginBuildkiteEnvironment(t, "dispatch-importer")
+			t.Setenv("BUILDKITE_SOURCE", "ui")
+			t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+			if tag, ok := strings.CutPrefix(test.ref, "refs/tags/"); ok {
+				t.Setenv("BUILDKITE_TAG", tag)
+				t.Setenv("BUILDKITE_BRANCH", tag)
+			}
+			setCLIPipelineTriggerEnvironment(t, ".github/workflows/ci.yml", "CI", "workflow_dispatch", "buildkite/buildkite-gha/.github/workflows/ci.yml@"+test.ref)
+			runner := &cliCaptureRunner{}
+			if test.webhook != "" {
+				runner.webhook = []byte(test.webhook)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 || !strings.Contains(stdout.String(), "Uploaded 1 job") {
+				t.Fatalf("plugin code/stdout/stderr = %d / %q / %q", code, stdout.String(), stderr.String())
+			}
+			var pipeline struct {
+				Steps []struct {
+					Label string `yaml:"label"`
+				} `yaml:"steps"`
+			}
+			if err := yaml.Unmarshal(lastPipelineUpload(t, runner), &pipeline); err != nil {
+				t.Fatal(err)
+			}
+			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Label != ":github: job · Test "+test.target {
+				t.Fatalf("dispatch steps = %#v", pipeline.Steps)
+			}
+			found := false
+			for path, contents := range runner.uploaded {
+				if !strings.HasPrefix(path, ".buildkite-gha/plans/") || !strings.HasSuffix(path, ".json") {
+					continue
+				}
+				job, err := plan.Decode(contents)
+				if err != nil {
+					t.Fatal(err)
+				}
+				found = true
+				if job.Event.Name != "workflow_dispatch" || job.Event.Ref != test.ref || job.Event.SHA != os.Getenv("BUILDKITE_COMMIT") {
+					t.Fatalf("dispatch event = %#v", job.Event)
+				}
+			}
+			if !found {
+				t.Fatal("plugin uploaded no dispatch job plan")
+			}
+		})
+	}
+}
+
+func TestPluginUsesPipelineTriggerPullRequestIdentity(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"ci.yml": "name: CI\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{}`)
+	setCLIPluginBuildkiteEnvironment(t, "pull-request-pipeline-trigger-importer")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	t.Setenv("BUILDKITE_BRANCH", "feature")
+	t.Setenv("BUILDKITE_PULL_REQUEST", "42")
+	t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/ci.yml", "CI", "pull_request", "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/pull/42/merge")
+	t.Setenv("BUILDKITE_GITHUB_ACTION", "opened")
+
+	headSHA := os.Getenv("BUILDKITE_COMMIT")
+	identities := make([]string, 0, 2)
+	for _, test := range []struct {
+		name    string
+		webhook []byte
+	}{
+		{name: "Buildkite environment fallback"},
+		{name: "linked webhook before synthetic merge is available", webhook: []byte(`{"action":"opened","number":42,"pull_request":{"head":{"ref":"feature","sha":"0123456789abcdef0123456789abcdef01234567"},"base":{"ref":"main"},"mergeable":null,"merge_commit_sha":null}}`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &cliCaptureRunner{webhook: test.webhook}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 || !strings.Contains(stdout.String(), "Uploaded 1 job") {
+				t.Fatalf("run() code/stdout/stderr = %d / %q / %q, want an uploaded PR job", code, stdout.String(), stderr.String())
+			}
+			for path, contents := range runner.uploaded {
+				if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
+					continue
+				}
+				job, err := plan.Decode(contents)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if job.Event.Name != "pull_request" || job.Event.Ref != "refs/pull/42/merge" || job.Event.SHA != headSHA {
+					t.Fatalf("pull request event = %#v", job.Event)
+				}
+				identities = append(identities, job.Event.Ref+"@"+job.Event.SHA)
+				return
+			}
+			t.Fatalf("uploaded artifacts = %#v, want pull request job plan", runner.uploaded)
+		})
+	}
+	if len(identities) != 2 || identities[0] != identities[1] {
+		t.Fatalf("fallback and linked-webhook identities = %#v, want agreement", identities)
+	}
+}
+
+func TestPluginUsesPipelineTriggerIssueAndCommentIdentity(t *testing.T) {
+	requireImporterHost(t)
+	tests := []struct {
+		name, event, action, payload string
+	}{
+		{
+			name: "issue", event: "issues", action: "typed",
+			payload: `{"action":"typed","issue":{"number":42,"title":"Issue"},"repository":{"id":12345,"full_name":"buildkite/buildkite-gha"},"sender":{"id":7,"login":"octocat"}}`,
+		},
+		{
+			name: "issue comment", event: "issue_comment", action: "edited",
+			payload: `{"action":"edited","issue":{"number":42},"comment":{"id":123456,"body":"updated"},"repository":{"id":12345,"full_name":"buildkite/buildkite-gha"},"sender":{"id":7,"login":"octocat"}}`,
+		},
+		{
+			name: "pull request conversation comment", event: "issue_comment", action: "created",
+			payload: `{"action":"created","issue":{"number":43,"pull_request":{"url":"https://api.github.com/repos/buildkite/buildkite-gha/pulls/43"}},"comment":{"id":123457,"body":"created"},"repository":{"id":12345,"full_name":"buildkite/buildkite-gha"},"sender":{"id":7,"login":"octocat"}}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workflow := "name: Selected\non: " + test.event + "\njobs:\n  selected:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ toJSON(github.event) }}'\n"
+			repository := writeUploadWorkflowRepository(t, map[string]string{
+				"selected.yml": workflow,
+				"other.yml":    strings.Replace(workflow, "name: Selected", "name: Other", 1),
+			})
+			t.Chdir(repository)
+			t.Setenv(pluginConfigurationEnvironment, `{}`)
+			setCLIPluginBuildkiteEnvironment(t, "default-branch-pipeline-trigger-importer")
+			t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+			t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+			t.Setenv("BUILDKITE_GITHUB_ACTION", test.action)
+			setCLIPipelineTriggerEnvironment(t, ".github/workflows/selected.yml", "Selected", test.event, "buildkite/buildkite-gha/.github/workflows/selected.yml@refs/heads/main")
+
+			runner := &cliCaptureRunner{webhook: []byte(test.payload)}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+				t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+
+			var pipeline struct {
+				Steps []struct {
+					Label     string `yaml:"label"`
+					Condition string `yaml:"if"`
+					DependsOn []struct {
+						Step string `yaml:"step"`
+					} `yaml:"depends_on"`
+				} `yaml:"steps"`
+			}
+			if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+				t.Fatal(err)
+			}
+			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Label != ":github: job · selected" || len(pipeline.Steps[0].DependsOn) != 1 || pipeline.Steps[0].DependsOn[0].Step != "default-branch-pipeline-trigger-importer" || pipeline.Steps[0].Condition == "" {
+				t.Fatalf("pipeline steps = %#v, want only the server-selected workflow", pipeline.Steps)
+			}
+
+			var foundPlan, foundPayload bool
+			for path, source := range runner.uploaded {
+				switch {
+				case strings.HasPrefix(path, ".buildkite-gha/plans/") && strings.HasSuffix(path, ".json"):
+					job, err := plan.Decode(source)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if job.Event.Name != test.event || job.Event.Ref != "refs/heads/main" || job.Event.SHA != os.Getenv("BUILDKITE_COMMIT") || job.Event.Actor != "octocat" || !job.Event.PayloadArtifact {
+						t.Fatalf("default-branch plan event = %#v", job.Event)
+					}
+					foundPlan = true
+				case strings.HasPrefix(path, ".buildkite-gha/events/") && strings.HasSuffix(path, ".json"):
+					var got, want map[string]any
+					if err := json.Unmarshal(source, &got); err != nil {
+						t.Fatal(err)
+					}
+					if err := json.Unmarshal([]byte(test.payload), &want); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("event payload = %#v, want %#v", got, want)
+					}
+					foundPayload = true
+				}
+			}
+			if !foundPlan || !foundPayload {
+				t.Fatalf("uploaded artifacts = %#v, want one plan and exact event payload", runner.uploaded)
+			}
+		})
+	}
+}
+
+func TestPluginUsesBuildkitePipelineTriggerCompatibilityIdentity(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"selected.yml": "name: Selected\non: push\njobs:\n  selected:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{}`)
+	setCLIPluginBuildkiteEnvironment(t, "compatibility-pipeline-trigger-importer")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "push")
+	t.Setenv(pipelineTriggerWorkflowPathEnvironment, ".github/workflows/selected.yml")
+
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 || !strings.Contains(stdout.String(), "Uploaded 1 job") {
+		t.Fatalf("run() code/stdout/stderr = %d / %q / %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestPluginExplicitWorkflowOverridesPipelineTriggerSelection(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"configured.yml": "name: Configured\non: push\njobs:\n  configured:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"selected.yml":   "name: Selected\non: push\njobs:\n  selected:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{"workflow":".github/workflows/configured.yml"}`)
+	setCLIPluginBuildkiteEnvironment(t, "explicit-workflow-importer")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/selected.yml", "Selected", "push", "buildkite/buildkite-gha/.github/workflows/selected.yml@refs/heads/main")
+
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group     string `yaml:"group"`
+			Condition string `yaml:"if"`
+			DependsOn string `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · Configured" || pipeline.Steps[0].DependsOn != "explicit-workflow-importer" || pipeline.Steps[0].Condition == "" {
+		t.Fatalf("pipeline steps = %#v", pipeline.Steps)
+	}
+
+	t.Setenv("BUILDKITE_STEP_KEY", "")
+	runner = &cliCaptureRunner{}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 2 || !strings.Contains(stderr.String(), "BUILDKITE_STEP_KEY") {
+		t.Fatalf("keyless explicit-selector run() code/stderr = %d / %q, want key-required usage error", code, stderr.String())
+	}
+	if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+		t.Fatalf("keyless explicit selector reached side effects: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+	}
+}
+
+func TestPluginRejectsMalformedPipelineTriggerEnvironment(t *testing.T) {
+	requireImporterHost(t)
+	for _, test := range []struct {
+		name       string
+		env        map[string]string
+		want       string
+		wantCode   int
+		fullPrefix bool
+	}{
+		{name: "workflow identity without selected path", env: map[string]string{githubWorkflowRefEnvironment: "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/heads/main"}, want: "missing BUILDKITE_GITHUB_WORKFLOW_PATH", wantCode: 2},
+		{name: "blank selected path", env: map[string]string{pipelineTriggerWorkflowPathEnvironment: "   "}, want: "BUILDKITE_GITHUB_WORKFLOW_PATH must be a non-empty workflow path", wantCode: 2},
+		{name: "missing event identity", env: map[string]string{pipelineTriggerWorkflowPathEnvironment: ".github/workflows/ci.yml"}, want: "GITHUB_EVENT_NAME or BUILDKITE_GITHUB_EVENT is required", wantCode: 2},
+		{name: "malformed preferred event", fullPrefix: true, env: map[string]string{githubEventNameEnvironment: " pull_request"}, want: "GITHUB_EVENT_NAME must be a lowercase GitHub event name", wantCode: 2},
+		{name: "blank preferred workflow name", fullPrefix: true, env: map[string]string{githubWorkflowEnvironment: "   "}, want: "GITHUB_WORKFLOW must be non-empty", wantCode: 2},
+		{name: "malformed preferred workflow ref", fullPrefix: true, env: map[string]string{githubWorkflowRefEnvironment: "buildkite/buildkite-gha/.github/workflows/ci.yml"}, want: "GITHUB_WORKFLOW_REF must have", wantCode: 2},
+		{name: "preferred workflow ref for another repository", fullPrefix: true, env: map[string]string{githubWorkflowRefEnvironment: "other/repository/.github/workflows/ci.yml@refs/heads/main"}, want: "GITHUB_WORKFLOW_REF repository", wantCode: 2},
+		{name: "preferred workflow ref with mismatched event ref", fullPrefix: true, env: map[string]string{githubWorkflowRefEnvironment: "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/pull/42/merge"}, want: "GITHUB_WORKFLOW_REF event ref", wantCode: 2},
+		{name: "dispatch with pull request ref", fullPrefix: true, env: map[string]string{githubEventNameEnvironment: "workflow_dispatch", githubWorkflowRefEnvironment: "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/pull/42/merge"}, want: "GITHUB_WORKFLOW_REF event ref", wantCode: 2},
+		{name: "malformed preferred workflow SHA", fullPrefix: true, env: map[string]string{githubWorkflowSHAEnvironment: "HEAD"}, want: "GITHUB_WORKFLOW_SHA must be a full lowercase 40-hex commit", wantCode: 2},
+		{name: "preferred workflow SHA does not match checkout", fullPrefix: true, env: map[string]string{githubWorkflowSHAEnvironment: strings.Repeat("a", 40)}, want: "GITHUB_WORKFLOW_SHA does not match BUILDKITE_COMMIT", wantCode: 1},
+		{name: "issues without preferred workflow ref", fullPrefix: true, env: map[string]string{githubEventNameEnvironment: "issues", githubWorkflowRefEnvironment: ""}, want: "GITHUB_WORKFLOW_REF and GITHUB_WORKFLOW_SHA are required for issues", wantCode: 2},
+		{name: "issue comment without preferred workflow SHA", fullPrefix: true, env: map[string]string{githubEventNameEnvironment: "issue_comment", githubWorkflowSHAEnvironment: ""}, want: "GITHUB_WORKFLOW_REF and GITHUB_WORKFLOW_SHA are required for issue_comment", wantCode: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(pluginConfigurationEnvironment, `{}`)
+			setCLIPluginBuildkiteEnvironment(t, "malformed-pipeline-trigger-importer")
+			if test.fullPrefix {
+				setCLIPipelineTriggerEnvironment(t, ".github/workflows/ci.yml", "CI", "push", "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/heads/main")
+			}
+			for name, value := range test.env {
+				t.Setenv(name, value)
+			}
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != test.wantCode || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("run() code/stderr = %d / %q, want %d / %q", code, stderr.String(), test.wantCode, test.want)
+			}
+			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+				t.Fatalf("malformed trigger environment reached upload: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+			}
+		})
+	}
+}
+
+func TestParsePipelineTriggerWorkflowRefPreservesDelimiterInEventRef(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ref  string
+	}{
+		{name: "branch", ref: "refs/heads/foo@refs/bar"},
+		{name: "tag", ref: "refs/tags/v1@refs/stable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflowRef := "acme/widgets/.github/workflows/ci.yml@" + test.ref
+			path, ref, err := parsePipelineTriggerWorkflowRef(workflowRef, "push", "https://github.com/acme/widgets.git", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if path != ".github/workflows/ci.yml" || ref != test.ref {
+				t.Fatalf("workflow identity = %q / %q, want path and complete ref %q", path, ref, test.ref)
+			}
+		})
+	}
+}
+
+func TestPluginRejectsPipelineTriggerWorkflowNameMismatch(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"ci.yml": "name: Actual\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{}`)
+	setCLIPluginBuildkiteEnvironment(t, "workflow-name-mismatch-importer")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/ci.yml", "Stale", "push", "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/heads/main")
+
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "GITHUB_WORKFLOW does not match the checked-out workflow") {
+		t.Fatalf("run() code/stdout/stderr = %d / %q / %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestPluginValidatesPipelineTriggerSelectedWorkflowPath(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"tracked.yml": "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	untracked := filepath.Join(repository, ".github", "workflows", "untracked.yml")
+	if err := os.WriteFile(untracked, []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(repository, ".github", "workflows", "linked.yml")
+	if err := os.Symlink("tracked.yml", symlink); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", repository, "add", ".github/workflows/linked.yml").CombinedOutput(); err != nil {
+		t.Fatalf("git add symlink: %v: %s", err, output)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.yml")
+	if err := os.WriteFile(outside, []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "outside checkout", path: outside, want: "outside the checked-out git repository"},
+		{name: "untracked", path: ".github/workflows/untracked.yml", want: "server-selected workflow path is missing or untracked"},
+		{name: "symlink", path: ".github/workflows/linked.yml", want: "is not a regular tracked file"},
+		{name: "glob", path: ".github/workflows/*.yml", want: "glob pattern"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Chdir(repository)
+			t.Setenv(pluginConfigurationEnvironment, `{}`)
+			setCLIPluginBuildkiteEnvironment(t, "unsafe-pipeline-trigger-importer")
+			t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+			setCLIPipelineTriggerEnvironment(t, test.path, "", "push", "buildkite/buildkite-gha/"+filepath.ToSlash(test.path)+"@refs/heads/main")
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("run() code/stderr = %d / %q, want 1 / %q", code, stderr.String(), test.want)
+			}
+			if stdout.Len() != 0 || len(runner.uploaded) != 0 {
+				t.Fatalf("unsafe selected path reached Buildkite: stdout %q, uploads %#v", stdout.String(), runner.uploaded)
+			}
+		})
 	}
 }
 
@@ -128,6 +704,7 @@ func TestPluginRejectsUnknownAndNonBooleanConfigurationWithoutSideEffects(t *tes
 	}{
 		{name: "unknown field", source: `{"workflow":"ci.yml","unknown":true}`, want: "unknown field"},
 		{name: "non-boolean experiment", source: `{"workflow":"ci.yml","experimental-runner-user":"true"}`, want: "must be a boolean"},
+		{name: "non-boolean private reusable workflows", source: `{"workflow":"ci.yml","private-reusable-workflows":"true"}`, want: "must be a boolean"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv(pluginConfigurationEnvironment, test.source)
@@ -151,6 +728,7 @@ func TestParsePluginConfiguration(t *testing.T) {
   "source-ref": "0123456789abcdef0123456789abcdef01234567",
   "minimum-release-age": "24h",
   "experimental-runner-user": true,
+  "private-reusable-workflows": true,
   "oidc": {
     "claims": ["organization_id", "future_server_claim"],
     "aws-session-tags": ["organization_slug", "pipeline_id"],
@@ -164,7 +742,7 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(configuration.Workflows, []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}) || !configuration.ExperimentalRunnerUser || len(configuration.runnerTargets) != 2 {
+	if !slices.Equal(configuration.Workflows, []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}) || !configuration.ExperimentalRunnerUser || !configuration.PrivateReusableWorkflows || len(configuration.runnerTargets) != 2 {
 		t.Fatalf("configuration = %#v", configuration)
 	}
 	if configuration.OIDC == nil || !slices.Equal(configuration.OIDC.Claims, []string{"organization_id", "future_server_claim"}) || !slices.Equal(configuration.OIDC.AWSSessionTags, []string{"organization_slug", "pipeline_id"}) || configuration.OIDC.SubjectClaim != "pipeline_id" {
@@ -173,16 +751,30 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if got := configuration.runnerTargets["ubuntu-latest"]; got.Queue != "hosted" || got.Platform != compiler.PlatformLinuxAMD64 || got.Image != image || got.Cache == nil || !slices.Equal(got.Cache.Paths, []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"}) || got.Cache.Name != "gradle-${BUILDKITE_BRANCH}" || got.Cache.Size != "40g" {
 		t.Fatalf("Linux target = %#v", got)
 	}
-	if got := configuration.runnerTargets["macos-14"]; got != (compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
+	if got := configuration.runnerTargets["macos-14"]; !reflect.DeepEqual(got, compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("Darwin target = %#v", got)
 	}
 	minimal, err := parsePluginConfiguration(`{"workflow":"workflow.yml"}`)
-	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || !minimal.ExperimentalRunnerUser || len(minimal.runnerTargets) != 0 {
+	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || !minimal.ExperimentalRunnerUser || minimal.PrivateReusableWorkflows || len(minimal.runnerTargets) != 0 {
 		t.Fatalf("minimal configuration = %#v, %v", minimal, err)
+	}
+	empty, err := parsePluginConfiguration(`{}`)
+	if err != nil || len(empty.Workflows) != 0 || !empty.ExperimentalRunnerUser || len(empty.runnerTargets) != 0 {
+		t.Fatalf("empty configuration = %#v, %v", empty, err)
 	}
 	disabled, err := parsePluginConfiguration(`{"workflow":"workflow.yml","experimental-runner-user":false}`)
 	if err != nil || disabled.ExperimentalRunnerUser {
 		t.Fatalf("disabled runner user configuration = %#v, %v", disabled, err)
+	}
+	host, err := importerPlatform(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, binary := range []string{`"https://example.com/buildkite-gha"`, `{"` + host.String() + `":"https://example.com/buildkite-gha#sha256=` + strings.Repeat("aB", 32) + `"}`} {
+		configuration, err := parsePluginConfiguration(`{"binary":` + binary + `}`)
+		if err != nil || len(configuration.binaries) != 1 || configuration.binaries[host] == "" {
+			t.Fatalf("binary configuration = %#v, %v", configuration, err)
+		}
 	}
 
 	for _, test := range []struct {
@@ -191,7 +783,6 @@ func TestParsePluginConfiguration(t *testing.T) {
 		want   string
 	}{
 		{name: "malformed", source: `{`, want: "decode"},
-		{name: "missing workflow selection", source: `{}`, want: "workflow or workflows is required"},
 		{name: "duplicate workflow", source: `{"workflow":"one.yml","workflow":"two.yml"}`, want: "duplicate object key"},
 		{name: "both workflow fields", source: `{"workflow":"one.yml","workflows":"two.yml"}`, want: "mutually exclusive"},
 		{name: "empty workflow", source: `{"workflow":""}`, want: "workflow must be a non-empty string"},
@@ -200,10 +791,26 @@ func TestParsePluginConfiguration(t *testing.T) {
 		{name: "non-string workflow entry", source: `{"workflows":["one.yml",null]}`, want: "workflows entry 1 must be a non-empty string"},
 		{name: "empty workflow entry", source: `{"workflows":["one.yml",""]}`, want: "workflows entry 1 must be a non-empty string"},
 		{name: "unknown top-level field", source: `{"workflow":"ci.yml","runnerss":[]}`, want: "unknown field"},
+		{name: "both acquisition modes", source: `{"version":"latest","binary":"https://example.com/bin"}`, want: "mutually exclusive"},
+		{name: "null binary", source: `{"binary":null}`, want: "non-empty platform-to-URL"},
+		{name: "empty binary map", source: `{"binary":{}}`, want: "non-empty platform-to-URL"},
+		{name: "missing host binary", source: `{"binary":{"windows/amd64":"https://example.com/bin"}}`, want: "importer platform"},
+		{name: "unknown binary platform", source: `{"binary":{"plan9/amd64":"https://example.com/bin"}}`, want: "unsupported runtime platform"},
+		{name: "non-string binary", source: `{"binary":{"linux/amd64":1}}`, want: "must be a string"},
+		{name: "insecure binary", source: `{"binary":"http://example.com/bin"}`, want: "HTTPS"},
+		{name: "hostless binary", source: `{"binary":"https:///bin"}`, want: "HTTPS"},
+		{name: "binary credentials", source: `{"binary":"https://user:secret@example.com/bin"}`, want: "without user credentials"},
+		{name: "unknown binary fragment", source: `{"binary":"https://example.com/bin#sha512=abcd"}`, want: "64 hexadecimal"},
+		{name: "empty binary fragment", source: `{"binary":"https://example.com/bin#"}`, want: "64 hexadecimal"},
+		{name: "short binary checksum", source: `{"binary":"https://example.com/bin#sha256=abcd"}`, want: "64 hexadecimal"},
+		{name: "invalid binary checksum", source: `{"binary":"https://example.com/bin#sha256=` + strings.Repeat("z", 64) + `"}`, want: "64 hexadecimal"},
 		{name: "retired source acquisition field", source: `{"workflow":"ci.yml","buildkite-gha-source-ref":"latest"}`, want: "unknown field"},
 		{name: "string experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":"true"}`, want: "must be a boolean"},
 		{name: "numeric experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":1}`, want: "must be a boolean"},
 		{name: "null experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":null}`, want: "must be a boolean"},
+		{name: "string private reusable workflows", source: `{"workflow":"ci.yml","private-reusable-workflows":"true"}`, want: "must be a boolean"},
+		{name: "numeric private reusable workflows", source: `{"workflow":"ci.yml","private-reusable-workflows":1}`, want: "must be a boolean"},
+		{name: "null private reusable workflows", source: `{"workflow":"ci.yml","private-reusable-workflows":null}`, want: "must be a boolean"},
 		{name: "null oidc", source: `{"workflow":"ci.yml","oidc":null}`, want: "oidc must be a JSON object"},
 		{name: "array oidc", source: `{"workflow":"ci.yml","oidc":[]}`, want: "oidc must be a JSON object"},
 		{name: "unknown oidc field", source: `{"workflow":"ci.yml","oidc":{"subject_claim":"pipeline_id"}}`, want: "oidc contains unknown field"},
@@ -271,6 +878,12 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 	t.Setenv("BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW", "ignored.yml")
 	_ = executable // The plugin uses the already-opened running executable, not an environment path.
 	setCLIPluginBuildkiteEnvironment(t, "plugin-linux")
+	server, _ := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+		"ubuntu-latest": {"validated": true, "target": map[string]string{"queue": "hosted", "platform": "linux/amd64"}},
+	})
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
@@ -304,11 +917,12 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 {
+	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 3 {
 		t.Fatalf("workflow groups = %#v", pipeline.Steps)
 	}
+	wantCachePaths := []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper", "/cache/bkcache/buildkite-gha/validation/linux-amd64"}
 	for _, step := range pipeline.Steps[0].Steps {
-		if step.Agents["queue"] != "hosted" || step.Image != defaultNobleRunnerImage || !slices.Equal(step.Cache.Paths, []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"}) || step.Cache.Name != "gradle-cache" || step.Cache.Size != "40g" || !strings.Contains(step.Command, "--hosted-tool-cache") || !strings.Contains(step.Command, "useradd --create-home") || !strings.Contains(step.Command, "chown -R runner") || !strings.Contains(step.Command, "sudo -n --preserve-env --user runner") {
+		if step.Agents["queue"] != "hosted" || step.Image != defaultNobleRunnerImage || !slices.Equal(step.Cache.Paths, wantCachePaths) || step.Cache.Name != "gradle-cache" || step.Cache.Size != "40g" || !strings.Contains(step.Command, "--hosted-tool-cache") || !strings.Contains(step.Command, "useradd --create-home") || !strings.Contains(step.Command, "chown -R runner") || !strings.Contains(step.Command, "sudo -n --preserve-env --user runner") {
 			t.Fatalf("plugin profile was not applied: %#v", step)
 		}
 	}
@@ -517,18 +1131,128 @@ func TestPluginRejectsNonExplicitWorkflowSelectors(t *testing.T) {
 	}
 }
 
+func TestPluginValidatesExplicitRunnerMappingsBeforeUpload(t *testing.T) {
+	requireImporterHost(t)
+	const mismatch = "The 'macos-medium' queue requires platform darwin/arm64, not linux/amd64."
+	for _, test := range []struct {
+		name       string
+		status     int
+		verdict    map[string]any
+		wantStop   bool
+		wantReject bool
+	}{
+		{name: "valid mapping preserves image and cache", status: http.StatusOK, verdict: map[string]any{"validated": true, "target": map[string]string{"queue": "macos-medium", "platform": "linux/amd64"}}},
+		{name: "platform mismatch", status: http.StatusOK, verdict: map[string]any{"error": map[string]string{"code": "queue_platform_mismatch", "message": mismatch}}, wantReject: true},
+		{name: "API unavailable", status: http.StatusServiceUnavailable, wantStop: true},
+		{name: "old server omits acknowledgment", status: http.StatusOK, verdict: map[string]any{"target": map[string]string{"queue": "macos-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}}, wantStop: true},
+		{name: "server changes configured queue", status: http.StatusOK, verdict: map[string]any{"validated": true, "target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64"}}, wantStop: true},
+		{name: "missing credentials", wantStop: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := writeUploadWorkflowRepository(t, map[string]string{
+				"ci.yml": "name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: echo tested}]\n",
+			})
+			t.Chdir(repository)
+			image := "registry.example.com/custom@sha256:" + strings.Repeat("1", 64)
+			configuration, err := json.Marshal(map[string]any{
+				"workflow": ".github/workflows/ci.yml",
+				"runners": []map[string]any{{"runs-on": "ubuntu-latest", "queue": "macos-medium", "image": image,
+					"cache": map[string]any{"paths": []string{"/home/runner/.cache"}, "name": "custom-dependencies", "size": "40g"}}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			setCLIPluginBuildkiteEnvironment(t, "configured-importer")
+			t.Setenv(pluginConfigurationEnvironment, string(configuration))
+			t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+			t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "true")
+			requests := 0
+			if test.status != 0 {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requests++
+					var body struct {
+						Requirements []struct {
+							ID               string            `json:"id"`
+							ConfiguredTarget map[string]string `json:"configured_target"`
+						} `json:"requirements"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+						return
+					}
+					if len(body.Requirements) != 1 || !reflect.DeepEqual(body.Requirements[0].ConfiguredTarget, map[string]string{"queue": "macos-medium", "platform": "linux/amd64"}) {
+						t.Errorf("explicit target was not sent for validation: %#v", body.Requirements)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					w.WriteHeader(test.status)
+					verdict := map[string]any{"id": body.Requirements[0].ID}
+					for key, value := range test.verdict {
+						verdict[key] = value
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": []map[string]any{verdict}})
+				}))
+				t.Cleanup(server.Close)
+				t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+				t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+				t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+			}
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner)
+			if test.status != 0 && requests != 1 {
+				t.Fatalf("validation requests = %d, want 1; stderr = %s", requests, stderr.String())
+			}
+			if test.wantStop {
+				if code != 1 || !strings.Contains(stderr.String(), "cannot validate explicit runner mappings") || len(runner.uploaded) != 0 {
+					t.Fatalf("unvalidated import = %d, %s; uploads = %d", code, stderr.String(), len(runner.uploaded))
+				}
+				for _, command := range runner.commands {
+					if len(command.args) >= 2 && command.args[0] == "pipeline" && command.args[1] == "upload" {
+						t.Fatal("unvalidated pipeline was uploaded")
+					}
+				}
+				return
+			}
+			if code != 0 || len(runner.commands) == 0 {
+				t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+			}
+			pipeline := string(runner.commands[len(runner.commands)-1].stdin)
+			if test.wantReject {
+				if strings.Contains(pipeline, "run-job") || strings.Contains(pipeline, image) {
+					t.Fatalf("rejected runner was uploaded: %s", pipeline)
+				}
+				foundMessage := false
+				for _, artifact := range runner.uploaded {
+					foundMessage = foundMessage || strings.Contains(string(artifact), mismatch)
+				}
+				if !foundMessage {
+					t.Fatal("queue mismatch diagnostic was not published")
+				}
+			} else if !strings.Contains(pipeline, image) || !strings.Contains(pipeline, `queue: "macos-medium"`) || !strings.Contains(pipeline, "custom-dependencies") || !strings.Contains(pipeline, "40g") || !strings.Contains(pipeline, "run-job") {
+				t.Fatalf("validated target lost its configuration: %s", pipeline)
+			}
+		})
+	}
+}
+
 func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
+	for _, mode := range []string{"release", "legacy-source", "binary"} {
+		t.Run(mode, func(t *testing.T) {
+			testPluginPublishesMixedRuntimeDistributions(t, mode)
+		})
+	}
+}
+
+func testPluginPublishesMixedRuntimeDistributions(t *testing.T, mode string) {
+	t.Helper()
 	requireImporterHost(t)
 	const fullCommit = "0123456789abcdef0123456789abcdef01234567"
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"mixed.yml": "on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  configured:\n    needs: linux\n    runs-on: ubuntu-18.04\n    steps:\n      - run: echo configured\n  fallback:\n    needs: linux\n    runs-on: [self-hosted, ubuntu-20.04]\n    steps:\n      - run: echo fallback\n  macos:\n    needs: linux\n    runs-on: macos-26\n    steps:\n      - run: echo macos\n",
+		"mixed.yml": "on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  configured:\n    needs: linux\n    runs-on: ubuntu-18.04\n    steps:\n      - run: echo configured\n  fallback:\n    needs: linux\n    runs-on: [self-hosted, ubuntu-20.04]\n    steps:\n      - run: echo fallback\n  expression:\n    needs: linux\n    strategy:\n      matrix:\n        runner: [custom-linux]\n    runs-on: [self-hosted, \"${{ matrix.runner }}\"]\n    steps:\n      - run: echo expression fallback\n  macos:\n    needs: linux\n    runs-on: macos-26\n    steps:\n      - run: echo macos\n",
 	})
 	t.Chdir(repository)
 	workflowPath := filepath.Join(".github", "workflows", "mixed.yml")
-	linuxPath, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	darwinContents := []byte{
 		0xcf, 0xfa, 0xed, 0xfe,
 		0x0c, 0x00, 0x00, 0x01,
@@ -539,16 +1263,49 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 		0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00,
 	}
-	darwinPath := filepath.Join(t.TempDir(), "buildkite-gha-darwin")
-	if err := os.WriteFile(darwinPath, darwinContents, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	configuration, err := json.Marshal(map[string]any{
+	archive := pluginTestArchive(t, darwinContents, false)
+	binaryServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/darwin":
+			_, _ = w.Write(darwinContents)
+		case "/v1.2.3/checksums.txt":
+			_, _ = fmt.Fprintf(w, "%x  %s\n", sha256.Sum256(archive), pluginDarwinAsset)
+		case "/v1.2.3/" + pluginDarwinAsset:
+			_, _ = w.Write(archive)
+		default:
+			t.Errorf("unexpected binary download: %s", r.URL)
+		}
+	}))
+	defer binaryServer.Close()
+	previousClient, previousBase := pluginHTTPClient, pluginReleaseBaseURL
+	pluginHTTPClient, pluginReleaseBaseURL = binaryServer.Client(), binaryServer.URL
+	t.Cleanup(func() { pluginHTTPClient, pluginReleaseBaseURL = previousClient, previousBase })
+	configurationFields := map[string]any{
 		"workflow": workflowPath,
 		"runners": []map[string]any{
 			{"runs-on": "ubuntu-18.04", "queue": "legacy-linux"},
 		},
-	})
+	}
+	version := "dev"
+	switch mode {
+	case "release":
+		version = "1.2.3"
+		configurationFields["version"] = "latest"
+		configurationFields["minimum-release-age"] = "24h"
+	case "legacy-source":
+		configurationFields["source-ref"] = fullCommit
+		darwinPath := filepath.Join(t.TempDir(), "buildkite-gha-darwin")
+		if err := os.WriteFile(darwinPath, darwinContents, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(pluginDevDarwinRuntimeEnvironment, darwinPath)
+	case "binary":
+		configurationFields["binary"] = map[string]string{
+			"linux/amd64":  binaryServer.URL + "/linux",
+			"darwin/arm64": fmt.Sprintf("%s/darwin#sha256=%x", binaryServer.URL, sha256.Sum256(darwinContents)),
+		}
+	}
+	configuration, err := json.Marshal(configurationFields)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,6 +1329,11 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 		resolutions := make([]map[string]any, len(body.Requirements))
 		for i, requirement := range body.Requirements {
 			switch {
+			case slices.Equal(requirement.Selector.Labels, []string{"ubuntu-18.04"}):
+				resolutions[i] = map[string]any{
+					"id": requirement.ID, "validated": true,
+					"target": map[string]string{"queue": "legacy-linux", "platform": "linux/amd64"},
+				}
 			case slices.Equal(requirement.Selector.Labels, []string{"ubuntu-latest"}):
 				resolutions[i] = map[string]any{
 					"id":     requirement.ID,
@@ -583,7 +1345,16 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 					"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage},
 					"warnings": []map[string]string{{
 						"code":    "runner_label_fallback",
-						"message": "This runner selector is not supported directly; using the linux-medium queue via a heuristic fallback. Configure an explicit runner mapping to use an appropriate Buildkite queue and avoid this fallback: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md",
+						"message": "This runner selector is not supported directly; using the linux-medium queue via a heuristic fallback. Configure an explicit runner mapping to use an appropriate Buildkite queue and avoid this fallback: https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility",
+					}},
+				}
+			case slices.Equal(requirement.Selector.Labels, []string{"self-hosted", "custom-linux"}):
+				resolutions[i] = map[string]any{
+					"id":     requirement.ID,
+					"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage},
+					"warnings": []map[string]string{{
+						"code":    "runner_label_fallback",
+						"message": "Expression-selected runner labels [self-hosted, custom-linux] are not supported directly; using the linux-medium queue via a heuristic fallback. Configure an explicit runner mapping to use an appropriate Buildkite queue and avoid this fallback: https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility",
 					}},
 				}
 			case slices.Equal(requirement.Selector.Labels, []string{"macos-26"}):
@@ -596,8 +1367,6 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	}))
 	defer server.Close()
 	t.Setenv(pluginConfigurationEnvironment, string(configuration))
-	_ = linuxPath // The plugin's Linux runtime is always its running executable.
-	t.Setenv(pluginDevDarwinRuntimeEnvironment, darwinPath)
 	setCLIPluginBuildkiteEnvironment(t, "plugin-mixed")
 	t.Setenv("BUILDKITE_COMMIT", "HEAD")
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
@@ -606,7 +1375,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "true")
 	runner := &cliCaptureRunner{gitOutput: []byte(fullCommit + "\n")}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+	if code := run([]string{"plugin"}, &stdout, &stderr, version, runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	if resolutionRequests != 1 {
@@ -620,7 +1389,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 			break
 		}
 	}
-	if runnerAnnotation == nil || runnerAnnotation.args[8] != "warning" || !strings.Contains(string(runnerAnnotation.stdin), "heuristic fallback") || !strings.Contains(string(runnerAnnotation.stdin), "linux-medium") || !strings.Contains(string(runnerAnnotation.stdin), "docs/compatibility.md") {
+	if runnerAnnotation == nil || runnerAnnotation.args[8] != "warning" || !strings.Contains(string(runnerAnnotation.stdin), "heuristic fallback") || !strings.Contains(string(runnerAnnotation.stdin), "custom-linux") || !strings.Contains(string(runnerAnnotation.stdin), "linux-medium") || !strings.Contains(string(runnerAnnotation.stdin), "run-github-actions-workflows/compatibility") {
 		t.Fatalf("runner resolution annotation = %#v", runnerAnnotation)
 	}
 	darwinDigest := transport.Digest(darwinContents)
@@ -661,7 +1430,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 {
+	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 5 {
 		t.Fatalf("workflow groups = %#v", pipeline.Steps)
 	}
 	steps := make(map[string]struct {
@@ -676,7 +1445,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 			Command string
 		}{Image: step.Image, Queue: step.Agents["queue"], Command: step.Command}
 	}
-	var linux, configured, fallback, macos struct {
+	var linux, configured, fallback, expression, macos struct {
 		Image   string
 		Queue   string
 		Command string
@@ -689,6 +1458,8 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 			configured = step
 		case strings.HasSuffix(key, "-fallback"):
 			fallback = step
+		case strings.Contains(key, "-expression-"):
+			expression = step
 		case strings.HasSuffix(key, "-macos"):
 			macos = step
 		}
@@ -702,7 +1473,10 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	if fallback.Queue != "linux-medium" || fallback.Image != defaultNobleRunnerImage || !strings.Contains(fallback.Command, "--hosted-tool-cache") || !strings.Contains(fallback.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
 		t.Fatalf("fallback Linux pipeline step = %#v", fallback)
 	}
-	if macos.Queue != "macos-26-medium" || macos.Image != "" || strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
+	if expression.Queue != "linux-medium" || expression.Image != defaultNobleRunnerImage || !strings.Contains(expression.Command, "--hosted-tool-cache") || !strings.Contains(expression.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
+		t.Fatalf("expression fallback Linux pipeline step = %#v", expression)
+	}
+	if macos.Queue != "macos-26-medium" || macos.Image != "" || !strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
 		t.Fatalf("Darwin pipeline step = %#v", macos)
 	}
 }
@@ -726,6 +1500,12 @@ func TestPluginRunsNativelyOnDarwinARM64(t *testing.T) {
 	t.Setenv(pluginConfigurationEnvironment, string(configuration))
 	setCLIPluginBuildkiteEnvironment(t, "plugin-darwin-importer")
 	t.Setenv("BUILDKITE_COMMIT", "HEAD")
+	server, _ := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+		"macos-15": {"validated": true, "target": map[string]string{"queue": "macos", "platform": "darwin/arm64"}},
+	})
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	runner := &cliCaptureRunner{gitOutput: []byte(fullCommit + "\n")}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
@@ -833,7 +1613,7 @@ func TestPluginCarriesReleaseCommitIntoPlans(t *testing.T) {
 			}
 			found := false
 			for path, source := range runner.uploaded {
-				if !strings.HasSuffix(path, ".json") {
+				if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 					continue
 				}
 				job, err := plan.Decode(source)
@@ -859,6 +1639,13 @@ func setCLIPluginBuildkiteEnvironment(t *testing.T, stepKey string) {
 	t.Helper()
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", "")
+	t.Setenv(pipelineTriggerWorkflowPathEnvironment, "")
+	t.Setenv(githubEventNameEnvironment, "")
+	t.Setenv(githubWorkflowEnvironment, "")
+	t.Setenv(githubWorkflowRefEnvironment, "")
+	t.Setenv(githubWorkflowSHAEnvironment, "")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "")
+	t.Setenv("BUILDKITE_GITHUB_ACTION", "")
 	t.Setenv("BUILDKITE_STEP_KEY", stepKey)
 	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
 	t.Setenv("BUILDKITE_COMMIT", "0123456789abcdef0123456789abcdef01234567")
@@ -866,4 +1653,16 @@ func setCLIPluginBuildkiteEnvironment(t *testing.T, stepKey string) {
 	t.Setenv("BUILDKITE_TAG", "")
 	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
 	t.Setenv("BUILDKITE_SOURCE", "webhook")
+}
+
+func setCLIPipelineTriggerEnvironment(t *testing.T, compatibilityPath, workflow, event, workflowRef string) {
+	t.Helper()
+	t.Setenv(pipelineTriggerWorkflowPathEnvironment, compatibilityPath)
+	t.Setenv("BUILDKITE_GITHUB_EVENT", event)
+	t.Setenv(githubEventNameEnvironment, event)
+	if workflow != "" {
+		t.Setenv(githubWorkflowEnvironment, workflow)
+	}
+	t.Setenv(githubWorkflowRefEnvironment, workflowRef)
+	t.Setenv(githubWorkflowSHAEnvironment, os.Getenv("BUILDKITE_COMMIT"))
 }

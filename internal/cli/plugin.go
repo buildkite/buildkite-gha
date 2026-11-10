@@ -8,26 +8,36 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
-const pluginConfigurationEnvironment = "BUILDKITE_PLUGIN_CONFIGURATION"
+const (
+	pluginConfigurationEnvironment         = "BUILDKITE_PLUGIN_CONFIGURATION"
+	pipelineTriggerWorkflowPathEnvironment = "BUILDKITE_GITHUB_WORKFLOW_PATH"
+	githubWorkflowEnvironment              = "GITHUB_WORKFLOW"
+	githubWorkflowRefEnvironment           = "GITHUB_WORKFLOW_REF"
+	githubWorkflowSHAEnvironment           = "GITHUB_WORKFLOW_SHA"
+)
 
-func plugin(args []string, stdout, stderr io.Writer, version, clientVersion string, runner transport.Runner) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+func plugin(ctx context.Context, args []string, stdout, stderr io.Writer, version, clientVersion string, runner transport.Runner) int {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return pluginContext(ctx, args, stdout, stderr, version, clientVersion, runner)
 }
 
 func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer, version, clientVersion string, runner transport.Runner) (code int) {
+	ctx, _ = actionsource.WithSourceStats(ctx)
 	started := time.Now()
 	details := &commandTelemetryDetails{}
 	stderr = details.captureErrors(stderr)
@@ -48,30 +58,42 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if err != nil {
 		return usageError(stderr, "plugin: %v", err)
 	}
+	workflowOperands, serverSelectedWorkflow, err := pluginWorkflowOperands(configuration, os.Getenv)
+	if err != nil {
+		return usageError(stderr, "plugin: %v", err)
+	}
 	checkoutPath := os.Getenv("BUILDKITE_BUILD_CHECKOUT_PATH")
 	if err := normalizePluginCommit(ctx, checkoutPath, os.Getenv, os.Setenv, runner); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", err)
 		return 1
 	}
+	if serverSelectedWorkflow != nil && serverSelectedWorkflow.SHA != "" && serverSelectedWorkflow.SHA != os.Getenv("BUILDKITE_COMMIT") {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %s does not match BUILDKITE_COMMIT after checkout: %q != %q\n", githubWorkflowSHAEnvironment, serverSelectedWorkflow.SHA, os.Getenv("BUILDKITE_COMMIT"))
+		return 1
+	}
 	return uploadParsedContext(ctx, parsedUploadArgs{
-		workflowOperands:       configuration.Workflows,
-		explicitWorkflowPaths:  true,
-		checkoutPath:           checkoutPath,
-		clientVersion:          clientVersion,
-		runnerTargets:          configuration.runnerTargets,
-		oidc:                   configuration.OIDC,
-		experimentalRunnerUser: configuration.ExperimentalRunnerUser,
-		pluginAcquisition:      &pluginRuntimeAcquisition{version: version},
-		importerPlatform:       importerPlatform,
-		telemetry:              details,
+		workflowOperands:         workflowOperands,
+		explicitWorkflowPaths:    true,
+		serverSelectedWorkflow:   serverSelectedWorkflow,
+		checkoutPath:             checkoutPath,
+		clientVersion:            clientVersion,
+		runnerTargets:            configuration.runnerTargets,
+		oidc:                     configuration.OIDC,
+		experimentalRunnerUser:   configuration.ExperimentalRunnerUser,
+		privateReusableWorkflows: configuration.PrivateReusableWorkflows,
+		pluginAcquisition:        &pluginRuntimeAcquisition{version: version, binaries: configuration.binaries},
+		importerPlatform:         importerPlatform,
+		telemetry:                details,
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
 }
 
 type pluginConfiguration struct {
-	Workflows              []string
-	ExperimentalRunnerUser bool
-	OIDC                   *plan.OIDCConfiguration
-	runnerTargets          map[string]compiler.RunnerTarget
+	Workflows                []string
+	ExperimentalRunnerUser   bool
+	PrivateReusableWorkflows bool
+	OIDC                     *plan.OIDCConfiguration
+	runnerTargets            map[string]compiler.RunnerTarget
+	binaries                 map[compiler.Platform]string
 }
 
 func parsePluginConfiguration(source string) (pluginConfiguration, error) {
@@ -95,9 +117,44 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	for key := range encoded {
 		switch key {
-		case "workflow", "workflows", "runners", "oidc", "version", "source-ref", "minimum-release-age", "experimental-runner-user":
+		case "workflow", "workflows", "runners", "oidc", "version", "source-ref", "minimum-release-age", "binary", "experimental-runner-user", "private-reusable-workflows":
 		default:
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
+		}
+	}
+	var binaries map[compiler.Platform]string
+	if value, configured := encoded["binary"]; configured {
+		if _, hasVersion := encoded["version"]; hasVersion {
+			return pluginConfiguration{}, fmt.Errorf("version and binary are mutually exclusive")
+		}
+		host, err := importerPlatform(runtime.GOOS, runtime.GOARCH)
+		if err != nil {
+			return pluginConfiguration{}, err
+		}
+		if source, ok := value.(string); ok {
+			value = map[string]any{host.String(): source}
+		}
+		values, ok := value.(map[string]any)
+		if !ok || len(values) == 0 {
+			return pluginConfiguration{}, fmt.Errorf("binary must be an HTTPS URL or a non-empty platform-to-URL object")
+		}
+		binaries = make(map[compiler.Platform]string, len(values))
+		for name, value := range values {
+			platform, err := compiler.ParsePlatform(name)
+			if err != nil {
+				return pluginConfiguration{}, err
+			}
+			source, ok := value.(string)
+			if !ok {
+				return pluginConfiguration{}, fmt.Errorf("binary URL for %s must be a string", platform)
+			}
+			if _, _, err := parsePluginBinaryURL(source); err != nil {
+				return pluginConfiguration{}, fmt.Errorf("binary URL for %s: %w", platform, err)
+			}
+			binaries[platform] = source
+		}
+		if binaries[host] == "" {
+			return pluginConfiguration{}, fmt.Errorf("binary URL for importer platform %s is required", host)
 		}
 	}
 	experimentalRunnerUser := true
@@ -106,6 +163,14 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 		experimentalRunnerUser, ok = value.(bool)
 		if !ok {
 			return pluginConfiguration{}, fmt.Errorf("%s experimental-runner-user must be a boolean", pluginConfigurationEnvironment)
+		}
+	}
+	privateReusableWorkflows := false
+	if value, configured := encoded["private-reusable-workflows"]; configured {
+		var ok bool
+		privateReusableWorkflows, ok = value.(bool)
+		if !ok {
+			return pluginConfiguration{}, fmt.Errorf("%s private-reusable-workflows must be a boolean", pluginConfigurationEnvironment)
 		}
 	}
 	workflowValue, hasWorkflow := encoded["workflow"]
@@ -120,7 +185,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			return pluginConfiguration{}, fmt.Errorf("%s workflow must be a non-empty string", pluginConfigurationEnvironment)
 		}
 		workflows = []string{workflow}
-	} else {
+	} else if hasWorkflows {
 		values, ok := workflowsValue.([]any)
 		if ok && len(values) != 0 {
 			workflows = make([]string, len(values))
@@ -175,6 +240,9 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 				return pluginConfiguration{}, fmt.Errorf("runner %d: %w", index, err)
 			}
 			if cacheValue, configured := runner["cache"]; configured {
+				if target.Platform == compiler.PlatformWindowsAMD64 {
+					return pluginConfiguration{}, fmt.Errorf("runner %d: cache volumes are unsupported on windows/amd64", index)
+				}
 				cache, err := parsePluginCacheVolume(cacheValue)
 				if err != nil {
 					return pluginConfiguration{}, fmt.Errorf("runner %d: %w", index, err)
@@ -194,7 +262,125 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			return pluginConfiguration{}, err
 		}
 	}
-	return pluginConfiguration{Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, OIDC: oidc, runnerTargets: targets}, nil
+	return pluginConfiguration{
+		Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, PrivateReusableWorkflows: privateReusableWorkflows,
+		OIDC: oidc, runnerTargets: targets, binaries: binaries,
+	}, nil
+}
+
+type pipelineTriggerWorkflow struct {
+	Name string
+	SHA  string
+}
+
+func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(string) string) ([]string, *pipelineTriggerWorkflow, error) {
+	if len(configuration.Workflows) != 0 {
+		return configuration.Workflows, nil, nil
+	}
+	compatibilityPath := getenv(pipelineTriggerWorkflowPathEnvironment)
+	if compatibilityPath == "" {
+		for _, name := range []string{githubEventNameEnvironment, githubWorkflowEnvironment, githubWorkflowRefEnvironment, githubWorkflowSHAEnvironment} {
+			if getenv(name) != "" {
+				return nil, nil, fmt.Errorf("GitHub Actions Pipeline Trigger environment is missing %s", pipelineTriggerWorkflowPathEnvironment)
+			}
+		}
+		return nil, nil, fmt.Errorf("%s workflow or workflows is required; workflows must be a non-empty array of non-empty strings", pluginConfigurationEnvironment)
+	}
+	if strings.TrimSpace(compatibilityPath) == "" || strings.TrimSpace(compatibilityPath) != compatibilityPath {
+		return nil, nil, fmt.Errorf("%s must be a non-empty workflow path", pipelineTriggerWorkflowPathEnvironment)
+	}
+
+	event, err := buildkiteGitHubEventName(getenv)
+	if err != nil {
+		return nil, nil, err
+	}
+	if event == "" {
+		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT is required", githubEventNameEnvironment)
+	}
+	if event != "workflow_dispatch" && event != "discussion_comment" && event != "discussion" && event != "branch_protection_rule" && event != "milestone" && event != "watch" && event != "page_build" && event != "gollum" && event != "public" && event != "fork" && event != "label" && event != "create" && event != "delete" && event != "push" && event != "pull_request" && event != "issues" && event != "issue_comment" && event != "pull_request_review" && event != "pull_request_review_comment" && event != "release" && event != "merge_group" && event != "deployment" && event != "deployment_status" {
+		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT must be push, pull_request, workflow_dispatch, issues, issue_comment, pull_request_review, pull_request_review_comment, release, merge_group, deployment, deployment_status, create, delete, label, fork, public, gollum, page_build, watch, milestone, branch_protection_rule, discussion, or discussion_comment", githubEventNameEnvironment)
+	}
+
+	workflowName := getenv(githubWorkflowEnvironment)
+	if workflowName != "" && strings.TrimSpace(workflowName) == "" {
+		return nil, nil, fmt.Errorf("%s must be non-empty", githubWorkflowEnvironment)
+	}
+	selectedPath := compatibilityPath
+	if workflowRef := getenv(githubWorkflowRefEnvironment); workflowRef != "" {
+		var err error
+		selectedPath, _, err = parsePipelineTriggerWorkflowRef(workflowRef, event, getenv("BUILDKITE_REPO"), getenv(githubServerURLEnvironment))
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	workflowSHA := getenv(githubWorkflowSHAEnvironment)
+	if workflowSHA != "" && !git.ValidObjectID(workflowSHA) {
+		return nil, nil, fmt.Errorf("%s must be a full lowercase 40-hex commit", githubWorkflowSHAEnvironment)
+	}
+	if (event == "discussion_comment" || event == "discussion" || event == "branch_protection_rule" || event == "milestone" || event == "watch" || event == "page_build" || event == "gollum" || event == "public" || event == "fork" || event == "label" || event == "create" || event == "delete" || event == "issues" || event == "issue_comment" || event == "pull_request_review" || event == "pull_request_review_comment" || event == "release" || event == "merge_group" || event == "deployment" || event == "deployment_status") && (getenv(githubWorkflowRefEnvironment) == "" || workflowSHA == "") {
+		return nil, nil, fmt.Errorf("%s and %s are required for %s", githubWorkflowRefEnvironment, githubWorkflowSHAEnvironment, event)
+	}
+	return []string{selectedPath}, &pipelineTriggerWorkflow{Name: workflowName, SHA: workflowSHA}, nil
+}
+
+func parsePipelineTriggerWorkflowRef(workflowRef, event, repository, serverURL string) (string, string, error) {
+	separator := strings.Index(workflowRef, "@refs/")
+	if separator < 0 && (event == "deployment" || event == "deployment_status") {
+		separator = strings.LastIndex(workflowRef, "@")
+	}
+	if separator <= 0 {
+		return "", "", fmt.Errorf("%s must have <owner>/<repo>/<workflow-path>@<event-ref> format", githubWorkflowRefEnvironment)
+	}
+	identity, eventRef := workflowRef[:separator], workflowRef[separator+1:]
+	parts := strings.SplitN(identity, "/", 3)
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return "", "", fmt.Errorf("%s must have <owner>/<repo>/<workflow-path>@<event-ref> format", githubWorkflowRefEnvironment)
+	}
+	provider, owner, name, _, err := parseBuildkiteRepository(repository, serverURL)
+	if err != nil {
+		return "", "", fmt.Errorf("BUILDKITE_REPO: %w", err)
+	}
+	if provider != "github" {
+		return "", "", fmt.Errorf("%s requires a github.com BUILDKITE_REPO", githubWorkflowRefEnvironment)
+	}
+	if !strings.EqualFold(parts[0], owner) || !strings.EqualFold(parts[1], name) {
+		return "", "", fmt.Errorf("%s repository %q does not match BUILDKITE_REPO %q", githubWorkflowRefEnvironment, parts[0]+"/"+parts[1], owner+"/"+name)
+	}
+	if !pipelineTriggerEventRef(event, eventRef) {
+		return "", "", fmt.Errorf("%s event ref %q does not match %s %q", githubWorkflowRefEnvironment, eventRef, githubEventNameEnvironment, event)
+	}
+	return parts[2], eventRef, nil
+}
+
+func pipelineTriggerEventRef(event, ref string) bool {
+	if ref != strings.TrimSpace(ref) {
+		return false
+	}
+	switch event {
+	case "deployment", "deployment_status":
+		return git.ValidObjectID(ref) || pipelineTriggerEventRef("push", ref)
+	case "push", "create", "workflow_dispatch":
+		for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
+			if value, ok := strings.CutPrefix(ref, prefix); ok {
+				return value != ""
+			}
+		}
+	case "pull_request", "pull_request_review", "pull_request_review_comment":
+		number, ok := strings.CutPrefix(ref, "refs/pull/")
+		if !ok {
+			return false
+		}
+		number, ok = strings.CutSuffix(number, "/merge")
+		parsed, err := strconv.Atoi(number)
+		return ok && err == nil && parsed > 0 && strconv.Itoa(parsed) == number
+	case "issues", "issue_comment", "merge_group", "delete", "label", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment":
+		branch, ok := strings.CutPrefix(ref, "refs/heads/")
+		return ok && branch != ""
+	case "release":
+		tag, ok := strings.CutPrefix(ref, "refs/tags/")
+		return ok && tag != ""
+	}
+	return false
 }
 
 func parsePluginCacheVolume(value any) (*compiler.CacheVolume, error) {
@@ -289,7 +475,7 @@ func pluginNonEmptyStringList(value any, field string) ([]string, error) {
 }
 
 func normalizePluginCommit(ctx context.Context, checkoutPath string, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {
-	if validBuildkiteCommit(getenv("BUILDKITE_COMMIT")) {
+	if git.ValidObjectID(getenv("BUILDKITE_COMMIT")) {
 		return nil
 	}
 	output, err := runner.Run(ctx, checkoutPath, "git", []string{"rev-parse", "HEAD"}, nil)
@@ -297,7 +483,7 @@ func normalizePluginCommit(ctx context.Context, checkoutPath string, getenv func
 		return fmt.Errorf("resolve BUILDKITE_COMMIT from checked-out HEAD: %w", err)
 	}
 	commit := strings.TrimSpace(string(output))
-	if !validBuildkiteCommit(commit) {
+	if !git.ValidObjectID(commit) {
 		return fmt.Errorf("resolve BUILDKITE_COMMIT from checked-out HEAD: git returned an invalid commit")
 	}
 	if err := setenv("BUILDKITE_COMMIT", commit); err != nil {

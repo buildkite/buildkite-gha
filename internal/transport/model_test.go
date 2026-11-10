@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -64,6 +67,25 @@ func TestResultManifestEnforcesOutputLimits(t *testing.T) {
 	}
 	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "oversized output") {
 		t.Fatalf("MarshalResultManifest() error = %v, want output size rejection", err)
+	}
+	// Control characters escape to six bytes each, so the largest permitted
+	// outputs must still fit the manifest and verify after download.
+	escaped := strings.Repeat("\x01", MaxResultOutputBytes)
+	manifest.Outputs = []Output{{Name: "a", Value: escaped}, {Name: "b", Value: escaped}, {Name: "c", Value: escaped}, {Name: "d", Value: escaped}}
+	encoded, err := MarshalResultManifest(manifest)
+	if err != nil {
+		t.Fatalf("MarshalResultManifest() error = %v, want largest outputs accepted", err)
+	}
+	if _, err := VerifyResultManifest(encoded, manifest.PlanDigest, manifest.Producer); err != nil {
+		t.Fatalf("VerifyResultManifest() error = %v", err)
+	}
+	metadata, err := ResultMetadata("ci", "producer", manifest, encoded)
+	if err != nil || len(metadata) != 2 {
+		t.Fatalf("ResultMetadata() = %d keys, %v; want outputs over 1 KiB left out of metadata", len(metadata), err)
+	}
+	manifest.Outputs = append(manifest.Outputs, Output{Name: "e", Value: "x"})
+	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "outputs exceed") {
+		t.Fatalf("MarshalResultManifest() error = %v, want total output size rejection", err)
 	}
 	manifest.Outputs = make([]Output, MaxResultOutputs+1)
 	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "maximum") {
@@ -124,7 +146,6 @@ func TestResultManifestRejectsMalformedArtifacts(t *testing.T) {
 		{name: "uppercase path digest", mutate: func(a *ResultArtifact) { a.Path = "buildkite-gha/v1/artifacts/" + strings.Repeat("A", 64) + ".zip" }},
 		{name: "invalid digest", mutate: func(a *ResultArtifact) { a.Digest = strings.Repeat("a", 64) }},
 		{name: "zero size", mutate: func(a *ResultArtifact) { a.Size = 0 }},
-		{name: "oversized archive", mutate: func(a *ResultArtifact) { a.Size = MaxResultArtifactSizeBytes + 1 }},
 		{name: "zero files", mutate: func(a *ResultArtifact) { a.FileCount = 0 }},
 		{name: "too many files", mutate: func(a *ResultArtifact) { a.FileCount = MaxResultArtifactFileCount + 1 }},
 	}
@@ -144,6 +165,16 @@ func TestResultManifestRejectsMalformedArtifacts(t *testing.T) {
 	manifest.Artifacts = make([]ResultArtifact, MaxResultArtifacts+1)
 	if _, err := MarshalResultManifest(manifest); err == nil {
 		t.Fatal("MarshalResultManifest() accepted too many artifacts")
+	}
+}
+
+func TestResultManifestAcceptsArtifactSizeWithoutPolicyLimit(t *testing.T) {
+	artifact := resultArtifact("artifact", "1", strings.Repeat("a", 64))
+	artifact.Size = int64(^uint64(0) >> 1)
+	manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), "success")
+	manifest.Artifacts = []ResultArtifact{artifact}
+	if _, err := MarshalResultManifest(manifest); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -184,22 +215,39 @@ type capturedCommand struct {
 
 type captureRunner struct {
 	commands []capturedCommand
+	uploaded map[string][]byte
 	failAt   int
-	afterRun func(int)
+	output   []byte
 }
 
-func (r *captureRunner) Run(_ context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
+func (r *captureRunner) Run(ctx context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
 	r.commands = append(r.commands, capturedCommand{dir: dir, name: name, args: append([]string(nil), args...), stdin: string(stdin)})
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if r.failAt != 0 && len(r.commands) == r.failAt {
 		return nil, errors.New("injected failure")
 	}
-	if r.afterRun != nil {
-		r.afterRun(len(r.commands))
+	if reflect.DeepEqual(args, []string{"artifact", "upload", ".buildkite-gha/**/*", "--concurrency", "8"}) {
+		r.uploaded = map[string][]byte{}
+		if err := filepath.WalkDir(filepath.Join(dir, ".buildkite-gha"), func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			relative, err := filepath.Rel(dir, path)
+			if err != nil {
+				return err
+			}
+			r.uploaded[filepath.ToSlash(relative)], err = os.ReadFile(path)
+			return err
+		}); err != nil {
+			return nil, err
+		}
 	}
-	return nil, nil
+	return bytes.Clone(r.output), nil
 }
 
-func TestAgentUsesExactProducerAndSafeUploadFlags(t *testing.T) {
+func TestAgentUsesExactProducerAndUploadFlags(t *testing.T) {
 	runner := &captureRunner{}
 	agent := Agent{Runner: runner}
 	if err := agent.DownloadArtifact(t.Context(), "result.json", ".", "gha-producer"); err != nil {
@@ -210,7 +258,7 @@ func TestAgentUsesExactProducerAndSafeUploadFlags(t *testing.T) {
 	}
 	want := []capturedCommand{
 		{name: "buildkite-agent", args: []string{"artifact", "download", "result.json", ".", "--step", "gha-producer"}},
-		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, stdin: "steps: []\n"},
+		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation"}, stdin: "steps: []\n"},
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
 		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
@@ -255,6 +303,35 @@ func TestAgentPublishesBoundedJobAnnotationThroughStdin(t *testing.T) {
 	}
 }
 
+func TestAgentEnsuresStepLabelSuffix(t *testing.T) {
+	runner := &captureRunner{}
+	agent := Agent{Runner: runner}
+	if err := agent.EnsureStepLabelSuffix(t.Context(), " (skipped)"); err != nil {
+		t.Fatal(err)
+	}
+	want := []capturedCommand{
+		{name: "buildkite-agent", args: []string{"step", "get", "label"}},
+		{name: "buildkite-agent", args: []string{"step", "update", "label", " (skipped)", "--append"}},
+	}
+	if !reflect.DeepEqual(runner.commands, want) {
+		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+	alreadyMarked := &captureRunner{output: []byte(":github: job · e2e (skipped)\n")}
+	if err := (Agent{Runner: alreadyMarked}).EnsureStepLabelSuffix(t.Context(), " (skipped)"); err != nil {
+		t.Fatal(err)
+	}
+	if len(alreadyMarked.commands) != 1 || !reflect.DeepEqual(alreadyMarked.commands[0].args, []string{"step", "get", "label"}) {
+		t.Fatalf("already marked commands = %#v, want no duplicate update", alreadyMarked.commands)
+	}
+
+	for _, suffix := range []string{"", string([]byte{0xff})} {
+		validationRunner := &captureRunner{}
+		if err := (Agent{Runner: validationRunner}).EnsureStepLabelSuffix(t.Context(), suffix); err == nil || len(validationRunner.commands) != 0 {
+			t.Fatalf("EnsureStepLabelSuffix(%q) error = %v, commands = %#v", suffix, err, validationRunner.commands)
+		}
+	}
+}
+
 func TestUploadArtifactsMaterializesContentBeforePipeline(t *testing.T) {
 	root := t.TempDir()
 	plan := Artifact{Path: ".buildkite-gha/plans/plan.json", Contents: []byte("plan\n")}
@@ -265,26 +342,59 @@ func TestUploadArtifactsMaterializesContentBeforePipeline(t *testing.T) {
 	if err := UploadArtifacts(t.Context(), Agent{Runner: runner}, root, []Artifact{plan, distribution}, []byte("steps: []\n")); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.commands) != 3 {
-		t.Fatalf("commands = %#v, want two artifacts then pipeline", runner.commands)
+	if len(runner.commands) != 2 {
+		t.Fatalf("commands = %#v, want one artifact batch then pipeline", runner.commands)
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []capturedCommand{
-		{dir: resolvedRoot, name: "buildkite-agent", args: []string{"artifact", "upload", distribution.Path}},
-		{dir: resolvedRoot, name: "buildkite-agent", args: []string{"artifact", "upload", plan.Path}},
-		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, stdin: "steps: []\n"},
+		{dir: resolvedRoot, name: "buildkite-agent", args: []string{"artifact", "upload", ".buildkite-gha/**/*", "--concurrency", "8"}},
+		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation"}, stdin: "steps: []\n"},
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
 		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+	wantUploaded := map[string][]byte{plan.Path: plan.Contents, distribution.Path: distribution.Contents}
+	if !reflect.DeepEqual(runner.uploaded, wantUploaded) {
+		t.Fatalf("uploaded bytes = %#v, want %#v", runner.uploaded, wantUploaded)
 	}
 	for _, artifact := range []Artifact{plan, distribution} {
 		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(artifact.Path)))
 		if err != nil || !bytes.Equal(contents, artifact.Contents) {
 			t.Fatalf("materialized %q = %q, %v", artifact.Path, contents, err)
 		}
+	}
+}
+
+func TestUploadArtifactsCancellationDoesNotUploadPipeline(t *testing.T) {
+	artifact := Artifact{Path: ".buildkite-gha/plans/plan.json", Contents: []byte("plan")}
+	artifact.Digest = Digest(artifact.Contents)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	runner := &captureRunner{}
+	err := UploadArtifacts(ctx, Agent{Runner: runner}, t.TempDir(), []Artifact{artifact}, []byte("steps: []\n"))
+	if !errors.Is(err, context.Canceled) || len(runner.commands) != 1 || runner.commands[0].args[0] != "artifact" {
+		t.Fatalf("UploadArtifacts() error = %v, commands = %#v", err, runner.commands)
+	}
+}
+
+func TestUploadMaterializedArtifactsIntegrityFailureDoesNotInvokeAgent(t *testing.T) {
+	root := t.TempDir()
+	artifact := Artifact{Path: ".buildkite-gha/plans/plan.json", Contents: []byte("plan")}
+	artifact.Digest = Digest(artifact.Contents)
+	path := filepath.Join(root, filepath.FromSlash(artifact.Path))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &captureRunner{}
+	err := uploadMaterializedArtifacts(t.Context(), Agent{Runner: runner}, root, []Artifact{artifact})
+	if err == nil || !strings.Contains(err.Error(), "verify artifact") || len(runner.commands) != 0 {
+		t.Fatalf("uploadMaterializedArtifacts() error = %v, commands = %#v", err, runner.commands)
 	}
 }
 
@@ -327,6 +437,61 @@ func TestCommandRunnerBoundsOutputWhileReading(t *testing.T) {
 	stdout, _, err := (CommandRunner{}).RunBounded(t.Context(), "", "sh", []string{"-c", "printf 123456789"}, nil, 8)
 	if err == nil || !strings.Contains(err.Error(), "exceeds 8 bytes") || len(stdout) != 0 {
 		t.Fatalf("runBounded() stdout = %q, error = %v", stdout, err)
+	}
+}
+
+func TestAgentUploadCancellationPreservesProcessExit(t *testing.T) {
+	root := t.TempDir()
+	marker := filepath.Join(root, "started")
+	executable := filepath.Join(root, "buildkite-agent")
+	if err := os.WriteFile(executable, fmt.Appendf(nil, "#!/bin/sh\nprintf ready > %q\nexec sleep 30\n", marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- (Agent{Runner: CommandRunner{}}).UploadPipeline(ctx, []byte("steps: []")) }()
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	waiting := true
+	for waiting {
+		select {
+		case <-deadline:
+			t.Fatal("Agent upload did not start")
+		case <-ticker.C:
+			if _, err := os.Stat(marker); err == nil {
+				waiting = false
+			}
+		}
+	}
+	cancel()
+	err := <-result
+	var exit *exec.ExitError
+	if !errors.Is(err, context.Canceled) || !errors.As(err, &exit) {
+		t.Fatalf("Agent upload lost cancellation or original exit: %v", err)
+	}
+}
+
+func TestCommandRunnerRunWithEnv(t *testing.T) {
+	if os.Getenv("TEST_CHILD_ENV") == "1" {
+		_, _ = fmt.Fprint(os.Stdout, os.Getenv("BUILDKITE_ORGANIZATION_SLUG"))
+		return
+	}
+	t.Setenv("BUILDKITE_ORGANIZATION_SLUG", "wrong-org")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := (CommandRunner{}).RunWithEnv(t.Context(), "", executable,
+		[]string{"-test.run=^TestCommandRunnerRunWithEnv$"}, nil,
+		[]string{"TEST_CHILD_ENV=1", "BUILDKITE_ORGANIZATION_SLUG=acme"})
+	if err != nil || !strings.HasPrefix(string(output), "acme") {
+		t.Fatalf("child output = %q, error = %v", output, err)
+	}
+	if got := os.Getenv("BUILDKITE_ORGANIZATION_SLUG"); got != "wrong-org" {
+		t.Fatalf("parent organization = %q", got)
 	}
 }
 

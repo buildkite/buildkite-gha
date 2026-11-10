@@ -38,8 +38,10 @@ func TestValidateBatchWritesAndResumesAtomicReports(t *testing.T) {
 		{ID: "one", Repository: "owner/one", Path: ".github/workflows/ci.yml", Hash: strings.Repeat("1", 64), Source: filepath.Join(root, "one.yml")},
 		{ID: "two", Repository: "owner/two", Path: ".github/workflows/test.yml", Hash: strings.Repeat("2", 64), Source: filepath.Join(root, "two.yml")},
 	}
-	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n")
-	for _, record := range records {
+	events := []string{"pull_request_review", "pull_request_review_comment"}
+	deployments := []string{"deployment", "deployment_status"}
+	for i, record := range records {
+		workflow := []byte("on: [push, create, delete, label, fork, public, gollum, page_build, watch, milestone, branch_protection_rule, discussion, discussion_comment, " + events[i] + ", " + deployments[i] + "]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n")
 		if err := os.WriteFile(record.Source, workflow, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -62,6 +64,18 @@ func TestValidateBatchWritesAndResumesAtomicReports(t *testing.T) {
 		contents, err := os.ReadFile(path)
 		if err != nil || json.Unmarshal(contents, &report) != nil || report.Schema != compatibility.ProcessingSchemaV3 || report.Profile != hostedProfile {
 			t.Fatalf("report %q is invalid: %v\n%s", path, err, contents)
+		}
+		wantEvent, wantDeployment := events[0], deployments[0]
+		if report.Workflow == records[1].Source {
+			wantEvent, wantDeployment = events[1], deployments[1]
+		}
+		if len(report.Evaluations) != 15 || report.Evaluations[0].Event != "push" || report.Evaluations[1].Event != wantDeployment || report.Evaluations[1].Report.Result != "admitted" || report.Evaluations[14].Event != wantEvent || report.Evaluations[14].Report.Result != "admitted" {
+			t.Fatalf("report %q lost deployment or review evaluation: %#v", path, report.Evaluations)
+		}
+		for i, event := range []string{"create", "delete", "label", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment"} {
+			if report.Evaluations[i+2].Event != event || report.Evaluations[i+2].Report.Result != "admitted" {
+				t.Fatalf("report lost %s: %#v", event, report.Evaluations)
+			}
 		}
 	}
 

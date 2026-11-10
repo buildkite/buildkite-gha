@@ -10,15 +10,14 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime"
 	"strings"
-	"time"
 
-	"github.com/buildkite/buildkite-gha/internal/useragent"
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
 )
 
 const (
 	cacheCredentialResponseLimit = 64 << 10
-	cacheActionToolPath          = "/usr/local/bin:/usr/bin:/bin"
 	defaultCacheResultsURL       = "https://ghacs.buildkite.com/"
 	cacheURLCompatibility        = "https://buildkite-gha-cache-gate.invalid/"
 
@@ -59,19 +58,17 @@ type AgentCacheConfig struct {
 // API endpoint.
 type AgentCacheCredentials struct {
 	mintURL    string
-	jobToken   string
 	resultsURL string
-	userAgent  string
-	client     *http.Client
+	agent      *agentapi.Client
 }
 
 func NewAgentCacheCredentials(config AgentCacheConfig) (*AgentCacheCredentials, error) {
-	mintURL, err := agentCacheMintURL(config.Endpoint, config.JobID)
+	agent, err := agentapi.New(agentapi.Config{
+		Endpoint: config.Endpoint, JobID: config.JobID, JobToken: config.JobToken,
+		ClientVersion: config.ClientVersion, HTTPClient: config.Client,
+	}, "cache")
 	if err != nil {
 		return nil, err
-	}
-	if config.JobToken == "" || strings.ContainsAny(config.JobToken, "\r\n") {
-		return nil, fmt.Errorf("cache Agent job token is required")
 	}
 	if config.ResultsURL == "" {
 		config.ResultsURL = defaultCacheResultsURL
@@ -80,23 +77,12 @@ func NewAgentCacheCredentials(config AgentCacheConfig) (*AgentCacheCredentials, 
 	if err != nil {
 		return nil, err
 	}
-	client := config.Client
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-	}
-	bounded := *client
-	bounded.Jar = nil
-	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	if bounded.Timeout == 0 {
-		bounded.Timeout = 15 * time.Second
-	}
 	return &AgentCacheCredentials{
-		mintURL: mintURL, jobToken: config.JobToken, resultsURL: resultsURL,
-		userAgent: useragent.FromVersion(config.ClientVersion), client: &bounded,
+		mintURL: agent.URL("ghac_tokens"), resultsURL: resultsURL, agent: agent,
 	}, nil
 }
 
-func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentials, error) {
+func (c *AgentCacheCredentials) Credentials(ctx context.Context) (credentials CacheCredentials, err error) {
 	if c == nil {
 		return CacheCredentials{}, fmt.Errorf("cache credentials are not configured")
 	}
@@ -104,10 +90,8 @@ func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentia
 	if err != nil {
 		return CacheCredentials{}, fmt.Errorf("create cache credential request: %w", err)
 	}
-	request.Header.Set("Authorization", "Token "+c.jobToken)
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", c.userAgent)
-	response, err := c.client.Do(request)
+	defer func() { err = markJobSetupFailure(FailureClassCacheCredential, credentialRequestFailure(ctx, err)) }()
+	response, err := c.agent.Do(request)
 	if err != nil {
 		return CacheCredentials{}, fmt.Errorf("request cache credential: %w", err)
 	}
@@ -129,7 +113,7 @@ func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentia
 		Token string `json:"token"`
 	}
 	if err := decoder.Decode(&body); err != nil {
-		return CacheCredentials{}, fmt.Errorf("decode cache credential response: %w", err)
+		return CacheCredentials{}, fmt.Errorf("decode cache credential response")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return CacheCredentials{}, fmt.Errorf("cache credential response has trailing data")
@@ -138,19 +122,6 @@ func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentia
 		return CacheCredentials{}, fmt.Errorf("cache credential response contains an invalid token")
 	}
 	return CacheCredentials{ResultsURL: c.resultsURL, Token: body.Token}, nil
-}
-
-func agentCacheMintURL(endpoint, jobID string) (string, error) {
-	if !validBuildkiteJobID(jobID) {
-		return "", fmt.Errorf("cache Agent job ID is required")
-	}
-	u, err := url.Parse(endpoint)
-	if err != nil || !validCredentialServiceURL(u) {
-		return "", fmt.Errorf("safe cache Agent endpoint using HTTPS or loopback HTTP is required")
-	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/ghac_tokens"
-	u.RawPath = ""
-	return u.String(), nil
 }
 
 func normalizeCacheResultsURL(value string) (string, error) {
@@ -177,40 +148,25 @@ func validCredentialServiceURL(u *url.URL) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func validBuildkiteJobID(value string) bool {
-	if len(value) != 36 {
-		return false
-	}
-	for index, character := range []byte(value) {
-		if index == 8 || index == 13 || index == 18 || index == 23 {
-			if character != '-' {
-				return false
-			}
-			continue
-		}
-		if character < '0' || character > '9' && character < 'a' || character > 'f' {
-			return false
-		}
-	}
-	return true
-}
-
 func cacheCredentialStatusError(status int) error {
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("cache credential request was denied")
+		return credentialStatusError(status, "cache credential request was denied")
 	case http.StatusNotFound:
-		return fmt.Errorf("cache credential service is not enabled for this organization")
+		return credentialStatusError(status, "cache credential service is not enabled for this organization")
 	case http.StatusUnprocessableEntity:
-		return fmt.Errorf("cache credential request rejected the current build provenance")
+		return credentialStatusError(status, "cache credential request rejected the current build provenance")
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("cache credential service is rate limited")
+		return credentialStatusError(status, "cache credential service is rate limited")
 	default:
-		return fmt.Errorf("cache credential service returned HTTP %d", status)
+		return credentialStatusError(status, "cache credential service returned HTTP %d", status)
 	}
 }
 
 func isCacheServiceEnvironment(name string) bool {
+	if runtime.GOOS == "windows" {
+		name = strings.ToUpper(name)
+	}
 	switch name {
 	case "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_SERVICE_V2", "ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL":
 		return true
@@ -220,7 +176,7 @@ func isCacheServiceEnvironment(name string) bool {
 }
 
 func removeCacheServiceEnvironment(env map[string]string) map[string]string {
-	clean := cloneStrings(env)
+	clean := mergeStringMaps(env)
 	for name := range clean {
 		if isCacheServiceEnvironment(name) {
 			delete(clean, name)
@@ -246,7 +202,7 @@ func shouldOverrideGitHubServerURL(serverURL string) bool {
 	return !isGitHub && !isGheCloud && !isLocal
 }
 
-func isolateCacheActionEnvironment(env map[string]string) map[string]string {
+func isolateCacheActionEnvironment(env map[string]string) (map[string]string, func(), error) {
 	isolated := removeCacheServiceEnvironment(env)
 	for _, name := range []string{
 		"NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_AUDIT", "LD_PRELOAD", "LD_LIBRARY_PATH",
@@ -255,19 +211,22 @@ func isolateCacheActionEnvironment(env map[string]string) map[string]string {
 		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
 		"BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_JOB_ID",
 	} {
-		delete(isolated, name)
+		deleteEnvironment(isolated, name)
 	}
-	isolated["PATH"] = cacheActionToolPath
-	return isolated
+	cleanup, err := isolateCacheToolEnvironment(isolated)
+	if err != nil {
+		return nil, nil, err
+	}
+	return isolated, cleanup, nil
 }
 
 func applyGitHubServerURLOverride(env map[string]string) {
-	if shouldOverrideGitHubServerURL(env["GITHUB_SERVER_URL"]) {
-		env["GITHUB_SERVER_URL"] = githubServerURLOverride
+	if shouldOverrideGitHubServerURL(environmentValue(env, "GITHUB_SERVER_URL")) {
+		mergeEnvironmentInto(env, map[string]string{"GITHUB_SERVER_URL": githubServerURLOverride})
 	}
 }
 
-func (r Runner) cacheActionEnvironment(ctx context.Context, processor *commandProcessor) (map[string]string, error) {
+func (r Runner) cacheActionEnvironment(ctx context.Context, processor *commandOutputProcessor) (map[string]string, error) {
 	if r.Cache == nil {
 		return nil, fmt.Errorf("cache credential provider is not configured")
 	}

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -99,7 +100,7 @@ func TestResolveRuntimeMisePinsRequiredExecutable(t *testing.T) {
 }
 
 func TestResolveRuntimeMiseAcceptsNewerVersion(t *testing.T) {
-	realMise := setFakeMise(t, "2026.8.1")
+	realMise := setFakeMise(t, "2026.10.18")
 	got, err := resolveRuntimeMiseWithInstaller(t.Context(), "", t.TempDir(), t.TempDir(), io.Discard, func(context.Context, string, string, io.Writer) (string, error) {
 		return "", errors.New("unexpected managed mise install")
 	})
@@ -111,7 +112,7 @@ func TestResolveRuntimeMiseAcceptsNewerVersion(t *testing.T) {
 func TestResolveRuntimeMiseAcceptsPrefixedVersionOutput(t *testing.T) {
 	root := canonicalTempDir(t)
 	mise := filepath.Join(root, "mise")
-	if err := os.WriteFile(mise, []byte("#!/bin/sh\nprintf 'mise v2026.8.1 linux-x64 (test)\\n'\n"), 0o700); err != nil {
+	if err := os.WriteFile(mise, []byte("#!/bin/sh\nprintf 'mise v2026.10.18 linux-x64 (test)\\n'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	got, err := resolveRuntimeMise(t.Context(), mise, t.TempDir(), t.TempDir(), io.Discard)
@@ -125,11 +126,13 @@ func TestMiseVersionAtLeast(t *testing.T) {
 		actual string
 		want   bool
 	}{
-		{actual: "2026.5.12", want: true},
-		{actual: "v2026.5.12", want: true},
-		{actual: "2026.5.13", want: true},
-		{actual: "2026.8.1", want: true},
+		{actual: "2026.10.17", want: true},
+		{actual: "v2026.10.17", want: true},
+		{actual: "2026.10.18", want: true},
 		{actual: "2027.1.1", want: true},
+		{actual: "2026.10.16"},
+		{actual: "2026.5.12"},
+		{actual: "v2026.5.12"},
 		{actual: "2026.5.11"},
 		{actual: "2025.12.31"},
 		{actual: "2026.5"},
@@ -148,6 +151,8 @@ func TestResolveRuntimeMiseInstallsManagedCopyWhenNeeded(t *testing.T) {
 	}{
 		{name: "missing"},
 		{name: "old PATH version", version: "2026.5.11"},
+		{name: "previous minimum PATH version", version: "2026.5.12"},
+		{name: "before patched PATH version", version: "2026.10.16"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			pathRoot := t.TempDir()
@@ -186,12 +191,18 @@ func TestResolveRuntimeMiseRejectsInvalidExplicitOverride(t *testing.T) {
 			t.Fatalf("resolveRuntimeMise() error = %v", err)
 		}
 	})
-	t.Run("old version", func(t *testing.T) {
-		mise := setFakeMise(t, "2026.5.11")
-		if _, err := resolveRuntimeMise(t.Context(), mise, t.TempDir(), t.TempDir(), io.Discard); err == nil || !strings.Contains(err.Error(), `reported version "2026.5.11", want "2026.5.12" or newer`) {
-			t.Fatalf("resolveRuntimeMise() error = %v", err)
-		}
-	})
+	for _, version := range []string{"2026.5.11", "2026.5.12", "2026.10.16"} {
+		t.Run("old version "+version, func(t *testing.T) {
+			mise := setFakeMise(t, version)
+			_, err := resolveRuntimeMiseWithInstaller(t.Context(), mise, t.TempDir(), t.TempDir(), io.Discard, func(context.Context, string, string, io.Writer) (string, error) {
+				t.Fatal("explicit override must not fall back to managed mise")
+				return "", nil
+			})
+			if err == nil || !strings.Contains(err.Error(), `reported version "`+version+`", want "2026.10.17" or newer`) {
+				t.Fatalf("resolveRuntimeMiseWithInstaller() error = %v", err)
+			}
+		})
+	}
 	t.Run("not executable", func(t *testing.T) {
 		mise := filepath.Join(t.TempDir(), "mise")
 		if err := os.WriteFile(mise, []byte("mise"), 0o600); err != nil {
@@ -405,7 +416,9 @@ func TestSelectRuntimeMiseRelease(t *testing.T) {
 		goos, goarch, asset, cacheKey, archiveDigest, binaryDigest string
 	}{
 		{"linux", "amd64", "linux-x64", "linux-amd64", runtimeMiseArchiveDigest, runtimeMiseBinaryDigest},
+		{"linux", "arm64", "linux-arm64", "linux-arm64", runtimeMiseLinuxARM64ArchiveDigest, runtimeMiseLinuxARM64BinaryDigest},
 		{"darwin", "arm64", "macos-arm64", "darwin-arm64", runtimeMiseDarwinARM64ArchiveDigest, runtimeMiseDarwinARM64BinaryDigest},
+		{"windows", "amd64", "windows-x64", "windows-amd64", runtimeMiseWindowsAMD64ArchiveDigest, runtimeMiseWindowsAMD64BinaryDigest},
 	} {
 		selected, err := selectRuntimeMiseRelease(test.goos, test.goarch)
 		if err != nil {
@@ -415,8 +428,45 @@ func TestSelectRuntimeMiseRelease(t *testing.T) {
 			t.Fatalf("selectRuntimeMiseRelease(%s/%s) = %#v", test.goos, test.goarch, selected)
 		}
 	}
-	if _, err := selectRuntimeMiseRelease("linux", "arm64"); err == nil || !strings.Contains(err.Error(), "unavailable") {
+	if _, err := selectRuntimeMiseRelease("linux", "386"); err == nil || !strings.Contains(err.Error(), "unavailable") {
 		t.Fatalf("selectRuntimeMiseRelease() unsupported platform error = %v", err)
+	}
+}
+
+func TestExtractRuntimeMiseWindowsZip(t *testing.T) {
+	binary := []byte("windows mise")
+	digest := sha256.Sum256(binary)
+	archive := filepath.Join(t.TempDir(), "mise.zip")
+	file, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	member, err := writer.Create("mise/bin/mise.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = member.Write(binary)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "mise.exe")
+	release := runtimeMiseRelease{archiveFormat: "zip", executable: "mise.exe"}
+	if err := extractRuntimeMiseRelease(archive, destination, hex.EncodeToString(digest[:]), release); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(destination, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = validateRuntimeMiseFile(t.Context(), destination, hex.EncodeToString(digest[:]))
+	if runtime.GOOS == "windows" && err != nil || runtime.GOOS != "windows" && err == nil {
+		t.Fatalf("non-executable mise on %s = %v", runtime.GOOS, err)
+	}
+	if err := extractRuntimeMiseRelease(archive, filepath.Join(t.TempDir(), "bad.exe"), strings.Repeat("0", 64), release); err == nil || !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("checksum error = %v", err)
 	}
 }
 

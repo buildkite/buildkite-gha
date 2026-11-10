@@ -5,26 +5,146 @@ import (
 	"testing"
 )
 
-func TestUploadArtifactCommitsAreExact(t *testing.T) {
+func TestUploadArtifactCommitContracts(t *testing.T) {
 	commits := []string{
 		UploadArtifactV1Commit, UploadArtifactV2Commit, UploadArtifactV3Commit,
-		UploadArtifactCommit, UploadArtifactV5Commit, UploadArtifactV6Commit, UploadArtifactV7Commit,
+		UploadArtifactV460Commit, UploadArtifactCommit, UploadArtifactV5Commit, UploadArtifactV6Commit, UploadArtifactV7Commit,
+		"c7d193f32edcb7bfad88892161225aeda64e9392", // v4.0.0
+		"694cdabd8bdb0f10b2cea11669e1bf5453eed0a6", // v4.2.0
+		"50769540e7f4bd5e21e526ee35c689e35e0d6874", // v4.4.0
+		"c6a366c94c3e0affe28c06c8df20a878f24da3cf", // v3.2.2
+		"c6a3b2bd78b3985e4b2f15397fec357f0fd808de", // v3.2.2-node20
 	}
 	for _, commit := range commits {
 		if err := validateUploadArtifactCommit(commit); err != nil {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
 	}
-	for _, commit := range []string{"bbbca2ddaa5d8feaa63e36b76fdaad77386f024f", strings.Repeat("0", 40)} {
+	unknown := strings.Repeat("0", 40)
+	if err := validateUploadArtifactCommit(unknown); err != nil || !UploadArtifactUsesFallbackContract(unknown) {
+		t.Fatalf("unknown immutable commit fallback = %v, %t", err, UploadArtifactUsesFallbackContract(unknown))
+	}
+	for _, commit := range []string{UploadArtifactV460Commit, UploadArtifactV7Commit} {
+		if UploadArtifactUsesFallbackContract(commit) {
+			t.Fatalf("known commit %s uses fallback contract", commit)
+		}
+	}
+	for _, commit := range []string{"v7", strings.Repeat("A", 40), strings.Repeat("0", 39)} {
 		err := validateUploadArtifactCommit(commit)
 		if err == nil {
-			t.Fatalf("unrecognized commit %s accepted", commit)
+			t.Fatalf("unsupported commit %s accepted", commit)
 		}
-		for _, supported := range commits {
+		for supported := range uploadArtifactCommits {
 			if !strings.Contains(err.Error(), supported) {
-				t.Fatalf("unrecognized commit %s error = %v, want audited commit %s", commit, err, supported)
+				t.Fatalf("unsupported commit %s error = %v, want principal commit %s", commit, err, supported)
 			}
 		}
+	}
+}
+
+func TestUploadArtifactSnapshotContracts(t *testing.T) {
+	if len(uploadArtifactCommitContracts) < 306 {
+		t.Fatalf("snapshotted upload-artifact commits = %d, want at least 306", len(uploadArtifactCommitContracts))
+	}
+	for branch, tip := range uploadArtifactSnapshotTips {
+		if _, ok := uploadArtifactCommitContracts[tip]; !ok {
+			t.Errorf("snapshot branch %s tip %s has no admitted contract", branch, tip)
+		}
+	}
+	for commit, contract := range uploadArtifactCommitContracts {
+		if contract.inputs == "" || !contract.declaresInput("name") || !contract.declaresInput("path") {
+			t.Errorf("snapshotted commit %s lacks required adapter inputs", commit)
+		}
+		for _, names := range []string{contract.inputs, contract.outputs} {
+			if names == "" {
+				continue
+			}
+			parts := strings.Split(names, ",")
+			for i, name := range parts {
+				if name != strings.ToLower(name) || i > 0 && parts[i-1] >= name {
+					t.Errorf("snapshotted commit %s has noncanonical names %q", commit, names)
+					break
+				}
+			}
+		}
+		if contract.nameRequired != contract.v1 {
+			t.Errorf("snapshotted commit %s has inconsistent v1 name requirement", commit)
+		}
+	}
+}
+
+func TestUploadArtifactFallbackUsesBoundedV7Contract(t *testing.T) {
+	unknown := strings.Repeat("0", 40)
+	if err := ValidateUploadArtifactInputs(unknown, map[string]string{
+		"path": "payload/*.zip", "archive": "true", "include-hidden-files": "false",
+		"compression-level": "0", "overwrite": "false",
+	}); err != nil {
+		t.Fatalf("fallback rejected bounded v7 inputs: %v", err)
+	}
+	if !UploadArtifactSupportsOutput(unknown, "artifact-id") || !UploadArtifactSupportsOutput(unknown, "artifact-digest") || UploadArtifactIncludesHiddenByDefault(unknown) {
+		t.Fatal("fallback did not use v7 outputs and hidden-file default")
+	}
+	for _, inputs := range []map[string]string{
+		{"path": "../outside"},
+		{"path": "payload", "archive": "false"},
+		{"path": "payload", "overwrite": "true"},
+		{"path": "payload", "future-input": "value"},
+	} {
+		if err := ValidateUploadArtifactInputs(unknown, inputs); err == nil {
+			t.Fatalf("fallback accepted unsafe inputs %#v", inputs)
+		}
+	}
+}
+
+func TestUploadArtifactSnapshotPreservesManifestContracts(t *testing.T) {
+	const (
+		v400 = "c7d193f32edcb7bfad88892161225aeda64e9392"
+		v420 = "694cdabd8bdb0f10b2cea11669e1bf5453eed0a6"
+		v440 = "50769540e7f4bd5e21e526ee35c689e35e0d6874"
+	)
+	if !UploadArtifactIncludesHiddenByDefault(v400) || !UploadArtifactSupportsOutput(v400, "artifact-id") || UploadArtifactSupportsOutput(v400, "artifact-digest") {
+		t.Fatal("v4.0.0 snapshot contract does not preserve hidden-file default and outputs")
+	}
+	if err := ValidateUploadArtifactInputs(v400, map[string]string{"path": "payload", "overwrite": "false"}); err == nil || !strings.Contains(err.Error(), "unsupported by this actions/upload-artifact release") {
+		t.Fatalf("v4.0.0 accepted later overwrite input: %v", err)
+	}
+	if err := ValidateUploadArtifactInputs(v420, map[string]string{"path": "payload", "overwrite": "false"}); err != nil {
+		t.Fatalf("v4.2.0 rejected declared overwrite input: %v", err)
+	}
+	if err := ValidateUploadArtifactInputs(v420, map[string]string{"path": "payload", "include-hidden-files": "true"}); err == nil || !strings.Contains(err.Error(), "unsupported by this actions/upload-artifact release") {
+		t.Fatalf("v4.2.0 accepted later hidden-file input: %v", err)
+	}
+	if err := ValidateUploadArtifactInputs(v440, map[string]string{"path": "payload", "include-hidden-files": "true"}); err != nil {
+		t.Fatalf("v4.4.0 rejected declared hidden-file input: %v", err)
+	}
+	if UploadArtifactIncludesHiddenByDefault(v440) || UploadArtifactSupportsOutput(v440, "artifact-digest") {
+		t.Fatal("v4.4.0 snapshot contract does not preserve hidden-file default and outputs")
+	}
+	if !UploadArtifactSupportsOutput(UploadArtifactV460Commit, "artifact-digest") {
+		t.Fatal("v4.6.0 snapshot contract omits artifact-digest")
+	}
+}
+
+func TestUploadArtifactGHESContracts(t *testing.T) {
+	for _, commit := range []string{"c6a366c94c3e0affe28c06c8df20a878f24da3cf", "c6a3b2bd78b3985e4b2f15397fec357f0fd808de"} {
+		t.Run(commit, func(t *testing.T) {
+			if err := ValidateUploadArtifactInputs(commit, map[string]string{"path": "payload", "include-hidden-files": "true", "retention-days": "7"}); err != nil {
+				t.Fatal(err)
+			}
+			if UploadArtifactUsesFallbackContract(commit) || UploadArtifactIncludesHiddenByDefault(commit) {
+				t.Fatal("GHES releases must use their exact contract and exclude hidden files by default")
+			}
+			for _, output := range []string{"artifact-id", "artifact-url", "artifact-digest"} {
+				if UploadArtifactSupportsOutput(commit, output) {
+					t.Errorf("GHES release exposes undeclared output %q", output)
+				}
+			}
+			for input, value := range map[string]string{"compression-level": "6", "overwrite": "false", "archive": "true"} {
+				if err := ValidateUploadArtifactInputs(commit, map[string]string{"path": "payload", input: value}); err == nil {
+					t.Errorf("GHES release accepts later input %q", input)
+				}
+			}
+		})
 	}
 }
 
@@ -81,8 +201,10 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 			}
 		})
 	}
-	if err := ValidateUploadArtifactInputs(UploadArtifactCommit, map[string]string{"path": "payload", "archive": "true"}); err == nil || !strings.Contains(err.Error(), "only in actions/upload-artifact v7") {
-		t.Fatalf("v4 archive input error = %v", err)
+	for _, commit := range []string{UploadArtifactV460Commit, UploadArtifactCommit} {
+		if err := ValidateUploadArtifactInputs(commit, map[string]string{"path": "payload", "archive": "true"}); err == nil || !strings.Contains(err.Error(), "only in actions/upload-artifact v7") {
+			t.Fatalf("v4 commit %s archive input error = %v", commit, err)
+		}
 	}
 	for _, test := range []struct {
 		name   string
@@ -110,17 +232,18 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 	}
 }
 
-func TestUploadArtifactPathsNormalizesSafeRelativeSpellings(t *testing.T) {
-	got, err := UploadArtifactPaths("./artifacts.tar.gz\nlog/\ntmp/capybara/\nreports/test (1).txt\n")
+func TestUploadArtifactPathsNormalizesSafeSpellings(t *testing.T) {
+	got, err := UploadArtifactPaths("./artifacts.tar.gz\nlog/\ntmp/capybara/\nreports/test (1).txt\n/tmp/baipp/dist/*\nC:\\build\\dist\\*.zip\n/\nC:\\\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"artifacts.tar.gz", "log/", "tmp/capybara/", "reports/test (1).txt"}
+	want := []string{"artifacts.tar.gz", "log/", "tmp/capybara/", "reports/test (1).txt", "/tmp/baipp/dist/*", "C:/build/dist/*.zip", "/", "C:/"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("UploadArtifactPaths() = %#v, want %#v", got, want)
 	}
 	for _, unsafe := range []string{
-		"../outside", "safe/../outside", "/absolute", `dir\file`, "./tests/**/*.log", "tests/*.log/", "tests/./*.log",
+		"../outside", "safe/../outside", "/absolute/../outside", `dir\file`, "./tests/**/*.log", "tests/*.log/", "tests/./*.log",
+		`C:\safe\..\outside`, `C:relative`, `//server/share/file`, `\\server\share\file`, `C:/safe/file:stream`,
 		"tests/@(a|b).log", "tests/+(a|b).log", "tests/?(a|b).log", "tests/*(a|b).log", "tests/!(a|b).log",
 	} {
 		if _, err := UploadArtifactPaths(unsafe); err == nil {

@@ -1,6 +1,7 @@
 // Action input default validation and evaluation with GitHub's loose
 // coercion semantics. Deliberately separate from the strict condition
 // family in condition.go.
+
 package expression
 
 import (
@@ -10,15 +11,16 @@ import (
 	"github.com/rhysd/actionlint"
 )
 
-// ValidateActionInputDefault verifies the restricted compound expression
-// surface supported only while evaluating action metadata input defaults.
-func ValidateActionInputDefault(template string) error {
-	referencesJobStatus, err := ReferencesJobStatus(template)
+// validateActionInputDefaultTemplate verifies the restricted compound
+// expression surface supported only while evaluating action metadata input
+// defaults.
+func validateActionInputDefaultTemplate(template string) error {
+	referencesJobStatus, err := templateReferencesJobStatus(template)
 	if err != nil {
 		return err
 	}
 	if referencesJobStatus {
-		root, path, err := ReferencePath(template)
+		root, path, err := staticReferencePath(template)
 		if err != nil || !isJobStatusReference(root, path) {
 			return fmt.Errorf("action input default job.status must be one direct expression")
 		}
@@ -28,18 +30,12 @@ func ValidateActionInputDefault(template string) error {
 
 func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 	validator := newSemanticValidator(actionInputDefaultSurface)
-	validator.validateReference = func(node actionlint.ExprNode, root string, path []string) error {
-		if isJobStatusReference(root, path) {
-			return nil
-		}
+	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if isJobCheckRunIDReference(root, path) {
 			return nil
 		}
 		if isRunnerTempReference(root, path) {
 			return fmt.Errorf("action input defaults cannot reference runner.temp")
-		}
-		if isDirectRunnerDebug(node, root, path) {
-			return nil
 		}
 		kind := classifyRuntimeReference(root, path)
 		if kind == runtimeReferenceSecret {
@@ -52,6 +48,28 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 	}
 	validator.referenceError = func(err error) error {
 		return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
+	}
+	validator.validateAccess = func(access actionlint.ExprNode) error {
+		if !isGitHubEventAccess(access) {
+			root, path, err := referencePath(access)
+			if err != nil {
+				return validator.referenceError(err)
+			}
+			return validator.validateReference(access, root, path)
+		}
+		switch access := access.(type) {
+		case *actionlint.ObjectDerefNode:
+			return validator.validate(access.Receiver)
+		case *actionlint.IndexAccessNode:
+			if err := validator.validate(access.Operand); err != nil {
+				return err
+			}
+			return validator.validate(access.Index)
+		case *actionlint.ArrayDerefNode:
+			return validator.validate(access.Receiver)
+		default:
+			return nil
+		}
 	}
 	validator.validateCompare = func(kind actionlint.CompareOpNodeKind) error {
 		return nil
@@ -73,15 +91,10 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 	return validator.validate(node)
 }
 
-// EvaluateActionInputDefault substitutes the restricted compound expressions
+// evaluateActionInputDefault substitutes the restricted compound expressions
 // supported only in action metadata input defaults.
-func EvaluateActionInputDefault(template string, context Context) (string, error) {
+func evaluateActionInputDefault(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateActionInputDefaultNode)
-}
-
-func isDirectRunnerDebug(node actionlint.ExprNode, root string, path []string) bool {
-	_, direct := node.(*actionlint.ObjectDerefNode)
-	return direct && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug")
 }
 
 func isJobCheckRunIDReference(root string, path []string) bool {
@@ -92,12 +105,12 @@ func isRunnerTempReference(root string, path []string) bool {
 	return strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "temp")
 }
 
-// ActionInputDefaultRequiresGitHubToken reports whether a metadata default can
+// actionInputDefaultRequiresGitHubToken reports whether a metadata default can
 // reach github.token for the event provider. A token branch guarded by an
 // unknown runtime value requires the token because that value is not known
 // during compilation.
-func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, error) {
-	referencesToken, err := ReferencesGitHubToken(template)
+func actionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, error) {
+	referencesToken, err := templateReferencesGitHubToken(template)
 	if err != nil || !referencesToken {
 		return referencesToken, err
 	}
@@ -121,18 +134,11 @@ func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, er
 }
 
 func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (any, error) {
-	root, path, err := referencePath(node)
-	if err == nil && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug") && !isDirectRunnerDebug(node, root, path) {
-		return nil, fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+	if err := validateActionInputDefaultNode(node); err != nil {
+		return nil, err
 	}
 	evaluator := newSemanticEvaluator(actionInputDefaultSurface)
 	evaluator.resolve = func(root string, path []string) (any, error) {
-		if isJobStatusReference(root, path) {
-			if context.JobStatus == "" {
-				return nil, fmt.Errorf("expression references unavailable job.status")
-			}
-			return context.JobStatus, nil
-		}
 		if isJobCheckRunIDReference(root, path) {
 			// Buildkite creates no GitHub check run. GitHub documents this
 			// property as unavailable on GitHub Enterprise Server; unavailable
@@ -142,11 +148,9 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 		if isRunnerTempReference(root, path) {
 			return nil, fmt.Errorf("action input defaults cannot reference runner.temp")
 		}
-		if strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug") {
-			return "false", nil
-		}
 		return resolveRuntimeReferenceWithMissingMembers(root, path, context)
 	}
+	evaluator.resolveRoot = func(root string) (any, error) { return resolveStepRuntimeRoot(root, context) }
 	evaluator.truthy = githubTruthy
 	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
 		return githubCompare(kind, left, right)

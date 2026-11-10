@@ -12,12 +12,6 @@ import (
 )
 
 func TestCompatibilityGapOtherShells(t *testing.T) {
-	bin := t.TempDir()
-	pwsh := filepath.Join(bin, "pwsh")
-	if err := os.WriteFile(pwsh, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	runCompatibilityGapWorkflow(t, "other-shells.yml")
 }
 
@@ -52,7 +46,7 @@ func runCompatibilityGapWorkflow(t *testing.T, name string) {
 	if len(bundle.Plans) != 1 {
 		t.Fatalf("plans = %d, want 1", len(bundle.Plans))
 	}
-	result, err := (Runner{}).RunJob(t.Context(), bundle.Plans[0].Job, root)
+	result, err := (Runner{}).runTestJob(t.Context(), bundle.Plans[0].Job, root)
 	if err != nil {
 		t.Fatalf("RunJob() conclusion = %q, error = %v", result.Conclusion, err)
 	}

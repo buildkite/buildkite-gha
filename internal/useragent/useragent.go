@@ -1,4 +1,3 @@
-// Package useragent identifies buildkite-gha HTTP requests.
 package useragent
 
 const (

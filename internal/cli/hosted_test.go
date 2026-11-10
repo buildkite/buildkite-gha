@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -17,9 +18,12 @@ import (
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -37,7 +41,7 @@ func TestConfiguredLinuxRunnerTargetsDefaultHostedToolchainImages(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if canonical != strings.ToLower(test.label) || target != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: test.image}) {
+			if canonical != strings.ToLower(test.label) || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: test.image}) {
 				t.Fatalf("configuredRunnerTarget() = %q, %#v", canonical, target)
 			}
 		})
@@ -53,7 +57,7 @@ func TestConfiguredLinuxRunnerTargetsDefaultHostedToolchainImages(t *testing.T) 
 	}
 
 	canonical, target, err := configuredRunnerTarget("ubuntu-18.04", "legacy-linux", "")
-	if err != nil || canonical != "ubuntu-18.04" || target != (compiler.RunnerTarget{Queue: "legacy-linux", Platform: compiler.PlatformLinuxAMD64}) {
+	if err != nil || canonical != "ubuntu-18.04" || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "legacy-linux", Platform: compiler.PlatformLinuxAMD64}) {
 		t.Fatalf("fallback override = %q, %#v, %v", canonical, target, err)
 	}
 }
@@ -69,7 +73,7 @@ func TestHostedRunnerTargetsContainOnlyHostedGuarantees(t *testing.T) {
 	if !slices.Equal(labels, want) {
 		t.Fatalf("hosted runner labels = %q, want %q", labels, want)
 	}
-	if got := targets["macos-latest"]; got != (compiler.RunnerTarget{Queue: defaultMacOSRunnerQueue, Platform: compiler.PlatformDarwinARM64}) {
+	if got := targets["macos-latest"]; !reflect.DeepEqual(got, compiler.RunnerTarget{Queue: defaultMacOSRunnerQueue, Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("macos-latest target = %#v", got)
 	}
 	for _, label := range []string{"macos-14", "macos-15", "ubuntu-24.04-arm", "windows-latest"} {
@@ -79,8 +83,16 @@ func TestHostedRunnerTargetsContainOnlyHostedGuarantees(t *testing.T) {
 	}
 
 	canonical, target, err := configuredRunnerTarget("macOS-15", "organization-macos", "")
-	if err != nil || canonical != "macos-15" || target != (compiler.RunnerTarget{Queue: "organization-macos", Platform: compiler.PlatformDarwinARM64}) {
+	if err != nil || canonical != "macos-15" || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "organization-macos", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("organization macOS target = %q, %#v, %v", canonical, target, err)
+	}
+	canonical, target, err = configuredRunnerTarget("ubuntu-24.04-arm", "organization-arm", "")
+	if err != nil || canonical != "ubuntu-24.04-arm" || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "organization-arm", Platform: compiler.PlatformLinuxARM64}) {
+		t.Fatalf("organization Linux ARM64 target = %q, %#v, %v", canonical, target, err)
+	}
+	canonical, target, err = configuredRunnerTarget("benchmark-aarch64", "benchmark-arm", "")
+	if err != nil || canonical != "benchmark-aarch64" || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "benchmark-arm", Platform: compiler.PlatformLinuxARM64}) {
+		t.Fatalf("custom Linux ARM64 target = %q, %#v, %v", canonical, target, err)
 	}
 }
 
@@ -113,15 +125,81 @@ func TestHostedPreflightCompilesPublicReusableWorkflowWithSharedSource(t *testin
 		t.Fatal(err)
 	}
 	distributionDigest := "sha256:" + strings.Repeat("d", 64)
-	compiled, err := compileHostedWithActionCache(t.Context(), callerPath, caller, event, "0.0.0-test", distributionDigest, "importer", "", nil, map[compiler.Platform]string{compiler.PlatformLinuxAMD64: distributionDigest}, "", shared, nil)
+	compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: callerPath, WorkflowSource: caller, EventSource: event, Version: "0.0.0-test", DistributionDigest: distributionDigest, ImporterStep: "importer", RuntimeDistributions: map[compiler.Platform]string{compiler.PlatformLinuxAMD64: distributionDigest}, RepositorySource: shared})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if compiled.HasActions || len(compiled.Bundle.Plans) != 1 || compiled.Bundle.Plans[0].Job.Workflow.Remote == nil || compiled.Bundle.Plans[0].Job.Workflow.Remote.Commit != strings.Repeat("a", 40) {
+	if !compiled.JobGraphComplete || compiled.HasActions || len(compiled.Bundle.Plans) != 1 || compiled.Bundle.Plans[0].Job.Workflow.Remote == nil || compiled.Bundle.Plans[0].Job.Workflow.Remote.Commit != strings.Repeat("a", 40) {
 		t.Fatalf("hosted remote workflow result = %#v", compiled)
 	}
 	if source.calls != 1 {
 		t.Fatalf("repository source calls = %d, want one across hosted preflight and plans", source.calls)
+	}
+}
+
+func TestHostedPreflightDoesNotMarkPartialJobGraphComplete(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), ".github", "workflows", "partial.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte(`on: push
+jobs:
+  known:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  unknown:
+    strategy:
+      matrix: ${{ github.ref }}
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("d", 64)
+	compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: digest, ImporterStep: "importer", RuntimeDistributions: map[compiler.Platform]string{compiler.PlatformLinuxAMD64: digest}})
+	if err == nil {
+		t.Fatal("compileHostedRequest() unexpectedly succeeded")
+	}
+	if compiled.JobGraphComplete || len(compiled.Bundle.IR.Jobs) != 1 || compiled.Bundle.IR.Jobs[0].LogicalJobID != "known" {
+		t.Fatalf("partial hosted compilation = %#v", compiled)
+	}
+}
+
+func TestHostedPreflightFailsClosedWhenEventArtifactCannotBeBuilt(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), ".github", "workflows", "event.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte(`on: push
+jobs:
+  whole-event:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ toJSON(github.event) }}'
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	event, err := json.Marshal(map[string]any{
+		"provider": "github", "event": "push", "ref": "refs/heads/main", "sha": strings.Repeat("1", 40), "actor": "octocat",
+		"repository": map[string]string{"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+		"payload":    map[string]string{"body": strings.Repeat("x", plan.MaxEventPayloadBytes+1)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("d", 64)
+	compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: digest, ImporterStep: "importer", RuntimeDistributions: map[compiler.Platform]string{compiler.PlatformLinuxAMD64: digest}})
+	if err == nil || !strings.Contains(err.Error(), "event payload artifact exceeds") {
+		t.Fatalf("compileHostedRequest() error = %v", err)
+	}
+	if !compiled.JobGraphComplete || len(compiled.Bundle.Plans) != 0 || compiled.Bundle.JobOutcomes[compiled.Bundle.IR.Jobs[0].Key] != compiler.JobFailed {
+		t.Fatalf("event artifact failure retained runnable work: %#v", compiled)
 	}
 }
 
@@ -198,7 +276,7 @@ runs:
 		t.Fatalf("actions = %#v, want both missing invocations failed", report.Actions)
 	}
 	for _, diagnostic := range report.Diagnostics {
-		if diagnostic.Instance == "" || diagnostic.Step == 0 || diagnostic.Code != compiler.CodeActionResolution || !strings.Contains(diagnostic.Message, `Action "`) || !strings.Contains(diagnostic.Message, "unsupported") {
+		if diagnostic.Instance == "" || diagnostic.Step == 0 || diagnostic.Action == "" || diagnostic.Code != compiler.CodeActionResolution {
 			t.Fatalf("diagnostic lacks invocation identity: %#v", diagnostic)
 		}
 	}
@@ -530,11 +608,13 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 	originEventSource = bytes.Replace(originEventSource, []byte(`"owner": "buildkite"`), []byte(`"owner": "acme_team"`), 1)
 	originEventSource = bytes.Replace(originEventSource, []byte(`"name": "buildkite-gha"`), []byte(`"name": "widgets"`), 1)
 	originEventSource = bytes.Replace(originEventSource, []byte(`"clone_url": "https://github.com/buildkite/buildkite-gha.git"`), []byte(`"clone_url": "https://origin.cursor.com/git/acme_team/widgets.git"`), 1)
+	trailingHyphenEventSource := bytes.Replace(eventSource, []byte(`"name": "buildkite-gha"`), []byte(`"name": "mon-projet-complet-sant-"`), 1)
 	for _, test := range []struct {
 		name  string
 		event []byte
 	}{
 		{name: "GitHub", event: eventSource},
+		{name: "GitHub repository name ending in a hyphen", event: trailingHyphenEventSource},
 		{name: "Origin repository with GitHub-incompatible namespace", event: originEventSource},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -542,7 +622,12 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 			redactor := &cliRedactor{}
 			var warnings bytes.Buffer
 			authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
-			if _, err := compileHosted(t.Context(), workflowPath, workflowSource, test.event, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", nil, nil, authentication); err != nil {
+			repositorySource, cleanup, err := hostedRepositorySource(t.Context(), "dev", test.event, authentication, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			if _, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: workflowSource, EventSource: test.event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("0", 64), ImporterStep: "importer", RepositorySource: repositorySource}); err != nil {
 				t.Fatal(err)
 			}
 			if provider.calls != 0 || len(redactor.values) != 0 || warnings.Len() != 0 {
@@ -560,16 +645,16 @@ func TestCompileHostedRequiresExplicitMacOSQueueAndRuntime(t *testing.T) {
 	}
 	compilerDigest := "sha256:" + strings.Repeat("0", 64)
 	darwinDigest := "sha256:" + strings.Repeat("1", 64)
-	_, err = compileHosted(t.Context(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", nil, nil, nil)
+	_, err = compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "macos.yml", WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: compilerDigest, ImporterStep: "importer"})
 	if err == nil || !strings.Contains(err.Error(), `runner label "macos-15" is not mapped by policy`) {
 		t.Fatalf("missing macOS queue error = %v", err)
 	}
 	macOSTarget := map[string]compiler.RunnerTarget{"macos-15": {Queue: "macos", Platform: compiler.PlatformDarwinARM64}}
-	_, err = compileHosted(t.Context(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", macOSTarget, nil, nil)
+	_, err = compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "macos.yml", WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: compilerDigest, ImporterStep: "importer", RunnerTargets: macOSTarget})
 	if err == nil || !strings.Contains(err.Error(), "no runtime distribution configured for darwin/arm64") {
 		t.Fatalf("missing macOS runtime error = %v", err)
 	}
-	compiled, err := compileHosted(t.Context(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", macOSTarget, map[compiler.Platform]string{compiler.PlatformDarwinARM64: darwinDigest}, nil)
+	compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "macos.yml", WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: compilerDigest, ImporterStep: "importer", RunnerTargets: macOSTarget, RuntimeDistributions: map[compiler.Platform]string{compiler.PlatformDarwinARM64: darwinDigest}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,12 +671,12 @@ func TestCompileHostedDefaultsMacOSLatestAliasToHostedQueue(t *testing.T) {
 	}
 	compilerDigest := "sha256:" + strings.Repeat("0", 64)
 	darwinDigest := "sha256:" + strings.Repeat("1", 64)
-	_, err = compileHosted(t.Context(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", nil, nil, nil)
+	_, err = compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "macos.yml", WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: compilerDigest, ImporterStep: "importer"})
 	if err == nil || !strings.Contains(err.Error(), "no runtime distribution configured for darwin/arm64") {
 		t.Fatalf("unmapped macos-latest without Darwin runtime error = %v", err)
 	}
 	darwinRuntime := map[compiler.Platform]string{compiler.PlatformDarwinARM64: darwinDigest}
-	compiled, err := compileHosted(t.Context(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", nil, darwinRuntime, nil)
+	compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "macos.yml", WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: compilerDigest, ImporterStep: "importer", RuntimeDistributions: darwinRuntime})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +684,7 @@ func TestCompileHostedDefaultsMacOSLatestAliasToHostedQueue(t *testing.T) {
 		t.Fatalf("default macos-latest compilation = %#v\n%s", compiled.Bundle.Plans, compiled.Bundle.Pipeline)
 	}
 	override := map[string]compiler.RunnerTarget{"macos-latest": {Queue: "custom-macos", Platform: compiler.PlatformDarwinARM64}}
-	compiled, err = compileHosted(t.Context(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", override, darwinRuntime, nil)
+	compiled, err = compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "macos.yml", WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: compilerDigest, ImporterStep: "importer", RunnerTargets: override, RuntimeDistributions: darwinRuntime})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -652,7 +737,7 @@ jobs:
 	targets := map[string]compiler.RunnerTarget{
 		"ubuntu-latest": {Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image},
 	}
-	compiled, err := compileHosted(t.Context(), "profiles.yml", workflow, event, "dev", "sha256:"+strings.Repeat("1", 64), "importer", "", targets, nil, nil)
+	compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "profiles.yml", WorkflowSource: workflow, EventSource: event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("1", 64), ImporterStep: "importer", RunnerTargets: targets})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +765,7 @@ jobs:
 		}{Image: step.Image, Agents: step.Agents, Command: step.Command}
 	}
 	selected, defaulted := steps["gha-selected"], steps["gha-default"]
-	if selected.Image != image || selected.Agents["queue"] != "hosted" || !strings.Contains(selected.Command, "--hosted-tool-cache") {
+	if selected.Image != image || selected.Agents["queue"] != "hosted" || !strings.Contains(selected.Command, "--hosted-tool-cache") || strings.Contains(selected.Command, "--docker-build-load") {
 		t.Fatalf("selected profile step = %#v", selected)
 	}
 	if defaulted.Image != defaultJammyRunnerImage || len(defaulted.Agents) != 0 || !strings.Contains(defaulted.Command, "--hosted-tool-cache") {
@@ -706,6 +791,49 @@ func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
 		var finding *compiler.ProcessingFinding
 		if err == nil || !errors.As(err, &finding) || finding.Message != test.want || finding.Detail != "" {
 			t.Fatalf("validateUnprivilegedBundle(%q) error = %v, want capability rejection", capability, err)
+		}
+	}
+}
+
+func TestFailedPartialBundleRemovesEveryRunnableArtifact(t *testing.T) {
+	bundle := compiler.Bundle{
+		IR: compiler.IR{Jobs: []compiler.JobInstance{
+			{Key: "safe", LogicalJobID: "safe"},
+			{Key: "rejected", LogicalJobID: "rejected"},
+		}},
+		Plans:             []compiler.PlanArtifact{{Job: plan.Job{Target: plan.Target{StepKey: "safe"}}}},
+		EventArtifact:     &transport.Artifact{Path: "event"},
+		GeneratedWorkflow: buildkitepipeline.Workflow{Jobs: []buildkitepipeline.Job{{Key: "safe", PlanDigest: "sha256:" + strings.Repeat("1", 64)}}},
+		JobOutcomes: map[string]compiler.JobOutcome{
+			"safe": compiler.JobPlanned, "rejected": compiler.JobFailed,
+		},
+	}
+
+	failed := failedPartialBundle(bundle)
+	if len(failed.Plans) != 0 || failed.EventArtifact != nil || len(failed.GeneratedWorkflow.Jobs) != 0 {
+		t.Fatalf("failed partial bundle retained runnable artifacts: %#v", failed)
+	}
+	for _, instance := range failed.IR.Jobs {
+		if failed.JobOutcomes[instance.Key] != compiler.JobFailed {
+			t.Fatalf("outcome for %q = %q, want failed", instance.Key, failed.JobOutcomes[instance.Key])
+		}
+	}
+}
+
+func TestPreparationAdmissionFailureDiscardsIndependentPlan(t *testing.T) {
+	compilation := hostedCompilation{JobGraphComplete: true, Bundle: compiler.Bundle{
+		IR:          compiler.IR{Jobs: []compiler.JobInstance{{Key: "safe"}, {Key: "rejected"}}},
+		Plans:       []compiler.PlanArtifact{{Job: plan.Job{Target: plan.Target{StepKey: "safe"}}}},
+		JobOutcomes: map[string]compiler.JobOutcome{"safe": compiler.JobPlanned, "rejected": compiler.JobFailed},
+	}}
+	admissionErr := errors.New("rejected capability")
+	failed, err := failClosedForPreparationAdmission(compilation, errors.New("missing macOS runtime"), admissionErr)
+	if err == nil || !strings.Contains(err.Error(), admissionErr.Error()) || len(failed.Bundle.Plans) != 0 {
+		t.Fatalf("failClosedForPreparationAdmission() = %#v, %v", failed, err)
+	}
+	for _, outcome := range failed.Bundle.JobOutcomes {
+		if outcome != compiler.JobFailed {
+			t.Fatalf("fail-closed outcome = %q", outcome)
 		}
 	}
 }
@@ -783,7 +911,7 @@ func TestUnprivilegedUploadAllowsPublicAndDockerfileActionCapabilities(t *testin
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Workflow:             plan.Workflow{LogicalJobID: "action-job"},
 			RequiredCapabilities: capabilities,
-			Steps:                []plan.Step{{ID: "action", Kind: "uses", Uses: "owner/example@commit"}},
+			Program:              &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{{ID: "action", Kind: "uses", Invocation: &program.Invocation{Uses: program.Site{Source: "owner/example@commit"}}}}}},
 		}, Authorization: compiler.PlanAuthorization{DockerCapabilitySources: []string{"dockerfile-actions"}}}}}
 		if err := validateUnprivilegedBundle(bundle); err != nil {
 			t.Fatalf("validateUnprivilegedBundle(%v) error = %v", capabilities, err)
@@ -899,7 +1027,7 @@ func TestUnprivilegedUploadAllowsOnlyAuditedCacheCommits(t *testing.T) {
 		t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", action, err)
 	}
 	var finding *compiler.ProcessingFinding
-	if !errors.As(err, &finding) || finding.Message != "actions/cache v6.0.2 is unsupported. Use a supported version from https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#cache-action." || !strings.Contains(finding.Detail, "Buildkite cache-v2 service") || !strings.Contains(finding.Detail, action.Commit) || strings.Contains(finding.Message, action.Commit) {
+	if !errors.As(err, &finding) || finding.Message != "actions/cache v6.0.2 is unsupported. Use a supported version from https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#actions-cache-action." || !strings.Contains(finding.Detail, "Buildkite cache-v2 service") || !strings.Contains(finding.Detail, action.Commit) || strings.Contains(finding.Message, action.Commit) {
 		t.Fatalf("hosted cache diagnostic = %#v", finding)
 	}
 }
@@ -917,8 +1045,14 @@ func TestCacheServiceRequiredUsesOnlyAuditedCacheLocks(t *testing.T) {
 		if err != nil || !required {
 			t.Fatalf("cache requirement for %s = %v, %v", commit, required, err)
 		}
+		locks[1].ServerURL = "https://github.example"
+		required, err = cacheServiceRequired(locks)
+		if err != nil || required {
+			t.Fatalf("same-name GHES action requested cache service: %v, %v", required, err)
+		}
 	}
 
+	locks[1].ServerURL = ""
 	locks[1].Commit = strings.Repeat("b", 40)
 	if _, err := cacheServiceRequired(locks); err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
 		t.Fatalf("unsupported cache lock error = %v", err)
@@ -965,14 +1099,14 @@ func TestUnprivilegedUploadDoesNotBroadenKnownServiceActionIdentity(t *testing.T
 
 func TestBundleUsesActionsDetectsStepsAndLocks(t *testing.T) {
 	for _, job := range []plan.Job{
-		{Steps: []plan.Step{{Kind: "uses"}}},
+		{Program: &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{{Kind: "uses", Invocation: &program.Invocation{}}}}}},
 		{Actions: []plan.ActionLock{{ID: "a-deadbeefdeadbeef"}}},
 	} {
 		if !bundleUsesActions(compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: job}}}) {
 			t.Fatalf("bundleUsesActions() = false for %#v", job)
 		}
 	}
-	if bundleUsesActions(compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{Steps: []plan.Step{{Kind: "run"}}}}}}) {
+	if bundleUsesActions(compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{Program: &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{{Kind: "run", Run: &program.Run{}}}}}}}}}) {
 		t.Fatal("bundleUsesActions() = true for shell-only plan")
 	}
 }
@@ -980,12 +1114,12 @@ func TestBundleUsesActionsDetectsStepsAndLocks(t *testing.T) {
 func TestUnprivilegedUploadAllowsCapabilityFreeConcurrentShellSteps(t *testing.T) {
 	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 		Workflow: plan.Workflow{LogicalJobID: "concurrent-job"},
-		Steps: []plan.Step{
-			{ID: "background", Kind: "run", Command: "true", Background: true},
+		Program: &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{
+			{ID: "background", Kind: "run", Run: &program.Run{Command: program.Site{Source: "true"}}, Background: true},
 			{ID: "wait", Kind: "wait", Targets: []string{"background"}},
 			{ID: "wait-all", Kind: "wait-all"},
 			{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
-		},
+		}}},
 	}}}}
 	if err := validateUnprivilegedBundle(bundle); err != nil {
 		t.Fatalf("validateUnprivilegedBundle() error = %v", err)

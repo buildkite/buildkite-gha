@@ -17,6 +17,10 @@ workflow is executable:
    output, environment-file, masking, summary, and post-action events.
 4. `artifact.yml` adds GitHub artifact-action compatibility and verifies one
    payload in both consumer matrix instances.
+5. `hash-files.yml` verifies matched and empty hashes, ordered exclusions, and
+   step condition evaluation against files created by an earlier step.
+6. `rust.yml` installs a pinned Rust toolchain with `dtolnay/rust-toolchain`,
+   then builds, tests, and runs a small Cargo application.
 
 `manifest.json` is the authoritative, ordered compatibility inventory for
 these workflows and the related behavior-oriented proof fixtures. Every
@@ -44,11 +48,13 @@ Run `mise run smoke:profile` for the opt-in networked preflight of entries marke
 the same admission policy as production upload without installing or executing
 Node. Admission does not execute action code or prove that a generic action is
 independent of GitHub-only artifact, cache, token, or OIDC services.
-The exact audited `actions/upload-artifact` and exact-name
-`actions/download-artifact` commits are admitted through bounded native
-adapters. The exact audited cache-v2-capable `actions/cache` release commits are
-also admitted by this profile. This compile/admission evidence does not prove a
-hosted cache roundtrip. Unpublished, withdrawn, older cache-v1, artifact merge,
+The frozen `actions/upload-artifact` snapshot and exact-name
+`actions/download-artifact` commits use bounded native adapters. Unknown
+immutable artifact commits use their adapters' documented fallback contracts.
+The frozen cache-v2-capable `actions/cache` snapshot commits are also
+admitted by this profile; other `actions/cache` commits run the newest
+audited release for their major with a warning. This compile/admission
+evidence does not prove a hosted cache roundtrip. Artifact merge,
 broad download, and unsupported artifact commits remain rejected. The profile leaves unknown
 generic service dependencies as an explicit warning rather than guessing from
 arbitrary action source. Runtime-pass job and service container fixtures are

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if (( $# > 1 )); then
-  echo 'usage: .buildkite/upload-examples.sh [basic|artifacts|advanced]' >&2
+  echo 'usage: .buildkite/upload-examples.sh [basic|artifacts|advanced|nodejs-concurrency]' >&2
   exit 2
 fi
 
@@ -11,7 +11,7 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 upload_pipeline() {
-  buildkite-agent pipeline upload --no-interpolation --reject-secrets
+  buildkite-agent pipeline upload --no-interpolation
 }
 
 if (( $# == 1 )); then
@@ -40,6 +40,8 @@ steps:
             value: "artifacts"
           - label: "Advanced delivery"
             value: "advanced"
+          - label: "Node.js concurrency"
+            value: "nodejs-concurrency"
 
   - label: ":pipeline: Load example workflow"
     key: "example-loader"
@@ -63,6 +65,9 @@ case "$example" in
     ;;
   advanced)
     workflow=".github/workflows/example-advanced.yml"
+    ;;
+  nodejs-concurrency)
+    workflow=".github/workflows/example-nodejs-concurrency.yml"
     ;;
   *)
     echo "unknown example: $example" >&2
@@ -103,7 +108,13 @@ steps:
           automatic: false
         cache: "/cache/bkcache/mise"
         plugins:
-          - github-actions#latest:
-              workflow: "$workflow"
-              source-ref: "$commit"
+          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+              version: "2026.10.17"
+        command: |
+          set -euo pipefail
+          scripts/verify-source-checkout "$commit"
+          distribution_root="\$(mktemp -d "\${TMPDIR:-/tmp}/buildkite-gha-example.XXXXXXXX")"
+          trap 'rm -rf -- "\$distribution_root"' EXIT
+          CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.revision=$commit" -o "\$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+          BUILDKITE_PLUGIN_CONFIGURATION='{"workflow":"$workflow"}' "\$distribution_root/buildkite-gha" plugin
 YAML

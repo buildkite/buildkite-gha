@@ -57,6 +57,16 @@ func TestParseRetainsTriggerConfiguration(t *testing.T) {
 	}
 }
 
+func TestParseRetainsIssuesActivityTypes(t *testing.T) {
+	w, err := Parse("workflow.yml", []byte("on:\n  issues:\n    types: [opened, typed, untyped]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w.Triggers) != 1 || w.Triggers[0].Event != "issues" || len(w.Triggers[0].Types) != 3 || w.Triggers[0].Types[1] != "typed" || w.Triggers[0].Types[2] != "untyped" {
+		t.Fatalf("issues trigger not retained: %#v", w.Triggers)
+	}
+}
+
 func TestParseRetainsImageVersionTriggerPosition(t *testing.T) {
 	source := []byte("on:\n  push:\n  image_version:\n    names: [ubuntu]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 	w, err := Parse("workflow.yml", source)
