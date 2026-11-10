@@ -206,11 +206,12 @@ for reported observations and their limits.
 
 ## Monitor dependency security
 
-Renovate uses the shared `buildkite/renovate-config` preset and runs every four
-hours, including weekends. Non-major updates merge after required checks pass;
-major updates require review. Vulnerability updates bypass the three-day
-release age and receive the `security` label. Failed Renovate builds notify
-`#team-platform-blerts`.
+Renovate runs every four hours, including weekends. `renovate.json` copies the
+shared policy instead of extending a private preset, so it can resolve without
+access to other repositories. Keep the copy in sync when the shared policy
+changes. Non-major updates merge after required checks pass; major updates
+require review. Vulnerability updates bypass the three-day release age and
+receive the `security` label. Failed Renovate builds notify the owning team.
 
 The [Renovate rules](../renovate.json) disable GitHub Actions updates in examples
 and compatibility fixtures to preserve their version coverage. CI workflows,
@@ -227,7 +228,7 @@ them when onboarding the repository and after changing app access:
 
 | Control | Required setting | Verification |
 | --- | --- | --- |
-| Renovate GitHub App | Install `buildkite-renovate` for this repository with Contents, Issues, Pull requests, Checks, Metadata, and Vulnerability alerts access. | Confirm a Renovate Dependency Dashboard issue exists and the scheduled pipeline records a successful run. |
+| Renovate GitHub App | Install `buildkite-renovate` for this repository with Contents, Issues, Pull requests, Checks, Metadata, and Vulnerability alerts access. Do not also give the Mend-hosted Renovate app access; two Renovate bots can open competing `renovate/*` branches. | Confirm a Renovate Dependency Dashboard issue exists and the scheduled pipeline records a successful run. |
 | Renovate missed-run monitor | Alert when the Renovate pipeline has no successful build within four hours. The Buildkite Terraform provider can alert on failed builds but cannot detect an absent scheduled build. | Compare the latest successful Buildkite build with the schedule interval. |
 | GitHub dependency security | Enable the dependency graph, Dependabot alerts, and Dependabot security updates. Do not enable Dependabot version updates; Renovate owns routine updates. | Repository administrators check **Settings → Code security and analysis**. |
 | Plerion | Fail or alert on reachable critical and high findings instead of returning a successful advisory check. | Confirm a known failing scan produces a failed required check or an owned alert. |
