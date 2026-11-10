@@ -782,10 +782,69 @@ builds used pull request heads. The selection gap was not an intentional differe
 
 The experiment does not prove branch creation/deletion, other activities,
 combined filters, malformed values, unknown keys, or post-fix hosted execution.
-Four separate `tags`/`tags-ignore` cases on `pull_request.opened` and
-`merge_group.checks_requested` had no native or hosted runs despite successful
-controls. Their cause remains unresolved; a quiet observation window is not
-proof of rejection or completed delivery.
+Separate `tags`/`tags-ignore` cases on `merge_group.checks_requested` had no native
+or hosted runs despite successful controls. Their cause remains unresolved; a
+quiet observation window is not proof of rejection or completed delivery.
+The pull-request cases are superseded by the reproducible evidence below.
+
+### Pull-request tag filter admission and selection
+
+GitHub.com admits `pull_request.tags` and `tags-ignore`, but admission does not
+mean that a pull request selects the workflow. Native experiments on November
+10, 2026 used public, same-repository, non-draft pull requests, shell-only jobs,
+positive controls, and mixed `push` declarations to separate admission from
+selection.
+
+| Declaration | Observed pull-request selection |
+| --- | --- |
+| Nonempty `tags` or `tags-ignore`, no nonempty branch filter | No run for `opened`, `synchronize`, or `reopened`. |
+| Either tag filter plus matching `branches` | Runs, including never-matching tags and `tags-ignore: ['**']`. |
+| Either tag filter plus nonmatching `branches` | No run. |
+| Empty or YAML-null tag filter | Does not suppress selection. |
+| Nonempty tag filter plus empty or null branch filter | No run. |
+| Nonempty `branches-ignore` | Selects by the base branch, not the head branch. |
+
+The [original tag-only fixture](https://github.com/sj26-testier/gha-e2e-onboarding-r-5a25e471655c/blob/f4fe73aa19eacc8ff8fd73d37b8906a2b03503ed/.github/workflows/pull_request-tags-v.yml)
+produced no PR runs. Its [mixed-push counterpart ran](https://github.com/sj26-testier/gha-e2e-onboarding-r-5a25e471655c/actions/runs/42809773289).
+A [matching-branch, ignore-all fixture](https://github.com/sj26-testier/gha-e2e-onboarding-r-5a25e471655c/blob/b32319682b1b9ac9ca08102856d8070d4cffc4b8/.github/workflows/pull_request-ignore-all.yml)
+[ran on a pull request](https://github.com/sj26-testier/gha-e2e-onboarding-r-5a25e471655c/actions/runs/42809956625).
+These positive receipts disprove blanket rejection and unconditional ignoring
+of tag-only filters. Missing runs remain bounded observations, not rejection
+diagnostics or evidence of GitHub's internal implementation.
+
+Accept empty arrays separately from null: null means absent, while two non-null
+include/ignore keys conflict even when both arrays are empty. Retain malformed
+filter rejection. Preserve activity, base-branch, and path selection, and do not
+let an inactive PR declaration invalidate an otherwise valid push workflow.
+
+The [edge fixtures](https://github.com/sj26-testier/gha-e2e-onboarding-r-5a25e471655c/tree/db31a13881ea2a8d18b0128cbde1255c5489fc5e/.github/workflows)
+also distinguish quoted `'null'` from YAML null, admit scalar strings and
+nonempty numeric/boolean tag values, and preserve empty/null activity defaults.
+Unknown activity strings are admitted without selecting the tested PR
+activities. Null list members are invalid, including
+[`types: [null]`](https://github.com/sj26-testier/gha-e2e-onboarding-r-5a25e471655c/blob/4ee737ba9f28cc25650f899dda0920c72d205ad1/.github/workflows/edge-pr-order-types-null.yml),
+which produced an [explicit invalid-workflow diagnostic](https://github.com/sj26-testier/gha-e2e-onboarding-r-5a25e471655c/actions/runs/42895800187)
+even alongside push. Non-string tag admission does not prove canonical lexical
+coercion because tag values do not participate in PR branch matching.
+
+For PR branch includes, leading negatives are admitted, but a negative-only
+array selects no branch. For branch ignores, negative patterns re-include in
+order: `['**', '!<base>']` [ran](https://github.com/sj26-testier/gha-e2e-onboarding-r-5a25e471655c/actions/runs/42896514377),
+while the reverse order did not, with the same `edited` event and a
+[successful control](https://github.com/sj26-testier/gha-e2e-onboarding-r-5a25e471655c/actions/runs/42896514403).
+Both [immutable order fixtures](https://github.com/sj26-testier/gha-e2e-onboarding-r-5a25e471655c/tree/673632a4b7cd223621d44a8ad97281604ce4dde4/.github/workflows)
+were admitted on push. Apply these PR observations without changing the
+existing push or merge-group pattern rules by inference.
+
+[Blocking CLI tests](../internal/cli/cli_test.go) check admission and the original
+compatibility-gap fixture's generated selection condition. [Trigger tests](../internal/buildkite/triggers_test.go)
+check the selection matrix. Passing the soft-failed gap assessment alone proves
+admission, not a positive PR match.
+
+Native `pull_request_target` observations do not change its intentional exclusion.
+These experiments do not establish GHES, fork, or merge-group behavior. Release
+and activate the compatible CLI before the backend admits newly eligible PR
+workflows; otherwise selected builds can reach the old CLI rejection.
 
 ### Merge-group destruction
 

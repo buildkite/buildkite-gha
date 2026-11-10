@@ -170,7 +170,7 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 		{name: "event", triggers: []workflow.Trigger{{Event: "repository_dispatch"}}, want: "unsupported GitHub trigger"},
 		{name: "mixed include ignore", triggers: []workflow.Trigger{{Event: "push", Branches: []string{"main"}, BranchesIgnore: []string{"release"}}}, want: "cannot be combined"},
 		{name: "leading negative", triggers: []workflow.Trigger{{Event: "push", Branches: []string{"!release/**"}}}, want: "must follow a positive"},
-		{name: "unsupported PR type", triggers: []workflow.Trigger{{Event: "pull_request", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
+		{name: "empty PR type", triggers: []workflow.Trigger{{Event: "pull_request", Types: []string{""}}}, want: "activity type cannot be empty"},
 		{name: "unsupported merge group type", triggers: []workflow.Trigger{{Event: "merge_group", Types: []string{"not-real"}}}, want: `merge_group type "not-real" is unsupported`},
 		{name: "merge group tags", triggers: []workflow.Trigger{{Event: "merge_group", Tags: []string{"v*"}}}, want: "does not support the tags filter"},
 		{name: "unknown release type", triggers: []workflow.Trigger{{Event: "release", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
@@ -657,6 +657,10 @@ func TestTranslateEventTriggerConditionMatchesPullRequestPaths(t *testing.T) {
 			name:    "ignore runs for one unignored path",
 			trigger: workflow.Trigger{Event: "pull_request", PathsIgnore: []string{"docs/**"}},
 		},
+		{
+			name:    "tag patterns do not constrain branch and path match",
+			trigger: workflow.Trigger{Event: "pull_request", Branches: []string{"main"}, TagsIgnore: []string{"**"}, Paths: []string{"**", "!docs/**"}},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{test.trigger}, "pull_request", expressions, snapshot)
@@ -666,7 +670,7 @@ func TestTranslateEventTriggerConditionMatchesPullRequestPaths(t *testing.T) {
 		})
 	}
 	condition, applicable, err := TranslateEventTriggerCondition(
-		[]workflow.Trigger{{Event: "pull_request", Paths: []string{"web/**"}}},
+		[]workflow.Trigger{{Event: "pull_request", Branches: []string{"main"}, Tags: []string{"v*"}, Paths: []string{"web/**"}}},
 		"pull_request",
 		expressions,
 		snapshot,
@@ -724,6 +728,75 @@ func TestTranslateEventTriggerConditionMatchesPushPaths(t *testing.T) {
 	trigger.Branches = []string{"release"}
 	if condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, "push", expressions, snapshot); err != nil || !applicable || !strings.Contains(condition, `"main" =~ /^release$/`) {
 		t.Fatalf("branch-mismatched push path filter = %q, %t, %v", condition, applicable, err)
+	}
+}
+
+func TestPullRequestTagFilterSelection(t *testing.T) {
+	base, head, action := "main", "feature", "synchronize"
+	expressions := TriggerConditionExpressions{EventPredicate: "true", PullRequestBaseBranch: yamlScalar(base), PullRequestAction: yamlScalar(action)}
+	snapshot := TriggerEventSnapshot{Branch: &head, PullRequestBaseBranch: &base, PullRequestAction: &action}
+	for _, test := range []struct {
+		configuration string
+		selected      bool
+		tagOnly       bool
+	}{
+		{"tags: [v*]", false, true},
+		{"tags-ignore: ['**']", false, true},
+		{"tags: [v*], branches: []", false, true},
+		{"tags: [v*], branches-ignore: null", false, true},
+		{"tags: [v*], branches-ignore: []", false, true},
+		{"tags: [], branches: []", true, false},
+		{"tags: null", true, false},
+		{"tags: 'null'", false, true},
+		{"tags-ignore: 'null', branches: [main]", true, false},
+		{"tags: 0", false, true},
+		{"tags-ignore: false", false, true},
+		{"tags: [true], branches: [main]", true, false},
+		{"tags-ignore: []", true, false},
+		{"tags-ignore: null", true, false},
+		{"tags: [never-matching], branches: main", true, false},
+		{"tags-ignore: ['**'], branches: [main]", true, false},
+		{"tags: ['!v*'], branches: [main]", true, false},
+		{"tags-ignore: ['!v*'], branches: [main]", true, false},
+		{"tags: [v*], branches: ['!never', main]", true, false},
+		{"tags: [v*], branches: ['!never']", false, false},
+		{"tags: [v*], branches-ignore: ['!never']", true, false},
+		{"tags: [v*], branches-ignore: ['!main']", true, false},
+		{"tags: [v*], branches-ignore: ['**', '!main']", true, false},
+		{"tags: [v*], branches-ignore: ['!main', '**']", false, false},
+		{"tags: null, tags-ignore: ['**'], branches: [main]", true, false},
+		{"tags: [v*], branches: [feature]", false, false},
+		{"tags: [v*], branches-ignore: [main]", false, false},
+		{"tags: [v*], branches-ignore: [feature]", true, false},
+		{"tags: [v*], branches: [main], types: []", true, false},
+		{"tags: [v*], branches: [main], types: null", true, false},
+		{"tags: [v*], branches: [main], types: synchronize", true, false},
+		{"tags: [v*], branches: [main], types: opened", false, false},
+		{"tags: [v*], branches: [main], types: [unknown]", false, false},
+		// Tag-only suppression must not require a diff for path evaluation.
+		{"tags: [v*], paths: ['src/**']", false, true},
+	} {
+		t.Run(test.configuration, func(t *testing.T) {
+			parsed, err := workflow.Parse("native.yml", []byte("on: {push: null, pull_request: {"+test.configuration+"}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateTriggerConditions(parsed.Triggers); err != nil {
+				t.Fatal(err)
+			}
+			condition, applicable, err := TranslateEventTriggerCondition(parsed.Triggers, "pull_request", expressions, snapshot)
+			if err != nil || !applicable || (condition == "(false)") != test.tagOnly {
+				t.Fatalf("condition=%q, applicable=%t, error=%v", condition, applicable, err)
+			}
+			reason, err := TriggerFilterMismatchReason(parsed.Triggers, "pull_request", snapshot)
+			if err != nil || (reason == "") != test.selected {
+				t.Fatalf("reason=%q, error=%v; want selected=%t", reason, err, test.selected)
+			}
+			condition, applicable, err = TranslateEventTriggerCondition(parsed.Triggers, "push", TriggerConditionExpressions{EventPredicate: "true", Branch: yamlScalar(head), Tag: "null"}, TriggerEventSnapshot{Branch: &head})
+			if err != nil || !applicable || condition != "(true)" {
+				t.Fatalf("mixed push condition=%q, applicable=%t, error=%v", condition, applicable, err)
+			}
+		})
 	}
 }
 
