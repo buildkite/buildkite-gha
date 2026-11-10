@@ -2673,8 +2673,12 @@ func TestRunJobContainerConcurrentExecUsesUniquePIDFiles(t *testing.T) {
 	}()
 	time.Sleep(100 * time.Millisecond)
 	x()
-	<-d1
-	<-d2
+	if err := <-d1; !errors.Is(err, context.Canceled) {
+		t.Errorf("canceled exec error = %v, want context cancellation", err)
+	}
+	if err := <-d2; err != nil {
+		t.Errorf("concurrent exec failed: %v", err)
+	}
 	_ = b.cleanup(t.Context())
 	runs := map[string]bool{}
 	terms := map[string]bool{}
