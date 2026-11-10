@@ -78,7 +78,7 @@ func TestExpandRuntimeMatrixOutputRejectsMalformedAndTypeConfusedValues(t *testi
 		source     string
 		want       string
 	}{
-		{name: "malformed", descriptor: include, source: `[`, want: "EOF"},
+		{name: "malformed", descriptor: include, source: `[`, want: "decode runtime matrix output:"},
 		{name: "trailing", descriptor: include, source: `[] true`, want: "multiple JSON values"},
 		{name: "null root", descriptor: include, source: `null`, want: "want array"},
 		{name: "wrong include type", descriptor: include, source: `{}`, want: "want array"},

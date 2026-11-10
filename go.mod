@@ -2,16 +2,16 @@ module github.com/buildkite/buildkite-gha
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.27.3
 
 require (
-	github.com/bmatcuk/doublestar/v4 v4.10.0
+	github.com/bmatcuk/doublestar/v4 v4.10.4
 	github.com/bugsnag/bugsnag-go/v2 v2.6.4
 	github.com/pkg/errors v0.9.1
 	github.com/rhysd/actionlint v1.7.12
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	go.yaml.in/yaml/v4 v4.0.0-rc.3
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.50.0
 )
 
 require (

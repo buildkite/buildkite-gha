@@ -25,6 +25,12 @@
       "automerge": false
     },
     {
+      "description": "Hold YAML until actionlint supports the stable v4 error API",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["go.yaml.in/yaml/v4"],
+      "allowedVersions": "=4.0.0-rc.3"
+    },
+    {
       "description": "Preserve action versions in examples and compatibility fixtures",
       "matchManagers": ["github-actions"],
       "matchFileNames": [

@@ -30,8 +30,8 @@ func TestActionResolutionSnapshotContextCancelsInitializationWhileLocked(t *test
 		}
 	case <-time.After(5 * time.Second):
 		unlock()
-		<-done
-		t.Fatal("snapshot initialization did not honor cancellation while locked")
+		err := <-done
+		t.Fatalf("snapshot initialization did not honor cancellation while locked: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "current.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("canceled initialization published a generation: %v", err)

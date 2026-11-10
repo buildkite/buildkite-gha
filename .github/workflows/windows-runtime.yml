@@ -19,7 +19,7 @@ jobs:
           go-version-file: go.mod
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: 24.18.0
+          node-version: 24.22.2
       - name: Build Windows runtime
         run: go build ./...
       - name: Verify secrets migration subprocesses
@@ -45,7 +45,7 @@ jobs:
         run: go test ./internal/action/source -run '^(TestStoreExactCommitAtomicHitAndSubpath|TestStoreConcurrentMaterialize|TestStoreMaintenanceUsesLRUAndCleansOnlyUnlockedPartials|TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease)$' -v -count=1
       - name: Exercise PowerShell and process cleanup
         run: go test ./internal/runtime -run '^(TestPowerShellExecution|TestWindowsEnvironment.*|TestWindowsProcessTree)$' -v -count=1 -timeout=3m
-      - uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6.0.2
+      - uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6.1
         with:
           platform: x86_64
           work-vol: 'D:'
@@ -55,7 +55,7 @@ jobs:
         run: |
           $env:BUILDKITE_GHA_TEST_CYGWIN = '1'
           go test ./internal/runtime -run '^TestWindowsCygwinShell$' -v -count=1 -timeout=3m
-      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: MINGW64
           update: false

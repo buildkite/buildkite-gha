@@ -763,13 +763,13 @@ func (b *jobContainerBackend) exec(ctx context.Context, r Runner, processor *com
 		stopDocker()
 		local := time.NewTimer(time.Second)
 		select {
-		case <-done:
+		case <-done: //nolint:errcheck // Return cancellation and termination errors, not the stopped client's exit status.
 			if !local.Stop() {
 				<-local.C
 			}
 		case <-local.C:
 			terminateErr = errors.Join(terminateErr, errors.New("local Docker exec client did not stop within 1s"))
-			<-done
+			<-done //nolint:errcheck // The timeout above already reports the client shutdown failure.
 		}
 		_ = os.Remove(pidfile)
 		_ = os.Remove(pidfile + containerCancellationMarkerSuffix)
