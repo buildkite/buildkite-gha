@@ -566,6 +566,34 @@ reachable or unknown composite child-input token branches. These are local
 implementation checks against documented fields, not native execution or
 backend delivery evidence for every event, manual build, or retry path.
 
+### Runner name
+
+GitHub's [runner context](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#runner-context)
+defines `runner.name` as the executing runner's name. The pinned
+[runner implementation](https://github.com/actions/runner/blob/310a370bf3605f5b092f8af63b3126627de2a210/src/Runner.Worker/JobRunner.cs#L165-L167)
+reads its configured agent name, not its hostname.
+
+Use the executing Buildkite agent's
+[`BUILDKITE_AGENT_NAME`](https://buildkite.com/docs/pipelines/configure/environment-variables#BUILDKITE_AGENT_NAME)
+in `run-job`. Generated jobs invoke that command in the executing agent's
+environment; the [runner-user bootstrap](../internal/buildkite/experimental_runner_user.go)
+preserves it across `sudo`. The plugin imports workflows, not the executing
+agent's identity. Never capture the importer's name in a plan or infer a name
+from hostname, `RUNNER_NAME`, or workflow environment values.
+
+Keep the name unknown during compilation and authority analysis. Supply it
+to workflow/composite step fields, action input defaults, lifecycle conditions,
+and job outputs. Graph fields, job/call conditions, job environment/defaults,
+and service fields retain their restrictions. An absent name stays unavailable;
+evaluated direct reads fail rather than inventing an identity. No new context
+roots, credential authority, or `RUNNER_NAME` export are implied.
+
+[Expression tests](../internal/expression/engine_test.go) cover allowed/rejected
+positions and token-branch analysis. [CLI tests](../internal/cli/run_job_test.go)
+cover supplied/absent names and environment overrides; [compiled execution tests](../internal/runtime/runtime_test.go)
+cover step conditions, composite defaults, and outputs across two agents using
+one serialized plan. These are local checks, not hosted or native-run evidence.
+
 ### Runner tool-cache paths
 
 The pinned runner [creates the tool cache and sets its context](https://github.com/actions/runner/blob/1ddb758ed014660b5d2220a5dc6b0e9957a9f96b/src/Runner.Worker/JobRunner.cs#L174-L176)

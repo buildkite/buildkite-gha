@@ -65,6 +65,7 @@ type Runner struct {
 	WorkflowToken         WorkflowTokenProvider
 	OIDCToken             OIDCTokenProvider
 	RunIdentity           RunIdentity
+	Name                  string // Executing agent name; empty leaves runner.name unavailable.
 	nodeDigests           map[int]string
 }
 

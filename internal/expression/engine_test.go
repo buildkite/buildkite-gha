@@ -74,6 +74,60 @@ func TestEngineGitHubIdentityIDs(t *testing.T) {
 	}
 }
 
+func TestEngineRunnerNameRemainsRuntimeOnly(t *testing.T) {
+	engine := NewEngine()
+	runner := map[string]string{"name": "agent-blue-42"}
+	values := Values{Runtime: Context{Runner: runner}, Condition: ConditionContext{Runner: runner}}
+	for _, profile := range []ProfileID{ProfileStepTemplate, ProfileActionStepTemplate, ProfileActionInputDefault, ProfileJobOutput, ProfileStepControl, ProfileStepCondition, ProfileActionStepCondition, ProfileActionLifecycle} {
+		t.Run(string(profile), func(t *testing.T) {
+			site := Site{Source: "${{ runner['NAME'] }}", Profile: profile, Result: ResultString}
+			var want any = "agent-blue-42"
+			if profiles[profile].Form == FormExpression {
+				site.Source, site.Result, want = "${{ runner['NAME'] == 'agent-blue-42' }}", ResultBoolean, true
+			}
+			if got, err := engine.Evaluate(site, values); err != nil || got != want {
+				t.Fatalf("Evaluate() = %#v, %v; want %#v", got, err, want)
+			}
+			if _, err := engine.Evaluate(site, Values{}); err == nil {
+				t.Fatal("Evaluate() invented a missing agent name")
+			}
+			reduced, err := engine.Reduce(site, Values{})
+			if err != nil || reduced.Known || !strings.Contains(strings.ToLower(reduced.Source), "name") {
+				t.Fatalf("Reduce() = %#v, %v; want runtime name", reduced, err)
+			}
+		})
+	}
+	for _, profile := range []ProfileID{ProfileCompileTemplate, ProfileRunsOnTemplate, ProfileRunName, ProfileWorkflowConcurrency, ProfileJobEnvironment, ProfileServiceEnvironment, ProfileServiceCredential, ProfileJobDefault, ProfileRuntimeTemplate, ProfileDockerActionArg, ProfileJobControl, ProfileJobCondition, ProfileCallCondition} {
+		site := Site{Source: "${{ false && runner.name }}", Profile: profile}
+		if profiles[profile].Form == FormExpression {
+			site.Source = "${{ false && runner.name != '' }}"
+		}
+		if _, err := engine.Validate(site); err == nil {
+			t.Errorf("%s admitted runner.name in a prohibited position", profile)
+		}
+	}
+	site := Site{Source: "${{ runner.name == 'agent-blue-42' && github.token || 'none' }}", Profile: ProfileStepTemplate, Result: ResultString}
+	unknown, err := engine.Analyze(site, AbstractValues{})
+	if err != nil || unknown.Value.Known || unknown.Effects.GitHubToken != GitHubTokenDirect {
+		t.Fatalf("unknown name authority = %#v, %v", unknown, err)
+	}
+	for _, name := range []string{"agent-blue-42", "agent-green-7"} {
+		known := map[string]any{"runner.name": name, "github.token": "synthetic-token"}
+		analysis, err := engine.Analyze(site, AbstractValues{References: known})
+		want, effect := "none", GitHubTokenEffect(0)
+		if name == "agent-blue-42" {
+			want, effect = "synthetic-token", GitHubTokenDirect
+		}
+		if err != nil || !analysis.Value.Known || analysis.Value.Value != want || analysis.Effects.GitHubToken != effect {
+			t.Fatalf("known name authority = %#v, %v", analysis, err)
+		}
+		got, err := engine.Evaluate(site, Values{Runtime: Context{Runner: map[string]string{"name": name}, GitHub: map[string]any{"token": "synthetic-token"}}})
+		if err != nil || got != want {
+			t.Fatalf("concrete name branch = %#v, %v; want %q", got, err, want)
+		}
+	}
+}
+
 func TestEngineToolCacheRemainsRuntimeOnly(t *testing.T) {
 	engine := NewEngine()
 	for _, profile := range []ProfileID{ProfileStepTemplate, ProfileActionStepTemplate, ProfileActionInputDefault, ProfileJobOutput} {

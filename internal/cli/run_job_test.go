@@ -31,6 +31,37 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
+func TestRunJobUsesExecutingAgentName(t *testing.T) {
+	job := cliRunJobPlan()
+	job.Outputs = map[string]string{"runner": "${{ runner.name }}"}
+	job.Program.Job.Steps[0].Env = cliProgramBindings(map[string]string{
+		"BUILDKITE_AGENT_NAME": "workflow-spoof",
+		"RUNNER_NAME":          "github-spoof",
+	})
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	t.Setenv("RUNNER_NAME", "ambient-spoof")
+	t.Setenv("HOSTNAME", "hostname-spoof")
+	for _, name := range []string{"agent-blue-42", "agent-green-7", ""} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("BUILDKITE_AGENT_NAME", name)
+			var stdout, stderr bytes.Buffer
+			runner := &cliCaptureRunner{}
+			code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner)
+			result := publishedCLIManifest(t, runner, job, planDigest)
+			if name == "" {
+				if code != 1 || result.Result != "failure" || !strings.Contains(stderr.String(), `unavailable runner value "name"`) {
+					t.Fatalf("missing name: exit = %d, result = %#v, stderr = %s", code, result, stderr.String())
+				}
+				return
+			}
+			if code != 0 || result.Result != "success" || !reflect.DeepEqual(result.Outputs, []transport.Output{{Name: "runner", Value: name}}) {
+				t.Fatalf("exit = %d, result = %#v, stderr = %s; want runner %q", code, result, stderr.String(), name)
+			}
+		})
+	}
+}
+
 func TestRunJobLogsHashFilesFailureEvenWhenTolerated(t *testing.T) {
 	for _, tolerate := range []bool{false, true} {
 		t.Run(fmt.Sprintf("continue-on-error=%t", tolerate), func(t *testing.T) {
