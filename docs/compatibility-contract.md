@@ -485,13 +485,16 @@ only under the bounded transient-failure policy in
 authorization denials into retryable failures or replace specific server
 diagnostics with generic App-permission advice.
 
-OIDC minting must emit one trusted issuer-migration warning per job, only after
-an authorized request succeeds and token redaction is registered. Keep token
-values out of the warning and preserve mint-failure status and attribution.
-This is Buildkite-specific migration guidance, not GitHub issuer parity or
-evidence that a downstream service accepts the token. Local
-[OIDC tests](../internal/runtime/oidc_token_service_test.go) cover warning
-deduplication, failure suppression, and secrecy; they do not prove cloud trust.
+Publish OIDC trust guidance only when a job makes an authorized token request
+and finishes with a failure conclusion. Permission alone is not a request;
+success, skipped, and cancelled conclusions must not publish it.
+Include post-action requests. Use the shared build-scoped context
+`buildkite-gha-oidc-trust`, replacing rather than appending, so failed jobs
+update one annotation per build. Keep the message conditional and token-free:
+job failure does not establish a downstream trust rejection. Preserve mint
+status and failure attribution. Local
+[OIDC tests](../internal/runtime/oidc_token_service_test.go) cover request
+tracking and publication parameters, not downstream cloud trust.
 
 Cache mode is client behavior, not server authorization. Clients that ignore
 `ACTIONS_CACHE_MODE` do not acquire its restrictions. A subprocess-only synthetic

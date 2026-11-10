@@ -5,17 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 func TestAgentOIDCTokensMintsRequestedAudienceAndConfiguredClaims(t *testing.T) {
@@ -169,8 +172,7 @@ func (p *testOIDCTokenProvider) OIDCToken(ctx context.Context, audience string) 
 func TestIDTokenServiceWireContract(t *testing.T) {
 	provider := &testOIDCTokenProvider{token: "header.payload.signature", requireLiveContext: true}
 	redactor := &testRedactor{}
-	stderr := &bytes.Buffer{}
-	processor := newCommandOutputProcessor(&bytes.Buffer{}, stderr)
+	processor := newCommandOutputProcessor(&bytes.Buffer{}, &bytes.Buffer{})
 	service, err := startIDTokenService(t.Context(), provider, redactor, processor)
 	if err != nil {
 		t.Fatal(err)
@@ -196,24 +198,15 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 	if unauthorized.StatusCode != http.StatusUnauthorized || len(provider.audiences) != 0 {
 		t.Fatalf("unauthorized request = %d, provider calls %#v", unauthorized.StatusCode, provider.audiences)
 	}
-	warnings, _, _, _ := processor.workflowCommandAnnotations()
-	if warnings != "" || stderr.Len() != 0 {
-		t.Fatalf("unauthorized request emitted guidance: annotation = %q, stderr = %q", warnings, stderr)
+	request, err := http.NewRequest(http.MethodGet, env["ACTIONS_ID_TOKEN_REQUEST_URL"]+"&audience=sts.amazonaws.com", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	authorizedRequest := func(audience string) *http.Response {
-		t.Helper()
-		request, err := http.NewRequest(http.MethodGet, env["ACTIONS_ID_TOKEN_REQUEST_URL"]+"&audience="+audience, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		request.Header.Set("Authorization", "Bearer "+env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
-		response, err := http.DefaultClient.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return response
+	request.Header.Set("Authorization", "Bearer "+env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
 	}
-	response := authorizedRequest("sts.amazonaws.com")
 	defer func() { _ = response.Body.Close() }()
 	var body struct {
 		Value string `json:"value"`
@@ -221,60 +214,11 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || body.Value != provider.token {
+	if response.StatusCode != http.StatusOK || body.Value != provider.token || len(provider.audiences) != 1 || provider.audiences[0] != "sts.amazonaws.com" {
 		t.Fatalf("response/provider = %d %#v / %#v", response.StatusCode, body, provider.audiences)
 	}
-	second := authorizedRequest("second-audience")
-	_ = second.Body.Close()
-	if second.StatusCode != http.StatusOK || len(provider.audiences) != 2 || provider.audiences[0] != "sts.amazonaws.com" || provider.audiences[1] != "second-audience" {
-		t.Fatalf("second response/provider = %d / %#v", second.StatusCode, provider.audiences)
-	}
-	if len(redactor.values) != 3 || redactor.values[0] != env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] || redactor.values[1] != provider.token || redactor.values[2] != provider.token {
+	if len(redactor.values) != 2 || redactor.values[0] != env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] || redactor.values[1] != provider.token {
 		t.Fatalf("redactions = %#v", redactor.values)
-	}
-	warnings, truncated, _, _ := processor.workflowCommandAnnotations()
-	if truncated || strings.Count(warnings, "Buildkite issued this job an OIDC token") != 1 || !strings.Contains(warnings, "https://agent.buildkite.com") || !strings.Contains(warnings, "https://buildkite.com/docs/pipelines/security/oidc") {
-		t.Fatalf("OIDC guidance annotation = %q, truncated = %v", warnings, truncated)
-	}
-	if strings.Count(stderr.String(), oidcIssuerMigrationWarn) != 1 {
-		t.Fatalf("OIDC guidance log = %q", stderr)
-	}
-	for _, secret := range []string{env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"], provider.token} {
-		if strings.Contains(warnings, secret) || strings.Contains(stderr.String(), secret) {
-			t.Fatalf("OIDC guidance leaked secret %q", secret)
-		}
-	}
-}
-
-func TestIDTokenServiceWarnsOnlyAfterTokenProtection(t *testing.T) {
-	provider := &testOIDCTokenProvider{token: "header.payload.signature"}
-	stderr := &bytes.Buffer{}
-	processor := newCommandOutputProcessor(io.Discard, stderr)
-	service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, processor)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = service.Close(t.Context()) }()
-	env, revoke, err := service.actionEnvironment(t.Context(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = revoke() }()
-	request := httptest.NewRequest(http.MethodGet, env["ACTIONS_ID_TOKEN_REQUEST_URL"], nil)
-	request.Header.Set("Authorization", "Bearer "+env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
-	service.redactor = failingTokenRedactor{token: provider.token}
-	response := httptest.NewRecorder()
-	service.ServeHTTP(response, request)
-	warnings, _, _, _ := processor.workflowCommandAnnotations()
-	if response.Code != http.StatusInternalServerError || warnings != "" || stderr.Len() != 0 || strings.Contains(response.Body.String(), provider.token) {
-		t.Fatalf("failed protection = HTTP %d, body %q, warnings %q, stderr %q", response.Code, response.Body, warnings, stderr)
-	}
-	service.redactor = &testRedactor{}
-	response = httptest.NewRecorder()
-	service.ServeHTTP(response, request)
-	warnings, _, _, _ = processor.workflowCommandAnnotations()
-	if response.Code != http.StatusOK || strings.Count(warnings, "Buildkite issued this job an OIDC token") != 1 {
-		t.Fatalf("successful protection = HTTP %d, warnings %q", response.Code, warnings)
 	}
 }
 
@@ -282,8 +226,7 @@ func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			provider := &testOIDCTokenProvider{err: markJobSetupFailure(FailureClassOIDCToken, oidcTokenStatusError(status))}
-			processor := newCommandOutputProcessor(&bytes.Buffer{}, &bytes.Buffer{})
-			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, processor)
+			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, newCommandOutputProcessor(&bytes.Buffer{}, &bytes.Buffer{}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -304,10 +247,6 @@ func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 			_ = response.Body.Close()
 			if response.StatusCode != status || len(provider.audiences) != 1 {
 				t.Fatalf("request = HTTP %d with %d mint calls, want HTTP %d with one call", response.StatusCode, len(provider.audiences), status)
-			}
-			warnings, _, _, _ := processor.workflowCommandAnnotations()
-			if warnings != "" {
-				t.Fatalf("failed mint emitted issued-token guidance: %q", warnings)
 			}
 			failure := revoke()
 			if ClassifyFailure(failure) != FailureClassOIDCToken {
@@ -430,11 +369,7 @@ const endpoint = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
 if (!endpoint.search) throw new Error("ACTIONS_ID_TOKEN_REQUEST_URL must already contain a query string");
 if (process.env.NO_PROXY !== "upper.example,127.0.0.1") throw new Error("NO_PROXY does not preserve the proxy bypass list");
 if (process.env.no_proxy !== "lower.example,127.0.0.1") throw new Error("no_proxy does not preserve the proxy bypass list");
-(async () => {
-  const first = await core.getIDToken("sts.amazonaws.com");
-  const second = await core.getIDToken("second-audience");
-  fs.writeFileSync(process.env.MARKER, first + "\n" + second);
-})().catch(error => { console.error(error); process.exitCode = 1; });
+(async () => fs.writeFileSync(process.env.MARKER, await core.getIDToken("sts.amazonaws.com")))().catch(error => { console.error(error); process.exitCode = 1; });
 `)
 	marker := filepath.Join(workspace, "token")
 	lockID := "a-0123456789abcdef"
@@ -454,15 +389,88 @@ if (process.env.no_proxy !== "lower.example,127.0.0.1") throw new Error("no_prox
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(contents) != provider.token+"\n"+provider.token || len(provider.audiences) != 2 || provider.audiences[0] != "sts.amazonaws.com" || provider.audiences[1] != "second-audience" {
+	if string(contents) != provider.token || len(provider.audiences) != 1 || provider.audiences[0] != "sts.amazonaws.com" {
 		t.Fatalf("token/audiences = %q / %#v", contents, provider.audiences)
 	}
-	if strings.Count(result.WarningAnnotations, "Buildkite issued this job an OIDC token") != 1 || !strings.Contains(result.WarningAnnotations, "https://agent.buildkite.com") || !strings.Contains(result.WarningAnnotations, "https://buildkite.com/docs/pipelines/security/oidc") {
-		t.Fatalf("RunJob() OIDC guidance annotation = %q", result.WarningAnnotations)
+}
+
+func TestOIDCTrustAnnotationOnlyForFailedRequestingJobs(t *testing.T) {
+	node := requireNode24(t)
+	const request = `await core.getIDToken("first"); await core.getIDToken("second");`
+	for _, test := range []struct {
+		name, main, post, conclusion string
+		mintError                    error
+		tolerate, warn               bool
+	}{
+		{name: "successful requests", main: request, conclusion: "success"},
+		{name: "failed job", main: request + `throw new Error("deploy failed");`, conclusion: "failure", warn: true},
+		{name: "permission without request", main: `throw new Error("test failed");`, conclusion: "failure"},
+		{name: "tolerated failure", main: request + `throw new Error("deploy failed");`, tolerate: true, conclusion: "success"},
+		{name: "post-only request and failure", post: request + `throw new Error("cleanup failed");`, conclusion: "failure", warn: true},
+		{name: "failed mint", main: request, mintError: errors.New("mint denied"), conclusion: "failure", warn: true},
+		{name: "unauthorized request", main: `await new Promise(resolve => require("node:http").get(process.env.ACTIONS_ID_TOKEN_REQUEST_URL, response => { response.resume(); response.on("end", resolve); })); throw new Error("unauthorized");`, conclusion: "failure"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath, actionPath := ".github/workflows/oidc.yml", ".github/actions/oidc"
+			writeFixtureFile(t, workspace, workflowPath, "name: OIDC guidance\n")
+			writeFixtureFile(t, workspace, actionPath+"/action.yml", "name: OIDC\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+			writeOIDCUtilsContractShim(t, workspace, actionPath)
+			for name, source := range map[string]string{"main.js": test.main, "post.js": test.post} {
+				writeFixtureFile(t, workspace, actionPath+"/"+name, `const core = require("@actions/core"); (async () => {`+source+`})().catch(error => { console.error(error); process.exitCode = 1; });`)
+			}
+			const lockID = "a-0123456789abcdef"
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
+				ID: "oidc", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID}, ContinueOnError: test.tolerate,
+			}})
+			job.IDTokenPermission = "write"
+			job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
+			provider := &testOIDCTokenProvider{token: "header.payload.signature", err: test.mintError}
+			var logs bytes.Buffer
+			result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: &testRedactor{}, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+			if result.Conclusion != test.conclusion || (err != nil) != (test.conclusion == "failure") {
+				t.Fatalf("RunJob() = %#v, %v", result, err)
+			}
+			if strings.Contains(logs.String()+result.WarningAnnotations, "https://agent.buildkite.com") {
+				t.Fatalf("mint-time or job-scoped guidance: logs %q, warnings %q", logs.String(), result.WarningAnnotations)
+			}
+			capture := &oidcAnnotationRunner{}
+			// Two jobs in one build publish to the same build-level context.
+			for _, jobID := range []string{"11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"} {
+				producer := transport.Producer{BuildID: "33333333-3333-4333-8333-333333333333", JobID: jobID, StepKey: "gha-job"}
+				publication, err := PublishJobResult(t.Context(), transport.Agent{Runner: capture}, t.TempDir(), strings.Repeat("a", 64), "gha-job", "sha256:"+strings.Repeat("b", 64), producer, result)
+				if err != nil || publication.WarningAnnotationError != nil {
+					t.Fatalf("PublishJobResult() = %#v, %v", publication, err)
+				}
+			}
+			wantCalls := 0
+			if test.warn {
+				wantCalls = 2
+			}
+			if capture.calls != wantCalls {
+				t.Fatalf("OIDC annotation writes = %d, want %d", capture.calls, wantCalls)
+			}
+			if test.warn && (!strings.Contains(capture.body, "If the failure involves cloud authentication") || !strings.Contains(capture.body, "https://agent.buildkite.com") || !strings.Contains(capture.body, "https://token.actions.githubusercontent.com") || strings.Contains(capture.body, provider.token)) {
+				t.Fatalf("OIDC guidance = %q", capture.body)
+			}
+		})
 	}
-	if strings.Contains(result.WarningAnnotations, provider.token) {
-		t.Fatalf("RunJob() OIDC guidance annotation leaked token: %q", result.WarningAnnotations)
+}
+
+type oidcAnnotationRunner struct {
+	calls int
+	body  string
+}
+
+func (r *oidcAnnotationRunner) Run(_ context.Context, _, _ string, args []string, stdin []byte) ([]byte, error) {
+	if len(args) > 0 && args[0] == "annotate" && slices.Contains(args, "buildkite-gha-oidc-trust") {
+		if len(args) != 10 || !slices.Equal(args[:4], []string{"annotate", "--scope", "build", "--job"}) || !slices.Equal(args[5:], []string{"--context", "buildkite-gha-oidc-trust", "--style", "warning", "--append=false"}) {
+			return nil, fmt.Errorf("OIDC guidance must replace the shared build annotation: %q", args)
+		}
+		r.calls++
+		r.body = string(stdin)
 	}
+	return nil, nil
 }
 
 func TestNodeActionPreservesOIDCTokenFailure(t *testing.T) {
@@ -557,6 +565,12 @@ const core = require("@actions/core");
 	}
 	if string(contents) != provider.token || len(provider.audiences) != 1 || provider.audiences[0] != "post-cleanup" {
 		t.Fatalf("token/audiences = %q / %#v", contents, provider.audiences)
+	}
+	capture := &oidcAnnotationRunner{}
+	producer := transport.Producer{BuildID: "33333333-3333-4333-8333-333333333333", JobID: testCacheJobID, StepKey: "gha-job"}
+	publication, err := PublishJobResult(t.Context(), transport.Agent{Runner: capture}, t.TempDir(), strings.Repeat("a", 64), "gha-job", "sha256:"+strings.Repeat("b", 64), producer, result)
+	if err != nil || publication.WarningAnnotationError != nil || capture.calls != 0 {
+		t.Fatalf("cancelled job publication = %#v, %v, OIDC annotations = %d", publication, err, capture.calls)
 	}
 }
 

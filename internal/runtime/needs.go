@@ -11,11 +11,19 @@ import (
 )
 
 const (
-	jobSummaryAnnotationContext = "buildkite-gha-job-summary"
-	jobWarningAnnotationContext = "buildkite-gha-workflow-warnings"
-	jobErrorAnnotationContext   = "buildkite-gha-workflow-errors"
-	skippedJobLabelSuffix       = " (skipped)"
+	jobSummaryAnnotationContext  = "buildkite-gha-job-summary"
+	jobWarningAnnotationContext  = "buildkite-gha-workflow-warnings"
+	jobErrorAnnotationContext    = "buildkite-gha-workflow-errors"
+	oidcFailureAnnotationContext = "buildkite-gha-oidc-trust"
+	skippedJobLabelSuffix        = " (skipped)"
 )
+
+const oidcFailureAnnotation = `#### Check OIDC trust configuration
+
+A workflow job requested an OIDC token and failed. If the failure involves cloud authentication, check that the target service trusts the Buildkite issuer (https://agent.buildkite.com) and its claims, rather than GitHub's issuer (https://token.actions.githubusercontent.com) and claims. See [Buildkite OIDC](https://buildkite.com/docs/pipelines/security/oidc).
+
+This is a troubleshooting hint, not a diagnosis. Token issuance does not confirm downstream trust; a failed mint request is separate from a cloud-service rejection.
+`
 
 // ResolveNeeds converts compiler-owned producer identities into the verified
 // logical results and outputs consumed by runtime expression contexts.
@@ -175,6 +183,11 @@ func publishJobAnnotations(ctx context.Context, agent transport.Agent, jobID str
 	if result.WarningAnnotations != "" {
 		if err := agent.AnnotateJob(ctx, jobID, jobWarningAnnotationContext, "warning", result.WarningAnnotations); err != nil {
 			publication.WarningAnnotationError = fmt.Errorf("publish workflow warnings: %w", err)
+		}
+	}
+	if result.Conclusion == "failure" && result.requestedIDToken {
+		if err := agent.AnnotateBuild(ctx, jobID, oidcFailureAnnotationContext, "warning", oidcFailureAnnotation); err != nil {
+			publication.WarningAnnotationError = errors.Join(publication.WarningAnnotationError, fmt.Errorf("publish OIDC trust guidance: %w", err))
 		}
 	}
 	if result.ErrorAnnotations != "" {
