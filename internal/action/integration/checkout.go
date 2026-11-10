@@ -64,7 +64,7 @@ type checkoutInputRule struct {
 var checkoutInputRules = map[string]checkoutInputRule{
 	"repository": {strings.EqualFold},
 	"ref": {func(value, _ string) bool {
-		return value == "" || git.ValidObjectID(value) || validCheckoutBranch(value)
+		return value == "" || git.ValidObjectID(value) || validCheckoutNamedRef(value)
 	}},
 	"fetch-depth": {func(value, _ string) bool {
 		depth, err := strconv.ParseUint(value, 10, 31)
@@ -206,9 +206,20 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 	return nil
 }
 
-func validCheckoutBranch(value string) bool {
+func validCheckoutNamedRef(value string) bool {
 	if after, ok := strings.CutPrefix(value, "refs/heads/"); ok {
 		value = after
+	} else if after, ok := strings.CutPrefix(value, "refs/pull/"); ok {
+		number, kind, ok := strings.Cut(after, "/")
+		if !ok || number == "" || number[0] == '0' || (kind != "head" && kind != "merge") {
+			return false
+		}
+		for _, digit := range number {
+			if digit < '0' || digit > '9' {
+				return false
+			}
+		}
+		return len(value) <= 255
 	} else if strings.HasPrefix(value, "refs/") {
 		return false
 	}

@@ -22,6 +22,7 @@ type JobResult struct {
 	warningsTruncated bool
 	errorsTruncated   bool
 	failureVisible    bool
+	requestedIDToken  bool
 }
 
 // FailureVisible reports whether the runtime expanded a section containing the failure.

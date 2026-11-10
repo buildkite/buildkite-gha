@@ -1523,16 +1523,16 @@ jobs:
 		t.Fatalf("job condition = %q", plans[0].Program.Job.Condition.Source)
 	}
 
-	_, err = compilePlansForTest(t.Context(), "runner-name.yml", []byte(`on: push
+	_, err = compilePlansForTest(t.Context(), "runner-unknown.yml", []byte(`on: push
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - if: runner.name == 'x'
+      - if: runner.unknown == 'x'
         run: true
 `), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), defaultOptions())
 	if err == nil || !strings.Contains(err.Error(), "runner.environment") {
-		t.Fatalf("Compile() runner.name error = %v, want the supported runner properties listed", err)
+		t.Fatalf("Compile() runner.unknown error = %v, want the supported runner properties listed", err)
 	}
 }
 

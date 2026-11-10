@@ -386,6 +386,32 @@ with an admitted release, not run under an adapter fallback. Preserve the
 requested and selected identities and their diagnostics. The
 [integration catalog](../internal/action/integration/catalog.go) owns that split.
 
+Checkout ref expressions can already fold to literal branches during event
+reduction. The identical expressions in PostHog's
+[migration check](https://github.com/buildkite/posthog/blob/b9a0729f733e6dd170017677bb339608489ec3d2/.github/workflows/ci-backend.yml#L1503-L1510)
+and [OpenAPI check](https://github.com/buildkite/posthog/blob/b9a0729f733e6dd170017677bb339608489ec3d2/.github/workflows/ci-backend.yml#L2027-L2035)
+select the same-repository PR branch or fall back to `github.ref`. Local
+reproduction on v0.123.0 accepted the branch and push cases, but rejected the
+fallback pull ref, not the expression syntax. Both original checkout declarations
+also failed with the archived synthetic `buildkite/posthog` event selecting
+`refs/pull/2688/head`; both compile with pull-ref support and unchanged
+`network` and `provider-token-read` capabilities, without a workflow token.
+
+Admit explicit `refs/pull/<positive-number>/head` and `/merge` in the event
+repository. Fetch the selected ref into `refs/remotes/pull/` at every supported
+depth, including full history, then check out its fetched commit detached.
+Do not replace an explicit pull ref with the event SHA or a same-named branch.
+An omitted or empty ref still uses the exact event SHA. Keep repository
+credential scope, token authority, and needs-output SHA restrictions unchanged.
+The pinned checkout [input handling](https://github.com/actions/checkout/blob/de0fac2e4500dabe0009e67214ff5f5447ce83dd/src/input-helper.ts#L59-L80)
+and [ref handling](https://github.com/actions/checkout/blob/de0fac2e4500dabe0009e67214ff5f5447ce83dd/src/ref-helper.ts)
+distinguish explicit mutable refs from omitted-ref commit pinning. This is source
+evidence, not a new native or hosted run. The
+[compiler regression](../internal/compiler/actions_test.go) checks selection and
+unchanged authority; the [local Git regression](../internal/runtime/checkout_test.go)
+uses different event, branch, pull-head, and pull-merge revisions to check fetches,
+history, and outputs. Neither establishes complete PostHog workflow success.
+
 Skip native adapter input validation only when the whole job is proven false
 after reusable inputs and matrix values resolve. Retain its skipped plan and
 action locks. Reachable jobs, runtime-dependent job conditions, and false
@@ -458,6 +484,17 @@ only under the bounded transient-failure policy in
 [token acquisition](../internal/runtime/github_token_service.go). Do not convert
 authorization denials into retryable failures or replace specific server
 diagnostics with generic App-permission advice.
+
+Publish OIDC trust guidance only when a job makes an authorized token request
+and finishes with a failure conclusion. Permission alone is not a request;
+success, skipped, and cancelled conclusions must not publish it.
+Include post-action requests. Use the shared build-scoped context
+`buildkite-gha-oidc-trust`, replacing rather than appending, so failed jobs
+update one annotation per build. Keep the message conditional and token-free:
+job failure does not establish a downstream trust rejection. Preserve mint
+status and failure attribution. Local
+[OIDC tests](../internal/runtime/oidc_token_service_test.go) cover request
+tracking and publication parameters, not downstream cloud trust.
 
 Cache mode is client behavior, not server authorization. Clients that ignore
 `ACTIONS_CACHE_MODE` do not acquire its restrictions. A subprocess-only synthetic
@@ -539,6 +576,34 @@ require the same ID guards in action preflight and expanded jobs, rejecting
 reachable or unknown composite child-input token branches. These are local
 implementation checks against documented fields, not native execution or
 backend delivery evidence for every event, manual build, or retry path.
+
+### Runner name
+
+GitHub's [runner context](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#runner-context)
+defines `runner.name` as the executing runner's name. The pinned
+[runner implementation](https://github.com/actions/runner/blob/310a370bf3605f5b092f8af63b3126627de2a210/src/Runner.Worker/JobRunner.cs#L165-L167)
+reads its configured agent name, not its hostname.
+
+Use the executing Buildkite agent's
+[`BUILDKITE_AGENT_NAME`](https://buildkite.com/docs/pipelines/configure/environment-variables#BUILDKITE_AGENT_NAME)
+in `run-job`. Generated jobs invoke that command in the executing agent's
+environment; the [runner-user bootstrap](../internal/buildkite/experimental_runner_user.go)
+preserves it across `sudo`. The plugin imports workflows, not the executing
+agent's identity. Never capture the importer's name in a plan or infer a name
+from hostname, `RUNNER_NAME`, or workflow environment values.
+
+Keep the name unknown during compilation and authority analysis. Supply it
+to workflow/composite step fields, action input defaults, lifecycle conditions,
+and job outputs. Graph fields, job/call conditions, job environment/defaults,
+and service fields retain their restrictions. An absent name stays unavailable;
+evaluated direct reads fail rather than inventing an identity. No new context
+roots, credential authority, or `RUNNER_NAME` export are implied.
+
+[Expression tests](../internal/expression/engine_test.go) cover allowed/rejected
+positions and token-branch analysis. [CLI tests](../internal/cli/run_job_test.go)
+cover supplied/absent names and environment overrides; [compiled execution tests](../internal/runtime/runtime_test.go)
+cover step conditions, composite defaults, and outputs across two agents using
+one serialized plan. These are local checks, not hosted or native-run evidence.
 
 ### Runner tool-cache paths
 

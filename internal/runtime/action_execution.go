@@ -70,6 +70,9 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if err != nil {
 		return JobResult{}, err
 	}
+	if r.Name != "" {
+		runnerContext["name"] = r.Name
+	}
 	for _, capability := range job.RequiredCapabilities {
 		if capability != "docker" && capability != "secrets" && capability != "network" && capability != "provider-token-read" && capability != "provider-token-write" {
 			return JobResult{}, fmt.Errorf("capability %q is unsupported in the job runtime", capability)

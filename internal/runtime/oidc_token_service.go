@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -156,6 +157,7 @@ type idTokenService struct {
 	provider   OIDCTokenProvider
 	redactor   Redactor
 	processor  *commandOutputProcessor
+	requested  atomic.Bool
 	mu         sync.RWMutex
 	authHashes map[[sha256.Size]byte]*idTokenInvocation
 }
@@ -273,6 +275,7 @@ func (s *idTokenService) ServeHTTP(w http.ResponseWriter, request *http.Request)
 		http.Error(w, "actions ID-token request is unauthorized", http.StatusUnauthorized)
 		return
 	}
+	s.requested.Store(true)
 	audience := request.URL.Query().Get("audience")
 	token, err := s.provider.OIDCToken(request.Context(), audience)
 	if err != nil {

@@ -252,8 +252,8 @@ func TestRunnerEnvironmentIsAvailableOnEveryRuntimeSurface(t *testing.T) {
 			t.Fatalf("ValidateCondition() scope %v runner.environment = %v", scope, err)
 		}
 	}
-	if err := ValidateCondition("runner.name == 'x'", StepCondition); err == nil || !strings.Contains(err.Error(), "runner.environment") {
-		t.Fatalf("ValidateCondition() runner.name error = %v, want the supported list to name runner.environment", err)
+	if err := ValidateCondition("runner.unknown == 'x'", StepCondition); err == nil || !strings.Contains(err.Error(), "runner.environment") {
+		t.Fatalf("ValidateCondition() runner.unknown error = %v, want the supported list to name runner.environment", err)
 	}
 	if got, err := EvaluateActionInputDefault("${{ runner.environment == 'github-hosted' && 'hosted' || 'self' }}", Context{Runner: runner}); err != nil || got != "self" {
 		t.Fatalf("EvaluateActionInputDefault() = %q, %v", got, err)
@@ -282,7 +282,7 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ github.event[secrets.FIELD] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job[env.NAME] }}", "${{ job.check_run_id.extra }}", "${{ job.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ github.event[secrets.FIELD] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.unknown }}", "${{ runner.temp }}", "${{ job[env.NAME] }}", "${{ job.check_run_id.extra }}", "${{ job.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
