@@ -3,7 +3,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
-trap 'rm -rf dist' EXIT
+checksums="$(mktemp)"
+trap 'rm -rf dist; rm -f "$checksums"' EXIT
 
 goreleaser release --snapshot --clean --skip=publish
 
@@ -53,5 +54,10 @@ if command -v sha256sum >/dev/null; then
 else
   (cd dist && shasum -a 256 --check checksums.txt)
 fi
+
+sort dist/checksums.txt > "$checksums"
+goreleaser release --snapshot --clean --skip=publish
+diff -u "$checksums" <(sort dist/checksums.txt)
+printf '%s\n' 'reproducible raw checksums verified for all four targets'
 
 printf '%s\n' 'release artifact tests passed'

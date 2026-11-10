@@ -673,6 +673,13 @@ names let mise install the executable as `buildkite-gha`. Checksums
 cover the executable bytes. New releases do not publish archives; historical
 releases remain unchanged.
 
+All four targets use `-trimpath` and the commit timestamp, not the build time.
+The linker flags embed the version and optional Bugsnag ingestion key, but no
+build timestamp. Reproducing a published binary requires the same source commit,
+release version, pinned toolchain, and embedded key. `mise run release:check`
+builds two snapshots with the same inputs and requires identical SHA-256 hashes
+for all four raw executables. It does not compare against published releases.
+
 Release counterpart acquisition uses the running CLI's exact version and each
 asset's GitHub API `browser_download_url` and SHA-256 `digest`, not `checksums.txt`.
 The plugin can pass its selected response in `BUILDKITE_GHA_PLUGIN_RELEASE` as
