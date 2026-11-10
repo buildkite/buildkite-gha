@@ -53,64 +53,20 @@ builds:
 archives:
   - id: buildkite-gha
     ids: [buildkite-gha-linux]
-    formats: [tar.gz]
-    name_template: buildkite-gha_Linux_x86_64
-    builds_info:
-      mtime: "{{ .CommitDate }}"
-      owner: root
-      group: root
-    files:
-      - src: LICENSE
-        info:
-          mtime: "{{ .CommitDate }}"
-          mode: 0644
-          owner: root
-          group: root
+    formats: [binary]
+    name_template: buildkite-gha_linux_x86_64
   - id: buildkite-gha-darwin-archive
     ids: [buildkite-gha-darwin]
-    formats: [tar.gz]
-    name_template: buildkite-gha_Darwin_arm64
-    builds_info:
-      mtime: "{{ .CommitDate }}"
-      owner: root
-      group: root
-    files:
-      - src: LICENSE
-        info:
-          mtime: "{{ .CommitDate }}"
-          mode: 0644
-          owner: root
-          group: root
+    formats: [binary]
+    name_template: buildkite-gha_darwin_arm64
   - id: buildkite-gha-linux-arm64-archive
     ids: [buildkite-gha-linux-arm64]
-    formats: [tar.gz]
-    name_template: buildkite-gha_Linux_arm64
-    builds_info:
-      mtime: "{{ .CommitDate }}"
-      owner: root
-      group: root
-    files:
-      - src: LICENSE
-        info:
-          mtime: "{{ .CommitDate }}"
-          mode: 0644
-          owner: root
-          group: root
+    formats: [binary]
+    name_template: buildkite-gha_linux_arm64
   - id: buildkite-gha-windows-archive
     ids: [buildkite-gha-windows]
-    formats: [tar.gz]
-    name_template: buildkite-gha_Windows_x86_64
-    builds_info:
-      mtime: "{{ .CommitDate }}"
-      owner: root
-      group: root
-    files:
-      - src: LICENSE
-        info:
-          mtime: "{{ .CommitDate }}"
-          mode: 0644
-          owner: root
-          group: root
+    formats: [binary]
+    name_template: buildkite-gha_windows_x86_64
 
 checksum:
   name_template: checksums.txt

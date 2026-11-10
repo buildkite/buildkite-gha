@@ -3,41 +3,61 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
-trap 'rm -rf dist' EXIT
+checksums="$(mktemp)"
+trap 'rm -rf dist; rm -f "$checksums"' EXIT
 
 goreleaser release --snapshot --clean --skip=publish
 
 expected="$(printf '%s\n' \
-  buildkite-gha_Darwin_arm64.tar.gz \
-  buildkite-gha_Linux_arm64.tar.gz \
-  buildkite-gha_Linux_x86_64.tar.gz \
-  buildkite-gha_Windows_x86_64.tar.gz \
+  buildkite-gha_darwin_arm64 \
+  buildkite-gha_linux_arm64 \
+  buildkite-gha_linux_x86_64 \
+  buildkite-gha_windows_x86_64.exe \
   checksums.txt | sort)"
-actual="$(for asset in dist/*.tar.gz dist/checksums.txt; do [[ ! -f "$asset" ]] || basename "$asset"; done | sort)"
+# Exclude only local metadata and un-packaged build outputs, not release assets.
+actual="$(jq -r '.[] | select(.type != "Metadata" and (.type != "Binary" or .extra.Format != null)) | .name' dist/artifacts.json | sort)"
 [[ "$actual" == "$expected" ]] || {
   printf 'unexpected release assets:\n%s\n' "$actual" >&2
   exit 1
 }
 
+# Raw assets keep their build paths locally; their release names appear in
+# the manifest and checksums. Materialize those names for checksum verification.
+while read -r name goos goarch build_id; do
+  path="$(jq -er --arg name "$name" --arg goos "$goos" --arg goarch "$goarch" '
+    [.[] | select(.type == "Binary" and .extra.Format == "binary" and
+      .name == $name and .goos == $goos and .goarch == $goarch)] |
+    if length == 1 then .[0].path else error("expected one raw asset for " + $name) end
+  ' dist/artifacts.json)"
+  build_path="$(jq -er --arg id "$build_id" '
+    [.[] | select(.type == "Binary" and .extra.Format == null and .extra.ID == $id)] |
+    if length == 1 then .[0].path else error("expected one build output for " + $id) end
+  ' dist/artifacts.json)"
+  cp "$path" "dist/$name"
+  cmp "$build_path" "dist/$name"
+  metadata="$(go version -m "dist/$name")"
+  printf '%s\n' "$metadata" | grep -Fx $'\tbuild\tGOOS='"$goos" >/dev/null
+  printf '%s\n' "$metadata" | grep -Fx $'\tbuild\tGOARCH='"$goarch" >/dev/null
+done <<'TARGETS'
+buildkite-gha_linux_x86_64 linux amd64 buildkite-gha-linux
+buildkite-gha_linux_arm64 linux arm64 buildkite-gha-linux-arm64
+buildkite-gha_darwin_arm64 darwin arm64 buildkite-gha-darwin
+buildkite-gha_windows_x86_64.exe windows amd64 buildkite-gha-windows
+TARGETS
+
+[[ "$(awk '{print $2}' dist/checksums.txt | sort)" == "$(printf '%s\n' "$expected" | grep -v '^checksums.txt$')" ]] || {
+  printf '%s\n' 'checksums.txt must cover only the four raw executables, exactly once each' >&2
+  exit 1
+}
 if command -v sha256sum >/dev/null; then
   (cd dist && sha256sum --check checksums.txt)
 else
   (cd dist && shasum -a 256 --check checksums.txt)
 fi
-for archive in dist/*.tar.gz; do
-  members="$(tar -tzf "$archive" | sort)"
-  binary=buildkite-gha
-  [[ "$archive" != *Windows* ]] || binary=buildkite-gha.exe
-  [[ "$members" == "$(printf '%s\n' LICENSE "$binary" | sort)" ]] || {
-    printf 'unexpected members in %s:\n%s\n' "$archive" "$members" >&2
-    exit 1
-  }
-done
 
-work="$(mktemp -d)"
-trap 'rm -rf dist "$work"' EXIT
-tar -xzf dist/buildkite-gha_Linux_arm64.tar.gz -C "$work" buildkite-gha
-go version -m "$work/buildkite-gha" | grep -F $'\tbuild\tGOARCH=arm64' >/dev/null
-go version -m "$work/buildkite-gha" | grep -F $'\tbuild\tGOOS=linux' >/dev/null
+sort dist/checksums.txt > "$checksums"
+goreleaser release --snapshot --clean --skip=publish
+diff -u "$checksums" <(sort dist/checksums.txt)
+printf '%s\n' 'reproducible raw checksums verified for all four targets'
 
 printf '%s\n' 'release artifact tests passed'

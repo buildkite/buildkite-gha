@@ -1,12 +1,11 @@
 package cli
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,13 +26,13 @@ const (
 	pluginDevLinuxRuntimeEnvironment      = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_RUNTIME"
 	pluginDevLinuxARM64RuntimeEnvironment = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_ARM64_RUNTIME"
 	pluginDevWindowsRuntimeEnvironment    = "BUILDKITE_GHA_PLUGIN_DEV_WINDOWS_RUNTIME"
-	pluginChecksumLimit                   = 4 << 20
-	pluginArchiveLimit                    = 256 << 20
+	pluginReleaseEnvironment              = "BUILDKITE_GHA_PLUGIN_RELEASE"
+	pluginReleaseMetadataLimit            = 4 << 20
 )
 
 var releaseVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*)?(\+[0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*)?$`)
 
-var pluginReleaseBaseURL = "https://github.com/buildkite/buildkite-gha/releases/download"
+var pluginReleaseAPIURL = "https://api.github.com/repos/buildkite/buildkite-gha/releases/tags/"
 
 var pluginHTTPClient = securePluginHTTPClient()
 
@@ -42,11 +41,22 @@ type pluginRuntimeAcquisition struct {
 	binaries map[compiler.Platform]string
 }
 
+type pluginRelease struct {
+	TagName string               `json:"tag_name"`
+	Assets  []pluginReleaseAsset `json:"assets"`
+}
+
+type pluginReleaseAsset struct {
+	Name   string `json:"name"`
+	URL    string `json:"browser_download_url"`
+	Digest string `json:"digest"`
+}
+
 const (
-	pluginLinuxAsset      = "buildkite-gha_Linux_x86_64.tar.gz"
-	pluginLinuxARM64Asset = "buildkite-gha_Linux_arm64.tar.gz"
-	pluginDarwinAsset     = "buildkite-gha_Darwin_arm64.tar.gz"
-	pluginWindowsAsset    = "buildkite-gha_Windows_x86_64.tar.gz"
+	pluginLinuxAsset      = "buildkite-gha_linux_x86_64"
+	pluginLinuxARM64Asset = "buildkite-gha_linux_arm64"
+	pluginDarwinAsset     = "buildkite-gha_darwin_arm64"
+	pluginWindowsAsset    = "buildkite-gha_windows_x86_64.exe"
 )
 
 func securePluginHTTPClient() *http.Client {
@@ -79,6 +89,7 @@ func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[com
 			}
 		}
 	}
+	var release *pluginRelease
 	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformLinuxARM64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		if !required[platform] {
 			continue
@@ -134,7 +145,14 @@ func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[com
 		if !releaseVersionPattern.MatchString(a.version) {
 			return nil, fmt.Errorf("running version %q is not a release version; configure binary URLs for other platforms", a.version)
 		}
-		distribution, err := acquirePluginRuntime(ctx, a.version, platform, pluginHTTPClient, pluginReleaseBaseURL, pluginArchiveCachePath(a.version, pluginRuntimeAsset(platform)))
+		if release == nil {
+			var err error
+			release, err = loadPluginRelease(ctx, a.version)
+			if err != nil {
+				return nil, err
+			}
+		}
+		distribution, err := acquirePluginRuntime(ctx, a.version, platform, pluginHTTPClient, *release, pluginReleaseCachePath(a.version, pluginRuntimeAsset(platform)))
 		if err != nil {
 			return nil, err
 		}
@@ -186,30 +204,62 @@ func pluginRuntimeAsset(platform compiler.Platform) string {
 	return pluginLinuxAsset
 }
 
-func acquirePluginRuntime(ctx context.Context, version string, platform compiler.Platform, client *http.Client, baseURL, cachePath string) (runtimeDistribution, error) {
-	asset := pluginRuntimeAsset(platform)
-	checksums, err := downloadPluginReleaseFile(ctx, client, baseURL+"/v"+version+"/checksums.txt", version, pluginChecksumLimit)
-	if err != nil {
-		return runtimeDistribution{}, fmt.Errorf("download release checksums: %w", err)
+func loadPluginRelease(ctx context.Context, version string) (*pluginRelease, error) {
+	metadata, provided := os.LookupEnv(pluginReleaseEnvironment)
+	data := []byte(metadata)
+	if !provided {
+		var err error
+		data, err = downloadPluginReleaseFile(ctx, pluginHTTPClient, pluginReleaseAPIURL+url.PathEscape("v"+version), version, pluginReleaseMetadataLimit)
+		if err != nil {
+			return nil, fmt.Errorf("download release metadata: %w", err)
+		}
 	}
-	expected, err := pluginAssetChecksum(checksums, asset)
-	if err != nil {
-		return runtimeDistribution{}, err
+	if len(data) > pluginReleaseMetadataLimit {
+		return nil, errors.New("release metadata exceeds size limit")
 	}
-	archive := readVerifiedPluginArchiveCache(cachePath, expected)
-	if archive == nil {
-		archive, err = downloadPluginReleaseFile(ctx, client, baseURL+"/v"+version+"/"+asset, version, pluginArchiveLimit)
+	var release pluginRelease
+	if err := json.Unmarshal(data, &release); err != nil {
+		return nil, fmt.Errorf("decode release metadata: %w", err)
+	}
+	if release.TagName != "v"+version {
+		return nil, fmt.Errorf("release metadata tag %q does not match running version %q", release.TagName, version)
+	}
+	return &release, nil
+}
+
+func acquirePluginRuntime(ctx context.Context, version string, platform compiler.Platform, client *http.Client, release pluginRelease, cachePath string) (runtimeDistribution, error) {
+	name := pluginRuntimeAsset(platform)
+	var selected pluginReleaseAsset
+	matches := 0
+	for _, asset := range release.Assets {
+		if asset.Name == name {
+			selected = asset
+			matches++
+		}
+	}
+	if matches != 1 {
+		return runtimeDistribution{}, fmt.Errorf("release must contain exactly one raw asset %s", name)
+	}
+	hash, ok := strings.CutPrefix(selected.Digest, "sha256:")
+	decoded, err := hex.DecodeString(hash)
+	if !ok || err != nil || len(decoded) != sha256.Size {
+		return runtimeDistribution{}, fmt.Errorf("release asset %s requires a valid SHA-256 digest", name)
+	}
+	parsed, err := url.Parse(selected.URL)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" {
+		return runtimeDistribution{}, fmt.Errorf("release asset %s requires an HTTPS URL without credentials or a fragment", name)
+	}
+	expected := [sha256.Size]byte(decoded)
+	contents := readVerifiedPluginRuntimeCache(cachePath, expected)
+	if contents == nil {
+		contents, err = downloadPluginReleaseFile(ctx, client, selected.URL, version, runtimeDistributionLimit)
 		if err != nil {
 			return runtimeDistribution{}, fmt.Errorf("download %s runtime: %w", platform, err)
 		}
-		if sha256.Sum256(archive) != expected {
-			return runtimeDistribution{}, fmt.Errorf("%s archive checksum verification failed", platform)
+		if sha256.Sum256(contents) != expected {
+			return runtimeDistribution{}, fmt.Errorf("%s binary checksum verification failed", platform)
 		}
-		writePluginArchiveCache(cachePath, archive)
-	}
-	contents, err := extractPluginRuntime(archive, platform)
-	if err != nil {
-		return runtimeDistribution{}, err
+		writePluginRuntimeCache(cachePath, contents)
 	}
 	if err := validateRuntimeDistributionBinary(platform, contents); err != nil {
 		return runtimeDistribution{}, fmt.Errorf("validate %s runtime: %w", platform, err)
@@ -242,77 +292,7 @@ func downloadPluginReleaseFile(ctx context.Context, client *http.Client, source,
 	return contents, nil
 }
 
-func pluginAssetChecksum(contents []byte, asset string) ([sha256.Size]byte, error) {
-	var result [sha256.Size]byte
-	matches := 0
-	for line := range strings.SplitSeq(string(contents), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 || strings.TrimPrefix(fields[1], "*") != asset {
-			continue
-		}
-		decoded, err := hex.DecodeString(fields[0])
-		if err != nil || len(decoded) != sha256.Size {
-			return result, fmt.Errorf("invalid checksum entry for %s", asset)
-		}
-		copy(result[:], decoded)
-		matches++
-	}
-	if matches != 1 {
-		return result, fmt.Errorf("checksums must contain exactly one valid entry for %s", asset)
-	}
-	return result, nil
-}
-
-func extractPluginRuntime(archive []byte, platform compiler.Platform) ([]byte, error) {
-	gzipReader, err := gzip.NewReader(bytes.NewReader(archive))
-	if err != nil {
-		return nil, fmt.Errorf("open %s archive: %w", platform, err)
-	}
-	defer func() { _ = gzipReader.Close() }()
-	tarReader := tar.NewReader(gzipReader)
-	seenBinary, seenLicense := false, false
-	var executable []byte
-	for {
-		header, err := tarReader.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("read %s archive: %w", platform, err)
-		}
-		if header.Typeflag != tar.TypeReg || header.Size < 0 || header.Size > runtimeDistributionLimit {
-			return nil, fmt.Errorf("%s archive contains an unsafe member %q", platform, header.Name)
-		}
-		binaryName := "buildkite-gha"
-		if platform == compiler.PlatformWindowsAMD64 {
-			binaryName = "buildkite-gha.exe"
-		}
-		switch header.Name {
-		case binaryName:
-			if seenBinary || (platform != compiler.PlatformWindowsAMD64 && header.Mode&0o111 == 0) {
-				return nil, fmt.Errorf("%s archive has an invalid executable member", platform)
-			}
-			seenBinary = true
-			executable, err = io.ReadAll(io.LimitReader(tarReader, runtimeDistributionLimit+1))
-			if err != nil || int64(len(executable)) != header.Size {
-				return nil, fmt.Errorf("read %s executable", platform)
-			}
-		case "LICENSE":
-			if seenLicense {
-				return nil, fmt.Errorf("%s archive contains duplicate LICENSE", platform)
-			}
-			seenLicense = true
-		default:
-			return nil, fmt.Errorf("%s archive contains unexpected member %q", platform, header.Name)
-		}
-	}
-	if !seenBinary || !seenLicense {
-		return nil, fmt.Errorf("%s archive must contain exactly its executable and LICENSE", platform)
-	}
-	return executable, nil
-}
-
-func pluginArchiveCachePath(version, asset string) string {
+func pluginReleaseCachePath(version, asset string) string {
 	root := os.Getenv("MISE_DATA_DIR")
 	if !filepath.IsAbs(root) {
 		return ""
@@ -320,12 +300,12 @@ func pluginArchiveCachePath(version, asset string) string {
 	return filepath.Join(root, "buildkite-gha", "releases", version, asset)
 }
 
-func readVerifiedPluginArchiveCache(path string, expected [sha256.Size]byte) []byte {
+func readVerifiedPluginRuntimeCache(path string, expected [sha256.Size]byte) []byte {
 	if path == "" {
 		return nil
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > pluginArchiveLimit {
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > runtimeDistributionLimit {
 		return nil
 	}
 	contents, err := os.ReadFile(path)
@@ -335,7 +315,7 @@ func readVerifiedPluginArchiveCache(path string, expected [sha256.Size]byte) []b
 	return contents
 }
 
-func writePluginArchiveCache(path string, contents []byte) {
+func writePluginRuntimeCache(path string, contents []byte) {
 	if path == "" {
 		return
 	}
@@ -351,7 +331,7 @@ func writePluginArchiveCache(path string, contents []byte) {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return
 	}
-	temporary, err := os.CreateTemp(directory, ".archive-")
+	temporary, err := os.CreateTemp(directory, ".binary-")
 	if err != nil {
 		return
 	}
