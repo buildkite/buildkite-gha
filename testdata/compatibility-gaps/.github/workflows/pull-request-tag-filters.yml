@@ -1,4 +1,4 @@
-name: Compatibility gap - pull request tag filters
+name: Pull request tag-only admission
 on:
   pull_request:
     tags: ["v*"]

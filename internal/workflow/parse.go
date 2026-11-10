@@ -62,7 +62,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if err != nil {
 		return nil, err
 	}
-	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, acceptedEmptyTypesDiagnostics(&document), cacheDiagnostics)
+	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, acceptedEmptyTriggerListsDiagnostics(&document), cacheDiagnostics)
 	if err := filterActionlintDiagnostics(path, errs, expectedDiagnostics); err != nil {
 		return nil, err
 	}
@@ -83,6 +83,28 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		case "issues", "issue_comment", "label", "release", "pull_request_review", "pull_request_review_comment", "merge_group", "pull_request", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment":
 			if types := mappingValue(node, "types"); types != nil && types.Tag == "!!null" {
 				trigger.Types = nil
+			}
+		}
+		if trigger.Event == "pull_request" {
+			for _, field := range []struct {
+				name   string
+				values *[]string
+			}{
+				{"branches", &trigger.Branches}, {"branches-ignore", &trigger.BranchesIgnore},
+				{"tags", &trigger.Tags}, {"tags-ignore", &trigger.TagsIgnore}, {"types", &trigger.Types},
+			} {
+				filter := mappingValue(node, field.name)
+				if filter == nil {
+					continue
+				}
+				if filter.Tag == "!!null" {
+					*field.values = nil
+				}
+				for _, item := range filter.Content {
+					if item.Tag == "!!null" {
+						return nil, fmt.Errorf("%s:%d:%d: pull_request %s: null list members are invalid", path, item.Line, item.Column, field.name)
+					}
+				}
 			}
 		}
 		if node == nil || node.Kind != yaml.MappingNode {
@@ -303,12 +325,10 @@ func parseCacheModes(path string, document *yaml.Node) (string, map[string]strin
 	return mode, jobs, diagnostics, nil
 }
 
-// The pinned actionlint parser rejects empty activity lists more strictly than
+// The pinned actionlint parser rejects empty trigger lists more strictly than
 // GitHub. Accept only that diagnostic at each verified sequence, leaving the
-// source and all other diagnostics (including alias errors) intact. The pinned
-// parser represents these sequences as omitted types, matching GitHub's default
-// activity behavior.
-func acceptedEmptyTypesDiagnostics(document *yaml.Node) []expectedActionlintDiagnostic {
+// source and all other diagnostics (including alias errors) intact.
+func acceptedEmptyTriggerListsDiagnostics(document *yaml.Node) []expectedActionlintDiagnostic {
 	if len(document.Content) == 0 {
 		return nil
 	}
@@ -319,6 +339,14 @@ func acceptedEmptyTypesDiagnostics(document *yaml.Node) []expectedActionlintDiag
 		if types != nil && types.Kind == yaml.SequenceNode && len(types.Content) == 0 {
 			diagnostics = append(diagnostics, expectedActionlintDiagnostic{
 				Position: nodePosition(types), Prefix: `"types" section should not be empty`,
+			})
+		}
+	}
+	for _, name := range []string{"branches", "branches-ignore", "tags", "tags-ignore"} {
+		filter := mappingValue(mappingValue(on, "pull_request"), name)
+		if filter != nil && filter.Kind == yaml.SequenceNode && len(filter.Content) == 0 {
+			diagnostics = append(diagnostics, expectedActionlintDiagnostic{
+				Position: nodePosition(filter), Prefix: fmt.Sprintf("%q section should not be empty", name),
 			})
 		}
 	}
