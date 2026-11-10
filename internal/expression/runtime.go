@@ -80,8 +80,8 @@ func validateRuntimeReferenceNode(node actionlint.ExprNode) error {
 	validator := newSemanticValidator(runtimeReferenceSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		// Direct runtime templates, such as job containers and run defaults,
-		// are evaluated before the tool cache and step job status are ready.
-		if isRunnerDebugReference(root, path) || isJobStatusReference(root, path) || (strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "tool_cache")) {
+		// cannot read execution identity, the tool cache, or step job status.
+		if isRunnerDebugReference(root, path) || isJobStatusReference(root, path) || (strings.EqualFold(root, "runner") && len(path) == 1 && (strings.EqualFold(path[0], "name") || strings.EqualFold(path[0], "tool_cache"))) {
 			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
 		}
 		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
@@ -699,7 +699,7 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 
 func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 	switch {
-	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") || strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "tool_cache") || strings.EqualFold(path[0], "debug")):
+	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") || strings.EqualFold(path[0], "name") || strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "tool_cache") || strings.EqualFold(path[0], "debug")):
 		return runtimeReferenceRunner
 	case isJobStatusReference(root, path):
 		return runtimeReferenceJobStatus

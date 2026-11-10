@@ -231,6 +231,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	runner := gharuntime.Runner{
 		Stdout:          stdout,
 		Stderr:          stderr,
+		Name:            os.Getenv("BUILDKITE_AGENT_NAME"),
 		MiseDataDir:     prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
 		ToolCache:       runnerToolCache,
 		Docker:          os.Getenv("BUILDKITE_GHA_DOCKER"),

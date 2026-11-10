@@ -481,6 +481,67 @@ jobs:
 	}
 }
 
+func TestCompiledRunnerNameUsesExecutionIdentity(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/actions/name/action.yml", `name: agent name
+inputs:
+  name:
+    default: ${{ runner.name }}
+outputs:
+  name:
+    value: ${{ steps.read.outputs.name }}
+runs:
+  using: composite
+  steps:
+    - id: read
+      if: runner.name == inputs.name
+      shell: sh
+      env:
+        NAME: ${{ inputs.name }}
+      run: echo "name=$NAME" >> "$GITHUB_OUTPUT"
+`)
+	source := `on: push
+jobs:
+  name:
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ runner.name }}
+      action: ${{ steps.action.outputs.name }}
+      step: ${{ steps.read.outputs.name }}
+    steps:
+      - id: action
+        uses: ./.github/actions/name
+      - id: read
+        if: runner.name == steps.action.outputs.name
+        env:
+          NAME: ${{ runner.name }}
+        run: echo "name=$NAME" >> "$GITHUB_OUTPUT"
+`
+	workflowPath := ".github/workflows/name.yml"
+	writeFixtureFile(t, workspace, workflowPath, source)
+	t.Setenv("BUILDKITE_AGENT_NAME", "importer-agent")
+	event := []byte(`{"provider":"github","event":"push","repository":{"owner":"acme","name":"widgets"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"octocat"}`)
+	jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(source), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("compile = %#v, %v", jobs, err)
+	}
+	encoded, err := plan.Encode(jobs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := plan.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"agent-blue-42", "agent-green-7"} {
+		result, err := (Runner{Name: name}).RunJob(t.Context(), job, workspace)
+		want := map[string]string{"name": name, "action": name, "step": name}
+		if err != nil || result.Conclusion != "success" || !reflect.DeepEqual(result.Outputs, want) {
+			t.Fatalf("RunJob() = %#v, %v; want outputs %#v", result, err, want)
+		}
+	}
+}
+
 func TestRunnerEnvironmentIsSelfHostedAtRuntime(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
