@@ -2783,6 +2783,42 @@ func TestCompilePlansContainersWithRemoteActionsRequireResolution(t *testing.T) 
 	}
 }
 
+func TestCheckoutPostHogRefExpression(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := writeWorkflow(t, workspace, "checkout.yml", "")
+	const commit = "de0fac2e4500dabe0009e67214ff5f5447ce83dd"
+	const ref = "${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'PostHog/posthog') && github.event.pull_request.head.ref || github.ref }}"
+	writeAction(t, remote, "", checkoutTestManifest(commit))
+	for _, test := range []struct {
+		name, event, headRepo, eventRef, wantRef string
+	}{
+		{"same repository", "pull_request", "PostHog/posthog", "refs/pull/42/merge", "feature/migrations"},
+		{"fork", "pull_request", "contributor/posthog", "refs/pull/42/merge", "refs/pull/42/merge"},
+		{"mirrored repository probe", "pull_request", "buildkite/posthog", "refs/pull/2688/head", "refs/pull/2688/head"},
+		{"push", "push", "", "refs/heads/master", "refs/heads/master"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflow := []byte("on: [push, pull_request]\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@" + commit + "\n        with:\n          ref: " + ref + "\n          clean: false\n")
+			event := []byte(fmt.Sprintf(`{"provider":"github","event":%q,"repository":{"owner":"PostHog","name":"posthog","default_branch":"master"},"ref":%q,"sha":%q,"actor":"test","payload":{"action":"opened","pull_request":{"head":{"ref":"feature/migrations","repo":{"full_name":%q}}}}}`, test.event, test.eventRef, strings.Repeat("a", 40), test.headRepo))
+			plans, err := compilePlansForTest(t.Context(), workflowPath, workflow, event, "checkout-test", testDistributionDigest, Options{
+				EventTrust:     EventUntrusted,
+				Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+				ResolveActions: true,
+				ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 1 || plans[0].GitHubToken != nil || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network", "provider-token-read"}) {
+				t.Fatalf("checkout authority = %#v", plans)
+			}
+			if got := programBindingMap(plans[0].Program.Job.Steps[0].Invocation.With)["ref"]; got != test.wantRef {
+				t.Fatalf("checkout ref = %q, want %q", got, test.wantRef)
+			}
+		})
+	}
+}
+
 func TestCheckoutAdapterInputBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")

@@ -386,6 +386,32 @@ with an admitted release, not run under an adapter fallback. Preserve the
 requested and selected identities and their diagnostics. The
 [integration catalog](../internal/action/integration/catalog.go) owns that split.
 
+Checkout ref expressions can already fold to literal branches during event
+reduction. The identical expressions in PostHog's
+[migration check](https://github.com/buildkite/posthog/blob/b9a0729f733e6dd170017677bb339608489ec3d2/.github/workflows/ci-backend.yml#L1503-L1510)
+and [OpenAPI check](https://github.com/buildkite/posthog/blob/b9a0729f733e6dd170017677bb339608489ec3d2/.github/workflows/ci-backend.yml#L2027-L2035)
+select the same-repository PR branch or fall back to `github.ref`. Local
+reproduction on v0.123.0 accepted the branch and push cases, but rejected the
+fallback pull ref, not the expression syntax. Both original checkout declarations
+also failed with the archived synthetic `buildkite/posthog` event selecting
+`refs/pull/2688/head`; both compile with pull-ref support and unchanged
+`network` and `provider-token-read` capabilities, without a workflow token.
+
+Admit explicit `refs/pull/<positive-number>/head` and `/merge` in the event
+repository. Fetch the selected ref into `refs/remotes/pull/` at every supported
+depth, including full history, then check out its fetched commit detached.
+Do not replace an explicit pull ref with the event SHA or a same-named branch.
+An omitted or empty ref still uses the exact event SHA. Keep repository
+credential scope, token authority, and needs-output SHA restrictions unchanged.
+The pinned checkout [input handling](https://github.com/actions/checkout/blob/de0fac2e4500dabe0009e67214ff5f5447ce83dd/src/input-helper.ts#L59-L80)
+and [ref handling](https://github.com/actions/checkout/blob/de0fac2e4500dabe0009e67214ff5f5447ce83dd/src/ref-helper.ts)
+distinguish explicit mutable refs from omitted-ref commit pinning. This is source
+evidence, not a new native or hosted run. The
+[compiler regression](../internal/compiler/actions_test.go) checks selection and
+unchanged authority; the [local Git regression](../internal/runtime/checkout_test.go)
+uses different event, branch, pull-head, and pull-merge revisions to check fetches,
+history, and outputs. Neither establishes complete PostHog workflow success.
+
 Skip native adapter input validation only when the whole job is proven false
 after reusable inputs and matrix values resolve. Retain its skipped plan and
 action locks. Reachable jobs, runtime-dependent job conditions, and false
