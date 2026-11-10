@@ -101,7 +101,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 					*field.values = nil
 				}
 				for _, item := range filter.Content {
-					if item.Tag == "!!null" {
+					if resolveAlias(item).Tag == "!!null" {
 						return nil, fmt.Errorf("%s:%d:%d: pull_request %s: null list members are invalid", path, item.Line, item.Column, field.name)
 					}
 				}

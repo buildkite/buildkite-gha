@@ -168,6 +168,8 @@ func TestRunPullRequestTagFilterValidation(t *testing.T) {
 		{name: "conflicting empty branch filters", configuration: "tags: [v*], branches: [], branches-ignore: []", wantError: "include and ignore filters cannot be combined"},
 		{name: "null member", configuration: "tags: [null], branches: [main]", wantError: "null list members are invalid"},
 		{name: "null activity member", configuration: "types: [null]", wantError: "null list members are invalid"},
+		{name: "aliased null activity member", configuration: "branches: &empty null, types: [*empty]", wantError: "null list members are invalid"},
+		{name: "aliased quoted null activity", configuration: "types: [&pattern 'null', *pattern]"},
 		{name: "empty pattern", configuration: "tags: [''], branches: [main]", wantError: "string should not be empty"},
 		{name: "invalid glob", configuration: "tags: ['['], branches: [main]", wantError: "glob"},
 	} {
