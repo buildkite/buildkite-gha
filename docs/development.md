@@ -212,6 +212,10 @@ major updates require review. Vulnerability updates bypass the three-day
 release age and receive the `security` label. Failed Renovate builds notify
 `#team-platform-blerts`.
 
+The [Renovate rules](../renovate.json) disable GitHub Actions updates in examples
+and compatibility fixtures to preserve their version coverage. CI workflows,
+Buildkite plugins, Go modules, and project toolchains still receive updates.
+
 Every pull request runs `govulncheck` as part of the required repository checks.
 The aggregate `buildkite/buildkite-gha` status is required on the default
 branch. A daily 06:00 UTC default-branch build sets `VULNERABILITY_SCAN=1` and
