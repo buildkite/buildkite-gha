@@ -10,7 +10,7 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/rhysd/actionlint v1.7.12
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
-	go.yaml.in/yaml/v4 v4.0.0
+	go.yaml.in/yaml/v4 v4.0.0-rc.3
 	golang.org/x/sys v0.50.0
 )
 
