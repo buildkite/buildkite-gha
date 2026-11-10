@@ -231,6 +231,16 @@ func (a Agent) EnsureStepLabelSuffix(ctx context.Context, suffix string) error {
 // AnnotateJob publishes Markdown through stdin under a job-scoped context.
 // Reusing the context updates the annotation instead of duplicating it.
 func (a Agent) AnnotateJob(ctx context.Context, jobID, annotationContext, style, body string) error {
+	return a.annotate(ctx, jobID, annotationContext, style, body, "job")
+}
+
+// AnnotateBuild replaces a build-scoped annotation, shared by all jobs using
+// the same context. jobID identifies the publishing job, not the scope.
+func (a Agent) AnnotateBuild(ctx context.Context, jobID, annotationContext, style, body string) error {
+	return a.annotate(ctx, jobID, annotationContext, style, body, "build")
+}
+
+func (a Agent) annotate(ctx context.Context, jobID, annotationContext, style, body, scope string) error {
 	if !uuidPattern.MatchString(jobID) {
 		return fmt.Errorf("invalid annotation job ID %q", jobID)
 	}
@@ -245,7 +255,11 @@ func (a Agent) AnnotateJob(ctx context.Context, jobID, annotationContext, style,
 	if body == "" || len(body) > maxAnnotationBodyBytes || !utf8.ValidString(body) {
 		return fmt.Errorf("annotation body must be valid UTF-8 between 1 and %d bytes", maxAnnotationBodyBytes)
 	}
-	_, err := a.run(ctx, []string{"annotate", "--scope", "job", "--job", jobID, "--context", annotationContext, "--style", style}, []byte(body))
+	args := []string{"annotate", "--scope", scope, "--job", jobID, "--context", annotationContext, "--style", style}
+	if scope == "build" {
+		args = append(args, "--append=false")
+	}
+	_, err := a.run(ctx, args, []byte(body))
 	return err
 }
 

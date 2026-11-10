@@ -485,6 +485,17 @@ only under the bounded transient-failure policy in
 authorization denials into retryable failures or replace specific server
 diagnostics with generic App-permission advice.
 
+Publish OIDC trust guidance only when a job makes an authorized token request
+and finishes with a failure conclusion. Permission alone is not a request;
+success, skipped, and cancelled conclusions must not publish it.
+Include post-action requests. Use the shared build-scoped context
+`buildkite-gha-oidc-trust`, replacing rather than appending, so failed jobs
+update one annotation per build. Keep the message conditional and token-free:
+job failure does not establish a downstream trust rejection. Preserve mint
+status and failure attribution. Local
+[OIDC tests](../internal/runtime/oidc_token_service_test.go) cover request
+tracking and publication parameters, not downstream cloud trust.
+
 Cache mode is client behavior, not server authorization. Clients that ignore
 `ACTIONS_CACHE_MODE` do not acquire its restrictions. A subprocess-only synthetic
 `GITHUB_SERVER_URL` helps selected setup-action cache clients use cache v2; it

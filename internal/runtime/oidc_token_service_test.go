@@ -5,17 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 func TestAgentOIDCTokensMintsRequestedAudienceAndConfiguredClaims(t *testing.T) {
@@ -391,6 +394,85 @@ if (process.env.no_proxy !== "lower.example,127.0.0.1") throw new Error("no_prox
 	}
 }
 
+func TestOIDCTrustAnnotationOnlyForFailedRequestingJobs(t *testing.T) {
+	node := requireNode24(t)
+	const request = `await core.getIDToken("first"); await core.getIDToken("second");`
+	for _, test := range []struct {
+		name, main, post, conclusion string
+		mintError                    error
+		tolerate, warn               bool
+	}{
+		{name: "successful requests", main: request, conclusion: "success"},
+		{name: "failed job", main: request + `throw new Error("deploy failed");`, conclusion: "failure", warn: true},
+		{name: "permission without request", main: `throw new Error("test failed");`, conclusion: "failure"},
+		{name: "tolerated failure", main: request + `throw new Error("deploy failed");`, tolerate: true, conclusion: "success"},
+		{name: "post-only request and failure", post: request + `throw new Error("cleanup failed");`, conclusion: "failure", warn: true},
+		{name: "failed mint", main: request, mintError: errors.New("mint denied"), conclusion: "failure", warn: true},
+		{name: "unauthorized request", main: `await new Promise(resolve => require("node:http").get(process.env.ACTIONS_ID_TOKEN_REQUEST_URL, response => { response.resume(); response.on("end", resolve); })); throw new Error("unauthorized");`, conclusion: "failure"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath, actionPath := ".github/workflows/oidc.yml", ".github/actions/oidc"
+			writeFixtureFile(t, workspace, workflowPath, "name: OIDC guidance\n")
+			writeFixtureFile(t, workspace, actionPath+"/action.yml", "name: OIDC\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+			writeOIDCUtilsContractShim(t, workspace, actionPath)
+			for name, source := range map[string]string{"main.js": test.main, "post.js": test.post} {
+				writeFixtureFile(t, workspace, actionPath+"/"+name, `const core = require("@actions/core"); (async () => {`+source+`})().catch(error => { console.error(error); process.exitCode = 1; });`)
+			}
+			const lockID = "a-0123456789abcdef"
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
+				ID: "oidc", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID}, ContinueOnError: test.tolerate,
+			}})
+			job.IDTokenPermission = "write"
+			job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
+			provider := &testOIDCTokenProvider{token: "header.payload.signature", err: test.mintError}
+			var logs bytes.Buffer
+			result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: &testRedactor{}, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+			if result.Conclusion != test.conclusion || (err != nil) != (test.conclusion == "failure") {
+				t.Fatalf("RunJob() = %#v, %v", result, err)
+			}
+			if strings.Contains(logs.String()+result.WarningAnnotations, "https://agent.buildkite.com") {
+				t.Fatalf("mint-time or job-scoped guidance: logs %q, warnings %q", logs.String(), result.WarningAnnotations)
+			}
+			capture := &oidcAnnotationRunner{}
+			// Two jobs in one build publish to the same build-level context.
+			for _, jobID := range []string{"11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"} {
+				producer := transport.Producer{BuildID: "33333333-3333-4333-8333-333333333333", JobID: jobID, StepKey: "gha-job"}
+				publication, err := PublishJobResult(t.Context(), transport.Agent{Runner: capture}, t.TempDir(), strings.Repeat("a", 64), "gha-job", "sha256:"+strings.Repeat("b", 64), producer, result)
+				if err != nil || publication.WarningAnnotationError != nil {
+					t.Fatalf("PublishJobResult() = %#v, %v", publication, err)
+				}
+			}
+			wantCalls := 0
+			if test.warn {
+				wantCalls = 2
+			}
+			if capture.calls != wantCalls {
+				t.Fatalf("OIDC annotation writes = %d, want %d", capture.calls, wantCalls)
+			}
+			if test.warn && (!strings.Contains(capture.body, "If the failure involves cloud authentication") || !strings.Contains(capture.body, "https://agent.buildkite.com") || !strings.Contains(capture.body, "https://token.actions.githubusercontent.com") || strings.Contains(capture.body, provider.token)) {
+				t.Fatalf("OIDC guidance = %q", capture.body)
+			}
+		})
+	}
+}
+
+type oidcAnnotationRunner struct {
+	calls int
+	body  string
+}
+
+func (r *oidcAnnotationRunner) Run(_ context.Context, _, _ string, args []string, stdin []byte) ([]byte, error) {
+	if len(args) > 0 && args[0] == "annotate" && slices.Contains(args, "buildkite-gha-oidc-trust") {
+		if len(args) != 10 || !slices.Equal(args[:4], []string{"annotate", "--scope", "build", "--job"}) || !slices.Equal(args[5:], []string{"--context", "buildkite-gha-oidc-trust", "--style", "warning", "--append=false"}) {
+			return nil, fmt.Errorf("OIDC guidance must replace the shared build annotation: %q", args)
+		}
+		r.calls++
+		r.body = string(stdin)
+	}
+	return nil, nil
+}
+
 func TestNodeActionPreservesOIDCTokenFailure(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()
@@ -483,6 +565,12 @@ const core = require("@actions/core");
 	}
 	if string(contents) != provider.token || len(provider.audiences) != 1 || provider.audiences[0] != "post-cleanup" {
 		t.Fatalf("token/audiences = %q / %#v", contents, provider.audiences)
+	}
+	capture := &oidcAnnotationRunner{}
+	producer := transport.Producer{BuildID: "33333333-3333-4333-8333-333333333333", JobID: testCacheJobID, StepKey: "gha-job"}
+	publication, err := PublishJobResult(t.Context(), transport.Agent{Runner: capture}, t.TempDir(), strings.Repeat("a", 64), "gha-job", "sha256:"+strings.Repeat("b", 64), producer, result)
+	if err != nil || publication.WarningAnnotationError != nil || capture.calls != 0 {
+		t.Fatalf("cancelled job publication = %#v, %v, OIDC annotations = %d", publication, err, capture.calls)
 	}
 }
 

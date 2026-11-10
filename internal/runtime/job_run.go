@@ -65,6 +65,9 @@ func (r *jobRun) run(ctx context.Context) (final JobResult, runJobErr error) {
 		if final.Conclusion == "success" && runJobErr != nil && !IsToleratedJobFailure(runJobErr) {
 			final.Conclusion = "failure"
 		}
+		if r.idTokenService != nil {
+			final.requestedIDToken = r.idTokenService.requested.Load()
+		}
 	}()
 	// prepare chains the remaining phases before it returns so its resource
 	// cleanup stays deferred until post actions and finalization complete.
