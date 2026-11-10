@@ -9,6 +9,22 @@
       "description": "Require manual review for major updates",
       "matchUpdateTypes": ["major"],
       "automerge": false
+    },
+    {
+      "description": "Preserve action versions in examples and compatibility fixtures",
+      "matchManagers": ["github-actions"],
+      "matchFileNames": [
+        "testdata/**",
+        ".github/workflows/example-*.{yml,yaml}",
+        ".github/workflows/*oracle*.{yml,yaml}",
+        ".github/workflows/*-proof.{yml,yaml}",
+        ".github/workflows/composite-hash-files.{yml,yaml}",
+        ".github/workflows/experimental-runner-user.{yml,yaml}",
+        ".github/actions/oracle-*/**",
+        ".github/actions/hash-files/**",
+        ".github/actions/experimental-runner-user/**"
+      ],
+      "enabled": false
     }
   ],
   "customManagers": [
