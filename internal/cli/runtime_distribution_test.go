@@ -55,6 +55,46 @@ func TestLinuxARM64RuntimeDistributionValidatesELFArchitecture(t *testing.T) {
 	if err := validateRuntimeDistributionBinary(compiler.PlatformLinuxAMD64, contents); err == nil || !strings.Contains(err.Error(), "linux/amd64") {
 		t.Fatalf("Linux AMD64 accepted ARM64 executable: %v", err)
 	}
+
+	for _, label := range []string{"ubuntu-24.04-arm", "ubuntu-26.04-arm", "depot-ubuntu-22.04-arm-64", "BLACKSMITH-32VCPU-UBUNTU-2604-ARM", "warp-ubuntu-latest-arm64-8x", "warp-ubuntu-2604-arm64-12x-xfast", "ubicloud-standard-30-arm-ubuntu-2604", "ubicloud-arm"} {
+		for _, queue := range []string{"linux-arm64-medium", "custom-arm"} {
+			t.Run(label+" upload "+queue, func(t *testing.T) {
+				requireImporterHost(t)
+				explicit := queue == "custom-arm"
+				setRunnerResolutionVerdicts(t, map[string]map[string]any{
+					label: {"validated": explicit, "target": map[string]string{"queue": queue, "platform": "linux/arm64"}},
+				})
+				workflow := filepath.Join(t.TempDir(), "arm.yml")
+				if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  arm:\n    runs-on: "+label+"\n    steps: [{run: uname -m}]\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("BUILDKITE", "true")
+				t.Setenv("BUILDKITE_STEP_KEY", "arm-importer")
+				runner := &cliCaptureRunner{}
+				var stdout, stderr bytes.Buffer
+				args := []string{"upload", "--event-path", "../../testdata/smoke/events/push.json",
+					"--runtime-distribution", "linux/arm64=" + path}
+				if explicit {
+					args = append(args, "--runner-queue", label+"="+queue)
+				}
+				if code := run(append(args, workflow), &stdout, &stderr, "dev", runner); code != 0 {
+					t.Fatalf("upload = %d: %s", code, stderr.String())
+				}
+				jobs := uploadedPlans(t, runner)["arm"]
+				digest := distributions[compiler.PlatformLinuxARM64].digest
+				if len(jobs) != 1 || jobs[0].Target.Queue != queue || jobs[0].RuntimeDistributionDigest() != digest {
+					t.Fatalf("ARM64 plans = %#v", jobs)
+				}
+				artifactPath, err := buildkitepipeline.DistributionPath(digest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if transport.Digest(runner.uploaded[artifactPath]) != digest {
+					t.Fatal("ARM64 executable was not uploaded intact")
+				}
+			})
+		}
+	}
 }
 
 func TestWindowsRuntimeDistributionValidatesPEAndNeedsNoUnixExecuteBit(t *testing.T) {
@@ -261,7 +301,7 @@ func TestUploadRejectsUnsupportedImporterBeforeProcessing(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &cliCaptureRunner{}
 			var stdout, stderr bytes.Buffer
-			if code := uploadFromPlatform("darwin", "amd64", test.args, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner}); code != 1 {
+			if code := uploadFromPlatform(t.Context(), "darwin", "amd64", test.args, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner}); code != 1 {
 				t.Fatalf("uploadFromPlatform() code = %d, want 1", code)
 			}
 			if got := stderr.String(); got != "buildkite-gha: upload: importer requires linux/amd64, linux/arm64, or darwin/arm64, running on darwin/amd64\n" {
@@ -284,7 +324,7 @@ func TestDarwinUploadRequiresLinuxDistributionForLinuxWorkflow(t *testing.T) {
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	code := uploadFromPlatform("darwin", "arm64", []string{"--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner})
+	code := uploadFromPlatform(t.Context(), "darwin", "arm64", []string{"--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner})
 	if code != 1 || !strings.Contains(stderr.String(), "runtime distribution for linux/amd64 is required by the selected workflows") {
 		t.Fatalf("uploadFromPlatform() = %d, stderr = %q", code, stderr.String())
 	}

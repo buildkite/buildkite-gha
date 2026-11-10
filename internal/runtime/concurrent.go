@@ -191,7 +191,7 @@ func bindHashFilesContext(ctx context.Context, eval *expression.Context) {
 }
 
 func (r *jobRun) executePlanStep(jobCtx, runCtx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step executionprogram.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
-	result, err := r.runJobStep(runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
+	result, err := r.runJobStep(jobCtx, runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
 	return classifyStepExecutionWithControls(jobCtx, runCtx, step, result, err, eval)
 }
 

@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 	"go.yaml.in/yaml/v4"
@@ -491,7 +492,7 @@ func TestCompileBundlePreservesRuntimeImagePolicy(t *testing.T) {
 	if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Steps) != 1 || document.Steps[0].Image != image || !strings.Contains(document.Steps[0].Command, "--hosted-tool-cache") {
+	if len(document.Steps) != 1 || document.Steps[0].Image != image || !strings.Contains(document.Steps[0].Command, "--hosted-tool-cache") || strings.Contains(document.Steps[0].Command, "/etc/environment") {
 		t.Fatalf("runtime image pipeline = %#v", document.Steps)
 	}
 }
@@ -525,11 +526,49 @@ func TestCompileBundleKeepsNativeHostSeparateFromJobContainer(t *testing.T) {
 		}
 		step := document.Steps[0]
 		wantAgents := map[string]string{"queue": "native-linux", "nsc-gha-image": "ubuntu-24.04", "provider.setting": "opaque: value"}
-		if step.Image != "" || !reflect.DeepEqual(step.Agents, wantAgents) || strings.Contains(step.Command, "--hosted-tool-cache") != toolCache || strings.Contains(step.Command, "/opt/hostedtoolcache") != toolCache {
+		if step.Image != "" || !reflect.DeepEqual(step.Agents, wantAgents) || strings.Contains(step.Command, "--hosted-tool-cache") != toolCache || strings.Contains(step.Command, "/opt/hostedtoolcache") != toolCache || !strings.Contains(step.Command, "/etc/environment") {
 			t.Fatalf("native step = %#v", step)
 		}
 		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.ExecutionJob().Container == nil || bundle.Plans[0].Job.ExecutionJob().Container.Image.Source != "alpine:3.21" {
 			t.Fatalf("job container was lost: %#v", bundle.Plans)
+		}
+	}
+}
+
+func TestCompileBundleEmitsMacOSGitHubRunnerImage(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: macos-15\n    steps:\n      - run: sw_vers\n")
+	toolCache := false
+	options := defaultOptions()
+	options.Runners = RunnerPolicy{Targets: map[string]RunnerTarget{"macos-15": {
+		Queue: "macos-medium", Platform: PlatformDarwinARM64,
+		Agents: map[string]string{"nsc-image-selectors": "macos.version=15.x,macos.purpose=githubrunner"}, ToolCache: &toolCache,
+	}}, UntrustedQueues: []string{"macos-medium"}}
+	options.RuntimeDistributions = map[Platform]string{PlatformDarwinARM64: testDistributionDigest}
+	bundle, err := CompileBundleWithOptions("workflow.yml", workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Image   string            `yaml:"image"`
+			Agents  map[string]string `yaml:"agents"`
+			Command string            `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 {
+		t.Fatalf("steps = %#v", document.Steps)
+	}
+	step := document.Steps[0]
+	wantAgents := map[string]string{"queue": "macos-medium", "nsc-image-selectors": "macos.version=15.x,macos.purpose=githubrunner"}
+	if step.Image != "" || !reflect.DeepEqual(step.Agents, wantAgents) || !strings.Contains(step.Command, "run-job") {
+		t.Fatalf("macOS step = %#v", step)
+	}
+	for _, forbidden := range []string{"--hosted-tool-cache", "/Users/runner/hostedtoolcache", "--docker-build-load"} {
+		if strings.Contains(step.Command, forbidden) {
+			t.Errorf("macOS command contains %q: %s", forbidden, step.Command)
 		}
 	}
 }
@@ -791,8 +830,8 @@ func TestCompileBundleCompilesSmokeCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(workflows) != 13 {
-		t.Fatalf("smoke workflows = %d, want 13", len(workflows))
+	if len(workflows) != 14 {
+		t.Fatalf("smoke workflows = %d, want 14", len(workflows))
 	}
 	event := readFile(t, smokePath("events", "push.json"))
 	for _, path := range workflows {
@@ -1016,8 +1055,8 @@ jobs:
 		t.Fatalf("concurrency IR = workflow %q jobs %#v", bundle.IR.Workflow.ConcurrencyGroup, bundle.IR.Jobs)
 	}
 	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0] != (Warning{
-		Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: 5, Column: 23,
-		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+		Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT", Line: 5, Column: 23,
+		Message: "Workflow cancel-in-progress requests cancellation through the opening concurrency gate only. Older gate steps can be canceled, but jobs that already passed their gate can keep running and overlap with the newer workflow. Cancellation is asynchronous, not atomic latest-wins. A reusable call whose condition is decided at runtime can request cancellation even when that condition is false.",
 	}) {
 		t.Fatalf("concurrency warnings = %#v", bundle.IR.Warnings)
 	}
@@ -1040,7 +1079,7 @@ jobs:
 	var document struct {
 		Steps []struct {
 			Key              string `yaml:"key"`
-			Concurrency      int    `yaml:"concurrency"`
+			Concurrency      any    `yaml:"concurrency"`
 			ConcurrencyGroup string `yaml:"concurrency_group"`
 			DependsOn        []struct {
 				Step         string `yaml:"step"`
@@ -1055,7 +1094,8 @@ jobs:
 		t.Fatalf("pipeline steps = %#v\n%s", document.Steps, bundle.Pipeline)
 	}
 	wantWorkflowGroup := buildkiteConcurrencyGroup(repository, bundle.IR.Workflow.ConcurrencyGroup)
-	if document.Steps[0].Concurrency != 1 || document.Steps[0].ConcurrencyGroup != wantWorkflowGroup || document.Steps[1].Concurrency != 1 || document.Steps[1].ConcurrencyGroup != wantWorkflowGroup {
+	wantRequest := map[string]any{"limit": 1, "group": wantWorkflowGroup, "cancel_in_progress": true}
+	if !reflect.DeepEqual(document.Steps[0].Concurrency, wantRequest) || document.Steps[0].ConcurrencyGroup != "" || document.Steps[1].Concurrency != 1 || document.Steps[1].ConcurrencyGroup != wantWorkflowGroup {
 		t.Fatalf("workflow gate groups = %#v / %#v, want %q", document.Steps[0], document.Steps[1], wantWorkflowGroup)
 	}
 	openKey := document.Steps[0].Key
@@ -1074,6 +1114,128 @@ jobs:
 		if !dependency.AllowFailure {
 			t.Fatalf("closing gate dependency is strict: %#v", document.Steps[1].DependsOn)
 		}
+	}
+}
+
+func TestCompileBundleResolvesJobCancellationPerInstance(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  []bool
+	}{
+		{"true", []bool{true, true}},
+		{"false", []bool{false, false}},
+		{"${{ matrix.target == 'alpha' && strategy.job-index == 0 }}", []bool{true, false}},
+		{"${{ startsWith(github.ref, 'refs/pull/') }}", []bool{false, false}},
+	} {
+		t.Run(test.value, func(t *testing.T) {
+			source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [alpha, beta]
+    concurrency:
+      group: test-${{ matrix.target }}
+      cancel-in-progress: ` + test.value + `
+    steps: [{run: true}]
+`)
+			bundle, err := CompileBundle("cancel.yml", source, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document struct {
+				Steps []struct {
+					Concurrency any    `yaml:"concurrency"`
+					Group       string `yaml:"concurrency_group"`
+				} `yaml:"steps"`
+			}
+			if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
+				t.Fatal(err)
+			}
+			if len(document.Steps) != 2 || len(bundle.IR.Warnings) != 0 {
+				t.Fatalf("unexpected pipeline or warnings: %s / %#v", bundle.Pipeline, bundle.IR.Warnings)
+			}
+			for i, step := range document.Steps {
+				group := buildkiteConcurrencyGroup(bundle.IR.Event.Repository, "test-"+[]string{"alpha", "beta"}[i])
+				if test.want[i] {
+					want := map[string]any{"limit": 1, "group": group, "cancel_in_progress": true}
+					if !reflect.DeepEqual(step.Concurrency, want) || step.Group != "" {
+						t.Fatalf("canceling job = %#v, want %#v", step, want)
+					}
+				} else if step.Concurrency != 1 || step.Group != group {
+					t.Fatalf("queue-only job = %#v", step)
+				}
+			}
+		})
+	}
+}
+
+func TestCompileBundleCancellationRespectsKnownSkippedJobsAndCalls(t *testing.T) {
+	for _, test := range []struct {
+		name, condition string
+		wantCancel      bool
+	}{
+		{"known false", "github.ref == 'refs/heads/release'", false},
+		{"known true", "github.ref == 'refs/heads/main'", true},
+		{"runtime decided", "vars.RUN == 'true'", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			writeWorkflow(t, repository, "leaf.yml", `on: workflow_call
+jobs:
+  deploy:
+    if: always()
+    runs-on: ubuntu-latest
+    concurrency:
+      group: called-deploy
+      cancel-in-progress: true
+    steps: [{run: true}]
+`)
+			writeWorkflow(t, repository, "middle.yml", `on: workflow_call
+jobs:
+  call:
+    if: always()
+    uses: ./.github/workflows/leaf.yml
+`)
+			caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  deploy:
+    if: `+test.condition+`
+    runs-on: ubuntu-latest
+    concurrency:
+      group: direct-deploy
+      cancel-in-progress: true
+    steps: [{run: true}]
+  call:
+    if: `+test.condition+`
+    uses: ./.github/workflows/middle.yml
+`)
+			bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document struct {
+				Steps []struct {
+					Concurrency any `yaml:"concurrency"`
+				} `yaml:"steps"`
+			}
+			if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
+				t.Fatal(err)
+			}
+			if len(document.Steps) != 2 {
+				t.Fatalf("steps = %d, want direct and nested jobs", len(document.Steps))
+			}
+			for _, step := range document.Steps {
+				if request, ok := step.Concurrency.(map[string]any); ok {
+					if !test.wantCancel || request["cancel_in_progress"] != true {
+						t.Fatalf("cancellation request = %#v, want cancellation %t", request, test.wantCancel)
+					}
+				} else if test.wantCancel || step.Concurrency != 1 {
+					t.Fatalf("concurrency = %#v, want cancellation %t", step.Concurrency, test.wantCancel)
+				}
+			}
+		})
 	}
 }
 
@@ -1104,7 +1266,7 @@ jobs:
 	if bundle.IR.Workflow.ConcurrencyGroup != "CI-42" {
 		t.Fatalf("workflow concurrency group = %q, want CI-42", bundle.IR.Workflow.ConcurrencyGroup)
 	}
-	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || bundle.IR.Warnings[0].Line != 5 {
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT" || bundle.IR.Warnings[0].Line != 5 || !bundle.GeneratedWorkflow.ConcurrencyGate.CancelInProgress {
 		t.Fatalf("workflow concurrency warnings = %#v", bundle.IR.Warnings)
 	}
 }
@@ -1171,19 +1333,19 @@ jobs:
 	}
 }
 
-func TestValidateClassifiesJobCancellationAsCompatibilityFailure(t *testing.T) {
+func TestValidateClassifiesNonBooleanJobCancellationAsCompatibilityFailure(t *testing.T) {
 	source := []byte(`on: push
 jobs:
   label-rebase-needed:
     runs-on: ubuntu-latest
     concurrency:
       group: rebase-needed
-      cancel-in-progress: true
+      cancel-in-progress: ${{ 'true' }}
     steps: [{run: true}]
 `)
 	report, err := Validate("rebase-needed.yml", source)
-	if err == nil || !strings.Contains(err.Error(), `job "label-rebase-needed": concurrency cancel-in-progress is unsupported`) {
-		t.Fatalf("Validate() error = %v, want unsupported job cancellation", err)
+	if err == nil || !strings.Contains(err.Error(), `job "label-rebase-needed": concurrency cancel-in-progress resolved to string, want boolean`) {
+		t.Fatalf("Validate() error = %v, want non-boolean job cancellation", err)
 	}
 	var finding *ProcessingFinding
 	if !errors.As(err, &finding) || finding.Stage != StageExpressions || finding.Code != CodeExpressionInvalid || finding.Job != "label-rebase-needed" {
@@ -1361,10 +1523,81 @@ jobs:
 		t.Fatal(err)
 	}
 	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0] != (Warning{
-		Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: 4, Column: 11, Job: "call",
-		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+		Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT", Line: 4, Column: 11, Job: "call",
+		Message: "Workflow cancel-in-progress requests cancellation through the opening concurrency gate only. Older gate steps can be canceled, but jobs that already passed their gate can keep running and overlap with the newer workflow. Cancellation is asynchronous, not atomic latest-wins. A reusable call whose condition is decided at runtime can request cancellation even when that condition is false.",
 	}) {
 		t.Fatalf("called workflow warnings = %#v", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileNestedReusableCancellationUsesEachFrameInputs(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      cancel: {type: boolean, required: true}
+concurrency:
+  group: leaf
+  cancel-in-progress: ${{ inputs.cancel }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: leaf-job
+      cancel-in-progress: ${{ !inputs.cancel }}
+    steps: [{run: true}]
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      cancel: {type: boolean, required: true}
+concurrency:
+  group: middle
+  cancel-in-progress: ${{ inputs.cancel }}
+jobs:
+  call:
+    uses: ./.github/workflows/leaf.yml
+    with:
+      cancel: ${{ !inputs.cancel }}
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+concurrency:
+  group: root
+  cancel-in-progress: true
+jobs:
+  call:
+    uses: ./.github/workflows/middle.yml
+    with:
+      cancel: false
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Concurrency any    `yaml:"concurrency"`
+			Group       string `yaml:"concurrency_group"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
+		t.Fatal(err)
+	}
+	// Root open/close, middle open/close, leaf open/close, then the job.
+	groups := []string{"root", "root", "middle", "middle", "leaf", "leaf", "leaf-job"}
+	if len(document.Steps) != len(groups) {
+		t.Fatalf("unexpected pipeline: %s", bundle.Pipeline)
+	}
+	for i, step := range document.Steps {
+		group := buildkiteConcurrencyGroup(bundle.IR.Event.Repository, groups[i])
+		if i == 0 || i == 4 {
+			want := map[string]any{"limit": 1, "group": group, "cancel_in_progress": true}
+			if !reflect.DeepEqual(step.Concurrency, want) || step.Group != "" {
+				t.Fatalf("opening request %d = %#v, want %#v", i, step, want)
+			}
+		} else if step.Concurrency != 1 || step.Group != group {
+			t.Fatalf("non-requesting step %d = %#v", i, step)
+		}
 	}
 }
 
@@ -1467,8 +1700,8 @@ jobs:
   "payload": {"pull_request": {"base": {"ref": "main"}}}
 }`)
 	cancellation := Warning{
-		Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: 6, Column: 11, Job: "python-runtime",
-		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+		Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT", Line: 6, Column: 11, Job: "python-runtime",
+		Message: "Workflow cancel-in-progress requests cancellation through the opening concurrency gate only. Older gate steps can be canceled, but jobs that already passed their gate can keep running and overlap with the newer workflow. Cancellation is asynchronous, not atomic latest-wins. A reusable call whose condition is decided at runtime can request cancellation even when that condition is false.",
 	}
 	tests := []struct {
 		name, condition, group string
@@ -1582,8 +1815,8 @@ jobs:
 			Message: `The call condition depends on runtime values, so Buildkite enters the concurrency group of reusable workflow "./.github/workflows/deploy.yml" before it knows whether the call runs. When the condition is false, the skipped jobs still wait for the group and hold it until they finish. GitHub never enters the group for a skipped call. Write the condition with github, inputs, or event values only, which resolve during compilation, if the wait matters.`,
 		},
 		{
-			Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: 8, Column: 11, Job: "deploy",
-			Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+			Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT", Line: 8, Column: 11, Job: "deploy",
+			Message: "Workflow cancel-in-progress requests cancellation through the opening concurrency gate only. Older gate steps can be canceled, but jobs that already passed their gate can keep running and overlap with the newer workflow. Cancellation is asynchronous, not atomic latest-wins. A reusable call whose condition is decided at runtime can request cancellation even when that condition is false.",
 		},
 	}
 	if !reflect.DeepEqual(bundle.IR.Warnings, want) {
@@ -2470,26 +2703,6 @@ func TestCompileBundlePreservesFoldedStepControlTypes(t *testing.T) {
 	}
 }
 
-func TestCompileBundleDoesNotReduceEventExpressionsInActionReferences(t *testing.T) {
-	source := []byte(`on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: ${{ github.event.action_ref }}
-`)
-	event := []byte(`{
-  "provider": "github", "event": "push",
-  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
-  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
-  "payload": {"action_ref": "owner/action@1111111111111111111111111111111111111111"}
-}`)
-	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "github.event cannot select an action reference") {
-		t.Fatalf("CompileBundle() error = %v, want static action reference rejection", err)
-	}
-}
-
 func TestCompileBundleRetainsEventPayloadOnlyForJobsThatNeedIt(t *testing.T) {
 	source := []byte(`on: push
 jobs:
@@ -2662,7 +2875,7 @@ jobs:
 
 func TestRequiredSecretsDoesNotInterpretConditionLiteralsAsTemplates(t *testing.T) {
 	instance := JobInstance{If: "'${{ github.token }} ${{ secrets.DEPLOY }} ${{ github.event.action }}' == runner.os"}
-	secrets, _, _, referencesToken, _, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, nil, false, "https://github.com", nil)
+	secrets, _, _, referencesToken, _, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, nil, false, "https://github.com", expression.AbstractValues{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2683,7 +2896,7 @@ func TestRequiredSecretsNarrowsTokenAuthorityByKnownServerURL(t *testing.T) {
 		{name: "non-GitHub provider", serverURL: "https://origin.cursor.com"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, _, _, token, _, err := requiredSecrets(workflowProgram, instance.secretAuthority, nil, nil, false, test.serverURL, nil)
+			_, _, _, token, _, err := requiredSecrets(workflowProgram, instance.secretAuthority, nil, nil, false, test.serverURL, expression.AbstractValues{})
 			if err != nil {
 				t.Fatal(err)
 			}

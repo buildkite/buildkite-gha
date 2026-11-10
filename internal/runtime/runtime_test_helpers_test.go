@@ -23,6 +23,7 @@ import (
 
 type runtimeTestStep struct {
 	ID                        string
+	GitHubAction              string
 	Name                      string
 	Kind                      string
 	Background                bool
@@ -76,7 +77,7 @@ func normalizeRuntimeTestSteps(steps []runtimeTestStep) []executionprogram.Step 
 
 func normalizeRuntimeTestStep(step runtimeTestStep) executionprogram.Step {
 	normalized := executionprogram.Step{
-		ID: step.ID, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...),
+		ID: step.ID, GitHubAction: step.GitHubAction, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...),
 		Env:             testProgramBindings(step.Env, executionprogram.SurfaceStepTemplate),
 		Condition:       testProgramSite(step.Condition, executionprogram.SurfaceStepCondition, executionprogram.ResultBoolean),
 		ContinueOnError: executionprogram.BoolControl{Literal: step.ContinueOnError},

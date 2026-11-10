@@ -36,7 +36,7 @@ func EvaluateAvailableCompileTemplate(source string, context CompileContext) (st
 }
 
 func ReduceAvailableCompileTemplate(source string, context CompileContext) (string, error) {
-	return reduceAvailableCompileTemplate(source, context, false)
+	return reduceAvailableCompileTemplate(source, context, "")
 }
 
 func ReferencePath(text string) (string, []string, error) { return staticReferencePath(text) }

@@ -13,6 +13,7 @@ func schedulingWorkflow() string {
 
 func TestRuntimeSchedulingKeepsContinuationOwnershipAndOutputData(t *testing.T) {
 	source := schedulingWorkflow()
+	source = strings.Replace(source, "    concurrency: ${{ needs.plan.outputs.group }}", "    concurrency:\n      group: ${{ needs.plan.outputs.group }}\n      cancel-in-progress: ${{ matrix.target != 'two' }}", 1)
 	initial, err := compileRuntimeMatrix(t, source, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +34,7 @@ func TestRuntimeSchedulingKeepsContinuationOwnershipAndOutputData(t *testing.T) 
 		t.Fatalf("jobs = %d, continuations = %d", len(ir.Jobs), len(ir.Continuations))
 	}
 	for _, job := range ir.Jobs {
-		if job.LogicalJobID == "build" && (job.ConcurrencyGroup != group || job.MaxParallel == nil || *job.MaxParallel != 2) {
+		if job.LogicalJobID == "build" && (job.ConcurrencyGroup != group || job.MaxParallel == nil || *job.MaxParallel != 2 || job.CancelInProgress != (job.Matrix["target"] != "two")) {
 			t.Fatalf("consumer scheduling = %#v", job)
 		}
 		if job.LogicalJobID == "publish" && len(job.Needs) != 4 {
@@ -96,7 +97,6 @@ func TestRuntimeSchedulingRejectsUnavailableAuthorityAndStages(t *testing.T) {
 		{"token in dead branch", strings.Replace(schedulingWorkflow(), "needs.plan.outputs.group", "needs.plan.outputs.group || (false && github.token)", 1), "github"},
 		{"secret in dead branch", strings.Replace(schedulingWorkflow(), "needs.plan.outputs.group", "needs.plan.outputs.group || (false && secrets.DEPLOY)", 1), "secrets"},
 		{"root gate", "concurrency: root\n" + schedulingWorkflow(), "workflow concurrency cannot be combined"},
-		{"job cancellation", strings.Replace(schedulingWorkflow(), "concurrency: ${{ needs.plan.outputs.group }}", "concurrency:\n      group: ${{ needs.plan.outputs.group }}\n      cancel-in-progress: true", 1), "cancel-in-progress"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := compileRuntimeMatrix(t, test.source, nil)
@@ -163,6 +163,36 @@ func TestRuntimeSchedulingValidatesOutputLimits(t *testing.T) {
 	}
 }
 
+func TestRuntimeMatrixKeepsCompileKnownJobControls(t *testing.T) {
+	source := strings.Replace(runtimeMatrixWorkflow, "    strategy:\n", "    timeout-minutes: ${{ matrix.minutes }}\n    strategy:\n      max-parallel: ${{ 2 }}\n", 1)
+	initial, err := compileRuntimeMatrix(t, source, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(initial.Continuations) != 1 || initial.Continuations[0].Scheduling {
+		t.Fatalf("static max-parallel incorrectly requires scheduling outputs: %#v", initial.Continuations)
+	}
+	options := defaultOptions()
+	options.RuntimeMatrixRows = map[string][]map[string]any{"build": {{"runner": "ubuntu-latest", "minutes": 7}, {"runner": "ubuntu-latest", "minutes": 13}}}
+	bundle, err := CompileBundleWithOptions("runtime.yml", []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumers := 0
+	for i, artifact := range bundle.Plans {
+		if artifact.Job.Workflow.LogicalJobID != "build" {
+			continue
+		}
+		if got := artifact.Job.ExecutionJob().TimeoutMinutes; got != []float64{7, 13}[consumers] || bundle.GeneratedWorkflow.Jobs[i].Concurrency != 2 {
+			t.Fatalf("deferred consumer timeout/parallel = %v/%d", got, bundle.GeneratedWorkflow.Jobs[i].Concurrency)
+		}
+		consumers++
+	}
+	if consumers != 2 {
+		t.Fatalf("consumers = %d, want 2", consumers)
+	}
+}
+
 func TestRuntimeSchedulingRejectsSiblingWorkflowGates(t *testing.T) {
 	repository := t.TempDir()
 	writeWorkflow(t, repository, "gated.yml", `on: workflow_call
@@ -179,5 +209,66 @@ jobs:
 	_, err := CompileBundle(path, readFile(t, path), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err == nil || !strings.Contains(err.Error(), "cannot be combined with reusable-workflow concurrency gates") {
 		t.Fatalf("sibling gate error = %v", err)
+	}
+}
+
+func TestRuntimeSchedulingReusableGroupReadsCallerInput(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/leaf.yml\n    with: {prefix: pre}\n")
+	callee := strings.Replace(schedulingWorkflow(), "on: push\n", "on:\n  workflow_call:\n    inputs:\n      prefix: {type: string}\n", 1)
+	callee = strings.Replace(callee, "concurrency: ${{ needs.plan.outputs.group }}", "concurrency: ${{ inputs.prefix }}-${{ needs.plan.outputs.group }}", 1)
+	writeWorkflow(t, repository, "leaf.yml", callee)
+	compile := func(options Options) IR {
+		t.Helper()
+		ir, err := CompileIRWithOptionsContext(t.Context(), callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ir
+	}
+	if initial := compile(defaultOptions()); len(initial.Continuations) != 1 || !initial.Continuations[0].Scheduling {
+		t.Fatalf("continuations = %#v", initial.Continuations)
+	}
+	options := defaultOptions()
+	options.RuntimeMatrixRows = map[string][]map[string]any{"call.build": {{"runner": "ubuntu-latest", "target": "one"}}}
+	options.RuntimeSchedulingOutputs = map[string]map[string]string{"call.build": {"group": "deploy", "parallel": "1"}}
+	for _, job := range compile(options).Jobs {
+		if job.LogicalJobID == "call.build" && job.ConcurrencyGroup != "pre-deploy" {
+			t.Fatalf("concurrency group = %q, want caller input and producer output", job.ConcurrencyGroup)
+		}
+	}
+}
+
+func TestRuntimeSchedulingReusableGroupRejectsDeferredInputs(t *testing.T) {
+	for _, test := range []struct {
+		group  string
+		reject bool
+	}{
+		{"${{ inputs.key }}-${{ needs.plan.outputs.group }}", false},
+		{"${{ inputs.prefix }}-${{ needs.plan.outputs.group }}", true},
+		{"${{ inputs[inputs.key] }}-${{ needs.plan.outputs.group }}", true},
+	} {
+		t.Run(test.group, func(t *testing.T) {
+			repository := t.TempDir()
+			callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    outputs: {value: '${{ steps.value.outputs.value }}'}
+    steps: [{id: value, run: true}]
+  call:
+    needs: seed
+    uses: ./.github/workflows/leaf.yml
+    with: {prefix: '${{ needs.seed.outputs.value }}', key: prefix}
+`)
+			callee := strings.Replace(schedulingWorkflow(), "on: push\n", "on:\n  workflow_call:\n    inputs:\n      prefix: {type: string}\n      key: {type: string}\n", 1)
+			writeWorkflow(t, repository, "leaf.yml", strings.Replace(callee, "concurrency: ${{ needs.plan.outputs.group }}", "concurrency: "+test.group, 1))
+			_, err := CompileIRWithOptionsContext(t.Context(), callerPath, readFile(t, callerPath), pushEvent(t), defaultOptions())
+			// The group profile admits inputs, so admission alone keeps deferred
+			// inputs out of scheduling.
+			if rejected := err != nil && strings.Contains(err.Error(), "scheduling values can read only workflow inputs known before jobs run"); rejected != test.reject {
+				t.Fatalf("compile error = %v, want rejection %t", err, test.reject)
+			}
+		})
 	}
 }

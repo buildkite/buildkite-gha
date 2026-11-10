@@ -35,6 +35,14 @@ const (
 
 var runnerQueuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var runnerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
+var providerLinuxARM64RunnerPattern = regexp.MustCompile(`^(?:` +
+	`depot-ubuntu-(?:22\.04|24\.04)-arm(?:-(?:4|8|16|32|64))?|` +
+	`blacksmith-(?:2|4|8|16|32)vcpu-ubuntu-(?:22|24|26)04-arm|` +
+	`warp-ubuntu-(?:latest|2404|2604)-arm64-(?:2|4|8|16|32)x|` +
+	`warp-ubuntu-2604-arm64-(?:6|12)x-xfast|` +
+	`ubicloud(?:-standard-(?:2|4|8|16|30))?-arm|` +
+	`ubicloud-standard-(?:2|4|8|16|30)-arm-ubuntu-(?:22|24|26)04` +
+	`)$`)
 
 type hostedCompilation struct {
 	Bundle           compiler.Bundle
@@ -187,7 +195,7 @@ func hostedOptions(groupLabel string, configuredTargets map[string]compiler.Runn
 // events use an all-zero placeholder SHA and cannot identify source.
 func candidateWorkflowSource(eventSource []byte) *compiler.WorkflowSourceReference {
 	event, err := compiler.ParseEvent(eventSource)
-	if err != nil || event.Provider != "github" || strings.Trim(event.SHA, "0") == "" {
+	if err != nil || plan.EventServerURL(event.Provider, event.ServerURL) != "https://github.com" || strings.Trim(event.SHA, "0") == "" {
 		return nil
 	}
 	return &compiler.WorkflowSourceReference{Repository: event.Repository.Owner + "/" + event.Repository.Name, Commit: event.SHA}
@@ -362,7 +370,7 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 			}
 		}
 		for _, action := range artifact.Job.Actions {
-			identity := actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path}
+			identity := actionintegration.Identity{Source: action.Source, ServerURL: action.ServerURL, Repository: action.Repository, Path: action.Path}
 			descriptor, _ := actionintegration.Lookup(identity)
 			if descriptor.Service == actionintegration.ServiceCache {
 				if _, _, err := actionintegration.Admit(identity, action.Commit); err != nil {
@@ -439,7 +447,7 @@ func githubTokenAdmissionDiagnostic(artifact compiler.PlanArtifact, reason strin
 		if len(quoted) > 1 {
 			actionLabel = "actions"
 		}
-		causes = append(causes, actionLabel+" "+strings.Join(quoted, ", ")+" defaults an input to github.token")
+		causes = append(causes, actionLabel+" "+strings.Join(quoted, ", ")+" references github.token in metadata")
 	}
 	if len(causes) == 0 {
 		causes = append(causes, "the compiled job requests a workflow token")
@@ -480,7 +488,7 @@ func irUsesActions(ir compiler.IR) bool {
 func bundleRunsUnprovenActions(bundle compiler.Bundle) bool {
 	for _, artifact := range bundle.Plans {
 		for _, lock := range artifact.Job.Actions {
-			identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
+			identity := actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path}
 			if _, native, err := actionintegration.AdmitNativeAdapter(identity, lock.Commit); err != nil || !native {
 				return true
 			}
@@ -540,8 +548,8 @@ func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
 	case "macos-15", "macos-14":
 		// These remain available as local fallbacks when the Agent API is absent.
 		return canonical, compiler.PlatformDarwinARM64, nil
-	case "ubuntu-24.04-arm", "ubuntu-22.04-arm", "ubuntu-24.04-arm64", "ubuntu-22.04-arm64":
-		// ARM Linux requires an explicit queue. It has no built-in Hosted preset.
+	case "ubuntu-26.04-arm", "ubuntu-24.04-arm", "ubuntu-22.04-arm", "ubuntu-26.04-arm64", "ubuntu-24.04-arm64", "ubuntu-22.04-arm64":
+		// Automatic ARM Linux routing is server-owned, with no local Hosted preset.
 		return canonical, compiler.PlatformLinuxARM64, nil
 	case "windows-latest", "windows-2022":
 		return canonical, compiler.PlatformWindowsAMD64, nil
@@ -549,7 +557,7 @@ func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
 		if canonical == "windows" || strings.HasPrefix(canonical, "windows-") {
 			return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q; Windows mappings support windows-latest and windows-2022", label)
 		}
-		if canonical == "arm64" || canonical == "aarch64" || strings.HasSuffix(canonical, "-arm64") || strings.HasSuffix(canonical, "-aarch64") {
+		if providerLinuxARM64RunnerPattern.MatchString(canonical) || canonical == "arm64" || canonical == "aarch64" || strings.HasSuffix(canonical, "-arm64") || strings.HasSuffix(canonical, "-aarch64") {
 			return canonical, compiler.PlatformLinuxARM64, nil
 		}
 		// Configuring an otherwise unknown selector explicitly maps it to the

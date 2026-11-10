@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -11,12 +12,55 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
+
+func TestWorkflowGitCredentialFailureIsNoninteractive(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	t.Setenv("BUILDKITE_JOB_ID", "11111111-1111-4111-8111-111111111111")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "must-not-leak")
+	writeFixtureFile(t, home, ".gitconfig", "[credential]\n\thelper = !echo helper-unavailable >&2; exit 1\n")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: Git credentials\n")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{
+		{ID: "missing", Kind: "run", Shell: "sh", ContinueOnError: true, Command: `
+test -z "${BUILDKITE_JOB_ID+x}" && test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}"
+printf 'protocol=https\nhost=example.invalid\n\n' | git credential fill
+`},
+		{ID: "supplied", Kind: "run", Shell: "sh", Command: `
+printf 'protocol=https\nhost=example.invalid\n\n' |
+  git -c credential.helper= -c 'credential.helper=!f() { printf "username=fixture\npassword=%s\n" test-credential; }; f' credential fill > credentials
+grep -qx username=fixture credentials
+grep -qx 'password=test-credential' credentials
+`},
+	})
+	job.Outputs = map[string]string{"missing": "${{ steps.missing.outcome }}", "supplied": "${{ steps.supplied.outcome }}"}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(ctx, job, workspace)
+	if err != nil || result.Outputs["missing"] != "failure" || result.Outputs["supplied"] != "success" {
+		t.Fatalf("Git outcomes = %v, error = %v\n%s", result.Outputs, err, &logs)
+	}
+	if !strings.Contains(logs.String(), "helper-unavailable") || !strings.Contains(logs.String(), "terminal prompts disabled") {
+		t.Fatalf("Git did not fail without prompting after helper failure:\n%s", &logs)
+	}
+}
 
 func TestPowerShellExecution(t *testing.T) {
 	pwsh, err := exec.LookPath("pwsh")
 	if err != nil {
 		t.Fatalf("PowerShell is required; run mise install: %v", err)
+	}
+	t.Setenv("JAVA_HOME", "host JDK")
+	javaHome := "JAVA_HOME"
+	if runtime.GOOS == "windows" {
+		javaHome = "java_home"
 	}
 	command := strconv.Quote(pwsh)
 	if runtime.GOOS == "windows" {
@@ -52,14 +96,19 @@ func TestPowerShellExecution(t *testing.T) {
 			writeFixtureFile(t, workspace, workflow, "name: PowerShell test\n")
 			job := runtimePlan(t, workspace, workflow, []runtimeTestStep{
 				{ID: "first", Kind: "run", Shell: shell, Command: `"script=$PSCommandPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-"GREETING=héllo 世界" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`},
+"java=$env:JAVA_HOME" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+"GREETING=héllo 世界" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+"JAVA_HOME=selected JDK" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`},
 				{ID: "second", Kind: "run", Shell: shell, Command: `if ($env:GREETING -ne 'héllo 世界') { throw 'environment lost' }
+if ($env:JAVA_HOME -ne 'selected JDK') { throw 'Java selection lost' }
 "value=$env:GREETING" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append`},
+				{ID: "empty", Kind: "run", Shell: shell, Env: map[string]string{javaHome: ""}, Command: `if ($env:JAVA_HOME) { throw 'empty Java override lost' }`},
+				{ID: "restore", Kind: "run", Shell: shell, Command: `if ($env:JAVA_HOME -ne 'selected JDK') { throw 'step Java override leaked' }`},
 			})
-			job.Outputs = map[string]string{"value": "${{ steps.second.outputs.value }}", "script": "${{ steps.first.outputs.script }}"}
+			job.Outputs = map[string]string{"value": "${{ steps.second.outputs.value }}", "script": "${{ steps.first.outputs.script }}", "java": "${{ steps.first.outputs.java }}"}
 			var stdout, stderr bytes.Buffer
 			result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).runTestJob(t.Context(), job, workspace)
-			if err != nil || result.Outputs["value"] != "héllo 世界" {
+			if err != nil || result.Outputs["value"] != "héllo 世界" || result.Outputs["java"] != "host JDK" {
 				t.Fatalf("outputs = %#v, error = %v\nstdout: %s\nstderr: %s", result.Outputs, err, stdout.String(), stderr.String())
 			}
 			script := result.Outputs["script"]
@@ -337,6 +386,82 @@ runs:
 	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRemoteCompositeWorkingDirectories(t *testing.T) {
+	for _, test := range []struct {
+		name, directory, want string
+		reject                bool
+		workflow              bool
+	}{
+		{name: "action path", directory: "${{ github.action_path }}", want: "action"},
+		{name: "action subdirectory", directory: "${{ github.action_path }}/sub", want: "action-sub"},
+		{name: "verified repository sibling", directory: "${{ github.action_path }}/../shared", want: "shared"},
+		{name: "default workspace", want: "workspace"},
+		{name: "relative workspace", directory: "sub", want: "workspace-sub"},
+		{name: "outside absolute", directory: "${{ inputs.outside }}", reject: true},
+		{name: "tool cache is not a working directory root", directory: "${{ runner.tool_cache }}", reject: true},
+		{name: "action traversal", directory: "${{ github.action_path }}/../..", reject: true},
+		{name: "workspace symlink escape", directory: "escape", reject: true},
+		{name: "workflow cannot inherit source root", directory: "${{ github.action_path }}", workflow: true, reject: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace, remote, outside := canonicalTempDir(t), canonicalTempDir(t), canonicalTempDir(t)
+			workflow := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflow, "name: working directory roots\n")
+			writeFixtureFile(t, workspace, "identity", "workspace")
+			writeFixtureFile(t, workspace, "sub/identity", "workspace-sub")
+			writeFixtureFile(t, remote, "composite/identity", "action")
+			writeFixtureFile(t, remote, "composite/sub/identity", "action-sub")
+			writeFixtureFile(t, remote, "shared/identity", "shared")
+			if test.name == "workspace symlink escape" {
+				if err := os.Symlink(outside, filepath.Join(workspace, "escape")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeFixtureFile(t, remote, "composite/action.yml", `name: working directories
+inputs:
+  outside:
+    required: false
+outputs:
+  identity:
+    value: ${{ steps.read.outputs.identity }}
+runs:
+  using: composite
+  steps:
+    - id: read
+      shell: sh
+      working-directory: `+test.directory+`
+      run: echo "identity=$(cat identity)" >> "$GITHUB_OUTPUT"
+`)
+			id := remoteLifecycleLockID(1)
+			job := runtimePlan(t, workspace, workflow, []runtimeTestStep{{
+				ID: "composite", Kind: "uses", Uses: remoteLifecycleUses("composite"),
+				Action: &plan.ActionSelector{Lock: id}, With: map[string]string{"outside": outside},
+			}})
+			if test.workflow {
+				job.Program.Job.Steps = append(job.Program.Job.Steps, normalizeRuntimeTestStep(runtimeTestStep{
+					ID: "outside", Kind: "run", Shell: "sh", Command: "true", WorkingDirectory: filepath.Join(remote, "composite"),
+				}))
+			}
+			digest := digestTree(t, remote)
+			job.Actions = []plan.ActionLock{remoteLifecycleLock(id, "composite", digest, nil)}
+			job.RequiredCapabilities = []string{"network"}
+			job.Outputs = map[string]string{"identity": "${{ steps.composite.outputs.identity }}"}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+			result, err := (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace)
+			if test.reject {
+				blocker, _, classified := UnsupportedFeature(err)
+				if err == nil || result.Conclusion != "failure" || ClassifyFailure(err) != FailureClassUnsupportedFeature || !classified || blocker != "working_directory" {
+					t.Fatalf("outside directory: result=%#v error=%v class=%s blocker=%s", result, err, ClassifyFailure(err), blocker)
+				}
+				return
+			}
+			if err != nil || result.Conclusion != "success" || result.Outputs["identity"] != test.want {
+				t.Fatalf("directory identity: result=%#v error=%v, want %q", result, err, test.want)
+			}
+		})
 	}
 }
 

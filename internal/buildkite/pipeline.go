@@ -23,6 +23,10 @@ const distributionDirectory = ".buildkite-gha/distributions"
 const stageDirectory = ".buildkite-gha/stages"
 const maxConcurrencyGroupLength = 200
 const runtimeCacheName = "buildkite-gha"
+
+// etcEnvironmentPATHCommand prepends /etc/environment PATH entries that the
+// agent's PATH lacks, so the agent's buildkite-agent and docker still win.
+const etcEnvironmentPATHCommand = `etc_path="$(sed -n 's/^PATH=//p' /etc/environment 2>/dev/null | tail -n 1)"; etc_path="${etc_path#\"}"; etc_path="${etc_path%\"}"; missing_path=''; IFS=: read -r -a etc_entries <<< "$etc_path"; for entry in "${etc_entries[@]}"; do case ":$PATH:$missing_path:" in *":$entry:"*) ;; *) test -z "$entry" || missing_path="$missing_path${missing_path:+:}$entry";; esac; done; if test -n "$missing_path"; then PATH="$missing_path:$PATH"; export PATH; fi`
 const runtimeCacheRoot = "/cache/bkcache/buildkite-gha"
 const darwinRuntimeCacheRoot = "/tmp/bkcache/buildkite-gha"
 
@@ -38,7 +42,7 @@ const DarwinHostedToolCachePath = "/Users/runner/hostedtoolcache"
 
 // MinimumMiseVersion is the oldest supported mise release and the exact
 // release installed when no compatible runtime executable is available.
-const MinimumMiseVersion = "2026.5.12"
+const MinimumMiseVersion = "2026.10.17"
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -48,14 +52,14 @@ var cacheNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Z
 var cacheNameVariablePattern = regexp.MustCompile(`\$\{BUILDKITE_[A-Z0-9_]+\}`)
 var cacheSizePattern = regexp.MustCompile(`^[0-9]+g$`)
 
-// ValidateRunnerAgents checks opaque Linux host-selection tags. Queue remains
+// ValidateRunnerAgents checks opaque host-selection tags. Queue remains
 // a separate authority boundary and must never be replaced by an extra tag.
 func ValidateRunnerAgents(platform, image string, agents map[string]string) error {
 	if len(agents) == 0 {
 		return nil
 	}
-	if platform != "linux/amd64" {
-		return fmt.Errorf("runner agent tags are only supported on linux/amd64")
+	if platform != "linux/amd64" && platform != "darwin/arm64" {
+		return fmt.Errorf("runner agent tags are only supported on linux/amd64 and darwin/arm64")
 	}
 	if image != "" {
 		return fmt.Errorf("runner agent tags and runtime image are mutually exclusive")
@@ -186,9 +190,10 @@ type Failure struct {
 // ConcurrencyGate serializes one workflow scope while allowing its jobs to run
 // in parallel. ID identifies called-workflow scopes; the root scope leaves it empty.
 type ConcurrencyGate struct {
-	ID    string
-	Group string
-	Queue string
+	ID               string
+	Group            string
+	Queue            string
+	CancelInProgress bool
 }
 
 // DistributionPath returns the fixed local path for a content-addressed
@@ -239,6 +244,7 @@ type Job struct {
 	SoftFail         bool
 	ConcurrencyGroup string
 	Concurrency      int
+	CancelInProgress bool
 	ConcurrencyGates []ConcurrencyGate
 	// Stage turns the job into a deferred upload step instead of a workflow
 	// job. Queue, Platform, DistributionDigest, RuntimeImage, and Agents select
@@ -449,12 +455,6 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				if job.Concurrency > 0 && job.ConcurrencyGroup == workflow.ConcurrencyGate.Group {
 					return nil, fmt.Errorf("workflow concurrency gate shares group with member job %q", job.Key)
 				}
-				// The closing marker waits for the steps of this upload only.
-				// Jobs a deferred upload adds later would run after the group
-				// is released.
-				if job.Stage != nil {
-					return nil, fmt.Errorf("workflow concurrency gate cannot hold deferred upload step %q", job.Key)
-				}
 			}
 		}
 		prepared[i] = preparedWorkflow{Workflow: workflow, Jobs: jobs, Grouped: !workflow.Ungrouped && (aggregate || workflow.GroupLabel != ""), Aggregate: aggregate}
@@ -593,17 +593,17 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if (!workflow.Aggregate || workflow.Ungrouped) && pipeline.CompilerStep != "" {
 			dependencies = append(dependencies, dependency{Step: pipeline.CompilerStep})
 		}
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start workflow concurrency", workflow.GateOpenKey, workflow.ConcurrencyGate, dependencies, condition)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start workflow concurrency", workflow.GateOpenKey, workflow.ConcurrencyGate, dependencies, condition, workflow.ConcurrencyGate.CancelInProgress)
 		dependencies = workflowGateCloseDependencies(workflow, pipeline.CompilerStep)
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", workflow.GateCloseKey, workflow.ConcurrencyGate, dependencies, condition)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", workflow.GateCloseKey, workflow.ConcurrencyGate, dependencies, condition, false)
 	}
 	gateOpenKeys := make(map[string]string, len(workflow.ReusableConcurrencyGates))
 	for _, gate := range workflow.ReusableConcurrencyGates {
 		dependencies := reusableGateOpenDependencies(workflow, gate, gateOpenKeys, pipeline.CompilerStep)
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start reusable-workflow concurrency", gate.OpenKey, &gate.ConcurrencyGate, dependencies, condition)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start reusable-workflow concurrency", gate.OpenKey, &gate.ConcurrencyGate, dependencies, condition, gate.CancelInProgress)
 		gateOpenKeys[gate.ID] = gate.OpenKey
 		dependencies = reusableGateCloseDependencies(workflow, gate)
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish reusable-workflow concurrency", gate.CloseKey, &gate.ConcurrencyGate, dependencies, condition)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish reusable-workflow concurrency", gate.CloseKey, &gate.ConcurrencyGate, dependencies, condition, false)
 	}
 	for _, job := range workflow.Jobs {
 		if job.Failure != nil || job.SkipReason != "" {
@@ -766,6 +766,13 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		// builder; see runtime.enableDockerBuildLoad.
 		if job.Agents["nsc-gha-image"] != "" {
 			runJob += " --docker-build-load"
+			if strings.HasPrefix(platform, "linux/") {
+				// GitHub runner images put tool paths such as ~/.cargo/bin in
+				// /etc/environment, which only PAM logins read. GitHub's runner
+				// starts with that PATH; the agent service never sees it.
+				commands = append(commands, etcEnvironmentPATHCommand)
+				runJob += " --repair-hostname"
+			}
 		}
 		if experimentalRunnerUser {
 			runJob = experimentalRunnerUserCommand(runJob)
@@ -808,13 +815,13 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if job.SoftFail {
 			_, _ = fmt.Fprintf(out, "%ssoft_fail:\n%s  - exit_status: %d\n", attributeIndent, attributeIndent, ContinueOnErrorExitStatus)
 		}
+		_, _ = fmt.Fprintf(out, "%senv:\n", attributeIndent)
+		_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_PLAN_DIGEST: %s\n", attributeIndent, yamlScalar(job.PlanDigest))
 		if job.RequiresMise && platform != "windows/amd64" {
-			_, _ = fmt.Fprintf(out, "%senv:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir(platform)))
 		}
 		if job.Concurrency != 0 {
-			_, _ = fmt.Fprintf(out, "%sconcurrency: %d\n", attributeIndent, job.Concurrency)
-			_, _ = fmt.Fprintf(out, "%sconcurrency_group: %s\n", attributeIndent, yamlScalar(job.ConcurrencyGroup))
+			emitConcurrency(out, attributeIndent, job.Concurrency, job.ConcurrencyGroup, job.CancelInProgress)
 		}
 		emitJobDependencies(out, attributeIndent, workflow, job, gateOpenKeys, pipeline.CompilerStep)
 	}
@@ -1034,7 +1041,9 @@ type dependency struct {
 	AllowFailure bool
 }
 
-func emitConcurrencyGateStep(out *bytes.Buffer, stepIndent, attributeIndent, label, key string, gate *ConcurrencyGate, dependencies []dependency, condition string) {
+// Only opening gates request cancellation. A closing gate must not cancel its
+// own opener or become a later request while another workflow waits to enter.
+func emitConcurrencyGateStep(out *bytes.Buffer, stepIndent, attributeIndent, label, key string, gate *ConcurrencyGate, dependencies []dependency, condition string, cancelInProgress bool) {
 	_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(label))
 	_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(key))
 	if condition != "" {
@@ -1046,8 +1055,7 @@ func emitConcurrencyGateStep(out *bytes.Buffer, stepIndent, attributeIndent, lab
 		_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(gate.Queue))
 	}
 	_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
-	_, _ = fmt.Fprintf(out, "%sconcurrency: 1\n", attributeIndent)
-	_, _ = fmt.Fprintf(out, "%sconcurrency_group: %s\n", attributeIndent, yamlScalar(gate.Group))
+	emitConcurrency(out, attributeIndent, 1, gate.Group, cancelInProgress)
 	if len(dependencies) == 0 {
 		return
 	}
@@ -1055,6 +1063,14 @@ func emitConcurrencyGateStep(out *bytes.Buffer, stepIndent, attributeIndent, lab
 	for _, dependency := range dependencies {
 		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: %t\n", attributeIndent, yamlScalar(dependency.Step), attributeIndent, dependency.AllowFailure)
 	}
+}
+
+func emitConcurrency(out *bytes.Buffer, indent string, limit int, group string, cancelInProgress bool) {
+	if cancelInProgress {
+		_, _ = fmt.Fprintf(out, "%sconcurrency:\n%s  limit: %d\n%s  group: %s\n%s  cancel_in_progress: true\n", indent, indent, limit, indent, yamlScalar(group), indent)
+		return
+	}
+	_, _ = fmt.Fprintf(out, "%sconcurrency: %d\n%sconcurrency_group: %s\n", indent, limit, indent, yamlScalar(group))
 }
 
 func validateConcurrencyGate(gate *ConcurrencyGate) error {
@@ -1225,6 +1241,9 @@ func validateJob(compilerStep string, job Job) error {
 	}
 	if job.Concurrency < 0 {
 		return fmt.Errorf("job %q has invalid concurrency %d", job.Key, job.Concurrency)
+	}
+	if job.CancelInProgress && job.Concurrency == 0 {
+		return fmt.Errorf("job %q cancellation requires concurrency", job.Key)
 	}
 	if job.Concurrency > 0 && job.ConcurrencyGroup == "" || job.Concurrency == 0 && job.ConcurrencyGroup != "" {
 		return fmt.Errorf("job %q requires concurrency and concurrency group together", job.Key)

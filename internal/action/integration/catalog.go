@@ -5,6 +5,7 @@ package integration
 // verification evidence rather than catalog selectors.
 type Identity struct {
 	Source     string
+	ServerURL  string
 	Repository string
 	Path       string
 }
@@ -88,14 +89,24 @@ var catalog = map[Identity]catalogEntry{
 // It does not admit the resolved commit; callers handling action locks should
 // use Admit instead.
 func Lookup(identity Identity) (Descriptor, bool) {
-	entry, ok := catalog[identity]
+	entry, ok := lookupEntry(identity)
 	return entry.descriptor, ok
+}
+
+func lookupEntry(identity Identity) (catalogEntry, bool) {
+	// Empty hosts in legacy locks and the catalog mean github.com. Never
+	// match another host's repository against an audited github.com action.
+	if identity.ServerURL == "https://github.com" {
+		identity.ServerURL = ""
+	}
+	entry, ok := catalog[identity]
+	return entry, ok
 }
 
 // Admit returns the integration for an exact canonical action identity and
 // atomically enforces any audited-commit policy attached to it.
 func Admit(identity Identity, commit string) (Descriptor, bool, error) {
-	entry, ok := catalog[identity]
+	entry, ok := lookupEntry(identity)
 	if !ok {
 		return Descriptor{}, false, nil
 	}

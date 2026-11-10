@@ -10,13 +10,93 @@ on:
 permissions:
   contents: read
 
-jobs:
-  reusable-defaults:
-    uses: ./.github/workflows/expression-oracle-reusable.yml
+concurrency:
+  group: expression-oracle-${{ github.run_id }}
 
-  expressions:
+jobs:
+  composite-token:
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          github-server-url: ${{ github.server_url }}
+      - uses: ./.github/actions/oracle-composite-token
+        id: matching-host
+        if: github.server_url == 'https://github.com'
+      - uses: ./.github/actions/oracle-composite-token
+        with:
+          fallback: none
+      - id: other-host
+        if: github.server_url != 'https://github.com'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: exit 1
+      - env:
+          MATCHING_HOST: ${{ steps.matching-host.outcome }}
+          OTHER_HOST: ${{ steps.other-host.outcome }}
+        run: |
+          test "$MATCHING_HOST" = success
+          test "$OTHER_HOST" = skipped
+
+  reusable-defaults:
+    if: github.server_url == 'https://github.com'
+    uses: ./.github/workflows/expression-oracle-reusable.yml
+
+  other-host:
+    if: github.server_url != 'https://github.com'
+    runs-on: ubuntu-latest
+    steps:
+      - run: exit 1
+
+  # format() builds values containing ${{ so the caller passes data, not an
+  # expression. A reparsed secret name would select GITHUB_TOKEN. Both calls
+  # must pass identical values so the depths are comparable.
+  reusable-input-data:
+    uses: ./.github/workflows/expression-oracle-input-data.yml
+    with:
+      payload: ${{ format('{0}{{{{ github.sha }}}}', '$') }}
+      secret-name: ${{ format('{0}{{{{ ''GITHUB_TOKEN'' }}}}', '$') }}
+      depth: "1"
+
+  nested-reusable-input-data:
+    uses: ./.github/workflows/expression-oracle-input-data-forward.yml
+    with:
+      payload: ${{ format('{0}{{{{ github.sha }}}}', '$') }}
+      secret-name: ${{ format('{0}{{{{ ''GITHUB_TOKEN'' }}}}', '$') }}
+
+  reusable-input-data-outputs:
+    # Run even when a callee is skipped, so its empty output fails the check.
+    if: ${{ !cancelled() }}
+    needs: [reusable-input-data, nested-reusable-input-data]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify reusable outputs stay data
+        shell: bash
+        env:
+          DIRECT_OUTPUT: ${{ needs.reusable-input-data.outputs.payload }}
+          NESTED_OUTPUT: ${{ needs.nested-reusable-input-data.outputs.payload }}
+        run: |
+          expected="$"'{{ github.sha }}'
+          printf '%s\n' "DIRECT_OUTPUT=$DIRECT_OUTPUT" "NESTED_OUTPUT=$NESTED_OUTPUT"
+          test "$DIRECT_OUTPUT" = "$expected"
+          test "$NESTED_OUTPUT" = "$expected"
+
+  expressions:
+    needs: [composite-token, reusable-defaults, other-host]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify host conditions
+        env:
+          MATCHING_JOB: ${{ needs.composite-token.result }}
+          MATCHING_CALL: ${{ needs.reusable-defaults.result }}
+          OTHER_HOST: ${{ needs.other-host.result }}
+        run: |
+          test "$MATCHING_JOB" = success
+          test "$MATCHING_CALL" = success
+          test "$OTHER_HOST" = skipped
       - name: Verify expression semantics
         shell: bash
         env:
@@ -30,6 +110,8 @@ jobs:
           FILTERED: ${{ join(fromJSON(format('[{{{0}:{1}}}, {{{0}:{2}}}]', toJSON('name'), toJSON('bug'), toJSON('help wanted'))).*.name, ',') }}
           MISSING: ${{ github.event.missing }}
           LAZY_CASE: ${{ case(false, fromJSON(format('invalid-{0}', github.run_id)), true, 'matched', fromJSON(format('invalid-{0}', github.run_id)) == null, 'late', 'default') }}
+          RUN_GROUP: expression-oracle-${{ github.run_id }}
+          REPEATED_RUN_GROUP: expression-oracle-${{ github.run_id }}
         run: |
           test "$NULL_EQUALS_ZERO" = "true"
           test "$ORDERED_COMPARISON" = "true"
@@ -41,6 +123,8 @@ jobs:
           test "$FILTERED" = "bug,help wanted"
           test -z "$MISSING"
           test "$LAZY_CASE" = "matched"
+          test "$RUN_GROUP" = "expression-oracle-$GITHUB_RUN_ID"
+          test "$REPEATED_RUN_GROUP" = "$RUN_GROUP"
           printf '%s\n' \
             "NULL_EQUALS_ZERO=$NULL_EQUALS_ZERO" \
             "ORDERED_COMPARISON=$ORDERED_COMPARISON" \
@@ -51,4 +135,49 @@ jobs:
             "JOINED=$JOINED" \
             "FILTERED=$FILTERED" \
             "MISSING=$MISSING" \
-            "LAZY_CASE=$LAZY_CASE"
+            "LAZY_CASE=$LAZY_CASE" \
+            "RUN_GROUP=$RUN_GROUP" \
+            "REPEATED_RUN_GROUP=$REPEATED_RUN_GROUP"
+
+  first-attempt:
+    if: github.run_attempt == '1'
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "$GITHUB_RUN_ATTEMPT" = 1
+
+  retry-attempt:
+    if: github.run_attempt != '1'
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "$GITHUB_RUN_ATTEMPT" -gt 1
+
+  run-attempt-conditions:
+    if: ${{ !cancelled() }}
+    needs: [first-attempt, retry-attempt]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - id: first
+        if: github.run_attempt == '1'
+        run: echo value=first >> "$GITHUB_OUTPUT"
+      - id: retry
+        if: github.run_attempt != '1'
+        run: echo value=retry >> "$GITHUB_OUTPUT"
+      - id: composite
+        uses: ./.github/actions/oracle-run-attempt
+      - name: Verify job and step selection
+        env:
+          FIRST_JOB: ${{ needs.first-attempt.result }}
+          RETRY_JOB: ${{ needs.retry-attempt.result }}
+          FIRST_STEP: ${{ steps.first.outputs.value }}
+          RETRY_STEP: ${{ steps.retry.outputs.value }}
+          COMPOSITE: ${{ steps.composite.outputs.value }}
+        run: |
+          printf '%s\n' "attempt=$GITHUB_RUN_ATTEMPT first=$FIRST_JOB retry=$RETRY_JOB steps=$FIRST_STEP/$RETRY_STEP composite=$COMPOSITE"
+          if [ "$GITHUB_RUN_ATTEMPT" = 1 ]; then
+            test "$FIRST_JOB/$RETRY_JOB/$FIRST_STEP/$RETRY_STEP/$COMPOSITE" = success/skipped/first//first
+          else
+            test "$FIRST_JOB/$RETRY_JOB/$FIRST_STEP/$RETRY_STEP/$COMPOSITE" = skipped/success//retry/retry
+          fi

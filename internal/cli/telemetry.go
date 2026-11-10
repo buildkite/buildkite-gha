@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"slices"
@@ -10,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -31,6 +34,7 @@ func emitCommandTelemetry(ctx context.Context, command telemetry.Command, outcom
 	if err != nil || client == nil {
 		return
 	}
+	details.SourceStats = actionsource.SourceStatsSnapshot(ctx)
 	_ = client.EmitContext(context.WithoutCancel(ctx), command, outcome, duration, details)
 }
 
@@ -57,14 +61,61 @@ func telemetryOutcome(code int, conclusion string, contextErr error) telemetry.O
 }
 
 type commandTelemetryDetails struct {
-	failurePhase   telemetry.FailurePhase
-	failureCode    telemetry.FailureCode
-	failureMessage string
-	blocker        string
-	blockerDetail  string
-	agentAPIStatus int
-	diagnostics    []telemetry.Diagnostic
-	errorOutput    boundedTailBuffer
+	failurePhase         telemetry.FailurePhase
+	failureCode          telemetry.FailureCode
+	failureMessage       string
+	blocker              string
+	blockerDetail        string
+	agentAPIStatus       int
+	diagnostics          []telemetry.Diagnostic
+	errorOutput          boundedTailBuffer
+	pathFilters          []telemetry.PathFilter
+	pathFiltersTruncated bool
+}
+
+func (d *commandTelemetryDetails) addPathFilter(input workflowInput, event effectiveEventSelection, selection workflowTriggerSelection, selectionErr error) {
+	if d == nil || input.ReusableOnly || (event.Event.Event != "push" && event.Event.Event != "pull_request") {
+		return
+	}
+	if len(d.pathFilters) == telemetry.MaxPathFilters {
+		d.pathFiltersTruncated = true
+		return
+	}
+	decision := telemetry.PathFilter{
+		WorkflowPath: input.CanonicalPath, WorkflowDigest: fmt.Sprintf("%x", sha256.Sum256(input.Source)),
+		EventName: event.Event.Event, EventOrigin: string(event.Origin), EventRef: event.Event.Ref,
+		HeadSHA: event.Event.SHA, BaseSHA: nestedString(event.Event.Payload, "before"),
+		ComparisonBaseSHA: input.PathFiltersComparisonBase,
+		Outcome:           "not_evaluated", Reason: "no_path_filters",
+	}
+	if event.Event.Event == "pull_request" {
+		decision.BaseSHA = nestedString(event.Event.Payload, "pull_request", "base", "sha")
+	}
+	if input.PathFiltersIdentityVerified {
+		decision.WorkflowSHA = event.Event.SHA
+	}
+	var pathError *buildkitepipeline.UnsupportedPathFiltersError
+	switch {
+	case input.ParseError != nil:
+		decision.Outcome, decision.Reason = "error", "workflow_parse_error"
+	case errors.As(selectionErr, &pathError):
+		decision.Outcome, decision.Reason = "error", "path_evidence_unavailable"
+	case selectionErr != nil:
+		decision.Outcome, decision.Reason = "error", "trigger_error"
+	case !workflowUsesPathFilters(input, event.Event.Event):
+	case event.Event.Event == "push" && event.TriggerSnapshot.Tag != nil:
+		decision.Reason = "tag_push"
+	case !selection.Applicable:
+		// With an active path-filtered trigger and no error, admission is
+		// inapplicable only when the paths did not match. Other exclusions
+		// retain their Buildkite condition and annotation instead.
+		decision.Outcome, decision.Reason = "nonmatch", "paths_do_not_match"
+	case selection.AnnotationReason != "":
+		decision.Reason = "non_path_filter_exclusion"
+	default:
+		decision.Outcome, decision.Reason = "match", "paths_match"
+	}
+	d.pathFilters = append(d.pathFilters, decision)
 }
 
 func (d *commandTelemetryDetails) captureErrors(writer io.Writer) io.Writer {
@@ -176,7 +227,8 @@ func (d *commandTelemetryDetails) setBlocker(blocker, detail string) {
 
 func (d *commandTelemetryDetails) forOutcome(outcome telemetry.Outcome) telemetry.Details {
 	if outcome == telemetry.OutcomeSuccess || outcome == telemetry.OutcomeSkipped {
-		return telemetry.Details{Diagnostics: slices.Clone(d.diagnostics), Blocker: d.blocker, BlockerDetail: d.blockerDetail}
+		return telemetry.Details{Diagnostics: slices.Clone(d.diagnostics), Blocker: d.blocker, BlockerDetail: d.blockerDetail,
+			PathFilters: slices.Clone(d.pathFilters), PathFiltersTruncated: d.pathFiltersTruncated}
 	}
 	phase, code := d.failurePhase, d.failureCode
 	if phase == "" {
@@ -207,6 +259,7 @@ func (d *commandTelemetryDetails) forOutcome(outcome telemetry.Outcome) telemetr
 		Blocker: d.blocker, BlockerDetail: d.blockerDetail,
 		ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated,
 		AgentAPIHTTPStatus: d.agentAPIStatus,
+		PathFilters:        slices.Clone(d.pathFilters), PathFiltersTruncated: d.pathFiltersTruncated,
 	}
 }
 
@@ -234,7 +287,7 @@ func allowlistedTelemetryDiagnosticCode(code string) bool {
 		workflowprocessing.CodeMatrixInvalid, workflowprocessing.CodeExpressionInvalid, workflowprocessing.CodeActionDiscovery,
 		workflowprocessing.CodeActionResolution, workflowprocessing.CodePlanConstruction, workflowprocessing.CodePipelineGeneration,
 		workflowprocessing.CodeEnvironment, workflowprocessing.CodeVariableResolution, "E_PROFILE", "W_ACTION_RUNTIME_UNKNOWN",
-		"W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED", "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED":
+		"W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT", "W_TRIGGER_EVENT_UNSUPPORTED", "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED":
 		return true
 	default:
 		return false

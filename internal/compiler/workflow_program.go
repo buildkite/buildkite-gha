@@ -77,6 +77,7 @@ func lowerWorkflowProgram(instance JobInstance) program.Program {
 
 func lowerWorkflowSteps(sourcePath string, source []workflow.Step) []program.Step {
 	steps := make([]program.Step, len(source))
+	githubActions := githubActionNames(source)
 	usedIDs := make(map[string]struct{}, len(source))
 	for _, step := range source {
 		if step.ID != "" {
@@ -111,7 +112,8 @@ func lowerWorkflowSteps(sourcePath string, source []workflow.Step) []program.Ste
 			TimeoutMinutes: program.NumberControl{
 				Literal: step.TimeoutMinutes,
 			},
-			Name: workflowSite(step.Name, location, field+".name"),
+			Name:         workflowSite(step.Name, location, field+".name"),
+			GitHubAction: githubActions[i],
 		}
 		if step.ContinueOnErrorExpression != "" {
 			site := workflowSite(step.ContinueOnErrorExpression, location, field+".continue-on-error")
@@ -136,6 +138,72 @@ func lowerWorkflowSteps(sourcePath string, source []workflow.Step) []program.Ste
 		}
 	}
 	return steps
+}
+
+// githubActionNames returns each run or uses step's github.action value. GitHub
+// uses the authored step ID, or generates one from the step in source order, as
+// in actions/runner WorkflowTemplateConverter.ConvertToSteps and IdBuilder:
+// "__" plus "self", "selfRepository", "owner/repo", or "run", with characters
+// outside [A-Za-z0-9_-] replaced by "_", truncated to 100 characters, and
+// suffixed "_2", "_3", ... for case-insensitive duplicates.
+// GitHub reserves the "__" prefix for generated IDs, including the parser's
+// parallel member IDs, so generated names cannot collide with authored IDs.
+func githubActionNames(steps []workflow.Step) []string {
+	const maxLength = 100
+	names := make([]string, len(steps))
+	used := make(map[string]struct{}, len(steps))
+	for i, step := range steps {
+		if step.Kind != "run" && step.Kind != "uses" {
+			continue
+		}
+		if step.ID != "" && !strings.HasPrefix(step.ID, "__") {
+			names[i] = step.ID
+			continue
+		}
+		var base strings.Builder
+		for _, r := range "__" + generatedStepIDSegment(step) {
+			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
+				base.WriteRune(r)
+			} else {
+				base.WriteByte('_')
+			}
+		}
+		original := base.String()
+		for attempt := 1; ; attempt++ {
+			suffix := ""
+			if attempt > 1 {
+				suffix = fmt.Sprintf("_%d", attempt)
+			}
+			candidate := original[:min(len(original), maxLength-len(suffix))] + suffix
+			if _, exists := used[strings.ToLower(candidate)]; !exists {
+				used[strings.ToLower(candidate)] = struct{}{}
+				names[i] = candidate
+				break
+			}
+		}
+	}
+	return names
+}
+
+func generatedStepIDSegment(step workflow.Step) string {
+	uses := step.Uses
+	switch {
+	case step.Kind != "uses":
+		return "run"
+	case strings.HasPrefix(uses, "./") || strings.HasPrefix(uses, `.\`):
+		return "self"
+	case strings.HasPrefix(uses, "$/"):
+		return "selfRepository"
+	}
+	segments := strings.Split(uses, "@")
+	if len(segments) != 2 || segments[1] == "" {
+		return "run"
+	}
+	path := strings.FieldsFunc(segments[0], func(r rune) bool { return r == '/' || r == '\\' })
+	if len(path) < 2 {
+		return "run"
+	}
+	return path[0] + "/" + path[1]
 }
 
 func workflowBindings(values map[string]string, location program.Location, field string) []program.Binding {

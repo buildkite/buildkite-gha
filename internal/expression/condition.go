@@ -24,6 +24,7 @@ type ConditionContext struct {
 	GitHub       map[string]any
 	Runner       map[string]string
 	Services     map[string]ServiceContext
+	JobStatus    string
 	Failure      bool
 	Cancelled    bool
 	Unsuccessful bool
@@ -45,6 +46,8 @@ const (
 	// actionLifecycleCondition is evaluated for action pre-if and post-if
 	// metadata. It has its own context policy and no implicit success guard.
 	actionLifecycleCondition
+	// actionStepCondition retains step semantics with composite-only references.
+	actionStepCondition
 )
 
 // validateCallCondition verifies the caller-only runtime surface of a local
@@ -146,7 +149,7 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error
 			}
 			return nil
 		case "hashfiles":
-			if scope != StepCondition && scope != actionLifecycleCondition {
+			if scope != StepCondition && scope != actionStepCondition && scope != actionLifecycleCondition {
 				return fmt.Errorf("condition function %q is unavailable in job conditions", node.Callee)
 			}
 			if len(node.Args) == 0 || len(node.Args) > 255 {
@@ -174,7 +177,7 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 				return nil
 			}
 			switch strings.ToLower(path[0]) {
-			case "actor", "base_ref", "event_name", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow", "workflow_ref", "workflow_sha":
+			case "actor", "actor_id", "base_ref", "event_name", "ref", "ref_name", "ref_type", "repository", "repository_id", "repository_owner", "repository_owner_id", "sha", "workflow", "workflow_ref", "workflow_sha":
 				if len(path) == 1 {
 					return nil
 				}
@@ -252,25 +255,47 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			if strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") {
 				return nil
 			}
-			if (strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "debug")) && scope != JobCondition && scope != CallCondition {
+			if (strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "tool_cache") || strings.EqualFold(path[0], "debug")) && scope != JobCondition && scope != CallCondition {
 				return nil
 			}
 		}
 		if scope == JobCondition {
 			return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, or runner.environment", reference)
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, runner.environment, runner.temp, or runner.debug", reference)
+		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, runner.environment, runner.temp, runner.tool_cache, or runner.debug", reference)
 	case "github":
 		if len(path) >= 1 && strings.EqualFold(path[0], "event") {
 			return nil
 		}
 		if len(path) == 1 {
 			switch strings.ToLower(path[0]) {
-			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow_ref", "workflow_sha":
+			case "actor", "actor_id", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_id", "repository_owner", "repository_owner_id", "sha", "workflow_ref", "workflow_sha":
 				return nil
+			case "event_path":
+				if scope == StepCondition || scope == actionStepCondition || scope == actionLifecycleCondition {
+					return nil
+				}
+			case "run_attempt":
+				if scope != actionLifecycleCondition {
+					return nil
+				}
+			case "server_url":
+				if scope != actionLifecycleCondition {
+					return nil
+				}
 			}
 		}
-		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are actor, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, sha, workflow_ref, and workflow_sha", reference)
+		supported := "actor, actor_id, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_id, repository_owner, repository_owner_id, sha, workflow_ref, and workflow_sha"
+		if scope != actionLifecycleCondition {
+			supported += ", plus run_attempt"
+		}
+		if scope == StepCondition || scope == actionStepCondition || scope == actionLifecycleCondition {
+			supported += ", plus event_path during execution"
+		}
+		if scope != actionLifecycleCondition {
+			supported += ", plus server_url"
+		}
+		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are %s", reference, supported)
 	case "needs":
 		if len(path) == 2 && strings.EqualFold(path[1], "result") || len(path) == 3 && strings.EqualFold(path[1], "outputs") {
 			return nil
@@ -318,10 +343,10 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 		if scope == JobCondition {
 			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
 		}
-		if len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports") || len(path) == 3 && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")) {
+		if isJobStatusReference(root, path) || len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports") || len(path) == 3 && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")) {
 			return nil
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected job.services.<service>.id, job.services.<service>.network, or job.services.<service>.ports[<port>]", reference)
+		return fmt.Errorf("condition reference %q is unsupported; expected job.status, job.services.<service>.id, job.services.<service>.network, or job.services.<service>.ports[<port>]", reference)
 	default:
 		return fmt.Errorf("condition context %q is unsupported", root)
 	}
@@ -620,6 +645,11 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		if isRunnerDebugReference(root, path) {
 			return nil, nil
 		}
+	case isJobStatusReference(root, path):
+		if context.JobStatus == "" {
+			return nil, fmt.Errorf("condition references unavailable job.status")
+		}
+		return context.JobStatus, nil
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return resolveServicePort(context.Services, path[1], path[3], "condition")
 	case len(path) == 3 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")):
@@ -637,7 +667,7 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		if value, ok := lookupRuntimeValue(context.GitHub, path); ok {
 			return value, nil
 		}
-		if context.GitHub == nil {
+		if context.GitHub == nil || len(path) == 1 && requiredGitHubRuntimeValue(path[0]) {
 			break
 		}
 		return nil, nil

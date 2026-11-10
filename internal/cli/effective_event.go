@@ -224,13 +224,11 @@ func pushPathFilterFailureMessage(reason string) string {
 		detail = "This import has no linked GitHub push webhook. Manual builds and explicit event snapshots cannot supply the linked evidence required for push path filters."
 		nextStep = " Use a build triggered by a GitHub push with its original webhook payload."
 	case "new-branch push requires complete pushed commit evidence":
-		detail = "The webhook commit list is empty or does not include the new branch's after commit, so Buildkite cannot determine the changed paths. Changing workflow checkout settings cannot supply this evidence."
+		detail = "The webhook commit list does not include the new branch's after commit, so Buildkite cannot determine the changed paths. Changing workflow checkout settings cannot supply this evidence."
 	case "webhook push requires its commits array":
 		detail = "The linked webhook has no usable commits array. Buildkite needs the original GitHub push commit list; changing workflow checkout settings cannot supply it."
 	case "push before commit is unavailable in the local checkout":
 		detail = "The webhook's before commit is missing from the importer's already non-shallow checkout. Buildkite needs that exact commit to compare the push; fetching more branch history is not a proven fix."
-	case "combined added and deleted files require provider rename conformance data", "renamed and copied files require provider conformance data":
-		detail = "Buildkite cannot yet match GitHub's path-filter behavior for possible renames or copies in this diff. This is a Buildkite compatibility limit, not an invalid workflow."
 	case "push path filters require a complete non-shallow checkout":
 		detail = "Buildkite could not confirm a non-shallow importer checkout. If git rev-parse --is-shallow-repository returns true there, ask the agent administrator to fetch full history before import. Workflow actions/checkout runs too late to fix this."
 		nextStep = " If the checkout is not shallow or the check fails, contact Buildkite support with this build's URL and the diagnostic detail."

@@ -71,8 +71,8 @@ func stageArgs(args []string) (stageOptions, error) {
 // uploadStage runs a later stage of a workflow's upload: it reads the stage
 // record an earlier stage uploaded, expands one needs-derived matrix from its
 // producers' results, and uploads the jobs that compile from it.
-func uploadStage(options stageOptions, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+func uploadStage(ctx context.Context, options stageOptions, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) int {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return uploadStageContext(ctx, options, stdout, stderr, version, clientVersion, agent)
 }
@@ -297,6 +297,13 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	preflight, report, err := r.compile(rows, skipped, runnerOutputs)
 	if err != nil {
 		_ = r.out.write(r.ctx, report)
+		// The report above carries the redacted diagnostics. A processing
+		// finding's raw error can quote values derived from producer outputs or
+		// workflow inputs, so name the failure without repeating it.
+		var finding *compiler.ProcessingFinding
+		if errors.As(err, &finding) {
+			return fail("compile deferred jobs: see the diagnostics above")
+		}
 		return fail("compile deferred jobs: %v", err)
 	}
 	bundle := preflight.Bundle
@@ -371,6 +378,7 @@ func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]b
 	}
 	defer cleanupSource()
 	request := record.compileRequest(r.workflowPath, r.workflowSource, r.eventSource, rows, skipped, runnerOutputs, repositorySource)
+	request.BuildID = r.buildID
 	if record.Continuation.Scheduling {
 		request.RuntimeSchedulingOutputs = map[string]map[string]string{record.Continuation.Descriptor.Job: r.producerOutputs}
 		request.RuntimeSchedulingBuildID = r.buildID

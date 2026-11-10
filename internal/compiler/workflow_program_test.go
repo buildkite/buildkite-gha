@@ -2,8 +2,10 @@ package compiler
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
@@ -114,6 +116,37 @@ func TestWorkflowProgramNormalizesExecutionSteps(t *testing.T) {
 	}
 }
 
+func TestWorkflowProgramNamesStepsLikeGitHub(t *testing.T) {
+	owner, repository := strings.Repeat("o", 39), strings.Repeat("r", 100)
+	steps := []workflow.Step{
+		{Kind: "run", Run: "a"},
+		{Kind: "uses", ID: "metrics", Uses: "lowlighter/metrics@latest"},
+		{Kind: "run", Run: "b"},
+		{Kind: "uses", Uses: "Actions/Checkout@v4"},
+		{Kind: "uses", Uses: "actions/checkout/sub/path@v3"},
+		{Kind: "uses", Uses: "./.github/actions/local"},
+		{Kind: "uses", Uses: "$/.github/actions/local"},
+		{Kind: "uses", Uses: "my.org/tool@v1"},
+		{Kind: "uses", Uses: owner + "/" + repository + "@v1"},
+		{Kind: "uses", Uses: owner + "/" + repository + "/path@v2"},
+		{Kind: "run", ID: "__parallel_4_7_1", Background: true, Run: "c"},
+		{Kind: "wait", ID: "__parallel_4_7_wait", Targets: []string{"__parallel_4_7_1"}},
+		{Kind: "run", ID: "Run", Run: "d"},
+	}
+	var got []string
+	for _, step := range lowerWorkflowProgram(JobInstance{Steps: steps}).Job.Steps {
+		got = append(got, step.GitHubAction)
+	}
+	truncated := ("__" + owner + "_" + repository)[:100]
+	want := []string{
+		"__run", "metrics", "__run_2", "__Actions_Checkout", "__actions_checkout_2", "__self", "__selfRepository",
+		"__my_org_tool", truncated, truncated[:98] + "_2", "__run_3", "", "Run",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("github.action names:\n got: %q\nwant: %q", got, want)
+	}
+}
+
 func TestProgramOwnedSecretInventory(t *testing.T) {
 	instance := JobInstance{
 		secretAuthority: secretAuthority{unrestricted: true},
@@ -128,7 +161,7 @@ func TestProgramOwnedSecretInventory(t *testing.T) {
 			{Kind: "uses", Uses: "owner/action@v1", With: map[string]string{"ignored": "${{ secrets.INSPECTED_INPUT }}"}},
 		},
 	}
-	secrets, mappings, aliases, token, _, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, []string{"ACTION_DEFAULT"}, []string{"ACTION_DEFAULT"}, true, "https://github.com", nil)
+	secrets, mappings, aliases, token, _, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, []string{"ACTION_DEFAULT"}, []string{"ACTION_DEFAULT"}, true, "https://github.com", expression.AbstractValues{})
 	if err != nil {
 		t.Fatal(err)
 	}

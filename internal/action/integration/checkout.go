@@ -64,7 +64,7 @@ type checkoutInputRule struct {
 var checkoutInputRules = map[string]checkoutInputRule{
 	"repository": {strings.EqualFold},
 	"ref": {func(value, _ string) bool {
-		return value == "" || git.ValidObjectID(value) || validCheckoutBranch(value)
+		return value == "" || git.ValidObjectID(value) || validCheckoutNamedRef(value)
 	}},
 	"fetch-depth": {func(value, _ string) bool {
 		depth, err := strconv.ParseUint(value, 10, 31)
@@ -91,8 +91,8 @@ var checkoutInputRules = map[string]checkoutInputRule{
 	"fetch-tags":                {func(value, _ string) bool { return actionBoolean(value) }},
 	"sparse-checkout":           {func(value, _ string) bool { return validSparseCheckout(value) }},
 	"sparse-checkout-cone-mode": {func(value, _ string) bool { return actionBoolean(value) }},
-	"github-server-url": {func(value, _ string) bool {
-		return value == "" || value == "https://github.com"
+	"github-server-url": {func(value, serverURL string) bool {
+		return value == "" || value == serverURL
 	}},
 	"filter":        {func(value, _ string) bool { return validCheckoutFilter(value) }},
 	"show-progress": {func(value, _ string) bool { return actionBoolean(value) }},
@@ -174,7 +174,7 @@ func sortedCheckoutCommits() []string {
 
 // ValidateCheckoutInputs enforces the release-specific input contract
 // implemented by the tokenless event-repository checkout adapter.
-func ValidateCheckoutInputs(commit string, inputs map[string]string, repository, sha string) error {
+func ValidateCheckoutInputs(commit string, inputs map[string]string, repository, serverURL string) error {
 	contract, exact := checkoutContractForCommit(commit)
 	if !exact && !git.ValidObjectID(commit) {
 		return versionError("actions/checkout", "native adapter", commit, supportedCheckoutContracts())
@@ -195,16 +195,31 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 		if !ok {
 			return fmt.Errorf("explicit input %q value is unsupported", name)
 		}
-		if !rule.valid(value, repository) {
+		identity := repository
+		if normalized == "github-server-url" {
+			identity = serverURL
+		}
+		if !rule.valid(value, identity) {
 			return fmt.Errorf("explicit input %q value is unsupported", name)
 		}
 	}
 	return nil
 }
 
-func validCheckoutBranch(value string) bool {
+func validCheckoutNamedRef(value string) bool {
 	if after, ok := strings.CutPrefix(value, "refs/heads/"); ok {
 		value = after
+	} else if after, ok := strings.CutPrefix(value, "refs/pull/"); ok {
+		number, kind, ok := strings.Cut(after, "/")
+		if !ok || number == "" || number[0] == '0' || (kind != "head" && kind != "merge") {
+			return false
+		}
+		for _, digit := range number {
+			if digit < '0' || digit > '9' {
+				return false
+			}
+		}
+		return len(value) <= 255
 	} else if strings.HasPrefix(value, "refs/") {
 		return false
 	}

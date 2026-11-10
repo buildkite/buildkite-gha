@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -107,8 +108,8 @@ func jobGraphExpansionReport(expanded jobGraphExpansionResult, warnings []Warnin
 
 // expandJobGraph resolves reusable workflow calls, then turns the parsed
 // logical job graph into deterministic JobInstance values and report data.
-func expandJobGraph(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (jobGraphExpansionResult, error) {
-	resolved, warnings, scan, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource, options.WorkflowSource)
+func expandJobGraph(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options, sourceServerURL string) (jobGraphExpansionResult, error) {
+	resolved, warnings, scan, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource, options.WorkflowSource, sourceServerURL)
 	if err != nil {
 		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
 		for _, job := range parsed.Jobs {
@@ -216,7 +217,15 @@ func (e *jobGraphExpansion) expandMatrices() {
 	e.matricesByJob = make(map[string][]map[string]any, len(e.accepted))
 	for _, id := range e.order {
 		sourced := e.accepted[e.acceptedIndex[id]]
-		job := sourced.Job
+		job, err := resolveJobMaxParallel(sourced.Job, e.frameContext(sourced))
+		if err != nil {
+			position := sourced.MaxParallelExpression.Span.Start
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", sourced.path, position.Line, position.Column, id, "", "", 0, locatedJobError(sourced.path, sourced.Job, position.Line, position.Column, fmt.Sprintf("resolve strategy.max-parallel: %v", err))))
+			e.failedMatrices[id], e.failedJobs[id] = true, true
+			continue
+		}
+		sourced.Job = job
+		e.accepted[e.acceptedIndex[id]] = sourced
 		continuation := e.deferredContinuation(sourced)
 		descriptor, deferred, err := describeRuntimeMatrix(job, sourced.path, sourced.digest, sourced.needBindings, e.topologyJobs, e.matricesByJob)
 		scheduling, schedulingErr := e.validateRuntimeScheduling(sourced, descriptor, deferred)
@@ -234,7 +243,8 @@ func (e *jobGraphExpansion) expandMatrices() {
 				err = errors.New("job-output-derived runs-on cannot depend on a deferred upload")
 			}
 			if err == nil && (e.workflowConcurrency || len(sourced.concurrencyGates) != 0) {
-				err = errors.New("workflow concurrency cannot be combined with job-output-derived runs-on")
+				e.rejectRuntimeRunsOnConcurrency(sourced)
+				continue
 			}
 			if err != nil {
 				e.rejectRuntimeRunsOn(sourced, err)
@@ -261,9 +271,7 @@ func (e *jobGraphExpansion) expandMatrices() {
 			switch {
 			case err != nil:
 			case len(sourced.concurrencyGates) != 0:
-				err = errors.New("reusable-workflow concurrency cannot be combined with a needs-derived matrix")
-			case e.workflowConcurrency:
-				err = errors.New("workflow concurrency cannot be combined with a needs-derived matrix")
+				err = deferredConcurrencyError("reusable-workflow", "a needs-derived matrix", "matrix")
 			}
 			if err != nil {
 				e.rejectRuntimeMatrix(sourced, err)
@@ -325,22 +333,23 @@ func (e *jobGraphExpansion) expandMatrices() {
 			if e.skippedPrerequisite(id) {
 				e.skip(id)
 			}
-			matrixContext := e.context
-			matrixContext.Inputs = sourced.inputs.values
-			matrixContext.InputsComplete = len(sourced.inputs.deferred) == 0
-			matrixContext.Matrix = nil
-			matrixContext.Strategy = nil
-			matrices, err = expandMatrix(sourced.path, job, matrixContext)
+			matrices, err = expandMatrix(sourced.path, job, e.frameContext(sourced))
 			if err == nil && continuation >= 0 {
 				e.deferJob(sourced, continuation, matrices)
 			}
 		}
 		if err != nil {
 			line, column := matrixErrorPosition(job, err)
+			message, detail := "matrix could not be expanded or validated", ""
+			if sourced.matrixDetailUnsafe {
+				message += inputValueHiddenNote
+			} else {
+				detail = matrixErrorDetail(err)
+			}
 			e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 				Path: sourced.path, Line: line, Column: column, Job: job.ID,
-				Message: "matrix could not be expanded or validated", Err: err,
+				Message: message, Detail: detail, Err: err,
 			})
 			e.failedMatrices[id] = true
 			e.failedJobs[id] = true
@@ -370,6 +379,17 @@ func (e *jobGraphExpansion) skip(id string) {
 	e.result.skippedJobs[id] = true
 }
 
+// frameContext scopes compile-time evaluation to the workflow that declared
+// the job: its own inputs, never the root workflow's.
+func (e *jobGraphExpansion) frameContext(sourced sourcedJob) expression.CompileContext {
+	context := e.context
+	context.Inputs = sourced.inputs.values
+	context.InputsComplete = len(sourced.inputs.deferred) == 0
+	context.Matrix = nil
+	context.Strategy = nil
+	return context
+}
+
 // deferJob hands a job to the continuation at index, which compiles it once
 // the rows of its roots are known. matrices are the instances the job's
 // static matrix expands to; a root whose rows the producer supplies has none.
@@ -378,7 +398,7 @@ func (e *jobGraphExpansion) deferJob(sourced sourcedJob, index int, matrices []m
 	e.deferred[id] = index
 	deferred := &e.result.continuations[index]
 	deferred.Jobs = append(deferred.Jobs, id)
-	deferred.Labels[id] = instanceLabel(job, nil, e.context)
+	deferred.Labels[id] = instanceLabel(job, nil, e.frameContext(sourced))
 	deferred.Sources[id] = deferredJobSource(sourced)
 	e.recordDeferredActions(deferred.Descriptor.Job, sourced)
 	for _, matrix := range matrices {
@@ -391,7 +411,7 @@ func (e *jobGraphExpansion) deferJob(sourced sourcedJob, index int, matrices []m
 			deferred.Instances = make(map[string][]RuntimeMatrixInstance)
 		}
 		deferred.Instances[id] = append(deferred.Instances[id], RuntimeMatrixInstance{
-			Key: key, Label: instanceLabel(job, matrix, e.context), CheckLabel: instanceCheckLabel(JobInstance{LogicalJobID: id, Matrix: matrix}),
+			Key: key, Label: instanceLabel(job, matrix, e.frameContext(sourced)), CheckLabel: instanceCheckLabel(JobInstance{LogicalJobID: id, Matrix: matrix}),
 		})
 	}
 }
@@ -539,16 +559,21 @@ func (e *jobGraphExpansion) mergeContinuations() {
 }
 
 // rejectRuntimeMatrix records why a needs-derived matrix, or a job that
-// depends on one, cannot be compiled. The reason quotes only job and output
-// identifiers from the workflow, never event data, so it can travel in Detail.
+// depends on one, cannot be compiled. The reason quotes job and output
+// identifiers from the workflow source, so it travels in Detail unless the
+// matrix reads inputs, whose values the reason could quote.
 func (e *jobGraphExpansion) rejectRuntimeMatrix(sourced sourcedJob, err error) {
 	job := sourced.Job
 	line, column := matrixErrorPosition(job, err)
+	message, detail := runtimeMatrixDeferredMessage, err.Error()
+	if sourced.matrixDetailUnsafe {
+		message, detail = runtimeMatrixDeferredMessage+inputValueHiddenNote, ""
+	}
 	e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 		Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 		Blocker: "expression",
 		Path:    sourced.path, Line: line, Column: column, Job: job.ID,
-		Message: runtimeMatrixDeferredMessage, Detail: err.Error(),
+		Message: message, Detail: detail,
 		Err: locatedJobError(sourced.path, job, line, column, err.Error()),
 	})
 	e.failedMatrices[job.ID] = true
@@ -740,7 +765,7 @@ func (e *jobGraphExpansion) expandInstances() {
 
 func (e *jobGraphExpansion) expandJobInstances(id string) {
 	sourced := e.accepted[e.acceptedIndex[id]]
-	job, schedulingGroup, schedulingErr := resolveRuntimeScheduling(sourced.Job, e.options.RuntimeSchedulingOutputs[id])
+	job, schedulingGroup, schedulingErr := resolveRuntimeScheduling(sourced, e.options.RuntimeSchedulingOutputs[id])
 	if schedulingErr != nil {
 		e.rejectRuntimeMatrix(sourced, schedulingErr)
 		return
@@ -750,9 +775,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 	jobFailed := e.failedJobs[id]
 	matrices := e.matricesByJob[id]
 	concurrencyGroups := make(map[string]struct{}, len(matrices))
-	jobContext := e.context
-	jobContext.Inputs = sourced.inputs.values
-	jobContext.InputsComplete = len(sourced.inputs.deferred) == 0
+	jobContext := e.frameContext(sourced)
 	for matrixIndex, matrix := range matrices {
 		strategy := matrixStrategy(job, matrixIndex, len(matrices))
 		instanceContext := jobContext
@@ -761,6 +784,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		// Conditions keep vars residual; see resolveCompileTimeConditions.
 		conditionContext := jobContext
 		conditionContext.Vars = nil
+		conditionContext.Inputs, conditionContext.InputsComplete = nil, false
 		compileConditionErr := supportedCompileTimeConditions(jobPath, job, conditionContext)
 		if sourced.blockerDetailUnsafe {
 			compileConditionErr = suppressBlockerDetail(compileConditionErr)
@@ -790,11 +814,16 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		controlContext.Vars = nil
 		resolvedContinueOnError, continueOnErrorErr := resolveJobContinueOnError(instanceJob, controlContext)
 		instanceJob = resolvedContinueOnError
+		instanceJob, timeoutErr := resolveJobTimeout(instanceJob, instanceContext)
 		candidate := newJobCandidate(sourced, instanceJob, matrix, key, resolvedServices)
 		candidate.Strategy = strategy
 
 		valid := true
-		if containerErr != nil {
+		if timeoutErr != nil {
+			position := job.TimeoutMinutesExpression.Span.Start
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, key, "", 0, locatedJobError(jobPath, job, position.Line, position.Column, fmt.Sprintf("resolve job timeout-minutes: %v", timeoutErr))))
+			valid = false
+		} else if containerErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve job container: %v", containerErr))))
 			valid = false
 		} else if serviceErr != nil {
@@ -815,13 +844,19 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			valid = false
 		}
 		runnerContext := instanceContext
-		if supplied, ok := e.runsOnContexts[id]; ok {
-			runnerContext = supplied
+		_, outputBacked := e.runsOnContexts[id]
+		if outputBacked {
+			runnerContext = e.runsOnContexts[id]
 			runnerContext.Strategy = strategy
 		}
 		labels, runsOnErr := resolveRunsOn(job, runnerContext, matrix)
 		if runsOnErr != nil {
-			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, key, "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, runsOnErr.Error())))
+			unsafe := sourced
+			unsafe.Job, unsafe.path = job, jobPath
+			// An evaluation error can quote the producer output the runs-on
+			// expression read, as well as input values.
+			unsafe.runsOnDetailUnsafe = unsafe.runsOnDetailUnsafe || outputBacked
+			e.diagnostics = append(e.diagnostics, runsOnFinding(unsafe, key, runsOnErr))
 			valid = false
 		}
 		candidate.RunsOn = labels
@@ -834,7 +869,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 				if sourced.blockerDetailUnsafe {
 					reportableLabels = nil
 				}
-				message, detail := runnerRejectionDiagnostic(err, reportableLabels, e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
+				message, detail, setupURL := runnerRejectionDiagnostic(err, reportableLabels, e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
 				blocker, blockerDetail := runnerRejectionBlocker(err, reportableLabels)
 				reportRunnerLabelDetail := ""
 				if len(reportableLabels) == 1 {
@@ -845,7 +880,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 					Blocker: blocker, BlockerDetail: blockerDetail,
 					ReportRunnerLabelDetail: reportRunnerLabelDetail,
 					Path:                    jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
-					Job: job.ID, Instance: key, Message: message, Detail: detail,
+					Job: job.ID, Instance: key, Message: message, Detail: detail, SetupURL: setupURL,
 					Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
 				})
 				valid = false
@@ -865,7 +900,8 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, concurrencyErr))
 			valid = false
 		}
-		if cancellationErr := rejectJobCancellation(jobPath, job); cancellationErr != nil {
+		cancelInProgress, cancellationErr := resolveCancellation(jobPath, job.ID, job.Concurrency, instanceContext)
+		if cancellationErr != nil {
 			position := job.Concurrency.CancelInProgressPosition
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, key, "", 0, cancellationErr))
 			valid = false
@@ -891,6 +927,9 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		instance.ToolCache = target.ToolCache
 		instance.Cache = target.Cache
 		instance.ConcurrencyGroup = concurrencyGroup
+		guardKnown, guardValue := staticCallGuardValue(sourced.callGuards)
+		// Buildkite enforces concurrency before run-job can skip this job.
+		instance.CancelInProgress = cancelInProgress && instanceJob.If != "false" && (!guardKnown || guardValue)
 		if e.bindInstanceDependencies(sourced, job, key, &instance) {
 			jobFailed = true
 			continue
@@ -1052,7 +1091,7 @@ func resolveDeferredInputBindings(inputs map[string]deferredInput, byLogicalID m
 		if err != nil {
 			return nil, nil, fmt.Errorf("input %q: %w", name, err)
 		}
-		resolved[name] = DeferredInput{Template: input.template, Type: input.inputType, NeedGroups: groups, NeedOutputs: outputs}
+		resolved[name] = DeferredInput{Template: input.template, Type: input.inputType, Inputs: maps.Clone(input.inputs), NeedGroups: groups, NeedOutputs: outputs}
 		dependencies = append(dependencies, inputDependencies...)
 	}
 	return resolved, dependencies, nil

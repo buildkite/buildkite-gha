@@ -34,13 +34,14 @@ func repositoryProviderGitCredentialsEnabled(getenv func(string) string) bool {
 	return getenv(repositoryProviderGitCredentialsEnvironment) == "true" || getenv(legacyGitHubAppGitCredentialsEnvironment) == "true"
 }
 
-func runJob(args []string, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) int {
+func runJob(args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runJobContext(ctx, args, stdout, stderr, version, clientVersion, agent)
+	return runJobContext(ctx, args, stdout, stderr, clientVersion, agent)
 }
 
-func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) (code int) {
+func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) (code int) {
+	ctx, _ = actionsource.WithSourceStats(ctx)
 	started := time.Now()
 	var result gharuntime.JobResult
 	details := &commandTelemetryDetails{}
@@ -93,10 +94,6 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	job, err := plan.Decode(source)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
-		return 1
-	}
-	if job.Compiler.Version != version {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: plan compiler version %q does not match runtime version %q\n", job.Compiler.Version, version)
 		return 1
 	}
 	runtimeDigest, err := executableDigest()
@@ -187,6 +184,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			PipelineSlug:     os.Getenv("BUILDKITE_PIPELINE_SLUG"),
 			BuildURL:         os.Getenv("BUILDKITE_BUILD_URL"),
 			ClientVersion:    clientVersion,
+			ServerURL:        job.Event.ServerURL,
 		})
 		if tokenErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure GitHub token service: %v\n", tokenErr)
@@ -237,6 +235,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		ToolCache:       runnerToolCache,
 		Docker:          os.Getenv("BUILDKITE_GHA_DOCKER"),
 		DockerBuildLoad: options.dockerBuildLoad,
+		RepairHostname:  options.repairHostname,
 		Git:             os.Getenv("BUILDKITE_GHA_GIT"),
 		Secrets: gharuntime.AgentSecrets{
 			Executable: os.Getenv("BUILDKITE_GHA_AGENT"),
@@ -284,8 +283,9 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}()
 	}
 	var runErr error
+	var terminalNeeds []transport.TerminalNeedResult
 	if len(job.NeedSources) != 0 {
-		job.Needs, runErr = gharuntime.ResolveNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources, job.NeedOutputs)
+		job.Needs, terminalNeeds, runErr = gharuntime.ResolveRuntimeNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources, job.NeedOutputs)
 		if runErr != nil {
 			details.setFailurePhase(telemetry.FailurePhaseSourceResolution)
 			runErr = fmt.Errorf("hydrate prerequisite results: %w", runErr)
@@ -301,11 +301,24 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 	}
 	if runErr == nil && len(job.CallGuards) != 0 {
-		job.CallGuards, runErr = gharuntime.ResolveCallGuards(ctx, agent, artifactRoot, producer.BuildID, job.CallGuards)
+		var guardResults []transport.TerminalNeedResult
+		job.CallGuards, guardResults, runErr = gharuntime.ResolveCallGuards(ctx, agent, artifactRoot, producer.BuildID, job.CallGuards)
+		terminalNeeds = append(terminalNeeds, guardResults...)
 		if runErr != nil {
 			details.setFailurePhase(telemetry.FailurePhaseSourceResolution)
 			runErr = fmt.Errorf("hydrate reusable-workflow call guards: %w", runErr)
 		}
+	}
+	if len(terminalNeeds) != 0 {
+		_, _ = fmt.Fprintln(stdout, "^^^ +++")
+	}
+	warned := map[transport.ResultSource]bool{}
+	for _, result := range terminalNeeds {
+		if warned[result.Source] {
+			continue
+		}
+		warned[result.Source] = true
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: prerequisite step %q has no result artifact; using Buildkite state %q (outcome %q) as %q with outputs and artifacts unavailable\n", result.Source.StepKey, result.State, result.Outcome, result.Result)
 	}
 	if runErr == nil {
 		result, runErr = runner.RunJob(ctx, job, "")
@@ -313,6 +326,10 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		if runErr != nil {
 			details.setFailurePhase(telemetry.FailurePhaseExecution)
 			details.setFailureCode(runtimeFailureCode(runErr))
+			if details.failureCode == telemetry.FailureCodeServiceReadiness {
+				// Runtime masks the complete evidence before telemetry bounds it.
+				details.failureMessage = runErr.Error()
+			}
 			if status, ok := gharuntime.AgentAPIHTTPStatus(runErr); ok {
 				details.setAgentAPIHTTPStatus(status)
 			}
@@ -344,6 +361,9 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintln(stdout, "~~~ :package: Publish GitHub Actions result")
 		publication, err := publishTerminalResult(ctx, agent, artifactRoot, job, planDigest, producer, result)
 		secretAnnotationError := publishSecretResolutionAnnotation(ctx, agent, producer.JobID, runErr)
+		if annotationErr := publishWorkflowTokenAnnotation(ctx, agent, producer.JobID, runErr); annotationErr != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: workflow token annotation: %v\n", annotationErr)
+		}
 		if publication.MetadataMirrorError != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: result metadata mirror: %v\n", publication.MetadataMirrorError)
 		}
@@ -406,6 +426,8 @@ func runtimeFailureCode(err error) telemetry.FailureCode {
 		return telemetry.FailureCodeOIDCToken
 	case gharuntime.FailureClassCacheCredential:
 		return telemetry.FailureCodeCacheCredential
+	case gharuntime.FailureClassServiceReadiness:
+		return telemetry.FailureCodeServiceReadiness
 	default:
 		return ""
 	}
@@ -429,7 +451,7 @@ func hasGitHubActionLocks(locks []plan.ActionLock) bool {
 func cacheServiceRequired(locks []plan.ActionLock) (bool, error) {
 	required := false
 	for _, lock := range locks {
-		identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
+		identity := actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path}
 		descriptor, _ := actionintegration.Lookup(identity)
 		if descriptor.Service == actionintegration.ServiceCache {
 			required = true
@@ -539,6 +561,21 @@ func publishTerminalResult(parent context.Context, agent transport.Agent, root s
 	return gharuntime.PublishJobResult(ctx, agent, root, workflow, job.Target.StepKey, planDigest, producer, result)
 }
 
+func publishWorkflowTokenAnnotation(parent context.Context, agent transport.Agent, jobID string, runErr error) error {
+	message := gharuntime.WorkflowTokenFailureMessage(runErr)
+	if message == "" {
+		return nil
+	}
+	paragraphs := strings.Split(message, "\n")
+	for i, paragraph := range paragraphs {
+		paragraphs[i] = annotationHTML(paragraph)
+	}
+	body := "#### GitHub workflow token unavailable\n\n" + strings.Join(paragraphs, "\n\n")
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), resultPublicationTimeout)
+	defer cancel()
+	return agent.AnnotateJob(ctx, jobID, "github-workflow-token", "error", body)
+}
+
 func publishSecretResolutionAnnotation(parent context.Context, agent transport.Agent, jobID string, runErr error) error {
 	var secretError *gharuntime.SecretResolutionError
 	if !errors.As(runErr, &secretError) {
@@ -567,6 +604,7 @@ type runJobOptions struct {
 	resultPath       string
 	hostedToolCache  bool
 	dockerBuildLoad  bool
+	repairHostname   bool
 }
 
 func runJobArgs(args []string) (runJobOptions, error) {
@@ -574,15 +612,18 @@ func runJobArgs(args []string) (runJobOptions, error) {
 	seen := map[string]bool{}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--hosted-tool-cache", "--docker-build-load":
+		case "--hosted-tool-cache", "--docker-build-load", "--repair-hostname":
 			if seen[args[i]] {
 				return runJobOptions{}, fmt.Errorf("%s may only be specified once", args[i])
 			}
 			seen[args[i]] = true
-			if args[i] == "--hosted-tool-cache" {
+			switch args[i] {
+			case "--hosted-tool-cache":
 				options.hostedToolCache = true
-			} else {
+			case "--docker-build-load":
 				options.dockerBuildLoad = true
+			case "--repair-hostname":
+				options.repairHostname = true
 			}
 		case "--plan", "--plan-digest", "--plan-producer", "--artifact-producer", "--result":
 			option := args[i]

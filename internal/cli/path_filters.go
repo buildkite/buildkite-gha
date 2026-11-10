@@ -116,7 +116,7 @@ func pushChangedPaths(event compiler.Event, workflows []workflowInput, checkoutP
 	if err != nil {
 		return nil, nil, fmt.Errorf("push path filters require the local origin repository")
 	}
-	provider, owner, name, _, err := parseBuildkiteRepository(strings.TrimSpace(string(remoteURLBytes)))
+	provider, owner, name, _, err := parseBuildkiteRepository(strings.TrimSpace(string(remoteURLBytes)), event.ServerURL)
 	if err != nil || provider != event.Provider || owner != event.Repository.Owner || name != event.Repository.Name {
 		return nil, nil, fmt.Errorf("local origin repository does not match the Buildkite build")
 	}
@@ -189,6 +189,11 @@ func pushChangedPaths(event compiler.Event, workflows []workflowInput, checkoutP
 		}
 	}
 
+	for i := range workflows {
+		if workflows[i].PathFiltersIdentityVerified {
+			workflows[i].PathFiltersComparisonBase = diffBase
+		}
+	}
 	output, err := boundedCommandOutput(gitCommand(root, "diff", "--name-status", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", diffBase, after), maxGitChangedPathBytes)
 	if err != nil {
 		return nil, workflowErrors, fmt.Errorf("list push changed paths: %w", err)
@@ -226,7 +231,12 @@ func pushWebhookCommits(payload map[string]any) ([]string, error) {
 }
 
 func newBranchPushDiffBase(root, after string, commits []string) (string, error) {
-	if len(commits) == 0 || !slices.Contains(commits, after) {
+	// Creating a ref at an already-published commit pushes no commits. Compare
+	// the verified head to itself, not to its parent or head_commit's file list.
+	if len(commits) == 0 {
+		return after, nil
+	}
+	if !slices.Contains(commits, after) {
 		return "", fmt.Errorf("new-branch push requires complete pushed commit evidence")
 	}
 	pushed := make(map[string]bool, len(commits))
@@ -394,6 +404,11 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 			return nil, pathEvaluationErrors(workflows, event.Event, workflowErrors, "pull request merge base must be an ancestor of both base and head commits"), nil
 		}
 	}
+	for i := range workflows {
+		if workflows[i].PathFiltersIdentityVerified {
+			workflows[i].PathFiltersComparisonBase = mergeBase
+		}
+	}
 	output, err := boundedCommandOutput(gitCommand(root, "diff", "--name-status", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", mergeBase, headSHA), maxGitChangedPathBytes)
 	if err != nil {
 		return nil, pathEvaluationErrors(workflows, event.Event, workflowErrors, fmt.Sprintf("list pull request changed paths: %v", err)), nil
@@ -535,7 +550,6 @@ func parseChangedPaths(output []byte) ([]string, error) {
 	}
 	fields = fields[:len(fields)-1]
 	paths := make([]string, 0, len(fields)/2)
-	added, deleted := false, false
 	for len(fields) != 0 {
 		if len(fields) < 2 {
 			return nil, fmt.Errorf("git changed-path output is incomplete")
@@ -546,25 +560,15 @@ func parseChangedPaths(output []byte) ([]string, error) {
 			return nil, fmt.Errorf("git returned an invalid changed path")
 		}
 		switch status[0] {
-		case 'A':
-			added = true
+		// --no-renames exposes both rename paths and only the new path of a copy.
+		case 'A', 'D', 'M', 'T', 'U', 'X', 'B':
 			paths = append(paths, path)
-		case 'D':
-			deleted = true
-			paths = append(paths, path)
-		case 'M', 'T', 'U', 'X', 'B':
-			paths = append(paths, path)
-		case 'R', 'C':
-			return nil, fmt.Errorf("renamed and copied files require provider conformance data")
 		default:
 			return nil, fmt.Errorf("git returned unsupported changed-path status %q", status)
 		}
 		if len(paths) > maxLocallyEvaluatedPathFilterFiles {
 			return nil, fmt.Errorf("changed paths exceed the importer's %d-file local evaluation bound", maxLocallyEvaluatedPathFilterFiles)
 		}
-	}
-	if added && deleted {
-		return nil, fmt.Errorf("combined added and deleted files require provider rename conformance data")
 	}
 	return paths, nil
 }

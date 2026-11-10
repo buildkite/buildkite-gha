@@ -49,7 +49,7 @@ func resolveSourcedJobsForTest(t *testing.T, path string) ([]sourcedJob, *workfl
 	}
 	context := compileContext(event, nil, path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
-	resolved, _, _, err := resolveReusableWorkflows(t.Context(), path, source, parsed, context, defaultOptions().RepositorySource, nil)
+	resolved, _, _, err := resolveReusableWorkflows(t.Context(), path, source, parsed, context, defaultOptions().RepositorySource, nil, event.ServerURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func expandJobGraphForTest(t *testing.T, path string) (jobGraphExpansionResult, 
 	event.Trust = options.EventTrust
 	context := compileContext(event, nil, path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
-	return expandJobGraph(t.Context(), path, source, parsed, context, options)
+	return expandJobGraph(t.Context(), path, source, parsed, context, options, event.ServerURL)
 }
 
 func candidateLogicalJobs(result jobGraphExpansionResult) []string {

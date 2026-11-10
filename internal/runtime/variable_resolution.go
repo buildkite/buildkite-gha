@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/agentapi"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 const (
@@ -58,7 +59,7 @@ type AgentVariableResolverConfig struct {
 // AgentVariableResolver resolves repository and organization variables
 // through the job-scoped Agent API endpoint github-actions/variables. The
 // backend performs the GitHub reads with its own credentials, restricted to
-// the pipeline's configured GitHub.com repository.
+// the pipeline's configured GitHub repository.
 type AgentVariableResolver struct {
 	resolveURL string
 	agent      *agentapi.Client
@@ -87,16 +88,20 @@ func NewAgentVariableResolver(config AgentVariableResolverConfig) (*AgentVariabl
 // when the Agent API answers 404; every other failure carries the backend's
 // status, and its message or Retry-After delay when present. Error messages
 // name at most a variable, never a value.
-func (c *AgentVariableResolver) ResolveVariables(ctx context.Context, repository string) (VariablesSnapshot, error) {
+func (c *AgentVariableResolver) ResolveVariables(ctx context.Context, serverURL, repository string) (VariablesSnapshot, error) {
 	if c == nil {
 		return VariablesSnapshot{}, fmt.Errorf("variable resolver is not configured")
+	}
+	serverURL = plan.EventServerURL("github", serverURL)
+	if err := plan.ValidateGitHubServerURL(serverURL); err != nil {
+		return VariablesSnapshot{}, err
 	}
 	if !validCheckoutRepository(repository) {
 		return VariablesSnapshot{}, fmt.Errorf("variable resolution requires a valid event repository")
 	}
 	body, err := json.Marshal(struct {
 		RepositoryURL string `json:"repo_url"`
-	}{RepositoryURL: "https://github.com/" + repository})
+	}{RepositoryURL: serverURL + "/" + repository})
 	if err != nil {
 		return VariablesSnapshot{}, fmt.Errorf("encode variable resolution request: %w", err)
 	}

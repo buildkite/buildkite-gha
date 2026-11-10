@@ -257,11 +257,16 @@ func testCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T, using, 
 		wantMode = "workflow-env-preserved"
 	}
 	node := requireNode24(t)
-	toolEnv, err := isolateCacheActionEnvironment(nil)
+	toolEnv, cleanupTools, err := isolateCacheActionEnvironment(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(cleanupTools)
 	cacheActionToolPath := toolEnv["PATH"]
+	if paths := filepath.SplitList(cacheActionToolPath); runtime.GOOS == "windows" && len(paths) == 4 {
+		paths[2] = "<verified-zstd>"
+		cacheActionToolPath = strings.Join(paths, ";")
+	}
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/cache.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: cache lifecycle\n")
@@ -271,6 +276,7 @@ func testCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T, using, 
 	for _, phase := range []string{"pre", "main", "post"} {
 		program := fmt.Sprintf(`import fs from "node:fs";
 import {spawnSync} from "node:child_process";
+import {createHash} from "node:crypto";
 if (process.versions.node.split(".")[0] !== "24") throw new Error("actions/cache did not use managed Node 24");
 const required = ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_URL"];
 for (const name of required) if (!process.env[name]) throw new Error("missing " + name);
@@ -287,7 +293,18 @@ for (const name of [
 ]) if (process.env[name]) throw new Error(name + " leaked");
 const tar = spawnSync("tar", ["--version"], {encoding: "utf8"});
 if (tar.status !== 0) throw new Error("trusted tar failed: " + tar.stderr);
-if (process.env.PATH !== %q) throw new Error("unsafe PATH: " + process.env.PATH);
+const delimiter = process.platform === "win32" ? ";" : ":";
+const paths = process.env.PATH.split(delimiter);
+if (process.platform === "win32" && paths.length === 4) {
+  const directory = paths[2];
+  if (!directory.match(/[/\\]buildkite-gha-cache-tools-[0-9]+$/)) throw new Error("unsafe extra tool directory");
+  if (fs.readdirSync(directory).join() !== "zstd.exe") throw new Error("unexpected staged tools");
+  const digest = createHash("sha256").update(fs.readFileSync(directory + "/zstd.exe")).digest("hex");
+  if (digest !== "8076aae03feac7c66b319579e82172eed168deed2a3f25e5e2d3c60f55e84111") throw new Error("untrusted staged zstd");
+  fs.appendFileSync(process.env.LIFECYCLE_LOG + ".tools", directory + "\n");
+  paths[2] = "<verified-zstd>";
+}
+if (paths.join(delimiter) !== %q) throw new Error("unsafe PATH: " + process.env.PATH);
 fs.appendFileSync(process.env.LIFECYCLE_LOG, "%s|" + process.env.ACTIONS_RUNTIME_TOKEN + "|" + process.env.ACTIONS_RESULTS_URL + "|" + process.env.ACTIONS_CACHE_SERVICE_V2 + "\n");
 console.log("credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 `, wantMode, cacheURLCompatibility, githubServerURLOverride, cacheActionToolPath, phase)
@@ -301,10 +318,10 @@ for (const name of ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_
 for (const name of ["ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL", "BUILDKITE_AGENT_ACCESS_TOKEN"])
   if (process.env[name]) throw new Error(name + " leaked");
 if (process.env.GITHUB_SERVER_URL !== "https://origin.cursor.com") throw new Error("ordinary action server URL changed");
-if (process.env.PATH === %q) throw new Error("ordinary action PATH was isolated");
+if (process.env.PATH.replace(/;[^;]*[/\\]buildkite-gha-cache-tools-[0-9]+(?=;)/, "") === %q) throw new Error("ordinary action PATH was isolated");
 fs.appendFileSync(process.env.LIFECYCLE_LOG, "ordinary-%s|" + process.env.ACTIONS_RUNTIME_TOKEN + "|" + process.env.ACTIONS_RESULTS_URL + "|" + process.env.ACTIONS_CACHE_SERVICE_V2 + "\n");
 console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
-`, cacheActionToolPath, phase))
+`, strings.ReplaceAll(cacheActionToolPath, ";<verified-zstd>", ""), phase))
 	}
 	digest, err := source.DigestTree(remote)
 	if err != nil {
@@ -380,6 +397,17 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+	if strings.Contains(cacheActionToolPath, "<verified-zstd>") {
+		directories, err := os.ReadFile(lifecycle + ".tools")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for directory := range strings.SplitSeq(strings.TrimSpace(string(directories)), "\n") {
+			if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("cache phase left staged tools behind: %q, %v", directory, err)
+			}
+		}
 	}
 	contents, err := os.ReadFile(lifecycle)
 	if err != nil {
@@ -472,10 +500,11 @@ func TestIsolateCacheActionEnvironmentLeavesGitHubServerURLForSharedOverride(t *
 		"BUILDKITE_AGENT_ACCESS_TOKEN": "secret",
 		"BUILDKITE_JOB_ID":             "job-id",
 	}
-	isolated, err := isolateCacheActionEnvironment(env)
+	isolated, cleanup, err := isolateCacheActionEnvironment(env)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(cleanup)
 	if got := isolated["GITHUB_SERVER_URL"]; got != "https://origin.cursor.com" {
 		t.Fatalf("GITHUB_SERVER_URL = %q, want unchanged https://origin.cursor.com", got)
 	}
@@ -493,10 +522,11 @@ func TestIsolateCacheActionEnvironmentLeavesRealGitHubServerURLUnchanged(t *test
 	env := map[string]string{
 		"GITHUB_SERVER_URL": "https://github.com",
 	}
-	isolated, err := isolateCacheActionEnvironment(env)
+	isolated, cleanup, err := isolateCacheActionEnvironment(env)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(cleanup)
 	if got := isolated["GITHUB_SERVER_URL"]; got != "https://github.com" {
 		t.Fatalf("GITHUB_SERVER_URL = %q, want unchanged https://github.com", got)
 	}

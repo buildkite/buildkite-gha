@@ -44,8 +44,8 @@ func (e *jobGraphExpansion) validateRuntimeScheduling(sourced sourcedJob, descri
 		}
 		return false, errors.New(message)
 	}
-	if err := rejectJobCancellation(sourced.path, sourced.Job); err != nil {
-		return false, err
+	if e.workflowConcurrency {
+		return false, errors.New("workflow concurrency cannot be combined with needs-derived scheduling")
 	}
 	for _, job := range e.accepted {
 		if len(job.concurrencyGates) != 0 {
@@ -55,6 +55,9 @@ func (e *jobGraphExpansion) validateRuntimeScheduling(sourced sourcedJob, descri
 	for _, site := range sites {
 		if _, err := expression.NewEngine().Validate(site); err != nil {
 			return false, err
+		}
+		if readsUnknownInput(site.Source, site.Profile, sourced.inputs) {
+			return false, errors.New("scheduling values can read only workflow inputs known before jobs run")
 		}
 		references, err := expression.DeferredInputReferences(site.Source)
 		if err != nil {
@@ -77,14 +80,16 @@ func (e *jobGraphExpansion) validateRuntimeScheduling(sourced sourcedJob, descri
 }
 
 // resolveRuntimeScheduling evaluates only the admitted scheduling sites, using
-// outputs from the producer manifest the continuation verified. The group is
-// returned separately so output text is never parsed again as workflow syntax.
-func resolveRuntimeScheduling(job workflow.Job, outputs map[string]string) (workflow.Job, *string, error) {
+// the job's own workflow inputs and outputs from the producer manifest the
+// continuation verified. The group is returned separately so output text is
+// never parsed again as workflow syntax.
+func resolveRuntimeScheduling(sourced sourcedJob, outputs map[string]string) (workflow.Job, *string, error) {
+	job := sourced.Job
 	sites, err := runtimeSchedulingSites(job)
 	if err != nil {
 		return job, nil, err
 	}
-	values := expression.Values{Runtime: expression.Context{Needs: make(map[string]expression.NeedStatus)}}
+	values := expression.Values{Runtime: expression.Context{WorkflowInputs: sourced.inputs.values, Needs: make(map[string]expression.NeedStatus)}}
 	for _, site := range sites {
 		references, err := expression.DeferredInputReferences(site.Source)
 		if err != nil {

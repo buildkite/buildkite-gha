@@ -25,6 +25,7 @@ const (
 // LocalPath and Digest identify local input; Repository and Commit identify
 // fetched GitHub input independently of its requested ref.
 type WorkflowSourceReference struct {
+	ServerURL  string
 	Repository string
 	Path       string
 	Commit     string
@@ -59,6 +60,7 @@ func retainRootSource(sources map[string]WorkflowSourceReference, path string, s
 // Digest on the containing workflow identifies the selected file; SourceDigest
 // identifies the complete repository tree.
 type RemoteWorkflowSource struct {
+	ServerURL    string `json:"server_url,omitempty"`
 	Repository   string `json:"repository"`
 	RequestedRef string `json:"requested_ref"`
 	Commit       string `json:"commit"`
@@ -67,13 +69,14 @@ type RemoteWorkflowSource struct {
 
 type reusableSourceIdentity struct {
 	kind       string
+	serverURL  string
 	repository string
 	commit     string
 	path       string
 }
 
 func (identity reusableSourceIdentity) key() string {
-	return identity.kind + "\x00" + identity.repository + "\x00" + identity.commit + "\x00" + identity.path
+	return identity.kind + "\x00" + actionsource.ServerURL(identity.serverURL) + "\x00" + identity.repository + "\x00" + identity.commit + "\x00" + identity.path
 }
 
 type reusableWorkflowSource struct {
@@ -106,6 +109,9 @@ func localReusableWorkflowSource(workflowPath string) (reusableWorkflowSource, e
 	root, canonicalPath, err := workflowRepository(workflowPath)
 	if err != nil {
 		return reusableWorkflowSource{}, err
+	}
+	if root == "" {
+		return reusableWorkflowSource{}, fmt.Errorf("%s: local reusable workflows require a Git checkout or the caller under .github/workflows", workflowPath)
 	}
 	relativePath, err := filepath.Rel(root, canonicalPath)
 	if err != nil {
@@ -149,21 +155,21 @@ func (resolver *reusableResolver) verifyWorkflowSource(ctx context.Context, work
 	candidate := resolver.workflowSource
 	var containing *RemoteWorkflowSource
 	if candidate != nil {
-		containing = &RemoteWorkflowSource{Repository: candidate.Repository, Commit: candidate.Commit}
+		containing = &RemoteWorkflowSource{ServerURL: candidate.ServerURL, Repository: candidate.Repository, Commit: candidate.Commit}
 	}
 	raw, err := selfRepositoryReference("$/"+strings.TrimPrefix(workflowPath, "./"), containing)
 	if err != nil {
 		return reusableWorkflowSource{}, err
 	}
-	loaded, data, err := resolver.loadRemoteReusableWorkflow(ctx, raw)
+	loaded, data, err := resolver.loadRemoteReusableWorkflow(ctx, raw, candidate.ServerURL)
 	if err != nil {
 		return reusableWorkflowSource{}, err
 	}
 	if "sha256:"+sha256Sum(data) != digest {
 		return reusableWorkflowSource{}, fmt.Errorf("workflow %q does not match its candidate repository commit", workflowPath)
 	}
-	if loaded.remote.Commit != candidate.Commit {
-		return reusableWorkflowSource{}, fmt.Errorf("workflow source returned a different commit")
+	if loaded.remote.Commit != candidate.Commit || actionsource.ServerURL(loaded.remote.ServerURL) != actionsource.ServerURL(candidate.ServerURL) {
+		return reusableWorkflowSource{}, fmt.Errorf("workflow source returned a different host or commit")
 	}
 	loaded.rootSecretScope = true
 	return loaded, nil
@@ -193,7 +199,7 @@ func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, pare
 			}
 			if loaded.remote != nil {
 				resolver.scan.sources[loaded.displayPath] = WorkflowSourceReference{
-					Repository: loaded.identity.repository, Path: loaded.identity.path, Commit: loaded.identity.commit,
+					ServerURL: loaded.identity.serverURL, Repository: loaded.identity.repository, Path: loaded.identity.path, Commit: loaded.identity.commit,
 					Excerpt: workflow.CaptureDiagnosticSource(source),
 				}
 			} else {
@@ -228,7 +234,7 @@ func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, pare
 		// repository tree. Keep its identity and the existing cycle/depth checks.
 		return resolver.loadLocalReusableWorkflow(parent, uses)
 	}
-	return resolver.loadRemoteReusableWorkflow(ctx, uses)
+	return resolver.loadRemoteReusableWorkflow(ctx, uses, resolver.sourceServerURL)
 }
 
 func (resolver *reusableResolver) loadLocalReusableWorkflow(parent reusableWorkflowSource, uses string) (reusableWorkflowSource, []byte, error) {
@@ -276,7 +282,7 @@ func (resolver *reusableResolver) loadLocalReusableWorkflow(parent reusableWorkf
 	return child, source, nil
 }
 
-func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context, uses string) (reusableWorkflowSource, []byte, error) {
+func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context, uses, serverURL string) (reusableWorkflowSource, []byte, error) {
 	if len(uses) > 1024 {
 		return reusableWorkflowSource{}, nil, fmt.Errorf("remote reusable workflow reference exceeds 1024 bytes")
 	}
@@ -284,6 +290,10 @@ func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context
 	if err != nil {
 		return reusableWorkflowSource{}, nil, fmt.Errorf("invalid remote reusable workflow %q: %w", uses, err)
 	}
+	if err := actionsource.ValidateServerURL(serverURL); err != nil {
+		return reusableWorkflowSource{}, nil, err
+	}
+	ref.ServerURL = serverURL
 	workflowPath, err := reusableWorkflowPath(ref.Path, true)
 	if err != nil {
 		return reusableWorkflowSource{}, nil, fmt.Errorf("remote reusable workflow %q %w", uses, err)
@@ -301,6 +311,9 @@ func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context
 		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: %w", uses, err)
 	}
 	resolver.materialized = append(resolver.materialized, materialized)
+	if err := actionsource.ValidateServerURL(resolved.Reference.ServerURL); err != nil {
+		return reusableWorkflowSource{}, nil, err
+	}
 	commit := resolved.Commit
 	if !git.ValidObjectID(commit) {
 		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: source returned a non-immutable commit", uses)
@@ -329,10 +342,10 @@ func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context
 	}
 	repository := strings.ToLower(ref.Owner + "/" + ref.Repository)
 	remote := &RemoteWorkflowSource{
-		Repository: repository, RequestedRef: ref.Ref, Commit: commit, SourceDigest: materialized.SourceDigest,
+		ServerURL: resolved.Reference.ServerURL, Repository: repository, RequestedRef: ref.Ref, Commit: commit, SourceDigest: materialized.SourceDigest,
 	}
 	return reusableWorkflowSource{
-		identity:       reusableSourceIdentity{kind: "github", repository: repository, commit: commit, path: workflowPath},
+		identity:       reusableSourceIdentity{kind: "github", serverURL: remote.ServerURL, repository: repository, commit: commit, path: workflowPath},
 		repositoryRoot: repositoryRoot,
 		displayPath:    repository + "/" + workflowPath + "@" + ref.Ref,
 		remote:         remote,

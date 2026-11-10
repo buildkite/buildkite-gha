@@ -18,6 +18,50 @@ type NeedOutputReference struct {
 	Output string
 }
 
+// InputReferences parses input reads without applying a consuming profile's
+// validation. Dynamic includes computed indexes and whole-context reads.
+func (engine Engine) InputReferences(site Site) (names []string, dynamic bool, err error) {
+	found := map[string]struct{}{}
+	inspect := func(node actionlint.ExprNode) error {
+		actionlint.VisitExprNode(node, func(node, parent actionlint.ExprNode, entering bool) {
+			if !entering {
+				return
+			}
+			if access, ok := parent.(*actionlint.ObjectDerefNode); ok && access.Receiver == node {
+				return
+			}
+			if access, ok := parent.(*actionlint.IndexAccessNode); ok && access.Operand == node {
+				return
+			}
+			root, path, referenceErr := referencePath(node)
+			if !strings.EqualFold(root, "inputs") {
+				return
+			}
+			if referenceErr != nil || len(path) == 0 {
+				dynamic = true
+				return
+			}
+			found[strings.ToLower(path[0])] = struct{}{}
+		})
+		return nil
+	}
+	profile, ok := profiles[site.Profile]
+	if !ok {
+		return nil, false, siteError(site, fmt.Errorf("unknown expression profile %q", site.Profile))
+	}
+	if profile.Form == FormExpression {
+		var node actionlint.ExprNode
+		var empty bool
+		node, empty, err = parseCondition(site.Source)
+		if err == nil && !empty {
+			err = inspect(node)
+		}
+	} else {
+		err = visitTemplateExpressions(site.Source, inspect)
+	}
+	return sortedReferenceNames(found), dynamic, siteError(site, err)
+}
+
 // NeedOutputs returns the statically named outputs a validated scheduling
 // site reads, including unselected branches. It never evaluates source text.
 func (engine Engine) NeedOutputs(site Site) ([]NeedOutputReference, error) {
@@ -457,7 +501,7 @@ func nodeReferencesCompileGitHubEvent(node actionlint.ExprNode) bool {
 			return false
 		}
 		switch strings.ToLower(path[0]) {
-		case "base_ref", "ref_name", "ref_type":
+		case "actor_id", "repository_id", "repository_owner_id", "base_ref", "ref_name", "ref_type":
 			return len(path) == 1
 		case "event":
 			return true
@@ -468,9 +512,21 @@ func nodeReferencesCompileGitHubEvent(node actionlint.ExprNode) bool {
 }
 
 func nodeReferencesGitHubEventPayload(node actionlint.ExprNode) bool {
-	return nodeReferencesGitHub(node, func(path []string) bool {
-		return len(path) != 0 && strings.EqualFold(path[0], "event")
-	})
+	return nodeReferencesGitHub(node, githubReferenceNeedsPayload)
+}
+
+func githubReferenceNeedsPayload(path []string) bool {
+	if len(path) == 0 {
+		return false
+	}
+	switch strings.ToLower(path[0]) {
+	case "event":
+		return true
+	case "actor_id", "repository_id", "repository_owner_id":
+		return len(path) == 1
+	default:
+		return false
+	}
 }
 
 func nodeReferencesGitHub(node actionlint.ExprNode, matches func([]string) bool) bool {

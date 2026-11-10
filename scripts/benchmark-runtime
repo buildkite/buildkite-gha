@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Compare production job execution against a fixed source baseline on one host."""
+
+import argparse
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+
+# Advance only in a reviewed change with old/new comparison evidence. A moving
+# previous-commit baseline would hide a slowdown spread across several merges.
+BASELINE = "f21555d419953eb93176b39cd1d57642c05ba4c5"
+CASES = ("shell", "composite", "javascript")
+# Batch short jobs so one filesystem/scheduler interruption does not dominate a
+# sample. ns/op remains time per job; both sides use the same fixed batch size.
+JOBS_PER_SAMPLE = {"shell": 20, "composite": 20, "javascript": 1}
+PAIRS = 12
+WARMUPS = 2
+RELATIVE_BUDGET = 0.20
+ABSOLUTE_BUDGET_NS = 25_000_000
+
+
+def compare(pairs):
+    """Classify complete paired measurements; uncertainty must not pass a gate."""
+    if len(pairs) != PAIRS or any(
+        not math.isfinite(p[side]) or p[side] <= 0
+        for p in pairs for side in ("baseline", "candidate")
+    ):
+        raise ValueError("expected 12 positive, finite baseline/candidate pairs")
+    medians = {side: statistics.median(p[side] for p in pairs)
+               for side in ("baseline", "candidate")}
+    spread = {side: statistics.median(abs(p[side] - medians[side]) for p in pairs)
+              / medians[side] for side in medians}
+    deltas = [p["candidate"] - p["baseline"] for p in pairs]
+    ratios = [p["candidate"] / p["baseline"] for p in pairs]
+    over = sum(delta > ABSOLUTE_BUDGET_NS and ratio > 1 + RELATIVE_BUDGET
+               for delta, ratio in zip(deltas, ratios))
+    # Judge agreement across paired budget decisions, not each binary's timing
+    # spread: shared host drift can leave every comparison within budget. Use
+    # the same evidence requirement to pass as to report a regression.
+    if over >= 11:
+        status = "regression"
+    elif PAIRS - over >= 11:
+        status = "pass"
+    else:
+        status = "inconclusive"
+    return {"status": status, "median_ns": medians, "relative_mad": spread,
+            "median_delta_ns": statistics.median(deltas),
+            "median_ratio": statistics.median(ratios), "pairs_over_budget": over}
+
+
+def run(args, *, cwd, env=None):
+    return subprocess.check_output(args, cwd=cwd, env=env, text=True,
+                                   stderr=subprocess.STDOUT, timeout=600).strip()
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def save_report(output, report):
+    (output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
+    lines = ["# Runtime benchmark", "", f"Status: **{report['status']}**", "",
+             f"Baseline: `{report.get('baseline', BASELINE)}`",
+             f"Candidate: `{report.get('candidate', 'unknown')}`", "",
+             "| Case | Baseline ms | Candidate ms | Paired change | Over budget | Max MAD | Result |",
+             "| --- | ---: | ---: | ---: | ---: | ---: | --- |"]
+    for case, result in report.get("comparisons", {}).items():
+        medians = result["median_ns"]
+        lines.append(f"| {case} | {medians['baseline'] / 1e6:.2f} | "
+                     f"{medians['candidate'] / 1e6:.2f} | "
+                     f"{(result['median_ratio'] - 1) * 100:+.1f}% | "
+                     f"{result['pairs_over_budget']}/{PAIRS} | "
+                     f"{max(result['relative_mad'].values()) * 100:.1f}% | {result['status']} |")
+    lines += ["", "Budget: >20% AND >25 ms per job in at least 11/12 pairs. "
+              "Pass requires at least 11/12 pairs within budget; otherwise inconclusive. "
+              "Max MAD describes timing spread, not paired uncertainty.",
+              "", "Only pass exits 0. Inconclusive/error exits 2; regression exits 1."]
+    if "error" in report:
+        lines += ["", "```text", report["error"], "```"]
+    (output / "summary.md").write_text("\n".join(lines) + "\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=Path(".runtime-benchmark"))
+    args = parser.parse_args()
+    output = args.output.resolve()
+    # Never mix evidence from separate runs or hide a stale successful report.
+    output.mkdir(parents=True, exist_ok=False)
+    root = Path(__file__).resolve().parent.parent
+    report = {"schema": 2, "status": "error", "baseline": BASELINE,
+              "samples": {case: [] for case in CASES}, "comparisons": {},
+              "policy": {"pairs": PAIRS, "warmups": WARMUPS,
+                         "jobs_per_sample": JOBS_PER_SAMPLE,
+                         "relative_budget": RELATIVE_BUDGET,
+                         "absolute_budget_ns": ABSOLUTE_BUDGET_NS,
+                         "required_agreement": 11},
+              "build_url": os.environ.get("BUILDKITE_BUILD_URL")}
+    try:
+        report["candidate"] = run(["git", "rev-parse", "HEAD"], cwd=root)
+        report["dirty"] = bool(run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=root))
+        report["host"] = platform.platform()
+        report["cpu"] = run(["uname", "-m"], cwd=root)
+        report["go"] = run(["go", "version"], cwd=root)
+        node = Path(run(["mise", "where", "node@24"], cwd=root)) / "bin/node"
+        report["node"] = run([str(node), "--version"], cwd=root)
+        if not report["node"].startswith("v24."):
+            raise ValueError("expected Node 24 from mise")
+        report["node_sha256"] = digest(node)
+        harness = root / "testdata/runtime-benchmark/runtime_test.go"
+        report["harness_sha256"] = digest(harness)
+        shutil.copy2(harness, output / "runtime_test.go")
+        # Do not pass Buildkite/API credentials or ambient Go tuning into the
+        # measured processes. Both builds use the candidate's pinned toolchain.
+        env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR") if key in os.environ}
+        env.update(GOTOOLCHAIN="local", GOENV="off", GOWORK="off", CGO_ENABLED="0",
+                   GOMAXPROCS="2", BENCHMARK_NODE24=str(node))
+        report["gomaxprocs"] = 2
+        with tempfile.TemporaryDirectory(prefix="gha-benchmark-") as work:
+            work = Path(work)
+            baseline = work / "baseline"
+            if subprocess.run(["git", "cat-file", "-e", BASELINE + "^{commit}"], cwd=root,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+                run(["git", "fetch", "--no-tags", "origin", BASELINE], cwd=root)
+            run(["git", "worktree", "add", "--detach", str(baseline), BASELINE], cwd=root)
+            try:
+                target = baseline / "testdata/runtime-benchmark"
+                # The candidate harness is authoritative, even after rebasing
+                # the baseline to a commit that already includes benchmarks.
+                if target.exists():
+                    shutil.rmtree(target)
+                target.mkdir(parents=True)
+                shutil.copy2(harness, target / harness.name)
+                binaries = {}
+                for side, source in (("baseline", baseline), ("candidate", root)):
+                    binary = work / f"{side}.test"
+                    log = run(["go", "test", "-c", "-trimpath", "-ldflags=-s -w",
+                               "-o", str(binary), "./testdata/runtime-benchmark"], cwd=source, env=env)
+                    (output / f"{side}-build.log").write_text(log + "\n")
+                    binaries[side] = binary
+                    report[side + "_binary_sha256"] = digest(binary)
+
+                for case in CASES:
+                    print(f"--- Runtime benchmark: {case}", flush=True)
+                    jobs = JOBS_PER_SAMPLE[case]
+                    for index in range(WARMUPS + PAIRS):
+                        pair = {}
+                        order = ("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")
+                        for side in order:
+                            text = run([str(binaries[side]), "-test.run=^$",
+                                        f"-test.bench=^BenchmarkRuntimeWorkflow$/{case}$",
+                                        f"-test.benchtime={jobs}x", "-test.count=1", "-test.timeout=60s"],
+                                       cwd=work, env=env)
+                            (output / f"{case}-{index:02d}-{side}.log").write_text(text + "\n")
+                            matches = re.findall(rf"^BenchmarkRuntimeWorkflow/{case}-\d+\s+{jobs}\s+([\d.]+) ns/op$", text, re.M)
+                            if len(matches) != 1:
+                                raise ValueError(f"missing or duplicate measurement: {case}/{side}")
+                            pair[side] = float(matches[0])
+                        if index >= WARMUPS:
+                            report["samples"][case].append(pair)
+                            save_report(output, report)
+                    report["comparisons"][case] = compare(report["samples"][case])
+            finally:
+                run(["git", "worktree", "remove", "--force", str(baseline)], cwd=root)
+        statuses = {result["status"] for result in report["comparisons"].values()}
+        report["status"] = ("regression" if "regression" in statuses else
+                            "inconclusive" if "inconclusive" in statuses else "pass")
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        report["error"] = str(error)
+        if isinstance(error, subprocess.CalledProcessError):
+            (output / "error.log").write_text(error.output or "")
+    finally:
+        save_report(output, report)
+        print((output / "summary.md").read_text())
+    return {"pass": 0, "regression": 1}.get(report["status"], 2)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

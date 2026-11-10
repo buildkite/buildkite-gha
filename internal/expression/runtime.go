@@ -5,6 +5,7 @@ package expression
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/rhysd/actionlint"
 )
+
+var errUnavailableGitHubToken = errors.New(`expression references unavailable github value "token"`)
 
 // NeedStatus contains the expression-visible state of one prerequisite.
 type NeedStatus struct {
@@ -62,6 +65,7 @@ const (
 	runtimeReferenceNeedOutput
 	runtimeReferenceNeedResult
 	runtimeReferenceRunner
+	runtimeReferenceJobStatus
 )
 
 // validateRuntimeTemplate verifies that every expression in a runtime template
@@ -75,7 +79,9 @@ func validateRuntimeTemplate(template string) error {
 func validateRuntimeReferenceNode(node actionlint.ExprNode) error {
 	validator := newSemanticValidator(runtimeReferenceSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
-		if isRunnerDebugReference(root, path) {
+		// Direct runtime templates, such as job containers and run defaults,
+		// are evaluated before the tool cache and step job status are ready.
+		if isRunnerDebugReference(root, path) || isJobStatusReference(root, path) || (strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "tool_cache")) {
 			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
 		}
 		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
@@ -381,7 +387,7 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 					return fmt.Errorf("github.token is unavailable in this field")
 				}
 				return nil
-			case "action_path", "action_ref", "action_repository", "actor", "base_ref", "event_name", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_owner", "run_attempt", "run_id", "run_number", "server_url", "sha", "workflow", "workflow_ref", "workflow_sha", "workspace":
+			case "action", "action_path", "action_ref", "action_repository", "actor", "actor_id", "api_url", "graphql_url", "base_ref", "event_name", "event_path", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_id", "repository_owner", "repository_owner_id", "run_attempt", "run_id", "run_number", "server_url", "sha", "workflow", "workflow_ref", "workflow_sha", "workspace":
 				return nil
 			default:
 				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
@@ -478,12 +484,12 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 }
 
 // requiredGitHubRuntimeValue names github members that must never fall back to
-// null: token because absence means missing authority, and run identity or
+// null: token because absence means missing authority, and identity or
 // workspace because a silently empty value would corrupt derived cache keys
 // and paths when the runtime cannot supply them.
 func requiredGitHubRuntimeValue(name string) bool {
 	switch strings.ToLower(name) {
-	case "token", "run_attempt", "run_id", "run_number", "workspace":
+	case "token", "actor_id", "repository_id", "repository_owner_id", "run_attempt", "run_id", "run_number", "workspace":
 		return true
 	default:
 		return false
@@ -586,6 +592,11 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 			return nil, nil
 		}
 		return "", fmt.Errorf("expression references unavailable runner value %q", path[0])
+	case runtimeReferenceJobStatus:
+		if context.JobStatus == "" {
+			return nil, fmt.Errorf("expression references unavailable job.status")
+		}
+		return context.JobStatus, nil
 	case runtimeReferenceServicePort:
 		return resolveServicePort(context.Services, path[1], path[3], "expression")
 	case runtimeReferenceServiceValue:
@@ -603,6 +614,9 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {
 			if !allowMissing || context.GitHub == nil || requiredGitHubRuntimeValue(path[0]) {
+				if len(path) == 1 && strings.EqualFold(path[0], "token") {
+					return "", errUnavailableGitHubToken
+				}
 				return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
 			}
 			return nil, nil
@@ -685,8 +699,10 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 
 func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 	switch {
-	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") || strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "debug")):
+	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "environment") || strings.EqualFold(path[0], "temp") || strings.EqualFold(path[0], "tool_cache") || strings.EqualFold(path[0], "debug")):
 		return runtimeReferenceRunner
+	case isJobStatusReference(root, path):
+		return runtimeReferenceJobStatus
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return runtimeReferenceServicePort
 	case len(path) == 3 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")):

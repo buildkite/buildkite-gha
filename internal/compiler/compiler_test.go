@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,6 +20,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -483,8 +485,75 @@ func TestReusableStepTimeoutRejectsOutOfRangeStaticInput(t *testing.T) {
 		Kind: "run", Run: "true", TimeoutMinutesExpression: "${{ inputs.timeout }}",
 		Span: workflow.Span{Start: workflow.Position{Line: 7, Column: 7}},
 	}}}
-	if _, err := applyStaticInputs("callee.yml", job, map[string]any{"timeout": 0}); err == nil || !strings.Contains(err.Error(), "greater than 0 and at most 360") {
-		t.Fatalf("applyStaticInputs() error = %v", err)
+	for _, source := range []string{"${{ inputs.timeout }}", "${{ inputs['timeout'] }}"} {
+		for _, complete := range []bool{true, false} {
+			job.Steps[0].TimeoutMinutesExpression = source
+			if _, err := resolveInputSelectedFields("callee.yml", job, expression.InputScope{Values: map[string]any{"timeout": 0}, Complete: complete}); err == nil || !strings.Contains(err.Error(), "greater than 0 and at most 360") {
+				t.Errorf("resolveInputSelectedFields(%s, complete=%t) error = %v", source, complete, err)
+			}
+		}
+	}
+}
+
+func TestCompileReusableDeferredInputLiteralConsumers(t *testing.T) {
+	for _, test := range []struct {
+		field     string
+		inputType string
+		forward   string
+		source    string
+		value     any
+		profile   expression.ProfileID
+		result    expression.ResultType
+	}{
+		{"timeout-minutes", "number", "fromJSON(needs.meta.outputs.value)", "${{ inputs[inputs.key] }}", json.Number("5"), expression.ProfileStepControl, expression.ResultNumber},
+		{"shell", "string", "needs.meta.outputs.value", "${{ inputs[inputs.key] || 'cmd' }}", "bash", expression.ProfileStepTemplate, expression.ResultString},
+	} {
+		t.Run(test.field, func(t *testing.T) {
+			repository := t.TempDir()
+			caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.meta.outputs.value }}
+    steps:
+      - id: meta
+        run: echo synthetic
+  call:
+    needs: meta
+    uses: ./.github/workflows/reusable.yml
+    with:
+      key: value
+      value: ${{ `+test.forward+` }}
+`)
+			writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      key: {type: string, required: true}
+      value: {type: `+test.inputType+`, required: true}
+jobs:
+  consume:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo synthetic
+        `+test.field+`: `+test.source+"\n")
+			plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			step := plans[1].Program.Job.Steps[0]
+			source := step.Run.Shell.Source
+			if test.field == "timeout-minutes" {
+				if step.TimeoutMinutes.Expression == nil {
+					t.Fatal("deferred timeout was resolved during compilation")
+				}
+				source = step.TimeoutMinutes.Expression.Source
+			}
+			got, err := expression.NewEngine().Evaluate(expression.Site{Source: source, Profile: test.profile, Result: test.result}, expression.Values{Runtime: expression.Context{WorkflowInputs: map[string]any{"key": "value", "value": test.value}}})
+			if err != nil || got != test.value {
+				t.Fatalf("hydrated %s = %#v, %v; want %#v", test.field, got, err, test.value)
+			}
+		})
 	}
 }
 
@@ -897,8 +966,8 @@ jobs:
 	}
 	calleeDigest := sha256.Sum256(readFile(t, calleePath))
 	wantCalleeDigest := "sha256:" + hex.EncodeToString(calleeDigest[:])
-	if first.SourcePath != "./.github/workflows/reusable.yml" || first.SourceDigest != wantCalleeDigest || first.Steps[0].Run != `echo "hello true"` {
-		t.Fatalf("callee provenance/input = %q / %q / %q, want repository-relative path, digest, and statically substituted input", first.SourcePath, first.SourceDigest, first.Steps[0].Run)
+	if first.SourcePath != "./.github/workflows/reusable.yml" || first.SourceDigest != wantCalleeDigest || first.Steps[0].Run != `echo "${{ inputs.message }} ${{ inputs.enabled }}"` || !reflect.DeepEqual(first.Inputs, map[string]any{"message": "hello", "enabled": true}) {
+		t.Fatalf("callee provenance/input = %q / %q / %q / %#v, want repository-relative path, digest, original source, and typed inputs", first.SourcePath, first.SourceDigest, first.Steps[0].Run, first.Inputs)
 	}
 	if prepare.SourcePath != "./.github/workflows/caller.yml" || finish.SourcePath != "./.github/workflows/caller.yml" {
 		t.Fatalf("caller source provenance = %q / %q", prepare.SourcePath, finish.SourcePath)
@@ -940,36 +1009,6 @@ jobs:
 		},
 	}) || !reflect.DeepEqual(plans[3].NeedOutputs, map[string][]plan.NeedOutput{"delegated": {}}) {
 		t.Fatalf("downstream reusable-workflow plan needs = %#v", plans[3].NeedSources)
-	}
-}
-
-func TestBlockerFieldsChangedTracksInputSubstitutionSurfaces(t *testing.T) {
-	base := workflow.Job{
-		If: "true", RunsOn: []string{"ubuntu-latest"}, DefaultShell: "bash",
-		Steps: []workflow.Step{{If: "true", Uses: "owner/action@v1", Shell: "bash", Run: "echo unchanged"}},
-	}
-	tests := []struct {
-		name   string
-		change func(*workflow.Job)
-		want   bool
-	}{
-		{name: "job condition", change: func(job *workflow.Job) { job.If = "false" }, want: true},
-		{name: "runner", change: func(job *workflow.Job) { job.RunsOn = []string{"private"} }, want: true},
-		{name: "matrix", change: func(job *workflow.Job) { job.Matrix = &workflow.Matrix{} }, want: true},
-		{name: "action", change: func(job *workflow.Job) { job.Steps[0].Uses = "owner/other@v1" }, want: true},
-		{name: "shell", change: func(job *workflow.Job) { job.Steps[0].Shell = "pwsh" }, want: true},
-		{name: "unrelated run command", change: func(job *workflow.Job) { job.Steps[0].Run = "echo changed" }},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			changed := base
-			changed.RunsOn = slices.Clone(base.RunsOn)
-			changed.Steps = slices.Clone(base.Steps)
-			test.change(&changed)
-			if got := blockerFieldsChanged(base, changed); got != test.want {
-				t.Fatalf("blockerFieldsChanged() = %t, want %t", got, test.want)
-			}
-		})
 	}
 }
 
@@ -1326,10 +1365,16 @@ jobs:
 	if !reflect.DeepEqual(ir.Jobs[2].NeedGroups, map[string][]string{"delegated": {ir.Jobs[0].Key, ir.Jobs[1].Key}}) || !reflect.DeepEqual(ir.Jobs[2].NeedOutputs, map[string][]NeedOutput{"delegated": {}}) {
 		t.Fatalf("matrix reusable caller projection = %#v / %#v", ir.Jobs[2].NeedGroups, ir.Jobs[2].NeedOutputs)
 	}
-	runs := []string{ir.Jobs[0].Steps[0].Run, ir.Jobs[1].Steps[0].Run}
-	sort.Strings(runs)
-	if !reflect.DeepEqual(runs, []string{"echo ubuntu-22.04", "echo ubuntu-24.04"}) {
-		t.Fatalf("statically resolved matrix inputs = %#v", runs)
+	inputs := make([]string, 0, 2)
+	for _, job := range ir.Jobs[:2] {
+		if job.Steps[0].Run != "echo ${{ inputs.target }}" || job.Inputs["target"] != job.RunsOn[0] {
+			t.Fatalf("matrix source/inputs = %q / %#v, runner = %#v", job.Steps[0].Run, job.Inputs, job.RunsOn)
+		}
+		inputs = append(inputs, job.Inputs["target"].(string))
+	}
+	sort.Strings(inputs)
+	if !reflect.DeepEqual(inputs, []string{"ubuntu-22.04", "ubuntu-24.04"}) {
+		t.Fatalf("statically resolved matrix inputs = %#v", inputs)
 	}
 	runners := []string{ir.Jobs[0].RunsOn[0], ir.Jobs[1].RunsOn[0]}
 	sort.Strings(runners)
@@ -1364,9 +1409,15 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: true}]
 `)
-	_, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
-	if err == nil || !strings.Contains(err.Error(), "strategy.max-parallel on a reusable-workflow matrix cannot be preserved") {
-		t.Fatalf("Compile() error = %v, want reusable max-parallel rejection", err)
+	for _, test := range []struct{ limit, want string }{
+		{"1", "strategy.max-parallel on a reusable-workflow matrix cannot be preserved"},
+		{"${{ 1 }}", "expression-valued max-parallel on a reusable-workflow call is unsupported"},
+	} {
+		source := strings.Replace(string(readFile(t, callerPath)), "max-parallel: 1", "max-parallel: "+test.limit, 1)
+		_, err := Compile(callerPath, []byte(source), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("Compile() error = %v, want reusable max-parallel rejection %q", err, test.want)
+		}
 	}
 }
 
@@ -1533,7 +1584,7 @@ func TestCompileRejectsUnavailableReusableCallConditionContexts(t *testing.T) {
 	}
 }
 
-func TestCompileSubstitutesReusableInputsInConditions(t *testing.T) {
+func TestCompilePreservesReusableInputsInConditions(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -1584,18 +1635,25 @@ jobs:
 			stepCondition = job.Program.Job.Steps[0].Condition.Source
 		}
 		conditions[job.Workflow.LogicalJobID] = [2]string{job.Condition, stepCondition}
+		wantInputs := map[string]any{"enabled": false, "label": ""}
+		if strings.HasPrefix(job.Workflow.LogicalJobID, "enabled-call.") {
+			wantInputs = map[string]any{"enabled": true, "label": "deploy"}
+		}
+		if !reflect.DeepEqual(job.Inputs, wantInputs) {
+			t.Errorf("inputs for %q = %#v, want %#v", job.Workflow.LogicalJobID, job.Inputs, wantInputs)
+		}
 	}
-	if got := conditions["enabled-call.gated"]; got != [2]string{"true", "true"} {
-		t.Fatalf("enabled conditions = %#v, want statically substituted true", got)
+	if got := conditions["enabled-call.gated"]; got != [2]string{"inputs.enabled", "${{ inputs.enabled }}"} {
+		t.Fatalf("enabled conditions = %#v, want original input references", got)
 	}
-	if got := conditions["disabled-call.gated"]; got != [2]string{"false", "false"} {
-		t.Fatalf("disabled conditions = %#v, want inert statically disabled step", got)
+	if got := conditions["disabled-call.gated"]; got != [2]string{"inputs.enabled", "${{ inputs.enabled }}"} {
+		t.Fatalf("disabled conditions = %#v, want original input references", got)
 	}
-	if got := conditions["enabled-call.string-gated"]; got != [2]string{"'deploy'", "'deploy'"} {
-		t.Fatalf("non-empty string conditions = %#v, want a quoted expression literal", got)
+	if got := conditions["enabled-call.string-gated"]; got != [2]string{"${{ inputs.label }}", "inputs.label"} {
+		t.Fatalf("non-empty string conditions = %#v, want original input references", got)
 	}
-	if got := conditions["disabled-call.string-gated"]; got != [2]string{"false", "''"} {
-		t.Fatalf("empty string conditions = %#v, want original step condition retained", got)
+	if got := conditions["disabled-call.string-gated"]; got != [2]string{"${{ inputs.label }}", "inputs.label"} {
+		t.Fatalf("empty string conditions = %#v, want original input references", got)
 	}
 }
 
@@ -1661,12 +1719,12 @@ jobs:
 		t.Fatal(err)
 	}
 	steps := plans[0].Program.Job.Steps
-	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "release" || plans[0].Outputs["label"] != "release" || len(steps) != 3 || steps[0].Run.Command.Source != "echo true ${{ github.ref }}" || steps[1].Condition.Source != "${{ true && github.ref }}" || steps[2].Condition.Source != "'release'" {
+	if len(plans) != 1 || plans[0].Condition != "inputs.enabled && github.ref" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "${{ inputs['label'] }}" || plans[0].Outputs["label"] != "${{ inputs['label'] }}" || len(steps) != 3 || steps[0].Run.Command.Source != "echo ${{ inputs['enabled'] }} ${{ github.ref }}" || steps[1].Condition.Source != "inputs['enabled'] && github.ref" || steps[2].Condition.Source != "${{ inputs [ 'label' ] }}" {
 		t.Fatalf("reusable condition = %#v", plans)
 	}
 }
 
-func TestCompilePreservesStatusFunctionsAfterReusableInputSubstitution(t *testing.T) {
+func TestCompilePreservesStatusFunctionsInReusableWorkflows(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -1704,8 +1762,8 @@ jobs:
 		t.Fatalf("plans = %d, want one job for each reusable call", len(plans))
 	}
 	want := map[string][3]string{
-		"enabled.test":  {"${{ always() && true }}", "${{ !cancelled() && true }}", "${{ failure() && true == true }}"},
-		"disabled.test": {"${{ always() && false }}", "${{ !cancelled() && false }}", "${{ failure() && false == true }}"},
+		"enabled.test":  {"always() && inputs.enabled", "${{ !cancelled() && inputs.enabled }}", "failure() && inputs.enabled == true"},
+		"disabled.test": {"always() && inputs.enabled", "${{ !cancelled() && inputs.enabled }}", "failure() && inputs.enabled == true"},
 	}
 	for _, job := range plans {
 		steps := job.Program.Job.Steps
@@ -1713,6 +1771,9 @@ jobs:
 		expected, ok := want[job.Workflow.LogicalJobID]
 		if !ok || got != expected {
 			t.Errorf("conditions for %q = %#v, want %#v", job.Workflow.LogicalJobID, got, expected)
+		}
+		if job.Inputs["enabled"] != (job.Workflow.LogicalJobID == "enabled.test") {
+			t.Errorf("inputs for %q = %#v", job.Workflow.LogicalJobID, job.Inputs)
 		}
 	}
 }
@@ -1736,6 +1797,68 @@ func TestCompileValidatesResidualReusableInputConditions(t *testing.T) {
 				t.Fatalf("Compile() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestCompileKeepsSiblingReusableTypedInputsOutOfRuntimeSource(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  first:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      label: synthetic-input-sentinel-first
+      enabled: true
+      count: 3
+  second:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      label: synthetic-input-sentinel-second
+      enabled: false
+      count: 7
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      label: {type: string, required: true}
+      enabled: {type: boolean, required: true}
+      count: {type: number, required: true}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ format('{0}:{1}:{2}:{3}', github.event_name, inputs.label, inputs.enabled, inputs.count) }}
+`)
+	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %d, want two sibling calls", len(plans))
+	}
+	want := map[string]struct {
+		inputs map[string]any
+		run    string
+	}{
+		"first.test":  {map[string]any{"label": "synthetic-input-sentinel-first", "enabled": true, "count": 3}, "echo push:synthetic-input-sentinel-first:true:3"},
+		"second.test": {map[string]any{"label": "synthetic-input-sentinel-second", "enabled": false, "count": 7}, "echo push:synthetic-input-sentinel-second:false:7"},
+	}
+	for _, job := range plans {
+		expected, ok := want[job.Workflow.LogicalJobID]
+		if !ok || !reflect.DeepEqual(job.Inputs, expected.inputs) {
+			t.Fatalf("inputs for %q = %#v, want %#v", job.Workflow.LogicalJobID, job.Inputs, expected.inputs)
+		}
+		source := job.Program.Job.Steps[0].Run.Command.Source
+		if strings.Contains(source, "synthetic-input-sentinel") || !strings.Contains(source, "inputs.label") || !strings.Contains(source, "inputs.enabled") || !strings.Contains(source, "inputs.count") {
+			t.Fatalf("runtime source contains input values or lost references: %q", source)
+		}
+		got, err := expression.NewEngine().Evaluate(expression.Site{Source: source, Profile: expression.ProfileStepTemplate, Result: expression.ResultString}, expression.Values{Runtime: expression.Context{
+			WorkflowInputs: job.Inputs,
+			GitHub:         map[string]any{"event_name": "push"},
+		}})
+		if err != nil || got != expected.run {
+			t.Fatalf("runtime command for %q = %q, %v; want %q", job.Workflow.LogicalJobID, got, err, expected.run)
+		}
 	}
 }
 
@@ -1777,7 +1900,7 @@ jobs:
 	if err := json.Unmarshal(result, &ir); err != nil {
 		t.Fatal(err)
 	}
-	if len(ir.Jobs) != 1 || len(ir.Jobs[0].Steps) != 1 || ir.Jobs[0].Steps[0].Run != "echo release" {
+	if len(ir.Jobs) != 1 || len(ir.Jobs[0].Steps) != 1 || ir.Jobs[0].Steps[0].Run != "echo ${{ inputs.target }}" || ir.Jobs[0].Inputs["target"] != "release" {
 		t.Fatalf("forwarded indexed input = %#v", ir.Jobs)
 	}
 }
@@ -2000,7 +2123,7 @@ jobs:
 		t.Fatalf("build dependencies = %#v, needs outputs = %#v", build.Dependencies, build.NeedOutputs)
 	}
 	step := build.ExecutionJob().Steps[0]
-	if step.Run.Command.Source != `echo "${{ inputs.tags }}" "${{ (inputs.flavor || 'refs/heads/main') }}" true` {
+	if step.Run.Command.Source != `echo "${{ inputs.tags }}" "${{ (inputs.flavor || 'refs/heads/main') }}" ${{ inputs.push }}` {
 		t.Fatalf("callee command = %q", step.Run.Command.Source)
 	}
 }
@@ -2038,12 +2161,12 @@ jobs:
 	}
 	steps := plans[0].Program.Job.Steps
 	env := testBindingSources(steps[0].Env)
-	if len(plans) != 1 || plans[0].Inputs["target"] != "release" || len(steps) != 1 || env["VALUE_ENV"] != "${{ inputs[env.KEY] }}" || env["VALUE_INPUT"] != "release" {
+	if len(plans) != 1 || plans[0].Inputs["target"] != "release" || plans[0].Inputs["key"] != "target" || len(steps) != 1 || env["VALUE_ENV"] != "${{ inputs[env.KEY] }}" || env["VALUE_INPUT"] != "${{ inputs[inputs.key] }}" {
 		t.Fatalf("computed reusable input plan = %#v", plans)
 	}
 }
 
-func TestApplyStaticInputsSubstitutesIndexedInputsInStepFields(t *testing.T) {
+func TestResolveInputSelectedFieldsPreservesIndexedInputsInStepFields(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
 	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
 		Span: span,
@@ -2051,58 +2174,71 @@ func TestApplyStaticInputsSubstitutesIndexedInputsInStepFields(t *testing.T) {
 		Env:  map[string]string{"TARGET": "${{ inputs['target'] }}"},
 		With: map[string]string{"target": "prefix-${{ inputs['target'] }}"},
 	}}}
-	resolved, err := applyStaticInputs("workflow.yml", job, map[string]any{"target": "production"})
+	resolved, err := resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"target": "production"}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	step := resolved.Steps[0]
-	if step.Run != "echo production" || step.Env["TARGET"] != "production" || step.With["target"] != "prefix-production" {
+	if step.Run != "echo ${{ inputs['target'] }}" || step.Env["TARGET"] != "${{ inputs['target'] }}" || step.With["target"] != "prefix-${{ inputs['target'] }}" {
 		t.Fatalf("resolved indexed inputs = %#v", step)
 	}
 }
 
-func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
+func TestResolveInputSelectedFieldsPreservesTypedStepControls(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
 	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
 		Span:                      span,
 		ContinueOnErrorExpression: "${{ inputs.allow }}",
 		TimeoutMinutesExpression:  "${{ inputs.wait }}",
 	}}}
-	resolved, err := applyStaticInputs("workflow.yml", job, map[string]any{"allow": true, "wait": 5})
+	resolved, err := resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"allow": true, "wait": 5}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resolved.Steps[0].ContinueOnError || resolved.Steps[0].ContinueOnErrorExpression != "" || resolved.Steps[0].TimeoutMinutes != 5 || resolved.Steps[0].TimeoutMinutesExpression != "" {
+	if resolved.Steps[0].ContinueOnError || resolved.Steps[0].ContinueOnErrorExpression != "${{ inputs.allow }}" || resolved.Steps[0].TimeoutMinutes != 0 || resolved.Steps[0].TimeoutMinutesExpression != "${{ inputs.wait }}" {
 		t.Fatalf("resolved controls = %#v", resolved.Steps[0])
+	}
+	for _, control := range []struct {
+		source string
+		result expression.ResultType
+		want   any
+	}{
+		{resolved.Steps[0].ContinueOnErrorExpression, expression.ResultBoolean, true},
+		{resolved.Steps[0].TimeoutMinutesExpression, expression.ResultNumber, 5},
+	} {
+		got, err := expression.NewEngine().Evaluate(expression.Site{Source: control.source, Profile: expression.ProfileStepControl, Result: control.result}, expression.Values{Runtime: expression.Context{WorkflowInputs: map[string]any{"allow": true, "wait": 5}}})
+		if err != nil || got != control.want {
+			t.Fatalf("typed control %q = %#v, %v; want %#v", control.source, got, err, control.want)
+		}
 	}
 
 	job.Steps[0].ContinueOnErrorExpression = "${{ inputs.allow && matrix.experimental }}"
 	job.Steps[0].TimeoutMinutesExpression = "${{ matrix.timeout || inputs.wait }}"
-	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"allow": true, "wait": 5})
+	resolved, err = resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"allow": true, "wait": 5}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Steps[0].ContinueOnErrorExpression != "${{ true && matrix.experimental }}" || resolved.Steps[0].TimeoutMinutesExpression != "${{ matrix.timeout || 5 }}" {
+	if resolved.Steps[0].ContinueOnErrorExpression != "${{ inputs.allow && matrix.experimental }}" || resolved.Steps[0].TimeoutMinutesExpression != "${{ matrix.timeout || inputs.wait }}" {
 		t.Fatalf("partially resolved controls = %#v", resolved.Steps[0])
 	}
 
 	job.Steps[0].ContinueOnErrorExpression = "${{ inputs.allow && steps.setup.outcome == 'success' }}"
 	job.Steps[0].TimeoutMinutesExpression = "${{ steps.setup.outputs.timeout || inputs.wait }}"
-	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"allow": true, "wait": 5})
+	resolved, err = resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"allow": true, "wait": 5}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Steps[0].ContinueOnErrorExpression != "${{ true && steps.setup.outcome == 'success' }}" || resolved.Steps[0].TimeoutMinutesExpression != "${{ steps.setup.outputs.timeout || 5 }}" {
+	if resolved.Steps[0].ContinueOnErrorExpression != "${{ inputs.allow && steps.setup.outcome == 'success' }}" || resolved.Steps[0].TimeoutMinutesExpression != "${{ steps.setup.outputs.timeout || inputs.wait }}" {
 		t.Fatalf("runtime step controls = %#v", resolved.Steps[0])
 	}
 
 	job.Steps[0].ContinueOnErrorExpression = "${{ inputs.allow && hashFiles('go.sum') != '' }}"
 	job.Steps[0].TimeoutMinutesExpression = ""
-	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"allow": true})
+	resolved, err = resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"allow": true}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Steps[0].ContinueOnErrorExpression != "${{ true && hashFiles('go.sum') != '' }}" {
+	if resolved.Steps[0].ContinueOnErrorExpression != "${{ inputs.allow && hashFiles('go.sum') != '' }}" {
 		t.Fatalf("runtime hashFiles control = %#v", resolved.Steps[0])
 	}
 
@@ -2115,20 +2251,21 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 			} else {
 				step.TimeoutMinutesExpression = source
 			}
-			_, err := applyStaticInputs("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, map[string]any{"allow": true})
-			if err == nil || !strings.Contains(err.Error(), "unsupported runtime function") {
-				t.Fatalf("applyStaticInputs() error = %v, want unsupported runtime function", err)
+			_, err := resolveInputSelectedFields("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, expression.InputScope{Values: map[string]any{"allow": true}, Complete: true})
+			// Validate hidden branches without exposing input values.
+			if err == nil || !strings.Contains(err.Error(), "step "+field+" expression cannot be resolved") {
+				t.Fatalf("resolveInputSelectedFields() error = %v, want %s rejection", err, field)
 			}
 		})
 	}
 
 	job.Steps[0].ContinueOnErrorExpression = "${{ matrix.experimental && fromJSON(inputs.value) }}"
 	job.Steps[0].TimeoutMinutesExpression = ""
-	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"value": "invalid"})
+	resolved, err = resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"value": "invalid"}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Steps[0].ContinueOnErrorExpression != "${{ matrix.experimental && fromJSON('invalid') }}" {
+	if resolved.Steps[0].ContinueOnErrorExpression != "${{ matrix.experimental && fromJSON(inputs.value) }}" {
 		t.Fatalf("runtime-first control = %#v", resolved.Steps[0])
 	}
 
@@ -2140,7 +2277,7 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 	}{
 		{name: "boolean string", expression: "${{ inputs.value }}", inputs: map[string]any{"value": "true"}, want: "must produce a boolean"},
 		{name: "numeric string", expression: "${{ inputs.value }}", inputs: map[string]any{"value": "5"}, want: "must produce a number"},
-		{name: "invalid static expression", expression: "${{ fromJSON(inputs.value) && matrix.experimental }}", inputs: map[string]any{"value": "invalid"}, want: "evaluate timeout-minutes expression"},
+		{name: "invalid static expression", expression: "${{ fromJSON(inputs.value) && matrix.experimental }}", inputs: map[string]any{"value": "invalid"}, want: "step timeout-minutes expression cannot be resolved"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			step := workflow.Step{Span: span}
@@ -2149,15 +2286,15 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 			} else {
 				step.TimeoutMinutesExpression = test.expression
 			}
-			_, err := applyStaticInputs("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, test.inputs)
+			_, err := resolveInputSelectedFields("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, expression.InputScope{Values: test.inputs, Complete: true})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("applyStaticInputs() error = %v, want %q", err, test.want)
+				t.Fatalf("resolveInputSelectedFields() error = %v, want %q", err, test.want)
 			}
 		})
 	}
 }
 
-func TestApplyStaticInputsPreservesRuntimeActionInputs(t *testing.T) {
+func TestResolveInputSelectedFieldsPreservesRuntimeActionInputs(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
 	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
 		Span: span,
@@ -2166,24 +2303,24 @@ func TestApplyStaticInputsPreservesRuntimeActionInputs(t *testing.T) {
 		},
 	}}}
 
-	resolved, err := applyStaticInputs("workflow.yml", job, map[string]any{"cache": true, "file": "Dockerfile"})
+	resolved, err := resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"cache": true, "file": "Dockerfile"}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "${{ true && format('type=gha,scope={0}', hashFiles('Dockerfile')) || '' }}"
+	want := "${{ inputs.cache && format('type=gha,scope={0}', hashFiles(inputs.file)) || '' }}"
 	if got := resolved.Steps[0].With["cache-from"]; got != want {
 		t.Fatalf("cache-from = %q, want %q", got, want)
 	}
-	if err := rejectUnresolvedInputExpressions("workflow.yml", resolved, nil); err != nil {
+	if err := rejectUnresolvedInputExpressions("workflow.yml", resolved, reusableInputs{values: map[string]any{"cache": true, "file": "Dockerfile"}}); err != nil {
 		t.Fatalf("rejectUnresolvedInputExpressions() error = %v", err)
 	}
 
 	job.Name = "cache-${{ hashFiles(inputs.file) }}"
-	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"cache": true, "file": "Dockerfile"})
+	resolved, err = resolveInputSelectedFields("workflow.yml", job, expression.InputScope{Values: map[string]any{"cache": true, "file": "Dockerfile"}, Complete: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnresolvedInputExpressions("workflow.yml", resolved, nil); err == nil || !strings.Contains(err.Error(), "not statically resolvable") {
+	if err := rejectUnresolvedInputExpressions("workflow.yml", resolved, reusableInputs{values: map[string]any{"cache": true, "file": "Dockerfile"}}); err == nil || !strings.Contains(err.Error(), "not statically resolvable") {
 		t.Fatalf("rejectUnresolvedInputExpressions() error = %v, want runtime job name rejection", err)
 	}
 }
@@ -2196,7 +2333,6 @@ func TestRejectUnresolvedIndexedInputsInCompileTimeFields(t *testing.T) {
 	}{
 		{name: "job name", job: workflow.Job{Name: "${{ inputs['label'] }}"}},
 		{name: "runner label", job: workflow.Job{RunsOn: []string{"${{ inputs['runner'] }}"}}},
-		{name: "action reference", job: workflow.Job{Steps: []workflow.Step{{Uses: "${{ inputs['action'] }}", Span: span}}}},
 		{name: "command", job: workflow.Job{Steps: []workflow.Step{{Run: "echo ${{ inputs['target'] }}", Span: span}}}},
 		{name: "environment", job: workflow.Job{Steps: []workflow.Step{{Env: map[string]string{"TARGET": "${{ inputs['target'] }}"}, Span: span}}}},
 		{name: "action input", job: workflow.Job{Steps: []workflow.Step{{With: map[string]string{"target": "${{ inputs['target'] }}"}, Span: span}}}},
@@ -2204,7 +2340,7 @@ func TestRejectUnresolvedIndexedInputsInCompileTimeFields(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			test.job.ID = "test"
 			test.job.Span = span
-			if err := rejectUnresolvedInputExpressions("workflow.yml", test.job, nil); err == nil || !strings.Contains(err.Error(), "not statically resolvable") {
+			if err := rejectUnresolvedInputExpressions("workflow.yml", test.job, reusableInputs{}); err == nil || !strings.Contains(err.Error(), "not statically resolvable") {
 				t.Fatalf("rejectUnresolvedInputExpressions() error = %v", err)
 			}
 		})
@@ -2334,7 +2470,7 @@ jobs:
 		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
 		var finding *ProcessingFinding
-		if err == nil || !errors.As(err, &finding) || !strings.HasPrefix(finding.Message, `Reusable workflow input "target" uses a needs expression in an unsupported form: compile-time expression references unavailable value "github.run_id".`) {
+		if err == nil || !errors.As(err, &finding) || !strings.HasPrefix(finding.Message, `Reusable workflow input "target" uses a needs expression in an unsupported form: compile-time expression references unavailable value "github.run_id": run identity is unavailable in this import-time expression position; github values available at import: actor,`) {
 			t.Fatalf("Compile() finding = %#v", finding)
 		}
 	})
@@ -2533,10 +2669,16 @@ jobs:
 	if len(ir.Jobs) != 3 {
 		t.Fatalf("jobs = %d, want 2 nested matrix instances and their caller", len(ir.Jobs))
 	}
-	runs := []string{ir.Jobs[0].Steps[0].Run, ir.Jobs[1].Steps[0].Run}
-	sort.Strings(runs)
-	if !reflect.DeepEqual(runs, []string{"echo arm", "echo linux"}) {
-		t.Fatalf("nested static inputs = %#v", runs)
+	inputs := make([]string, 0, 2)
+	for _, job := range ir.Jobs[:2] {
+		if job.Steps[0].Run != "echo ${{ inputs.target }}" {
+			t.Fatalf("nested source = %q, want original input reference", job.Steps[0].Run)
+		}
+		inputs = append(inputs, job.Inputs["target"].(string))
+	}
+	sort.Strings(inputs)
+	if !reflect.DeepEqual(inputs, []string{"arm", "linux"}) {
+		t.Fatalf("nested static inputs = %#v", inputs)
 	}
 	for _, job := range ir.Jobs {
 		if job.LogicalJobID == "finish" {
@@ -2548,6 +2690,95 @@ jobs:
 	}
 	if !reflect.DeepEqual(ir.Jobs[2].NeedGroups, map[string][]string{"middle": {ir.Jobs[0].Key, ir.Jobs[1].Key}}) || !reflect.DeepEqual(ir.Jobs[2].NeedOutputs, map[string][]NeedOutput{"middle": {}}) {
 		t.Fatalf("nested reusable caller projection = %#v / %#v", ir.Jobs[2].NeedGroups, ir.Jobs[2].NeedOutputs)
+	}
+}
+
+func TestCompileRedactsEvaluatedValuesInDeferredCallInputErrors(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on:
+  workflow_dispatch:
+    inputs:
+      pattern: {type: string}
+jobs:
+  call:
+    uses: ./.github/workflows/middle.yml
+    with: {prefix: p}
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      prefix: {type: string}
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+    steps:
+      - id: t
+        run: true
+  call:
+    needs: prepare
+    uses: ./.github/workflows/leaf.yml
+    with:
+      target: ${{ inputs.prefix }}-${{ format(github.event.inputs.pattern, 'x') }}-${{ needs.prepare.outputs.tag }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", "on:\n  workflow_call:\n    inputs:\n      target: {type: string}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	event := bytes.Replace(readFile(t, smokePath("events", "workflow_dispatch.json")), []byte(`"inputs": {}`), []byte(`"inputs": {"pattern": "{PRIVATE_VALUE}"}`), 1)
+	_, err := Compile(callerPath, readFile(t, callerPath), event)
+	var finding *ProcessingFinding
+	if err == nil || !errors.As(err, &finding) || strings.Contains(err.Error()+finding.Message+finding.Detail, "PRIVATE_VALUE") {
+		t.Fatalf("Compile() error = %v", err)
+	}
+}
+
+func TestCompileGraphFieldsReadTheirOwnWorkflowInputs(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  middle:
+    uses: ./.github/workflows/middle.yml
+    with: {target: outer, os: bogus}
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string}
+      os: {type: string}
+jobs:
+  call:
+    name: call ${{ inputs.target }}
+    uses: ./.github/workflows/leaf.yml
+    with:
+      target: inner-${{ inputs.target }}
+      os: latest
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string}
+      os: {type: string}
+jobs:
+  build:
+    name: build ${{ inputs.target }}
+    runs-on: ubuntu-${{ inputs.os }}
+    concurrency: group-${{ inputs.target }}
+    strategy:
+      matrix:
+        target: ["${{ inputs.target }}"]
+    steps:
+      - run: echo ${{ matrix.target }}
+`)
+	result, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	job := ir.Jobs[0]
+	if job.Label != "middle / call outer / build inner-outer (target=inner-outer)" || job.ConcurrencyGroup != "group-inner-outer" || !reflect.DeepEqual(job.RunsOn, []string{"ubuntu-latest"}) || job.Matrix["target"] != "inner-outer" {
+		t.Fatalf("label = %q, concurrency = %q, runs-on = %#v, matrix = %#v", job.Label, job.ConcurrencyGroup, job.RunsOn, job.Matrix)
 	}
 }
 
@@ -2605,14 +2836,17 @@ jobs:
 	if len(ir.Jobs) != 5 {
 		t.Fatalf("jobs = %d, want four composed instances and one fan-in", len(ir.Jobs))
 	}
-	runs := make([]string, 0, 4)
+	inputs := make([]string, 0, 4)
 	for _, job := range ir.Jobs[:4] {
-		runs = append(runs, job.Steps[0].Run)
+		if job.Steps[0].Run != "echo ${{ inputs.target }}" {
+			t.Fatalf("nested matrix source = %q, want original input reference", job.Steps[0].Run)
+		}
+		inputs = append(inputs, job.Inputs["target"].(string))
 	}
-	sort.Strings(runs)
-	wantRuns := []string{"echo darwin-amd64", "echo darwin-arm64", "echo linux-amd64", "echo linux-arm64"}
-	if !reflect.DeepEqual(runs, wantRuns) {
-		t.Fatalf("nested matrix runs = %#v, want %#v", runs, wantRuns)
+	sort.Strings(inputs)
+	wantInputs := []string{"darwin-amd64", "darwin-arm64", "linux-amd64", "linux-arm64"}
+	if !reflect.DeepEqual(inputs, wantInputs) {
+		t.Fatalf("nested matrix inputs = %#v, want %#v", inputs, wantInputs)
 	}
 	if got := len(ir.Jobs[4].Needs); got != 4 {
 		t.Fatalf("fan-in dependencies = %d, want 4", got)
@@ -2709,7 +2943,7 @@ jobs:
 		if err := json.Unmarshal(result, &ir); err != nil {
 			t.Fatal(err)
 		}
-		if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo main" {
+		if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo ${{ inputs.target }}" || ir.Jobs[0].Inputs["target"] != "main" {
 			t.Fatalf("resolved reusable matrix value = %#v", ir.Jobs)
 		}
 	})
@@ -2736,7 +2970,7 @@ jobs:
 		if err := json.Unmarshal(result, &ir); err != nil {
 			t.Fatal(err)
 		}
-		if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo yes" {
+		if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo ${{ inputs.enabled && 'yes' || 'no' }}" || ir.Jobs[0].Inputs["enabled"] != true {
 			t.Fatalf("resolved reusable input expression = %#v", ir.Jobs)
 		}
 	})
@@ -2990,7 +3224,7 @@ jobs:
 			break
 		}
 	}
-	if collision == nil || collision.Inputs["target"] != "linux" || collision.Steps[0].Run != "echo linux" {
+	if collision == nil || collision.Inputs["target"] != "linux" || collision.Steps[0].Run != "echo ${{ inputs.target }}" {
 		t.Fatalf("accepted colliding job = %#v, want first flattened record", collision)
 	}
 	var finding *ProcessingFinding
@@ -3099,6 +3333,8 @@ jobs:
       required_alias: ${{ secrets.ORIGINAL }}
       duplicate_alias: ${{ secrets.ORIGINAL }}
       token_alias: ${{ secrets.GITHUB_TOKEN }}
+      access-token: ${{ secrets.ORIGINAL }}
+      token-alias: ${{ secrets.GITHUB_TOKEN }}
 `)
 	writeWorkflow(t, repository, "reusable.yml", `on:
   workflow_call:
@@ -3108,6 +3344,8 @@ jobs:
       duplicate_alias:
       optional_alias:
       token_alias:
+      access-token:
+      token-alias:
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -3116,6 +3354,8 @@ jobs:
       DUPLICATE: ${{ secrets['duplicate_alias'] }}
       OPTIONAL: ${{ secrets.optional_alias }}
       TOKEN: ${{ secrets.token_alias }}
+      HYPHENATED: ${{ secrets.access-token }}
+      HYPHENATED_TOKEN: ${{ secrets.token-alias }}
     steps:
       - run: true
 `)
@@ -3127,11 +3367,11 @@ jobs:
 		t.Fatalf("plans = %d, want two matrix instances", len(plans))
 	}
 	for _, job := range plans {
-		wantMappings := map[string]string{"DUPLICATE_ALIAS": "ORIGINAL", "REQUIRED_ALIAS": "ORIGINAL"}
+		wantMappings := map[string]string{"ACCESS-TOKEN": "ORIGINAL", "DUPLICATE_ALIAS": "ORIGINAL", "REQUIRED_ALIAS": "ORIGINAL"}
 		if !slices.Equal(job.RequiredSecrets, []string{"ORIGINAL"}) || !reflect.DeepEqual(job.SecretMappings, wantMappings) || !job.HasCapability("secrets") {
 			t.Fatalf("ordinary secret boundary = %#v / %#v / %#v", job.RequiredSecrets, job.SecretMappings, job.RequiredCapabilities)
 		}
-		if job.GitHubToken == nil || !slices.Equal(job.GitHubToken.Aliases, []string{"TOKEN_ALIAS"}) || !job.HasCapability("provider-token-write") {
+		if job.GitHubToken == nil || !slices.Equal(job.GitHubToken.Aliases, []string{"TOKEN-ALIAS", "TOKEN_ALIAS"}) || !job.HasCapability("provider-token-write") {
 			t.Fatalf("token alias boundary = %#v / %#v", job.GitHubToken, job.RequiredCapabilities)
 		}
 		encoded, encodeErr := plan.Encode(job)
@@ -3360,6 +3600,33 @@ jobs:
 	}
 }
 
+func TestCompileSecretLookupsByImpossibleNames(t *testing.T) {
+	const callee = "on:\n  workflow_call:\n    secrets:\n      access-token:\n      other:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        env:\n          A: ${{ secrets['a-b'] }}\n          T: ${{ secrets.access-token }}\n          O: ${{ secrets.other }}\n"
+	tests := []struct {
+		name, caller string
+		want         []string
+		wantMappings map[string]string
+	}{
+		{name: "root", caller: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        env:\n          A: ${{ secrets['a-b'] }}\n          B: ${{ secrets.CANARY }}\n", want: []string{"CANARY"}},
+		{name: "inherited", caller: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets: inherit\n", want: []string{"OTHER"}},
+		{name: "mapped", caller: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets:\n      access-token: ${{ secrets.MY-SECRET }}\n      other: ${{ secrets.CANARY }}\n", want: []string{"CANARY"}, wantMappings: map[string]string{"OTHER": "CANARY"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			path := writeWorkflow(t, repository, "caller.yml", test.caller)
+			writeWorkflow(t, repository, "callee.yml", callee)
+			plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 1 || !slices.Equal(plans[0].RequiredSecrets, test.want) || !maps.Equal(plans[0].SecretMappings, test.wantMappings) {
+				t.Fatalf("required secrets = %v, mappings = %v, want %v", plans[0].RequiredSecrets, plans[0].SecretMappings, test.want)
+			}
+		})
+	}
+}
+
 func TestCompileRequiresSecretInheritanceOnEveryReusableWorkflowEdge(t *testing.T) {
 	for _, test := range []struct {
 		name          string
@@ -3492,7 +3759,7 @@ jobs:
 	if err := json.Unmarshal(result, &ir); err != nil {
 		t.Fatal(err)
 	}
-	if len(ir.Jobs) != 1 || len(ir.Jobs[0].Steps) != 1 || ir.Jobs[0].Steps[0].Run != "echo false true" {
+	if len(ir.Jobs) != 1 || len(ir.Jobs[0].Steps) != 1 || ir.Jobs[0].Steps[0].Run != "echo ${{ inputs.is-trunk }} ${{ inputs.is-public-fork }}" || !reflect.DeepEqual(ir.Jobs[0].Inputs, map[string]any{"is-trunk": false, "is-public-fork": true}) {
 		t.Fatalf("event-backed reusable inputs = %#v", ir.Jobs)
 	}
 }
@@ -3530,7 +3797,7 @@ jobs:
 	if err := json.Unmarshal(result, &ir); err != nil {
 		t.Fatal(err)
 	}
-	if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo push-release:true:3" {
+	if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo ${{ inputs.label }}:${{ inputs.enabled }}:${{ inputs.count }}" || !reflect.DeepEqual(ir.Jobs[0].Inputs, map[string]any{"label": "push-release", "enabled": true, "count": float64(3)}) {
 		t.Fatalf("reusable defaults = %#v", ir.Jobs)
 	}
 }
@@ -3716,7 +3983,7 @@ jobs:
 	if err := json.Unmarshal(result, &ir); err != nil {
 		t.Fatal(err)
 	}
-	if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo release-push-linux-push" {
+	if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo ${{ inputs.value }}" || ir.Jobs[0].Inputs["value"] != "release-push-linux-push" {
 		t.Fatalf("nested reusable input = %#v", ir.Jobs)
 	}
 }
@@ -4127,11 +4394,10 @@ jobs:
 	}
 }
 
-// TestValidateRecognizesRuntimeMatrixIncludeAfterInputSubstitution covers a
-// called workflow that receives inputs: input substitution clones the matrix
-// and must not turn the absent static include and exclude lists into a
-// reason to reject an otherwise valid needs-derived include matrix.
-func TestValidateRecognizesRuntimeMatrixIncludeAfterInputSubstitution(t *testing.T) {
+// TestValidateRecognizesRuntimeMatrixIncludeInReusableWorkflow covers a
+// called workflow that receives inputs: the absent static include and exclude
+// lists must not reject an otherwise valid needs-derived include matrix.
+func TestValidateRecognizesRuntimeMatrixIncludeInReusableWorkflow(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -4916,6 +5182,138 @@ jobs:
 	}
 }
 
+func TestCompilePlansReusableServicesUseEachCallersInputs(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "services.yml", `on:
+  workflow_call:
+    inputs:
+      image: {type: string, required: true}
+      user: {type: string, required: true}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: ${{ inputs.image }}
+        env: {USER: '${{ inputs.user }}'}
+        credentials: {username: '${{ inputs.USER }}', password: '${{ secrets.REGISTRY_PASSWORD }}'}
+    steps: [{run: true}]
+`)
+	source := `on: push
+jobs:
+  none:
+    uses: ./.github/workflows/services.yml
+    with: {image: '', user: gamma}
+  first:
+    uses: ./.github/workflows/services.yml
+    secrets: inherit
+    with: {image: 'postgres:16', user: alpha}
+  second:
+    uses: ./.github/workflows/services.yml
+    secrets: inherit
+    with: {image: 'redis:7', user: beta}
+`
+	path := writeWorkflow(t, repository, "caller.yml", source)
+	plans, err := compilePlansForTest(t.Context(), path, []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err != nil || len(plans) != 3 {
+		t.Fatalf("compile = %d plans, %v", len(plans), err)
+	}
+	byJob := make(map[string]plan.Job, len(plans))
+	for _, job := range plans {
+		byJob[job.Workflow.LogicalJobID] = job
+	}
+	// An image input that resolves empty runs the job without the service.
+	if none := byJob["none.test"]; len(none.Services) != 0 || len(none.Program.Job.Services.Static) != 0 {
+		t.Fatalf("empty image job services = %#v", none.Services)
+	}
+	for i, want := range []struct{ job, image, user string }{{"first.test", "postgres:16", "alpha"}, {"second.test", "redis:7", "beta"}} {
+		job := byJob[want.job]
+		service := job.Program.Job.Services.Static[0].Container
+		if service.Image.Source != want.image || job.Services["db"].Env["USER"] != want.user {
+			t.Fatalf("job %d service = %#v", i, job.Services["db"])
+		}
+		// Credentials keep the input read and evaluate against this job's inputs.
+		username := service.Credentials.Username
+		got, err := program.EvaluateSite(username, program.EvaluationContext{Expression: expression.Context{WorkflowInputs: job.Inputs}})
+		if strings.Contains(username.Source, want.user) || err != nil || got != want.user {
+			t.Fatalf("job %d credential source %q = %q, %v; want %q", i, username.Source, got, err, want.user)
+		}
+	}
+
+	deferred := `on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs: {image: '${{ steps.image.outputs.image }}'}
+    steps: [{id: image, run: true}]
+  call:
+    needs: producer
+    uses: ./.github/workflows/services.yml
+    with: {image: '${{ needs.producer.outputs.image }}', user: alpha}
+`
+	path = writeWorkflow(t, repository, "deferred.yml", deferred)
+	if _, err := compilePlansForTest(t.Context(), path, []byte(deferred), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions()); err == nil || !strings.Contains(err.Error(), "not statically resolvable") {
+		t.Fatalf("deferred service image error = %v", err)
+	}
+}
+
+func TestCompilePlansReusableServicesFoldInputsBesideNeeds(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "services.yml", `on:
+  workflow_call:
+    inputs:
+      image: {type: string}
+      secret_name: {type: string}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: ${{ format('{0}:{1}', inputs.image, needs.build.outputs.tag) }}
+        env: {PASSWORD: '${{ secrets[inputs.secret_name] }}'}
+    steps: [{run: true}]
+`)
+	source := `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/services.yml
+    secrets: inherit
+    with: {image: postgres, secret_name: DB_PASSWORD}
+`
+	path := writeWorkflow(t, repository, "caller.yml", source)
+	plans, err := compilePlansForTest(t.Context(), path, []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err != nil || len(plans) != 1 {
+		t.Fatalf("compile = %d plans, %v", len(plans), err)
+	}
+	service := plans[0].Program.Job.Services.Static[0].Container
+	if service.Image.Source != "${{ format('{0}:{1}', 'postgres', needs.build.outputs.tag) }}" {
+		t.Fatalf("service image = %q", service.Image.Source)
+	}
+	if !slices.Equal(plans[0].RequiredSecrets, []string{"DB_PASSWORD"}) {
+		t.Fatalf("required secrets = %v", plans[0].RequiredSecrets)
+	}
+}
+
+func TestCompilePlansServiceErrorsWithholdInputValues(t *testing.T) {
+	repository := t.TempDir()
+	source := `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/services.yml
+    with: {pattern: '{9} SENSITIVE-VALUE'}
+`
+	path := writeWorkflow(t, repository, "caller.yml", source)
+	for _, field := range []string{"ports: ['${{ format(inputs.pattern, 1) }}']", "env: {VALUE: '${{ format(inputs.pattern, 1) }}'}", "credentials: {username: '${{ format(inputs.pattern, 1) }}', password: p}"} {
+		t.Run(field, func(t *testing.T) {
+			writeWorkflow(t, repository, "services.yml", "on:\n  workflow_call:\n    inputs:\n      pattern: {type: string}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      db:\n        image: postgres\n        "+field+"\n    steps: [{run: true}]\n")
+			_, err := compilePlansForTest(t.Context(), path, []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+			if err == nil || strings.Contains(err.Error(), "{9}") || strings.Contains(err.Error(), "SENSITIVE") {
+				t.Fatalf("error = %v, want a failure that withholds the input value", err)
+			}
+		})
+	}
+}
+
 func TestCompilePlansOptionalMatrixContainer(t *testing.T) {
 	const image = "node:24"
 	for _, object := range []bool{false, true} {
@@ -5001,6 +5399,7 @@ func TestResolveCompileServiceMatrixCredentials(t *testing.T) {
 		{"${{ matrix.user || secrets.REGISTRY_PASSWORD }}", "registry-user"},
 		{"${{ format('{0}:{1}', matrix.user, strategy.job-index) }}", "registry-user:2"},
 		{"${{ format('{0}:{1}', matrix.user, needs.auth.outputs.name) }}", "registry-user:upstream"},
+		{"${{ matrix[inputs.key] }}", "registry-user"},
 	} {
 		t.Run(test.source, func(t *testing.T) {
 			services := []workflow.Service{{Name: "database", Container: workflow.ServiceContainer{
@@ -5008,7 +5407,7 @@ func TestResolveCompileServiceMatrixCredentials(t *testing.T) {
 			}}}
 			resolved, err := resolveCompileServices(services, expression.CompileContext{
 				Matrix: map[string]any{"user": "registry-user"}, Strategy: map[string]any{"job-index": 2},
-				Vars: map[string]string{"USER": "repository"},
+				Vars: map[string]string{"USER": "repository"}, Inputs: map[string]any{"key": "user"}, InputsComplete: true,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -5034,8 +5433,8 @@ func TestResolveCompileServiceMatrixCredentials(t *testing.T) {
 
 func TestResolveCompileServiceCredentialAuthoredValidation(t *testing.T) {
 	for _, source := range []string{
-		"${{ true || inputs.user }}", "${{ true || runner.os }}",
-		"${{ matrix.user || inputs.user }}", "${{ matrix.user || runner.os }}",
+		"${{ true || inputs.missing }}", "${{ true || runner.os }}",
+		"${{ matrix.user || inputs.missing }}", "${{ matrix.user || runner.os }}",
 		"${{ matrix.user || secrets[matrix.name] }}", "${{ true || secrets[vars.NAME] }}",
 		"${{ matrix.user || toJSON(github) }}", "${{ matrix.user || hashFiles('**') }}",
 		"${{ github.token }}", "${{ true || github.token }}",
@@ -5049,6 +5448,204 @@ func TestResolveCompileServiceCredentialAuthoredValidation(t *testing.T) {
 			})
 			if err == nil {
 				t.Fatal("accepted forbidden authored credential context")
+			}
+		})
+	}
+}
+
+func TestCompilePlansServiceCredentialAuthoredInputs(t *testing.T) {
+	for _, mode := range []string{"dispatch", "caller", "no-known-inputs", "deferred"} {
+		t.Run(mode, func(t *testing.T) {
+			repository := t.TempDir()
+			jobs := `jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      database:
+        image: postgres:16
+        credentials:
+          username: user
+          password: CREDENTIAL
+    steps: [{run: true}]
+`
+			source := "on: push\n" + jobs
+			var event map[string]any
+			if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "dispatch":
+				source = "on:\n  workflow_dispatch:\n    inputs:\n      user: {type: string, default: REGISTRY_PASSWORD}\n      key: {type: string, default: user}\n" + jobs
+				event["event"] = "workflow_dispatch"
+			case "caller", "deferred":
+				source = "on:\n  workflow_call:\n    inputs:\n      user: {type: string, default: REGISTRY_PASSWORD}\n      key: {type: string, default: user}\n      pending: {type: string}\n" + jobs
+			}
+			eventSource, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, credential := range []string{
+				"literal",
+				"${{ inputs.user || inputs.missing }}",
+				"${{ true || inputs.missing }}",
+				"${{ inputs.user || inputs[vars.NAME] }}",
+				"${{ inputs[inputs.key] }}",
+				"${{ true || toJSON(inputs) }}",
+				"${{ true || inputs.pending }}",
+				"${{ inputs.user || inputs.pending }}",
+				"${{ secrets[inputs.user] }}",
+				"${{ true || secrets[inputs.user] }}",
+				"${{ inputs.user || secrets[inputs.user] }}",
+				"${{ true || runner.os }}",
+				"${{ inputs.user || github.token }}",
+				"${{ true || toJSON(github) }}",
+				"${{ true || hashFiles('**') }}",
+			} {
+				// pending has a known empty default in the ordinary caller case.
+				if mode == "caller" && strings.Contains(credential, "inputs.pending") {
+					continue
+				}
+				t.Run(credential, func(t *testing.T) {
+					workflowSource := strings.Replace(source, "CREDENTIAL", credential, 1)
+					if mode == "caller" || mode == "deferred" {
+						writeWorkflow(t, repository, "callee.yml", workflowSource)
+						workflowSource = "on: push\njobs:\n"
+						if mode == "deferred" {
+							workflowSource += "  producer:\n    runs-on: ubuntu-latest\n    outputs: {value: '${{ steps.value.outputs.value }}'}\n    steps: [{id: value, run: true}]\n"
+						}
+						workflowSource += "  call:\n    uses: ./.github/workflows/callee.yml\n    secrets: inherit\n"
+						if mode == "deferred" {
+							workflowSource += "    needs: producer\n    with: {pending: '${{ needs.producer.outputs.value }}'}\n"
+						}
+					}
+					path := writeWorkflow(t, repository, "caller.yml", workflowSource)
+					plans, err := compilePlansForTest(t.Context(), path, []byte(workflowSource), eventSource, "0.0.0-test", testDistributionDigest, defaultOptions())
+					if credential == "literal" {
+						if err != nil || len(plans) == 0 {
+							t.Fatalf("valid fixture: plans=%d, err=%v", len(plans), err)
+						}
+					} else if err == nil {
+						t.Fatalf("accepted prohibited authored credential %q", credential)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCompilePlansServiceCredentialKnownInputs(t *testing.T) {
+	for _, mode := range []string{"dispatch", "caller"} {
+		t.Run(mode, func(t *testing.T) {
+			repository := t.TempDir()
+			declarations := `    inputs:
+      user: {type: string, default: default-user}
+      enabled: {type: boolean, default: false}
+      count: {type: number, default: 7}
+`
+			jobs := `jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: {name: [row]}
+    services:
+      database:
+        image: postgres:16
+        credentials:
+          username: ${{ format('{0}:{1}:{2}:{3}:{4}', inputs['user'], inputs.enabled, inputs.count, matrix.name, vars.USER) }}
+          password: ${{ inputs.enabled && secrets.GITHUB_TOKEN || inputs.user || secrets.REGISTRY_PASSWORD }}
+    steps: [{run: true}]
+`
+			source := "on:\n  workflow_dispatch:\n" + declarations + "permissions: {contents: read}\n" + jobs
+			var event map[string]any
+			if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+				t.Fatal(err)
+			}
+			wantUsername, wantPassword := "default-user:false:9:row:environment", "default-user"
+			if mode == "dispatch" {
+				event["event"] = "workflow_dispatch"
+				event["payload"] = map[string]any{"inputs": map[string]any{"count": "9"}}
+			} else {
+				writeWorkflow(t, repository, "callee.yml", "on:\n  workflow_call:\n"+declarations+jobs)
+				source = "on: push\npermissions: {contents: read}\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    secrets: inherit\n    with: {user: '${{ vars.USER }}'}\n"
+				wantUsername, wantPassword = "repository:false:7:row:environment", "repository"
+			}
+			path := writeWorkflow(t, repository, "caller.yml", source)
+			eventSource, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := defaultOptions()
+			options.Vars.Organization = map[string]string{"USER": "organization"}
+			options.Vars.Repository = map[string]string{"USER": "repository"}
+			plans, err := compilePlansForTest(t.Context(), path, []byte(source), eventSource, "0.0.0-test", testDistributionDigest, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := plan.Encode(plans[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			job, err := plan.Decode(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Even with enabled=false and a nonempty user, both named secret
+			// inventories survive. The decoded positional profile owns evaluation.
+			if !slices.Equal(job.RequiredSecrets, []string{"REGISTRY_PASSWORD"}) || job.GitHubToken == nil || !job.HasCapability("provider-token-write") || job.GitHubToken.Permissions["contents"] != "read" {
+				t.Fatalf("credential authority changed: secrets=%v token=%v capabilities=%v", job.RequiredSecrets, job.GitHubToken, job.RequiredCapabilities)
+			}
+			credentials := job.Program.Job.Services.Static[0].Container.Credentials
+			context := program.EvaluationContext{Expression: expression.Context{
+				WorkflowInputs: job.Inputs,
+				Vars:           map[string]string{"USER": "environment"}, Secrets: map[string]string{"REGISTRY_PASSWORD": "private", "GITHUB_TOKEN": "token"},
+			}}
+			for _, field := range []struct {
+				site program.Site
+				want string
+			}{{credentials.Username, wantUsername}, {credentials.Password, wantPassword}} {
+				// Input reads stay in the source; the runtime supplies the job's inputs.
+				if source := field.site.Source; !strings.Contains(source, "inputs") || strings.Contains(source, "default-user") || strings.Contains(source, "repository:") {
+					t.Fatalf("credential source = %q, want input reads without input values", source)
+				}
+				got, err := program.EvaluateSite(field.site, context)
+				if err != nil || got != field.want {
+					t.Fatalf("credential = %q, %v; want %q", got, err, field.want)
+				}
+			}
+		})
+	}
+}
+
+func TestCompilePlansServiceCredentialInputData(t *testing.T) {
+	const input = "it's ${{ github.token }} and ${{ secrets.ADMIN }}"
+	var event map[string]any
+	if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+		t.Fatal(err)
+	}
+	event["event"] = "workflow_dispatch"
+	event["payload"] = map[string]any{"inputs": map[string]any{"user": input}}
+	eventSource, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, credential := range []string{"${{ inputs.user }}", "${{ format('{0}:{1}', inputs.user, secrets.REGISTRY_PASSWORD) }}"} {
+		t.Run(credential, func(t *testing.T) {
+			source := []byte("on:\n  workflow_dispatch:\n    inputs:\n      user: {type: string}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      database:\n        image: postgres:16\n        credentials:\n          username: user\n          password: " + credential + "\n    steps: [{run: true}]\n")
+			plans, err := compilePlansForTest(t.Context(), "credentials.yml", source, eventSource, "0.0.0-test", testDistributionDigest, defaultOptions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := plans[0]
+			want, wantSecrets := input, []string(nil)
+			if credential != "${{ inputs.user }}" {
+				want, wantSecrets = input+":private", []string{"REGISTRY_PASSWORD"}
+			}
+			if !slices.Equal(job.RequiredSecrets, wantSecrets) || job.GitHubToken != nil {
+				t.Fatalf("input data introduced authority: secrets=%v token=%v", job.RequiredSecrets, job.GitHubToken)
+			}
+			got, err := program.EvaluateSite(job.Program.Job.Services.Static[0].Container.Credentials.Password, program.EvaluationContext{Expression: expression.Context{WorkflowInputs: job.Inputs, Secrets: map[string]string{"REGISTRY_PASSWORD": "private"}}})
+			if err != nil || got != want {
+				t.Fatalf("credential = %q, %v; want %q", got, err, want)
 			}
 		})
 	}
@@ -5434,7 +6031,7 @@ jobs:
 	}
 }
 
-func TestCompilePlansSubstituteWorkflowDispatchInputsWithoutReusableCalls(t *testing.T) {
+func TestCompilePlansEvaluateWorkflowDispatchInputsWithoutReusableCalls(t *testing.T) {
 	workflowSource := []byte(`on:
   workflow_dispatch:
     inputs:
@@ -5478,8 +6075,12 @@ jobs:
 	}
 	job := plans[0]
 	step := job.Program.Job.Steps[0]
-	if job.Env["LABEL"] != "bash" || job.Env["INDEXED_LABEL"] != "bash" || job.Inputs["label"] != "bash" || job.Inputs["timeout"] != json.Number("7") || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || step.TimeoutMinutes.Literal != 7 || step.TimeoutMinutes.Expression != nil {
+	if job.Env["LABEL"] != "${{ inputs.label }}" || job.Env["INDEXED_LABEL"] != "${{ inputs['label'] }}" || job.Inputs["label"] != "bash" || job.Inputs["timeout"] != json.Number("7") || job.DefaultShell != "${{ inputs.label }}" || job.Outputs["label"] != "${{ inputs.label }}" || step.TimeoutMinutes.Literal != 0 || step.TimeoutMinutes.Expression == nil || step.TimeoutMinutes.Expression.Source != "${{ inputs.timeout }}" {
 		t.Fatalf("compiled dispatch input surfaces = %#v", job)
+	}
+	got, err := expression.NewEngine().Evaluate(expression.Site{Source: step.TimeoutMinutes.Expression.Source, Profile: expression.ProfileStepControl, Result: expression.ResultNumber}, expression.Values{Runtime: expression.Context{WorkflowInputs: job.Inputs}})
+	if err != nil || got != json.Number("7") {
+		t.Fatalf("dispatch timeout = %#v, %v; want typed number 7", got, err)
 	}
 }
 
@@ -5637,5 +6238,46 @@ func TestCompilerWarningsFlagIgnoredMergeGroupPathFilters(t *testing.T) {
 	parsed.Triggers = []workflow.Trigger{{Event: "merge_group", Types: []string{"checks_requested"}}}
 	if warnings := compilerWarnings(parsed, false); warnings != nil {
 		t.Fatalf("warnings without path filters = %#v, want none", warnings)
+	}
+}
+
+func TestCompileReusableCallNamesKeepInputDataInLabels(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    name: ${{ format('{0}{{{{ github.sha }}}}', '$') }}
+    uses: ./.github/workflows/forward.yml
+    with:
+      payload: ${{ format('{0}{{{{ github.sha }}}}', '$') }}
+`)
+	writeWorkflow(t, repository, "forward.yml", `on:
+  workflow_call:
+    inputs:
+      payload: {type: string}
+jobs:
+  forward:
+    name: ${{ inputs.payload }}
+    uses: ./.github/workflows/callee.yml
+    with:
+      payload: ${{ inputs.payload }}
+`)
+	writeWorkflow(t, repository, "callee.yml", `on:
+  workflow_call:
+    inputs:
+      payload: {type: string}
+jobs:
+  test:
+    name: leaf-${{ inputs.payload }}
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	bundle, err := CompileBundle(path, readFile(t, path), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "${{ github.sha }} / ${{ github.sha }} / leaf-${{ github.sha }}"
+	if len(bundle.IR.Jobs) != 1 || bundle.IR.Jobs[0].Label != want {
+		t.Fatalf("labels = %#v, want %q", bundle.IR.Jobs, want)
 	}
 }

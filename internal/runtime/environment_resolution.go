@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/agentapi"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 const (
@@ -68,7 +69,7 @@ type AgentEnvironmentResolverConfig struct {
 
 // AgentEnvironmentResolver resolves GitHub deployment environments through
 // the job-scoped Agent API endpoint github-actions/environments. The backend
-// restricts resolution to the pipeline's configured GitHub.com repository.
+// restricts resolution to the pipeline's configured GitHub repository.
 type AgentEnvironmentResolver struct {
 	resolveURL string
 	agent      *agentapi.Client
@@ -98,9 +99,13 @@ func NewAgentEnvironmentResolver(config AgentEnvironmentResolverConfig) (*AgentE
 // rejection surfaces as the request error. Every failure is terminal for the
 // whole batch: deployment protection never degrades to an unprotected
 // default.
-func (c *AgentEnvironmentResolver) ResolveEnvironments(ctx context.Context, repository string, names []string) ([]EnvironmentSnapshot, error) {
+func (c *AgentEnvironmentResolver) ResolveEnvironments(ctx context.Context, serverURL, repository string, names []string) ([]EnvironmentSnapshot, error) {
 	if c == nil {
 		return nil, fmt.Errorf("environment resolver is not configured")
+	}
+	serverURL = plan.EventServerURL("github", serverURL)
+	if err := plan.ValidateGitHubServerURL(serverURL); err != nil {
+		return nil, err
 	}
 	if !validCheckoutRepository(repository) {
 		return nil, fmt.Errorf("environment resolution requires a valid event repository")
@@ -126,7 +131,7 @@ func (c *AgentEnvironmentResolver) ResolveEnvironments(ctx context.Context, repo
 		EnvironmentNames []string `json:"environment_names"`
 		IncludeVariables bool     `json:"include_variables"`
 	}{
-		RepositoryURL:    "https://github.com/" + repository,
+		RepositoryURL:    serverURL + "/" + repository,
 		EnvironmentNames: names,
 		IncludeVariables: true,
 	})

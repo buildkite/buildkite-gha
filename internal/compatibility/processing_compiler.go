@@ -324,6 +324,7 @@ func diagnosticFromError(defaultPath string, stage workflowprocessing.Stage, cod
 		Message: message, Detail: detail, Location: location,
 	}
 	if finding != nil {
+		diagnostic.SetupURL = finding.SetupURL
 		diagnostic.Blocker = finding.Blocker
 		diagnostic.BlockerDetail = finding.BlockerDetail
 		diagnostic.reportRunnerLabelDetail = finding.ReportRunnerLabelDetail

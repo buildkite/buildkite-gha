@@ -15,11 +15,19 @@ import (
 )
 
 const (
-	ResultManifestSchema   = "buildkite-gha/result-manifest/v2"
-	MaxResultOutputs       = 64
-	MaxResultOutputBytes   = 1024
-	MaxResultManifestBytes = 96 * 1024
+	ResultManifestSchema = "buildkite-gha/result-manifest/v2"
+	MaxResultOutputs     = 64
+	// MaxResultOutputBytes matches GitHub's documented 1 MB output limit.
+	MaxResultOutputBytes = 1 << 20
+	// MaxResultOutputsBytes bounds the raw output values of one job.
+	MaxResultOutputsBytes = 4 << 20
+	// JSON escaping can grow a value up to six times; the remainder leaves
+	// room for names and artifacts, so only the output limits bind.
+	MaxResultManifestBytes = 6*MaxResultOutputsBytes + 1<<20
 	MaxResultProducers     = 1024
+	// Buildkite discourages metadata values over 1 KB, so larger outputs are
+	// not mirrored.
+	maxResultMetadataValueBytes = 1024
 
 	MaxResultArtifacts         = 64
 	MaxResultArtifactNameBytes = 255
@@ -144,9 +152,13 @@ func MarshalResultManifest(manifest ResultManifest) ([]byte, error) {
 	}
 	sort.Slice(manifest.Outputs, func(i, j int) bool { return manifest.Outputs[i].Name < manifest.Outputs[j].Name })
 	outputNames := make(map[string]struct{}, len(manifest.Outputs))
+	outputBytes := 0
 	for _, output := range manifest.Outputs {
 		if !keyPattern.MatchString(output.Name) || len(output.Value) > MaxResultOutputBytes {
 			return nil, fmt.Errorf("invalid or oversized output %q", output.Name)
+		}
+		if outputBytes += len(output.Value); outputBytes > MaxResultOutputsBytes {
+			return nil, fmt.Errorf("result manifest outputs exceed %d bytes", MaxResultOutputsBytes)
 		}
 		name := strings.ToLower(output.Name)
 		if _, exists := outputNames[name]; exists {
@@ -243,7 +255,9 @@ func ResultMetadata(workflow, instance string, manifest ResultManifest, manifest
 		resultPrefix + "/manifest-digest": Digest(manifestBytes),
 	}
 	for _, output := range manifest.Outputs {
-		values[outputPrefix+"/"+output.Name] = output.Value
+		if len(output.Value) <= maxResultMetadataValueBytes {
+			values[outputPrefix+"/"+output.Name] = output.Value
+		}
 	}
 	return values, nil
 }

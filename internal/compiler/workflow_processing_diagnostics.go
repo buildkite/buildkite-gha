@@ -61,8 +61,9 @@ type ProcessingFinding struct {
 	Message string
 	// Detail adds lower-level diagnostic information after Message. It must not
 	// contain event-derived data.
-	Detail string
-	Err    error
+	Detail   string
+	SetupURL string
+	Err      error
 }
 
 func (e *ProcessingFinding) Error() string { return e.Err.Error() }

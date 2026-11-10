@@ -104,15 +104,15 @@ instances:
 }
 
 func canonicalWorkflowRunPath(workflowPath string) (string, error) {
-	if !isRepositoryWorkflowPath(workflowPath) {
+	repositoryRoot, canonicalPath, err := workflowRepository(workflowPath)
+	if err != nil {
+		return "", err
+	}
+	if repositoryRoot == "" {
 		if filepath.IsAbs(workflowPath) {
 			return "", nil
 		}
 		return filepath.ToSlash(filepath.Clean(workflowPath)), nil
-	}
-	repositoryRoot, canonicalPath, err := workflowRepository(workflowPath)
-	if err != nil {
-		return "", err
 	}
 	return repositoryWorkflowPath(repositoryRoot, canonicalPath)
 }
@@ -253,8 +253,8 @@ func (b planBuilder) validateShellCompatibility(instance JobInstance, workflowPr
 // variable shadow the environment variable that overrides it at runtime.
 func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (JobInstance, error) {
 	context := compileContext(b.ir.Event, nil, instance.SourcePath, b.workflowName)
-	context.Inputs = instance.Inputs
-	context.InputsComplete = len(instance.DeferredInputs) == 0
+	// Runtime fields evaluate inputs from Job.Inputs; keep them residual.
+	context.Inputs, context.InputsComplete = nil, false
 	context.Matrix = instance.Matrix
 	reduceTemplate := func(value string, profile expression.ProfileID) (string, error) {
 		if value == "" {
@@ -344,14 +344,6 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		case program.SurfaceStepTemplate:
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceRuntimeTemplate:
-			if strings.HasSuffix(site.Location.Field, ".uses") {
-				var referencesEvent bool
-				referencesEvent, reduceErr = siteReferencesEvent(site.Source, profile, expression.ResultString, false)
-				if reduceErr == nil && referencesEvent {
-					reduceErr = fmt.Errorf("github.event cannot select an action reference")
-				}
-				break
-			}
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceServiceTemplate:
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
@@ -499,7 +491,9 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 		built.capabilities = capabilities
 		return built, nil
 	}
-	compiled, err := b.actionGraphs.compile(b.ctx, instance, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs)
+	event := b.ir.Event
+	identityIDs := plan.EventIdentityIDs(event.Provider, event.Repository.Owner+"/"+event.Repository.Name, event.Actor, event.Payload)
+	compiled, err := b.actionGraphs.compile(b.ctx, instance, plan.EventServerURL(event.Provider, event.ServerURL), identityIDs, actionRefs, actionInputs)
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -510,7 +504,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 	built.requiredSecrets = compiled.requiredSecrets
 	built.programs = compiled.programs
 	built.inputsInspected = true
-	reachability, err := program.WorkflowReachability(*workflowProgram, expression.AbstractValues{References: b.authorityReferences(instance)})
+	reachability, err := program.WorkflowReachability(*workflowProgram, b.authorityValues(instance))
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -567,29 +561,56 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 	return built, nil
 }
 
-// authorityReferences are the values token and secret authority planning may
+// authorityValues are the values token and secret authority planning may
 // resolve. Planning never resolves vars: GitHub evaluates jobs.<id>.if with
 // repository and organization variables but steps with the environment laid
 // over them, so a single map would be wrong in one of the two positions.
 // Unknown vars keep planning conservative: an expression that may reference
 // github.token still requests the token.
-func (b planBuilder) authorityReferences(instance JobInstance) map[string]any {
-	return map[string]any{
-		"github.server_url": plan.EventServerURL(b.ir.Event.Provider),
-		"inputs":            instance.Inputs,
-		"matrix":            instance.Matrix,
-		"strategy":          instance.Strategy,
+func (b planBuilder) authorityValues(instance JobInstance) expression.AbstractValues {
+	values := expression.AbstractValues{
+		References: map[string]any{
+			"github.server_url": plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL),
+			"matrix":            instance.Matrix,
+			"strategy":          instance.Strategy,
+		},
+		Inputs: instance.inputScope(),
 	}
+	event := b.ir.Event
+	for name, value := range plan.EventIdentityIDs(event.Provider, event.Repository.Owner+"/"+event.Repository.Name, event.Actor, event.Payload) {
+		values.References["github."+name] = value
+	}
+	return values
 }
 
 func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, jobReachable, stepReachable bool, built *builtPlanActions) error {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path})
+	if descriptor.Adapter == "" || !jobReachable {
+		return nil
+	}
+	// Adapters validate a resolved view, never rewriting the emitted source.
+	inputs := cloneMap(instance.Steps[stepIndex].With)
+	readsInputValues := false
+	for _, name := range sortedKeys(inputs) {
+		source := inputs[name]
+		site := compileExpressionSite(source, expression.ProfileStepTemplate, expression.ResultString)
+		readsInputs, err := expression.NewEngine().ReferencesContext(site, "inputs", false)
+		checkoutHost := descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA && strings.EqualFold(name, "github-server-url")
+		if err != nil || !readsInputs && !checkoutHost {
+			continue
+		}
+		readsInputValues = readsInputValues || readsInputs
+		analysis, err := expression.NewEngine().Analyze(site, b.authorityValues(instance))
+		if err != nil {
+			return fmt.Errorf("action input %q: %w", name, err)
+		}
+		if analysis.Value.Known {
+			inputs[name] = analysis.Value.Value.(string)
+		}
+	}
 	switch descriptor.Adapter {
 	case actionintegration.AdapterCheckoutExactEventSHA:
-		if !jobReachable {
-			return nil
-		}
-		checkoutInputs := cloneMap(instance.Steps[stepIndex].With)
+		checkoutInputs := inputs
 		for name, value := range checkoutInputs {
 			if !strings.EqualFold(name, "ref") {
 				continue
@@ -600,7 +621,7 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 				checkoutInputs[name] = b.ir.Event.SHA
 			}
 		}
-		if err := actionintegration.ValidateCheckoutInputs(lock.Commit, checkoutInputs, b.ir.Event.Repository.Owner+"/"+b.ir.Event.Repository.Name, b.ir.Event.SHA); err != nil {
+		if err := actionintegration.ValidateCheckoutInputs(lock.Commit, checkoutInputs, b.ir.Event.Repository.Owner+"/"+b.ir.Event.Repository.Name, plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL)); err != nil {
 			span := instance.Steps[stepIndex].Span.Start
 			return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 		}
@@ -609,12 +630,15 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 			built.authorization.ProviderTokenReadCapabilitySources = append(built.authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
 		}
 	case actionintegration.AdapterUploadArtifactBuildkite:
-		if err := actionintegration.ValidateUploadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
+		if err := actionintegration.ValidateUploadArtifactInputs(lock.Commit, inputs); err != nil {
 			span := instance.Steps[stepIndex].Span.Start
+			if readsInputValues {
+				err = fmt.Errorf("invalid inputs%s", inputValueHiddenNote)
+			}
 			return fmt.Errorf("%s:%d:%d: bounded upload-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 		}
 	case actionintegration.AdapterDownloadArtifactBuildkite:
-		if err := actionintegration.ValidateDownloadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
+		if err := actionintegration.ValidateDownloadArtifactInputs(lock.Commit, inputs); err != nil {
 			span := instance.Steps[stepIndex].Span.Start
 			return fmt.Errorf("%s:%d:%d: bounded download-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 		}
@@ -647,8 +671,8 @@ func addContainerCapabilities(instance JobInstance, built *builtPlanActions) err
 }
 
 func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram program.Program, actions *builtPlanActions) ([]string, map[string]string, *plan.GitHubToken, error) {
-	serverURL := plan.EventServerURL(b.ir.Event.Provider)
-	secrets, mappings, tokenAliases, referencesGitHubToken, referencesEventPayload, err := requiredSecrets(workflowProgram, instance.secretAuthority, actions.requiredSecrets, actions.reachableSecrets, actions.inputsInspected, serverURL, b.authorityReferences(instance))
+	serverURL := plan.EventServerURL(b.ir.Event.Provider, b.ir.Event.ServerURL)
+	secrets, mappings, tokenAliases, referencesGitHubToken, referencesEventPayload, err := requiredSecrets(workflowProgram, instance.secretAuthority, actions.requiredSecrets, actions.reachableSecrets, actions.inputsInspected, serverURL, b.authorityValues(instance))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -669,7 +693,7 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 		policyWorkflow = filepath.Base(instance.SourcePath)
 	}
 	if len(b.ir.Workflow.WorkflowTokenPermissions) == 0 {
-		reference := "an action input default that references github.token"
+		reference := "resolved action metadata that references github.token"
 		if referencesGitHubTokenSecret {
 			reference = "secrets.GITHUB_TOKEN"
 		} else if referencesGitHubToken {
@@ -705,7 +729,7 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 			SelfRepository: planRemoteWorkflowSource(actions.workflowSource),
 		},
 		Event: plan.Event{
-			Provider: b.ir.Event.Provider, Name: b.ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(b.eventDigest[:]),
+			Provider: b.ir.Event.Provider, ServerURL: b.ir.Event.ServerURL, Name: b.ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(b.eventDigest[:]),
 			Repository: b.ir.Event.Repository.Owner + "/" + b.ir.Event.Repository.Name,
 			Ref:        b.ir.Event.Ref, HeadRef: eventHeadRef(b.ir.Event), BaseRef: eventBaseRef(b.ir.Event), SHA: b.ir.Event.SHA, Actor: b.ir.Event.Actor,
 		},
@@ -756,13 +780,13 @@ func planConstructionFinding(instance JobInstance, err error) error {
 	)
 }
 
-func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, actionRequired, reachableActionRequired []string, actionInputsInspected bool, serverURL string, references map[string]any) ([]string, map[string]string, []string, bool, bool, error) {
-	if references == nil {
-		references = map[string]any{"github.server_url": serverURL}
+func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, actionRequired, reachableActionRequired []string, actionInputsInspected bool, serverURL string, values expression.AbstractValues) ([]string, map[string]string, []string, bool, bool, error) {
+	if values.References == nil {
+		values.References = map[string]any{"github.server_url": serverURL}
 	}
 	authority, err := program.InventoryAuthority(workflowProgram, program.AuthorityOptions{
 		ActionInputsInspected: actionInputsInspected,
-		Values:                expression.AbstractValues{References: references},
+		Values:                values,
 	})
 	if err != nil {
 		return nil, nil, nil, false, false, err
@@ -823,6 +847,11 @@ func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, 
 			}
 			continue
 		}
+		if !plan.ValidSecretName(binding.source) {
+			// A lookup of a name no secret can have is empty, whether the
+			// name is inherited or mapped by a reusable workflow call.
+			continue
+		}
 		sources[binding.source] = struct{}{}
 		if !bindings.unrestricted {
 			mappings[alias] = binding.source
@@ -841,6 +870,6 @@ func planRemoteWorkflowSource(source *RemoteWorkflowSource) *plan.RemoteWorkflow
 		return nil
 	}
 	return &plan.RemoteWorkflowSource{
-		Repository: source.Repository, RequestedRef: source.RequestedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
+		ServerURL: source.ServerURL, Repository: source.Repository, RequestedRef: source.RequestedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
 	}
 }

@@ -68,6 +68,25 @@ func TestResultManifestEnforcesOutputLimits(t *testing.T) {
 	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "oversized output") {
 		t.Fatalf("MarshalResultManifest() error = %v, want output size rejection", err)
 	}
+	// Control characters escape to six bytes each, so the largest permitted
+	// outputs must still fit the manifest and verify after download.
+	escaped := strings.Repeat("\x01", MaxResultOutputBytes)
+	manifest.Outputs = []Output{{Name: "a", Value: escaped}, {Name: "b", Value: escaped}, {Name: "c", Value: escaped}, {Name: "d", Value: escaped}}
+	encoded, err := MarshalResultManifest(manifest)
+	if err != nil {
+		t.Fatalf("MarshalResultManifest() error = %v, want largest outputs accepted", err)
+	}
+	if _, err := VerifyResultManifest(encoded, manifest.PlanDigest, manifest.Producer); err != nil {
+		t.Fatalf("VerifyResultManifest() error = %v", err)
+	}
+	metadata, err := ResultMetadata("ci", "producer", manifest, encoded)
+	if err != nil || len(metadata) != 2 {
+		t.Fatalf("ResultMetadata() = %d keys, %v; want outputs over 1 KiB left out of metadata", len(metadata), err)
+	}
+	manifest.Outputs = append(manifest.Outputs, Output{Name: "e", Value: "x"})
+	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "outputs exceed") {
+		t.Fatalf("MarshalResultManifest() error = %v, want total output size rejection", err)
+	}
 	manifest.Outputs = make([]Output, MaxResultOutputs+1)
 	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "maximum") {
 		t.Fatalf("MarshalResultManifest() error = %v, want output count rejection", err)

@@ -82,7 +82,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		job.Inputs = mergeWorkflowInputs(job.Inputs, job.DeferredInputValues)
 		r.job = job
 	}
-	guardsPass, err := evaluateCallGuards(job)
+	guardsPass, err := evaluateCallGuards(job, r.RunIdentity)
 	if err != nil {
 		return jobResult, err
 	}
@@ -209,18 +209,21 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		jobResult.Conclusion = "skipped"
 		return jobResult, nil
 	}
+	r.repairHostname(ctx, processor)
 	r.continueOnError, err = evaluateJobContinueOnError(executionJob.ContinueOnError, eval)
 	if err != nil {
 		return jobResult, fmt.Errorf("evaluate job continue-on-error: %w", err)
 	}
 	// Reachability never resolves vars: jobs.<id>.if and step conditions see
 	// different vars scopes, so unknown vars keep every step reachable.
-	reachability, err := executionprogram.WorkflowReachability(*job.Program, expression.AbstractValues{References: map[string]any{
-		"github.server_url": plan.EventServerURL(job.Event.Provider),
-		"inputs":            planningInputs,
-		"matrix":            job.Matrix,
-		"strategy":          job.Strategy,
-	}})
+	reachability, err := executionprogram.WorkflowReachability(*job.Program, expression.AbstractValues{
+		Inputs: expression.InputScope{Values: planningInputs, Complete: len(job.DeferredInputs) == 0},
+		References: map[string]any{
+			"github.server_url": plan.EventServerURL(job.Event.Provider, job.Event.ServerURL),
+			"matrix":            job.Matrix,
+			"strategy":          job.Strategy,
+		},
+	})
 	if err != nil {
 		return jobResult, fmt.Errorf("analyze workflow reachability: %w", err)
 	}
@@ -337,6 +340,18 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			}()
 		}
 	}
+	var eventPath string
+	if job.Event.PayloadFile {
+		eventPath, err = newEventFile(job.Event, job.HasCapability("docker"))
+		if err != nil {
+			return jobResult, err
+		}
+		defer func() { _ = os.RemoveAll(filepath.Dir(eventPath)) }()
+		eval.GitHub["event_path"] = eventPath
+		if job.Container != nil {
+			eval.GitHub["event_path"] = containerEventPath
+		}
+	}
 	jobEnv, err := executionprogram.EvaluateBindings(executionJob.Env, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("evaluate job environment: %w", err))
@@ -370,19 +385,18 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			return jobResult, fmt.Errorf("make Docker runner temp writable: %w", err)
 		}
 	}
-	var eventPath string
-	if job.Event.PayloadFile {
-		eventPath, err = newEventFile(job.Event, job.HasCapability("docker"))
-		if err != nil {
-			return jobResult, err
-		}
-		defer func() { _ = os.RemoveAll(filepath.Dir(eventPath)) }()
-	}
 	toolCache := r.ToolCache
-	if toolCache == "" {
+	if toolCache == "" || containerSpec != nil {
+		// Job containers use the existing temp mount, not an unmounted host
+		// tool cache. Do not expose another host directory to the container.
 		toolCache = filepath.Join(runnerTemp, "tool-cache")
 		if err := os.Mkdir(toolCache, 0o755); err != nil {
 			return jobResult, fmt.Errorf("create runner tool cache: %w", err)
+		}
+		if containerSpec != nil {
+			if err := os.Chmod(toolCache, 0o777); err != nil {
+				return jobResult, fmt.Errorf("make container tool cache writable: %w", err)
+			}
 		}
 	} else {
 		if !filepath.IsAbs(toolCache) || filepath.Clean(toolCache) != toolCache {
@@ -485,8 +499,10 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		}()
 	}
 	runnerContext["temp"] = runnerTemp
+	runnerContext["tool_cache"] = toolCache
 	if r.jobContainer != nil {
 		runnerContext["temp"] = r.jobContainer.containerPath(runnerTemp)
+		runnerContext["tool_cache"] = r.jobContainer.containerPath(toolCache)
 	}
 	runtimeEnv := standardEnvironment(job, workspace, runnerTemp, toolCache, r.RunIdentity)
 	if eventPath != "" {
@@ -539,7 +555,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 	preFailures := r.preFailures
 	if len(job.Actions) != 0 {
 		for stepIndex, step := range executionJob.Steps {
-			eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
+			eval.JobStatus = jobStatusValue(runErr != nil || preStatus.unsuccessful, runCtx.Err() != nil)
 			if step.Kind != "uses" {
 				continue
 			}
@@ -572,12 +588,13 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 			if entry := actions.locks[selector.Lock]; entry != nil && (usesUploadArtifactAdapter(entry.lock) || usesDownloadArtifactAdapter(entry.lock)) {
 				continue
 			}
+			eval.GitHub["action"] = step.GitHubAction
 			preEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
 			preEval := stepExpressionContext(eval)
 			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes.Literal)
 			bindHashFilesContext(preCtx, &preEval)
 			wasUnsuccessful := preStatus.unsuccessful
-			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, posts, actions, prepared, &preStatus, true, nil, nil, nil)
+			preResult, preErr := r.prepareRemoteAction(runCtx, preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, posts, actions, prepared, &preStatus, true, nil, nil, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
 			maps.Copy(jobResult.State, preResult.State)
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
@@ -656,8 +673,18 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			eval.Steps[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: outcome, Conclusion: conclusion, Outputs: map[string]string{}}
 			continue
 		}
+		// GitHub updates the shared job context before evaluating the step,
+		// even when its condition skips it. Each invocation receives a copy.
+		eval.GitHub["action"] = step.GitHubAction
 		if execution, ok := preFailures[stepIndex]; ok {
 			runErr = errors.Join(runErr, commitStepExecution(execution, processor, &jobResult, &eval))
+			continue
+		}
+		// Planning may have pruned credentials used by this step's environment.
+		// Use the same reachability decision as action preparation before
+		// evaluating fields on a step that cannot run.
+		if stepIndex < len(r.reachableSteps) && !r.reachableSteps[stepIndex] {
+			eval.Steps[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
 			continue
 		}
 		if runErr != nil || runCtx.Err() != nil {
@@ -684,7 +711,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			continue
 		}
 		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
-		condition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, Steps: eval.Steps, Env: stepEval.Env, Vars: eval.Vars, Matrix: job.Matrix, Strategy: job.Strategy, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
+		condition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, Steps: eval.Steps, Env: stepEval.Env, Vars: eval.Vars, Matrix: job.Matrix, Strategy: job.Strategy, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, JobStatus: eval.JobStatus, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
 		run, err := evaluateProgramTyped[bool](step.Condition, executionprogram.EvaluationContext{Expression: stepEval, Condition: condition})
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("condition: %w", err), stepEval)
@@ -769,12 +796,14 @@ func (r *jobRun) runPostActions(runCtx context.Context) (JobResult, error) {
 		invocation := post.invocation
 		action := invocation.action
 		postEval := cloneExpressionContext(invocation.eval)
+		eval.GitHub["action"] = postEval.GitHub["action"]
 		if !invocation.isolated {
 			postEval.Steps = cloneStepStatuses(eval.Steps)
 		}
 		postEval.Env = mergeStringMaps(jobResult.Env, invocation.envOverlay)
 		bindHashFilesContext(postCtx, &postEval)
 		unsuccessful, cancelled := runErr != nil, runCtx.Err() != nil
+		postEval.JobStatus = jobStatusValue(unsuccessful, cancelled)
 		condition := lifecycleConditionContext(postEval, unsuccessful, cancelled)
 		runPost, conditionErr := evaluateActionLifecycleSite(*post.conditionSite, condition)
 		if conditionErr != nil {
@@ -794,9 +823,8 @@ func (r *jobRun) runPostActions(runCtx context.Context) (JobResult, error) {
 		}
 		if len(action.jobStatusInputs) != 0 {
 			action.Inputs = cloneStrings(action.Inputs)
-			status := jobStatusValue(runErr != nil, runCtx.Err() != nil)
 			for _, name := range action.jobStatusInputs {
-				action.Inputs[name] = status
+				action.Inputs[name] = postEval.JobStatus
 			}
 		}
 		postResult := newResult()
@@ -836,7 +864,10 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 		}
 	}
 	eval.Env = jobResult.Env
+	// GitHub evaluates job outputs after post steps, with the final status.
+	eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
 	outputBindings := job.ExecutionJob().Outputs
+	outputBytes := 0
 	for _, output := range outputBindings {
 		name := output.Name
 		value, err := evaluateProgramTyped[string](output.Value, executionprogram.EvaluationContext{Expression: eval})
@@ -845,8 +876,11 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 			// or other runtime-backed operations. A rejected value is authored.
 			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, errWorkflowValidationf("job output %q: %w", name, err))
 		}
-		if len(value) > maxJobOutputBytes {
-			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, errWorkflowValidationf("job output %q exceeds the %d-byte limit", name, maxJobOutputBytes))
+		if len(value) > transport.MaxResultOutputBytes {
+			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, errUnsupportedf("job output %q is %d bytes, over the %d-byte limit", name, len(value), transport.MaxResultOutputBytes))
+		}
+		if outputBytes += len(value); outputBytes > transport.MaxResultOutputsBytes {
+			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, errUnsupportedf("job outputs total more than %d bytes", transport.MaxResultOutputsBytes))
 		}
 		for _, sensitive := range sensitiveValues {
 			if sensitive != "" && strings.Contains(value, sensitive) {
@@ -874,12 +908,15 @@ func evaluateJobContinueOnError(control executionprogram.BoolControl, context ex
 	return control.Literal, nil
 }
 
-func evaluateCallGuards(job plan.Job) (bool, error) {
+func evaluateCallGuards(job plan.Job, identity RunIdentity) (bool, error) {
 	executionJob := job.ExecutionJob()
 	if executionJob == nil || len(job.CallGuards) != len(executionJob.Guards) {
 		return false, fmt.Errorf("evaluate reusable-workflow call guards: plan projection does not match normalized program")
 	}
 	github := githubContext(job)
+	for name, value := range identity.githubValues() {
+		github[name] = value
+	}
 	for i, guard := range job.CallGuards {
 		if len(guard.DeferredInputs) != 0 && !deferredInputsHydrated(guard.DeferredInputs, guard.DeferredInputValues) {
 			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: deferred inputs were not hydrated", i+1)
@@ -978,7 +1015,10 @@ func evaluateProgramServices(services executionprogram.Services, eval expression
 		if resolved.Image == "" {
 			continue
 		}
-		if err := plan.ValidateEvaluatedServiceContainer(resolved); err != nil {
+		// Each field was evaluated from its program site and is never parsed
+		// again, so expression syntax in the result, such as from an input
+		// value, is data.
+		if err := plan.ValidateServiceContainer(resolved); err != nil {
 			return nil, nil, fmt.Errorf("service %q: %w", service.Name, err)
 		}
 		result[service.Name] = resolved
@@ -1207,6 +1247,7 @@ func lifecycleConditionContext(eval expression.Context, unsuccessful, cancelled 
 		GitHub:       eval.GitHub,
 		Runner:       eval.Runner,
 		Services:     eval.Services,
+		JobStatus:    eval.JobStatus,
 		Failure:      unsuccessful && !cancelled,
 		Unsuccessful: unsuccessful,
 		Cancelled:    cancelled,
@@ -1432,7 +1473,8 @@ func githubContext(job plan.Job) map[string]any {
 		event = *job.Event.Payload
 	}
 	workflowRef, workflowSHA := workflowRunIdentity(job)
-	return map[string]any{
+	github := map[string]any{
+		"action":            "",
 		"action_path":       "",
 		"action_ref":        "",
 		"action_repository": "",
@@ -1446,13 +1488,21 @@ func githubContext(job plan.Job) map[string]any {
 		"sha":               job.Event.SHA,
 		"actor":             job.Event.Actor,
 		"event_name":        job.Event.Name,
+		"event_path":        "",
 		"event":             event,
-		"server_url":        plan.EventServerURL(job.Event.Provider),
+		"server_url":        plan.EventServerURL(job.Event.Provider, job.Event.ServerURL),
 		"workflow":          workflowDisplayName(job),
 		"workflow_ref":      workflowRef,
 		"workflow_sha":      workflowSHA,
 		"job":               job.Workflow.LogicalJobID,
 	}
+	for name, value := range plan.EventIdentityIDs(job.Event.Provider, job.Event.Repository, job.Event.Actor, event) {
+		github[name] = value
+	}
+	if rest, graphql := plan.EventAPIURLs(job.Event.Provider, job.Event.ServerURL); rest != "" {
+		github["api_url"], github["graphql_url"] = rest, graphql
+	}
+	return github
 }
 
 func workflowDisplayName(job plan.Job) string {
@@ -1487,6 +1537,7 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, 
 	workflowRef, workflowSHA := workflowRunIdentity(job)
 	env := map[string]string{
 		"CI":                  "true",
+		"GIT_TERMINAL_PROMPT": "0",
 		"GITHUB_ACTIONS":      "true",
 		"GITHUB_ACTOR":        job.Event.Actor,
 		"GITHUB_EVENT_NAME":   job.Event.Name,
@@ -1495,7 +1546,7 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, 
 		"GITHUB_REF_NAME":     plan.EventRefName(job.Event.Ref),
 		"GITHUB_REF_TYPE":     plan.EventRefType(job.Event.Name, job.Event.Ref),
 		"GITHUB_REPOSITORY":   job.Event.Repository,
-		"GITHUB_SERVER_URL":   plan.EventServerURL(job.Event.Provider),
+		"GITHUB_SERVER_URL":   plan.EventServerURL(job.Event.Provider, job.Event.ServerURL),
 		"GITHUB_SHA":          job.Event.SHA,
 		"GITHUB_WORKFLOW":     workflowName,
 		"GITHUB_WORKFLOW_REF": workflowRef,
@@ -1506,6 +1557,9 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, 
 		"RUNNER_ENVIRONMENT":  runner["environment"],
 		"RUNNER_TEMP":         runnerTemp,
 		"RUNNER_TOOL_CACHE":   toolCache,
+	}
+	if rest, graphql := plan.EventAPIURLs(job.Event.Provider, job.Event.ServerURL); rest != "" {
+		env["GITHUB_API_URL"], env["GITHUB_GRAPHQL_URL"] = rest, graphql
 	}
 	for name, value := range identity.githubValues() {
 		env["GITHUB_"+strings.ToUpper(name)] = value
@@ -1642,6 +1696,8 @@ func isRuntimeContextEnvironment(name string) bool {
 	switch name {
 	case "GITHUB_ACTIONS",
 		"GITHUB_ACTOR",
+		"GITHUB_API_URL",
+		"GITHUB_GRAPHQL_URL",
 		"GITHUB_EVENT_NAME",
 		"GITHUB_EVENT_PATH",
 		"GITHUB_JOB",
@@ -1669,8 +1725,8 @@ func isRuntimeContextEnvironment(name string) bool {
 	}
 }
 
-func (r *jobRun) runJobStep(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step executionprogram.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) (Result, error) {
-	return r.runActionStep(ctx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, nil, eval, posts, actions, prepared, nil, nil)
+func (r *jobRun) runJobStep(jobCtx, ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step executionprogram.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) (Result, error) {
+	return r.runActionStep(jobCtx, ctx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, nil, eval, eval.JobStatus, posts, actions, prepared, nil, nil)
 }
 
 // verifyRemoteActionTree materializes and verifies every remote subtree before
@@ -1751,7 +1807,7 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 			}
 		}
 		if material != nil && actionRuntime != metadata.RuntimeDocker {
-			target := remoteMountTarget(entry.lock.Repository, entry.lock.Commit)
+			target := remoteMountTarget(entry.lock.ServerURL, entry.lock.Repository, entry.lock.Commit)
 			m := containerMount{host: material.RepositoryRoot, target: target, readonly: true, probe: true}
 			if old, ok := byTarget[target]; ok && old.host != m.host {
 				return nil, fmt.Errorf("conflicting verified action roots for %q", target)
@@ -1807,9 +1863,15 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 	return out, nil
 }
 
-func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutputProcessor, workspace string, step executionprogram.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error, inheritedTimeout *remotePreparationTimeout, inheritedEnvOverlay map[string]string) (Result, error) {
+func (r *jobRun) prepareRemoteAction(jobCtx, ctx context.Context, processor *commandOutputProcessor, workspace string, step executionprogram.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error, inheritedTimeout *remotePreparationTimeout, inheritedEnvOverlay map[string]string) (Result, error) {
 	result := newResult()
-	eval.JobStatus = jobStatusValue(status.unsuccessful, ctx.Err() != nil)
+	// A composite's pre failures reach the job only when its preparation
+	// returns. Nested pre hooks retain the enclosing job status meanwhile.
+	if workflowStep {
+		eval.JobStatus = jobStatusValue(status.unsuccessful, jobCtx.Err() != nil)
+	} else if jobCtx.Err() != nil {
+		eval.JobStatus = "cancelled"
+	}
 	bindHashFilesContext(ctx, &eval)
 	if inheritedTimeout != nil && inheritedTimeout.bounded != nil {
 		// Later children share the deadline started by an earlier pre hook.
@@ -1978,7 +2040,7 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 			childProcessEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 			eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
 			wasUnsuccessful := status.unsuccessful
-			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, false, compositeEvalErr, preparationTimeout, lifecycleEnvOverlay)
+			childResult, childErr := r.prepareRemoteAction(jobCtx, ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, false, compositeEvalErr, preparationTimeout, lifecycleEnvOverlay)
 			mergeEnvironmentInto(result.Env, childResult.Env)
 			if childResult.pathBaseSet {
 				result.pathBase = childResult.pathBase
@@ -2014,7 +2076,10 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 	}
 }
 
-func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step executionprogram.Step, invocationID string, jobEnv, stepEnv, evaluatedWith map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string, inheritedEnvOverlay map[string]string) (Result, error) {
+// runActionStep runs one action invocation. actionStatus is the status that
+// status functions observe: the job status for workflow steps, or the
+// enclosing composite's status for nested actions.
+func (r *jobRun) runActionStep(jobCtx, ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step executionprogram.Step, invocationID string, jobEnv, stepEnv, evaluatedWith map[string]string, eval expression.Context, actionStatus string, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string, inheritedEnvOverlay map[string]string) (Result, error) {
 	if stepEnv == nil {
 		var err error
 		stepEnv, err = executionprogram.EvaluateBindings(step.Env, executionprogram.EvaluationContext{Expression: eval})
@@ -2146,8 +2211,8 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProc
 			invocation.postRegistered = true
 		}
 		if javascript.Pre != "" && !wasPrepared {
-			cancelled := eval.JobStatus == "cancelled"
-			unsuccessful := eval.JobStatus == "failure" || cancelled
+			cancelled := actionStatus == "cancelled"
+			unsuccessful := actionStatus == "failure" || cancelled
 			condition := lifecycleConditionContext(lifecycleEval, unsuccessful, cancelled)
 			runPre, err := evaluateActionLifecycleSite(actionProgram.PreIf, condition)
 			if err != nil {
@@ -2169,7 +2234,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProc
 		}
 		return result, nil
 	case metadata.RuntimeComposite:
-		return r.runCompositeAction(ctx, processor, workspace, job, resolved, inputs, invocationID, jobEnv, stepEnv, lifecycleEnvOverlay, actionEval, posts, actions, prepared, actionStack)
+		return r.runCompositeAction(jobCtx, ctx, processor, workspace, job, resolved, inputs, invocationID, jobEnv, stepEnv, lifecycleEnvOverlay, actionEval, actionStatus, posts, actions, prepared, actionStack)
 	case metadata.RuntimeDocker:
 		if goruntime.GOOS == "darwin" {
 			return result, errUnsupportedf("docker action %q is unsupported on macOS runners", stepUses(step))
@@ -2203,7 +2268,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProc
 	return result, errUnsupportedFeature("action_ref", "", "action %q uses unsupported runtime %q", stepUses(step), actionRuntime)
 }
 
-func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, action resolvedAction, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string) (Result, error) {
+func (r *jobRun) runCompositeAction(jobCtx, ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, action resolvedAction, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, actionStatus string, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string) (Result, error) {
 	result := newResult()
 	actionPath := action.metadata.Path
 	bindHashFilesContext(ctx, &eval)
@@ -2222,8 +2287,11 @@ func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutpu
 	eval.GitHub = cloneAnyMap(eval.GitHub)
 	eval.GitHub["action_path"] = contextActionPath
 	compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
-	inheritedFailure := eval.JobStatus == "failure"
-	inheritedCancelled := eval.JobStatus == "cancelled"
+	// Status functions observe this composite's own status, while job.status
+	// keeps the job's status until this step completes, as on GitHub.
+	jobStatus := eval.JobStatus
+	inheritedFailure := actionStatus == "failure"
+	inheritedCancelled := actionStatus == "cancelled"
 	inheritedUnsuccessful := inheritedFailure || inheritedCancelled
 	var runErr error
 	for i := range action.program.Steps {
@@ -2232,7 +2300,10 @@ func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutpu
 		failure := inheritedFailure || runErr != nil
 		cancelled := inheritedCancelled || ctx.Err() != nil
 		unsuccessful := inheritedUnsuccessful || runErr != nil
-		eval.JobStatus = jobStatusValue(unsuccessful, cancelled)
+		eval.JobStatus = jobStatus
+		if jobCtx.Err() != nil {
+			eval.JobStatus = "cancelled"
+		}
 		// GITHUB_ENV effects are visible to subsequent children. Keep this
 		// composite's invocation environment in expression contexts, while
 		// rebuilding the map so a child's declared env cannot leak to siblings.
@@ -2257,7 +2328,7 @@ func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutpu
 		for name, value := range eval.Inputs {
 			inputs[name] = value
 		}
-		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, Steps: eval.Steps, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled, HashFiles: eval.HashFiles}
+		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, Steps: eval.Steps, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, JobStatus: eval.JobStatus, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled, HashFiles: eval.HashFiles}
 		run, err := evaluateProgramTyped[bool](step.Condition, executionprogram.EvaluationContext{Expression: eval, Condition: condition})
 		if err != nil {
 			childErr := fmt.Errorf("composite action step %d condition: %w", i+1, err)
@@ -2310,12 +2381,12 @@ func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutpu
 				child.Invocation.Lock = selector.Lock
 			}
 			if childErr == nil {
-				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, childInvocationID, childJobEnv, childEnv, childWith, eval, posts, actions, prepared, actionStack, lifecycleEnvOverlay)
+				stepResult, childErr = r.runActionStep(jobCtx, ctx, processor, workspace, job, child, childInvocationID, childJobEnv, childEnv, childWith, eval, jobStatusValue(unsuccessful, cancelled), posts, actions, prepared, actionStack, lifecycleEnvOverlay)
 			}
 		case step.Run == nil || strings.TrimSpace(step.Run.Command.Source) == "":
 			childErr = fmt.Errorf("composite action step %d has no run command", i+1)
 		default:
-			childErr = r.runCompositeShellStep(ctx, processor, workspace, step, childJobEnv, eval, &stepResult)
+			childErr = r.runCompositeShellStep(ctx, processor, workspace, action.metadata.SourceRoot, step, childJobEnv, eval, &stepResult)
 		}
 		mergeEnvironmentInto(result.Env, stepResult.Env)
 		if stepResult.pathBaseSet {
@@ -2337,6 +2408,10 @@ func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutpu
 		if execution.conclusion != "success" {
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d: %w", i+1, childErr))
 		}
+	}
+	// Cancellation can arrive during the last child, before outputs evaluate.
+	if jobCtx.Err() != nil {
+		eval.JobStatus = "cancelled"
 	}
 	// Output metadata is not a step field. Retain its existing hashFiles boundary.
 	eval.HashFiles = func([]string) (string, error) {

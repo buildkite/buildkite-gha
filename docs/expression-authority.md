@@ -40,8 +40,11 @@ conservative without granting credentials to known-unreachable paths:
 
 - A known-false or provider-inapplicable branch must not grant token authority.
 - A branch that depends on an unknown runtime value may grant token authority.
+- Runtime skips planning-proven-unreachable steps before evaluating their
+  environment, which may reference a token that planning did not authorize.
 - Action metadata cannot grant ordinary secret authority.
-- Composite metadata cannot grant `github.token` authority.
+- Composite shell `env`, `run`, and `working-directory` templates can require
+  the job-authorized token; other composite metadata cannot add token authority.
 - Workflow-authored `toJSON(github)` and direct `github.token` access retain
   distinct provenance from action-authored access.
 
@@ -87,6 +90,34 @@ An expression site selects a closed semantic profile. The profile owns:
 The same engine validates and evaluates a profile. Adding a context or function
 to one field does not implicitly add it to another field.
 
+Event-derived GitHub identity IDs share extraction between compilation and
+runtime. Authority planning receives only validated IDs; residual reads retain
+payload effects even when a known ID prunes a token branch. Missing IDs remain
+unknown to planning and unavailable at execution. See the
+[identity contract](compatibility-contract.md#github-identity-ids).
+
+Workflow concurrency has its own compile-time profile. The hosted adapter
+supplies the owning build ID separately from the shared GitHub context, so
+evaluating a group cannot make run identity available to other graph-time
+positions. Offline callers leave that identity unavailable.
+
+`github.run_attempt` stays unknown during compilation and authority planning.
+Job, reusable-call, workflow-step, and composite-step conditions read the same
+retry-derived runtime identity as templates. Missing identity is an error, not
+a first attempt or a retry. This does not admit run identity in graph-time
+fields or action lifecycle conditions.
+
+`github.event_path` remains unknown during compilation and authority planning.
+Runtime supplies it after creating the job's event file, before job environment
+evaluation. Graph-time fields and pre-setup job/call conditions cannot read it.
+The expression does not grant payload provenance or credential authority; see
+the [event-file contract](compatibility-contract.md#event-file-paths).
+
+`runner.tool_cache` is also unknown during compilation and authority planning.
+Runtime selects its directory before action defaults and steps run. It does
+not become available to graph construction, job environment, or pre-setup
+job/call conditions. See the [tool-cache contract](compatibility-contract.md#runner-tool-cache-paths).
+
 Program sites serialize source text and diagnostic location. Their position in
 the program derives profile, result type, provenance, and purpose after decode.
 This prevents a plan from claiming broader semantics in serialized profile
@@ -102,8 +133,9 @@ with an abstract value domain:
 
 ```go
 type AbstractValue struct {
-	Known bool
-	Value any
+	Known  bool
+	Value  any
+	Truthy *bool
 }
 
 type Analysis struct {
@@ -115,6 +147,10 @@ type Analysis struct {
 Known values preserve normal evaluation. Unknown runtime values join effects
 from every reachable branch. Unknown means a valid runtime dependency, not an
 evaluation or validation failure.
+
+An unknown value can have known truthiness. For example, `unknown && false`
+is always falsy, even though it can return different falsy values. Logical
+operators and `case()` preserve that fact without inventing a concrete value.
 
 The abstract domain must satisfy:
 
@@ -166,8 +202,69 @@ a second execution model. Workspace actions created by checkout remain lazy;
 container preparation classifies them from their normalized program rather
 than resolving their source before checkout.
 
+Composite shell execution receives the verified action's `SourceRoot` for
+working-directory containment. Relative directories still resolve from the job
+workspace. Only that invocation can use its source root; workflow steps don't
+inherit it, and `workspacePath` retains its single-root contract. Container paths
+map back to host paths before containment checks.
+
 Reusable workflows flatten before program construction. Direct and called
 jobs therefore use the same lowering and authority paths.
+
+Runtime job and step expressions retain reusable-workflow input references.
+Evaluation and authority analysis read each job's typed `Job.Inputs`; action
+bodies use invocation inputs instead. Call guards and deferred input templates
+read the caller inputs captured with them, never the callee's. Compilation
+folds each guard with its caller inputs, so a known-false call gets no token.
+Authority analysis does not read guard inputs; a guard that stays unknown after
+folding keeps its input reads and grants authority conservatively. Unknown deferred values keep authority
+conservative. Planning distinguishes known individual input properties from a
+complete input object. With deferred inputs, named known reads can still prune
+branches, but computed and whole-object reads remain unknown.
+Known absent action inputs stay separate from the object. Analysis uses the
+runtime access path's missing value: named reads use empty string in action
+templates and defaults, while conditions and default bracket reads use null.
+Default bracket access follows concrete object evaluation and stays unknown
+when the input object is incomplete. Whole-object serialization still omits
+absent properties.
+
+Event reduction preserves input reads, including mixed event/input expressions.
+Shell checks and native action adapters evaluate a separate literal view without
+rewriting program source. Secret inventory needs static names, so flattening
+rewrites input-selected secret names, such as `secrets[inputs.name]`, to
+literals. It rejects selectors that deferred inputs could change. Service
+credentials reject input-selected secret names, so a reusable workflow cannot
+choose which secret a credential reads. Evaluator
+diagnostics must not quote input-derived values. Graph fields, such as labels, matrices,
+`runs-on`, and concurrency, evaluate against the workflow frame's own inputs.
+So do service templates, which compile to literals or `needs`-only residuals.
+Job `timeout-minutes` resolves to a number per expanded instance using the job
+control profile and compile-known values. `strategy.max-parallel` resolves before
+matrix expansion using its own profile, which excludes `matrix` and `strategy`.
+Both use the declaring workflow's typed inputs without source substitution;
+unresolved controls fail rather than entering the runtime program. Their
+`vars` reads use import-time repository/organization values, not environment
+values supplied after graph construction.
+The separate needs-derived `max-parallel` path and dynamic service maps read
+only `needs` outputs.
+Service credentials keep their input reads, which the runtime evaluates against
+`Job.Inputs`. A needs-derived concurrency group reads the frame's static inputs
+when its continuation resolves the group. Credentials and scheduling groups reject
+input reads that are unknown at compile time, including deferred inputs.
+Step `uses` must be a literal action reference, because GitHub resolves
+actions before the job starts.
+
+GitHub treats input values as data, including values containing `${{`
+([evidence](compatibility-contract.md#expression-and-composite-source-evidence)).
+No input value is pasted into expression source, except an input-selected
+secret name, which becomes a quoted string literal. A secret name no secret
+can have reads as empty, whether it is an input value such as
+`${{ 'TOKEN' }}`, inherited, or mapped by a `workflow_call` from
+`secrets.MY-SECRET`. Service and job container images still reject a folded
+value that would introduce `${{`, because the runtime evaluates their partially
+folded result again. Exact forwarding of a deferred input keeps its original caller capture
+and producer bindings; compound forwarding of deferred parent inputs is
+unsupported. Input defaults keep the `github` and `vars` restriction.
 
 Deferred runner selection supplies verified job outputs only to the `runs-on`
 expression profiles. It does not resolve job conditions or reusable inputs in
@@ -184,7 +281,8 @@ The following boundaries are deliberate:
 - Commands and workflow-command mutations produce unknown planning values.
   Later token authority joins conservatively.
 - Action metadata cannot introduce ordinary secret authority.
-- Composite-authored expressions cannot introduce `github.token` authority.
+- Composite shell token reads retain the workflow's existing permission policy;
+  they do not enable pipeline token issuance or expand scopes.
 - Whole-context `github` serialization is allowed only by profiles that admit
   it and retains its author provenance.
 - Validation inspects unreachable branches for unsupported or prohibited
@@ -202,6 +300,26 @@ The following boundaries are deliberate:
 This architecture does not broaden expression syntax, allow dynamic secret
 access, make private actions available, or weaken immutable source
 verification.
+
+### Composite tokens
+
+Action input defaults have a separate profile: an effective default that reaches
+`github.token` can retain token authority, including on a composite action.
+Reachable composite shell `env`, `run`, and `working-directory` templates also
+retain direct token authority. Analysis uses ordered defaults, caller-scoped
+supplied inputs, and the job's matrix. Sibling supplied values never overwrite
+their caller's input scope. Known-false invocation and shell guards prune shell
+authority; unknown runtime guards retain it. Nested input defaults remain
+conservative because preparation can evaluate them before main-step guards.
+
+Composite outputs and whole-context serialization do not independently request
+a token. Child-action `with` expressions that would grant token authority still
+fail compilation. Those uses can receive a token through a workflow-authorized
+input. JavaScript and Docker lifecycle boundaries are unchanged.
+
+Missing-token diagnostics retain the explicit input remedy, including for older
+tokenless plans. Issuance failures own settings guidance; see the
+[security documentation](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/security).
 
 ## Implemented outcome
 

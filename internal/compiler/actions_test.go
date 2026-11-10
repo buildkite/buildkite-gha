@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -28,7 +29,7 @@ import (
 // compileActionLocks builds one shared action DAG for all roots. Selectors are
 // returned in the same order as refs.
 func compileActionLocks(ctx context.Context, workspace string, actionSource ActionSource, refs []string) ([]plan.ActionSelector, []plan.ActionLock, []string, bool, error) {
-	compiled, err := compileActionInvocations(ctx, workspace, actionSource, plan.EventServerURL("github"), refs, nil)
+	compiled, err := compileActionInvocations(ctx, workspace, actionSource, plan.EventServerURL("github", ""), refs, nil)
 	if err != nil {
 		return nil, nil, nil, true, err
 	}
@@ -216,6 +217,110 @@ func writeAction(tb testing.TB, root, name, body string) {
 	}
 }
 
+func TestCompileActionsOutsideGitHubWorkflows(t *testing.T) {
+	const workflowPath = ".buildkite/mirrors/speed-budgets.yml"
+	const actionBody = "runs:\n  using: composite\n  steps:\n    - run: echo locked\n      shell: bash\n"
+	for _, uses := range []string{"owner/action@v1", "./tools/action", "$/tools/action"} {
+		t.Run(uses, func(t *testing.T) {
+			workspace, remote := t.TempDir(), t.TempDir()
+			if output, err := exec.Command("git", "-C", workspace, "init", "-q").CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v: %s", err, output)
+			}
+			text := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: " + uses + "\n"
+			caller := filepath.Join(workspace, filepath.FromSlash(workflowPath))
+			for _, root := range []string{workspace, remote} {
+				file := filepath.Join(root, filepath.FromSlash(workflowPath))
+				if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeAction(t, workspace, "tools/action", actionBody)
+			writeAction(t, remote, "tools/action", actionBody)
+			writeAction(t, remote, "", actionBody)
+			fake := newFakeReusableRepositorySource(t, map[string]string{"owner/action": remote, "source/repo": remote})
+			options := defaultOptions()
+			options.WorkflowSource = &WorkflowSourceReference{Repository: "source/repo", Commit: fake.commits["source/repo"]}
+			options.RepositorySource = MemoizeRepositorySource(fake)
+			options.ActionSource, options.ResolveActions = options.RepositorySource, true
+			plans, err := compilePlansForTest(t.Context(), caller, []byte(text), pushEvent(t), "test", testDistributionDigest, options)
+			if strings.HasPrefix(uses, "$/") {
+				if err == nil || !strings.Contains(err.Error(), "must name a file directly under .github/workflows") {
+					t.Fatalf("self source location boundary = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := plans[0]
+			if job.Workflow.Path != "./"+workflowPath || job.Workflow.RunPath != "" || job.Workflow.Name != workflowPath || job.Workflow.Digest != "sha256:"+sha256Sum([]byte(text)) || len(job.Actions) != 1 {
+				t.Fatalf("workflow identity or action locks = %#v", job)
+			}
+			lock := job.Actions[0]
+			if uses == "./tools/action" {
+				if lock.Source != "workspace" || lock.Path != "tools/action" {
+					t.Fatalf("local action identity = %#v", lock)
+				}
+			} else {
+				repository := "owner/action"
+				if lock.Source != "github" || lock.Repository != repository || lock.Commit != fake.commits[repository] || lock.SourceDigest == "" {
+					t.Fatalf("remote action identity = %#v", lock)
+				}
+			}
+			validateCompiledPlansAgainstSchema(t, plans)
+		})
+	}
+}
+
+func TestMirroredWorkflowDirectorySymlinkContainment(t *testing.T) {
+	for _, checkoutAlias := range []bool{false, true} {
+		t.Run(fmt.Sprintf("checkout_alias=%t", checkoutAlias), func(t *testing.T) {
+			workspace, other := t.TempDir(), t.TempDir()
+			for _, root := range []string{workspace, other} {
+				if output, err := exec.Command("git", "-C", root, "init", "-q").CombinedOutput(); err != nil {
+					t.Fatalf("git init: %v: %s", err, output)
+				}
+			}
+			text := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./tools/action\n"
+			mirrors := filepath.Join(other, ".buildkite", "mirrors")
+			if err := os.MkdirAll(mirrors, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(mirrors, "speed-budgets.yml"), []byte(text), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeAction(t, other, "tools/action", "runs:\n  using: composite\n  steps:\n    - run: echo other\n      shell: bash\n")
+			link, destination := filepath.Join(workspace, "mirrors"), mirrors
+			if checkoutAlias {
+				link, destination = filepath.Join(t.TempDir(), "checkout"), other
+			}
+			if err := os.Symlink(destination, link); err != nil {
+				t.Fatal(err)
+			}
+			caller := filepath.Join(link, "speed-budgets.yml")
+			if checkoutAlias {
+				caller = filepath.Join(link, ".buildkite", "mirrors", "speed-budgets.yml")
+			}
+			plans, err := compilePlansForTest(t.Context(), caller, []byte(text), pushEvent(t), "test", testDistributionDigest, defaultOptions())
+			if !checkoutAlias {
+				if err == nil || !strings.Contains(err.Error(), "escapes repository root") {
+					t.Fatalf("directory symlink escape accepted: plans=%v err=%v", plans, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 1 || plans[0].Workflow.Path != "./.buildkite/mirrors/speed-budgets.yml" || len(plans[0].Actions) != 1 || plans[0].Actions[0].Path != "tools/action" {
+				t.Fatalf("checkout alias plan = %#v", plans)
+			}
+		})
+	}
+}
+
 func TestActionResolutionMessageExplainsUnsupportedMetadata(t *testing.T) {
 	err := errors.New("compile action \"owner/action@v1\": parse action metadata \"/tmp/download/action.yml\": yaml: unmarshal errors:\n  line 11: field type not found in type metadata.Input\n  line 16: field type not found in type metadata.Input")
 	want := `Action "owner/action@v1" is unsupported: action metadata uses unsupported field "type" at lines 11, 16`
@@ -276,7 +381,7 @@ func TestValidateActionResolutionsAttributesMissingCalledWorkflowAction(t *testi
 			Steps:          []workflow.Step{{Kind: "uses", Uses: reference, Span: workflow.Span{Start: workflow.Position{Line: 281, Column: 15}}}},
 		}},
 	}
-	evidence, err := validateActionResolutions(t.Context(), ir, Options{}, newActionGraphCache(Options{}))
+	evidence, err := validateActionResolutions(t.Context(), ir, Options{}, newActionGraphCache(Options{}, ir.Event.ServerURL))
 	if err == nil || len(evidence.Actions) != 1 || evidence.Actions[0].Passed {
 		t.Fatalf("validateActionResolutions() evidence = %#v, error = %v", evidence, err)
 	}
@@ -555,6 +660,16 @@ runs:
   using: node24
   main: index.js
 `)
+	writeAction(t, w, "composite-token", `name: composite token default
+inputs:
+  github_token:
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: echo safe
+`)
 	writeAction(t, w, "actor", `name: actor default
 inputs:
   actor:
@@ -598,6 +713,8 @@ runs:
 		wantErr  string
 	}{
 		{name: "effective default", ref: "./token", want: true},
+		{name: "effective composite default", ref: "./composite-token", want: true},
+		{name: "overridden composite default", ref: "./composite-token", supplied: map[string]string{"github_token": ""}},
 		{name: "explicit empty input", ref: "./token", supplied: map[string]string{"github_token": ""}},
 		{name: "case-insensitive explicit input", ref: "./token", supplied: map[string]string{"GITHUB_TOKEN": "explicit"}},
 		{name: "unrelated GitHub default", ref: "./actor"},
@@ -619,6 +736,291 @@ runs:
 			}
 			if compiled.requiresGitHubToken != test.want {
 				t.Fatalf("requires GitHub token = %t, want %t", compiled.requiresGitHubToken, test.want)
+			}
+		})
+	}
+}
+
+func TestCompileActionInvocationsDetectsReachableCompositeShellGitHubToken(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "token", `name: composite token
+inputs:
+  fallback:
+    default: cargo-binstall
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        DEFAULT_GITHUB_TOKEN: ${{ inputs.fallback == 'cargo-binstall' && github.server_url == 'https://github.com' && github.token || '' }}
+      run: test -n "$DEFAULT_GITHUB_TOKEN"
+`)
+
+	for _, test := range []struct {
+		name      string
+		serverURL string
+		supplied  map[string]string
+		want      bool
+	}{
+		{name: "matching default", serverURL: "https://github.com", want: true},
+		{name: "matching explicit input", serverURL: "https://github.com", supplied: map[string]string{"fallback": "cargo-binstall"}, want: true},
+		{name: "disabled explicit input", serverURL: "https://github.com", supplied: map[string]string{"fallback": "none"}},
+		{name: "unknown input", serverURL: "https://github.com", supplied: map[string]string{"fallback": "${{ matrix.fallback }}"}, want: true},
+		{name: "Origin provider", serverURL: "https://origin.cursor.com"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			compiled, err := compileActionInvocations(t.Context(), workspace, nil, test.serverURL, []string{"./token"}, []map[string]string{test.supplied})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if compiled.requiresGitHubToken != test.want {
+				t.Fatalf("requires GitHub token = %t, want %t", compiled.requiresGitHubToken, test.want)
+			}
+		})
+	}
+}
+
+func TestCompileActionInvocationsInspectsCompositeShellTemplates(t *testing.T) {
+	workspace := t.TempDir()
+	for _, test := range []struct {
+		name   string
+		field  string
+		indent string
+	}{
+		{name: "environment", field: "env:\n        TOKEN: ${{ github.token }}\n      run: echo token", indent: "      "},
+		{name: "run", field: "run: echo '${{ github.token }}'", indent: "      "},
+		{name: "working directory", field: "working-directory: ${{ github.token }}\n      run: pwd", indent: "      "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			writeAction(t, workspace, test.name, "name: token\nruns:\n  using: composite\n  steps:\n    - shell: bash\n"+test.indent+test.field+"\n")
+			compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./" + test.name}, []map[string]string{{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !compiled.requiresGitHubToken {
+				t.Fatal("composite shell template did not request GitHub token")
+			}
+		})
+	}
+}
+
+func TestCompileActionInvocationsSkipsKnownFalseCompositeShellStep(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "token", `name: conditional token
+inputs:
+  enabled:
+    default: "false"
+  unrelated:
+    default: ""
+runs:
+  using: composite
+  steps:
+    - if: inputs.enabled == 'true'
+      shell: bash
+      env:
+        TOKEN: ${{ github.token }}
+      run: echo token
+`)
+	for _, test := range []struct {
+		enabled string
+		want    bool
+	}{
+		{enabled: "false"},
+		{enabled: "true", want: true},
+		{enabled: "${{ matrix.enabled }}", want: true},
+	} {
+		compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./token"}, []map[string]string{{"enabled": test.enabled, "unrelated": "${{ matrix.unrelated }}"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.want {
+			t.Fatalf("enabled %q requires GitHub token = %t, want %t", test.enabled, compiled.requiresGitHubToken, test.want)
+		}
+	}
+}
+
+func TestCompileActionInvocationsReducesProviderBackedCompositeInputDefault(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "token", `name: provider-conditional token
+inputs:
+  enabled:
+    default: ${{ github.server_url == 'https://github.com' && 'true' || 'false' }}
+  forwarded:
+    default: ${{ inputs.enabled }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ inputs.forwarded == 'true' && github.token || '' }}
+      run: echo token
+`)
+	for _, test := range []struct {
+		name      string
+		serverURL string
+		supplied  map[string]string
+	}{
+		{name: "provider-backed default", serverURL: "https://origin.cursor.com", supplied: map[string]string{}},
+		{name: "provider-backed supplied input", serverURL: "https://origin.cursor.com", supplied: map[string]string{"enabled": "${{ github.server_url == 'https://github.com' && 'true' || 'false' }}"}},
+		{name: "supplied input forwarded by default", serverURL: "https://github.com", supplied: map[string]string{"enabled": "false"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			compiled, err := compileActionInvocations(t.Context(), workspace, nil, test.serverURL, []string{"./token"}, []map[string]string{test.supplied})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if compiled.requiresGitHubToken {
+				t.Fatal("known false forwarded input requested a GitHub token")
+			}
+		})
+	}
+}
+
+func TestCompileActionInvocationsReducesComputedCompositeInputIndexes(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "token", `name: computed input token
+inputs:
+  enabled:
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - if: inputs[format('{0}', 'enabled')] == 'true'
+      shell: bash
+      env:
+        TOKEN: ${{ inputs[format('{0}', 'enabled')] == 'true' && github.token || '' }}
+      run: echo token
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./token"}, []map[string]string{{"enabled": "false"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("known false computed input requested a GitHub token")
+	}
+}
+
+func TestCompileActionInvocationsConstrainsCompositeShellTokenByInvocationReachability(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child token
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ github.token }}
+      run: echo token
+`)
+	for _, test := range []struct {
+		condition string
+		wantToken bool
+	}{
+		{condition: "false"},
+		{condition: "github.run_attempt == '1'", wantToken: true},
+		{condition: "github.run_attempt != '1'", wantToken: true},
+		{condition: "github.run_attempt == '1' && false"},
+	} {
+		writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - if: `+test.condition+`
+      uses: ./child
+`)
+
+		compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.wantToken {
+			t.Fatalf("condition %q requires token = %t, want %t", test.condition, compiled.requiresGitHubToken, test.wantToken)
+		}
+	}
+}
+
+func TestCompileActionInvocationsPreservesDefaultsForUnreachableInvocation(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "token", `name: default token
+inputs:
+  token:
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo safe
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - if: false
+      uses: ./token
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("unreachable invocation dropped input-default token requirement")
+	}
+}
+
+func TestCompileActionInvocationsEvaluatesNestedInputsAgainstCaller(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  a: {}
+  b: {}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ inputs.b == 'true' && github.token || '' }}
+      run: echo token
+`)
+	writeAction(t, workspace, "parent", `name: parent
+inputs:
+  a:
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        a: "false"
+        b: ${{ inputs.a }}
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("nested input evaluated against child values and omitted a required GitHub token")
+	}
+}
+
+func TestCompileActionInvocationsRejectsAuthorityFromCompositeShellMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	for _, test := range []struct {
+		name      string
+		template  string
+		condition string
+		want      string
+	}{
+		{name: "secret", template: "${{ secrets.DEPLOY_KEY }}", want: "cannot grant secret authority"},
+		{name: "unreachable secret", template: "${{ secrets.DEPLOY_KEY }}", condition: "false", want: "cannot grant secret authority"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			condition := ""
+			if test.condition != "" {
+				condition = "      if: " + test.condition + "\n"
+			}
+			writeAction(t, workspace, test.name, "name: invalid authority\nruns:\n  using: composite\n  steps:\n    - shell: bash\n"+condition+"      env:\n        VALUE: "+test.template+"\n      run: echo value\n")
+			_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./" + test.name}, []map[string]string{{}})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("compileActionInvocations() error = %v, want %q", err, test.want)
 			}
 		})
 	}
@@ -748,6 +1150,30 @@ runs:
 	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
 	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant github.token authority") {
 		t.Fatalf("composite metadata token error = %v", err)
+	}
+	for _, want := range []string{"with: token: ${{ github.token }}", "forward ${{ inputs.token }}"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("composite metadata token error = %v, want remedy %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "settings/repository") {
+		t.Fatalf("composite metadata rejection suggested token settings: %v", err)
+	}
+
+	writeAction(t, workspace, "forwarded", `name: forwarded
+inputs:
+  token:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        token: ${{ inputs.token }}
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./forwarded"}, []map[string]string{{"token": "${{ github.token }}"}})
+	if err != nil || !compiled.requiresGitHubToken {
+		t.Fatalf("workflow-authorized forwarded input: token=%v, error=%v", compiled.requiresGitHubToken, err)
 	}
 }
 
@@ -916,7 +1342,7 @@ runs:
         token: ${{ inputs.token }}
 `)
 	refs := []string{"./child", "./parent"}
-	graph, err := buildActionGraph(t.Context(), workspace, nil, refs, nil)
+	graph, err := buildActionGraph(t.Context(), workspace, nil, refs, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,6 +1411,29 @@ runs:
 	}
 	if fake.calls["owner/action@v1"] != 1 {
 		t.Fatalf("remote action resolutions = %d, want one shared resolution", fake.calls["owner/action@v1"])
+	}
+}
+
+func TestMemoizeRepositorySourceSeparatesHosts(t *testing.T) {
+	fake := &fakeActionSource{root: t.TempDir(), calls: map[string]int{}, commit: strings.Repeat("a", 40)}
+	shared := MemoizeRepositorySource(fake)
+	ref, err := source.Parse("owner/action@v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct{ host, commit string }{
+		{"", strings.Repeat("a", 40)},
+		{"https://github.example", strings.Repeat("b", 40)},
+		{"https://github.com", strings.Repeat("a", 40)},
+		{"https://github.example", strings.Repeat("b", 40)},
+	} {
+		ref.ServerURL = tt.host
+		resolved, materialized, err := shared.Fetch(t.Context(), ref)
+		if err != nil || resolved.Commit != tt.commit || source.ServerURL(resolved.Reference.ServerURL) != source.ServerURL(tt.host) {
+			t.Fatalf("source %q = %#v, %v", tt.host, resolved, err)
+		}
+		materialized.Release()
+		fake.commit = strings.Repeat("b", 40)
 	}
 }
 
@@ -1201,8 +1650,87 @@ jobs:
     steps:
       - uses: ./.github/actions/token
 `)
-	if err == nil || !strings.Contains(err.Error(), "action input default that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
+	if err == nil || !strings.Contains(err.Error(), "resolved action metadata that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
 		t.Fatalf("compilePlansForTest() error = %v, want empty permission rejection", err)
+	}
+}
+
+func TestCompilePlansCompositeTokenGuards(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "token.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	action := `name: token
+inputs:
+  enabled:%s
+runs:
+  using: composite
+  steps:
+    - if: inputs.enabled == 'true'
+      shell: sh
+      env:
+        TOKEN: ${{ github.token }}
+      run: test -n "$TOKEN"
+    - shell: sh
+      env:
+        TOKEN: ${{ inputs.enabled == 'true' && github.token || '' }}
+      run: echo guarded
+`
+	for _, test := range []struct {
+		name, condition, input, permissions string
+		defaultInput                        string
+		wantToken, wantError                bool
+		unknownSibling                      bool
+	}{
+		{name: "enabled", input: "true", permissions: "{contents: read}", wantToken: true},
+		{name: "empty permissions", input: "true", permissions: "{}", wantError: true},
+		{name: "omitted optional input", permissions: "{}"},
+		{name: "omitted optional input with unknown sibling", permissions: "{}", unknownSibling: true},
+		{name: "matrix input", input: "${{ matrix.enabled }}", permissions: "{}"},
+		{name: "matrix default false", defaultInput: "${{ matrix.enabled }}", permissions: "{}"},
+		{name: "matrix default true", defaultInput: "${{ matrix.enabled == false }}", permissions: "{contents: read}", wantToken: true},
+		{name: "runtime default", defaultInput: "${{ env.RUNTIME }}", permissions: "{contents: read}", wantToken: true},
+		{name: "matrix guard", condition: "matrix.enabled", input: "true", permissions: "{}"},
+		{name: "literal guard", condition: "false", input: "true", permissions: "{}"},
+		{name: "status guard", condition: "success() && false", input: "true", permissions: "{}"},
+		{name: "first attempt guard", condition: "github.run_attempt == '1'", input: "true", permissions: "{contents: read}", wantToken: true},
+		{name: "retry guard", condition: "github.run_attempt != '1'", input: "true", permissions: "{contents: read}", wantToken: true},
+		{name: "attempt guard empty permissions", condition: "github.run_attempt == '1'", input: "true", permissions: "{}", wantError: true},
+		{name: "false attempt guard", condition: "github.run_attempt == '1' && false", input: "true", permissions: "{}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			definition := " {}"
+			if test.defaultInput != "" {
+				definition = "\n    default: " + test.defaultInput
+			}
+			writeAction(t, workspace, ".github/actions/token", fmt.Sprintf(action, definition))
+			if test.condition == "" {
+				test.condition = "true"
+			}
+			workflow := "on: push\npermissions: " + test.permissions + "\njobs:\n  token:\n    strategy:\n      matrix:\n        enabled: [false]\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/token\n        if: " + test.condition + "\n"
+			if test.input != "" {
+				workflow += "        with:\n          enabled: " + test.input + "\n"
+			} else if test.unknownSibling {
+				workflow += "        with:\n          unrelated: ${{ env.RUNTIME }}\n"
+			}
+			bundle, err := CompileBundleWithOptions(workflowPath, []byte(workflow), pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", defaultOptions())
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "no effective permissions") {
+					t.Fatalf("error = %v, want permission rejection", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.Plans) != 1 || (bundle.Plans[0].Job.GitHubToken != nil) != test.wantToken || (len(bundle.Plans[0].Authorization.GitHubTokenActions) != 0) != test.wantToken {
+				t.Fatalf("unexpected composite token authority: %#v", bundle.Plans)
+			}
+			if test.wantToken && !reflect.DeepEqual(bundle.Plans[0].Job.GitHubToken.Permissions, map[string]string{"contents": "read"}) {
+				t.Fatalf("token permissions = %#v", bundle.Plans[0].Job.GitHubToken)
+			}
+		})
 	}
 }
 
@@ -1273,21 +1801,56 @@ jobs:
 }
 
 func TestCompilePlansPrunesActionTokenAuthorityBehindKnownFalseCallGuard(t *testing.T) {
-	repository := t.TempDir()
-	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+	for _, test := range []struct {
+		name, guard string
+		pruned      bool
+	}{
+		{name: "literal", guard: "false", pruned: true},
+		{name: "caller input", guard: "inputs.enabled", pruned: true},
+		{name: "caller input with needs", guard: "inputs.enabled && needs.prepare.result == 'success'", pruned: true},
+		{name: "callee input name", guard: "inputs.run", pruned: false},
+		{name: "first attempt", guard: "github.run_attempt == '1'", pruned: false},
+		{name: "retry", guard: "github.run_attempt != '1'", pruned: false},
+		{name: "false attempt", guard: "false && github.run_attempt == '1'", pruned: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			caller := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
-  delegated:
-    if: false
-    uses: ./.github/workflows/reusable.yml
+  outer:
+    uses: ./.github/workflows/middle.yml
+    with:
+      enabled: false
+      run: true
 `)
-	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+			writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      enabled: {type: boolean}
+      run: {type: boolean}
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+  delegated:
+    needs: prepare
+    if: `+test.guard+`
+    uses: ./.github/workflows/reusable.yml
+    with:
+      run: false
+`)
+			writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      run: {type: boolean}
 jobs:
   action:
     runs-on: ubuntu-latest
     steps:
       - uses: ./.github/actions/token
 `)
-	writeAction(t, repository, ".github/actions/token", `name: token default
+			writeAction(t, repository, ".github/actions/token", `name: token default
 inputs:
   token:
     default: ${{ github.token }}
@@ -1295,15 +1858,22 @@ runs:
   using: node24
   main: index.js
 `)
-	plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plans) != 1 || len(plans[0].CallGuards) != 1 || plans[0].GitHubToken != nil || plans[0].HasCapability("provider-token-write") {
-		t.Fatalf("known-false call guard retained token authority: %#v", plans)
-	}
-	if len(plans[0].Actions) == 0 || len(plans[0].Program.Actions) == 0 {
-		t.Fatal("known-false call guard skipped action resolution")
+			plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := plans[len(plans)-1]
+			guard := job.CallGuards[len(job.CallGuards)-1]
+			if pruned := job.GitHubToken == nil; pruned != test.pruned {
+				t.Fatalf("pruned = %v, want %v; guard = %#v", pruned, test.pruned, guard)
+			}
+			if test.pruned && guard.Condition != "false" {
+				t.Fatalf("known-false guard condition = %q", guard.Condition)
+			}
+			if len(job.Actions) == 0 {
+				t.Fatal("known-false call guard skipped action resolution")
+			}
+		})
 	}
 }
 
@@ -1434,6 +2004,46 @@ func TestCheckoutAuthorityFollowsRootReachability(t *testing.T) {
 	}
 }
 
+func TestCheckoutServerURLExpressionAndSourceHost(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := writeWorkflow(t, workspace, "checkout-host.yml", "")
+	writeAction(t, remote, "", checkoutTestManifest(actionintegration.CheckoutV7Commit))
+	for _, server := range []string{"https://github.com", "https://buildkite-ghe.com"} {
+		for _, input := range []string{"${{ github.server_url }}", "${{ github['server_url'] }}", "https://wrong.example", "${{ github.server_url }}/other"} {
+			t.Run(server+"/"+input, func(t *testing.T) {
+				workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@" + actionintegration.CheckoutV7Commit + "\n        with:\n          github-server-url: " + input + "\n")
+				event := bytes.Replace(pushEvent(t), []byte(`"event":`), []byte(fmt.Sprintf(`"server_url":%q,"event":`, server)), 1)
+				event = bytes.ReplaceAll(event, []byte("https://github.com/"), []byte(server+"/"))
+				bundle, err := CompileBundleWithOptions(workflowPath, workflow, event, "0.0.0-test", testDistributionDigest, "importer", Options{
+					EventTrust:     EventUntrusted,
+					Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+					ResolveActions: true,
+					ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+				})
+				// Only the GitHub.com source receives adapter input checks and
+				// authority. This fake can supply GHES bytes; real transport rejects them.
+				native := server == "https://github.com"
+				if native && (strings.Contains(input, "wrong.example") || strings.HasSuffix(input, "/other")) {
+					if err == nil || !strings.Contains(err.Error(), `explicit input "github-server-url" value is unsupported`) {
+						t.Fatalf("foreign checkout host error = %v", err)
+					}
+					return
+				}
+				if err != nil || len(bundle.Plans) != 1 {
+					t.Fatalf("compile = %#v, %v", bundle.Plans, err)
+				}
+				job := bundle.Plans[0].Job
+				if job.Event.ServerURL != server || len(job.Actions) != 1 || job.Actions[0].ServerURL != server || job.HasCapability("provider-token-read") != native || job.GitHubToken != nil {
+					t.Fatalf("checkout identity or authority = %#v", job)
+				}
+				if got := job.Program.Job.Steps[0].Invocation.With[0].Value.Source; got != input {
+					t.Fatalf("checkout source = %q, want retained expression %q", got, input)
+				}
+			})
+		}
+	}
+}
+
 func TestStaticallySkippedReusableJobDoesNotValidateCheckoutAdapterInputs(t *testing.T) {
 	repository, remote := t.TempDir(), t.TempDir()
 	caller := writeWorkflow(t, repository, "caller.yml", "")
@@ -1468,11 +2078,301 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Condition != "false" || len(bundle.Plans[0].Job.Actions) == 0 || bundle.Plans[0].Job.HasCapability("provider-token-read") {
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Condition != "inputs.enabled" || bundle.Plans[0].Job.Inputs["enabled"] != false || len(bundle.Plans[0].Job.Actions) == 0 || bundle.Plans[0].Job.HasCapability("provider-token-read") {
 		t.Fatalf("statically skipped checkout plan = %#v", bundle.Plans)
 	}
 	if _, err := compile(true); err == nil || !strings.Contains(err.Error(), `explicit input "persist-credentials" value is unsupported`) {
 		t.Fatalf("reachable checkout adapter error = %v", err)
+	}
+}
+
+func TestStaticallySkippedReusableJobDoesNotValidateArtifactAdapterInputs(t *testing.T) {
+	repository, remote := t.TempDir(), t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", "")
+	writeAction(t, remote, "", "name: artifact action\nruns:\n  using: node24\n  main: index.js\n")
+	options := Options{
+		EventTrust:     EventUntrusted,
+		Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	}
+	for _, adapter := range []struct{ name, commit, inputs string }{
+		{"download-artifact", actionintegration.DownloadArtifactV7Commit, "name: payload\n          path: ${{ runner.temp }}/digests"},
+		{"upload-artifact", actionintegration.UploadArtifactCommit, "path: payload\n          retention-days: -1"},
+	} {
+		for _, test := range []struct {
+			name, condition, stepCondition string
+			enabled, wantError             bool
+		}{
+			{name: "false input", condition: "inputs.enabled"},
+			{name: "true input", condition: "inputs.enabled", enabled: true, wantError: true},
+			{name: "false matrix", condition: "matrix.enabled"},
+			{name: "true matrix", condition: "matrix.enabled", enabled: true, wantError: true},
+			{name: "runtime condition", condition: "vars.RUNTIME_FLAG == 'yes'", wantError: true},
+			{name: "false step", condition: "true", stepCondition: "false", wantError: true},
+		} {
+			t.Run(adapter.name+"/"+test.name, func(t *testing.T) {
+				if test.stepCondition == "" {
+					test.stepCondition = "true"
+				}
+				writeWorkflow(t, repository, "reusable.yml", fmt.Sprintf(`on:
+  workflow_call:
+    inputs:
+      enabled: {type: boolean, required: true}
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo producer
+  merge:
+    needs: producer
+    if: %s
+    strategy:
+      matrix:
+        enabled: ["${{ inputs.enabled }}"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/%s@%s
+        if: %s
+        with:
+          %s
+`, test.condition, adapter.name, adapter.commit, test.stepCondition, adapter.inputs))
+				source := []byte(fmt.Sprintf("on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    with:\n      enabled: %t\n", test.enabled))
+				if err := os.WriteFile(caller, source, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				bundle, err := CompileBundleWithOptions(caller, source, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", options)
+				if test.wantError {
+					if err == nil || !strings.Contains(err.Error(), "bounded "+adapter.name+" adapter") {
+						t.Fatalf("reachable adapter error = %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(bundle.Plans) != 2 || bundle.Plans[1].Job.Workflow.LogicalJobID != "call.merge" || len(bundle.Plans[1].Job.Actions) != 1 {
+					t.Fatalf("skipped job and action lock not retained: %#v", bundle.Plans)
+				}
+			})
+		}
+	}
+}
+
+func TestCompileReusableInputAuthorityUsesWorkflowScope(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  enabled:
+    uses: ./.github/workflows/reusable.yml
+    secrets: inherit
+    with:
+      enabled: true
+      name: ALPHA_KEY
+  disabled:
+    uses: ./.github/workflows/reusable.yml
+    secrets: inherit
+    with:
+      enabled: false
+      name: BETA_KEY
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      enabled: {type: boolean, required: true}
+      name: {type: string, required: true}
+jobs:
+  action:
+    runs-on: ubuntu-latest
+    env:
+      KEY: ${{ secrets[inputs.name] }}
+    steps:
+      - uses: ./.github/actions/token
+        with:
+          enabled: ''
+          token: ${{ inputs.enabled && github.token || '' }}
+          key: ${{ secrets[inputs.name] }}
+`)
+	writeAction(t, repository, ".github/actions/token", `name: scoped token
+inputs:
+  enabled: {}
+  token: {}
+  key: {required: true}
+runs:
+  using: node24
+  main: index.js
+`)
+	plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %d, want two sibling calls", len(plans))
+	}
+	for _, job := range plans {
+		enabled := job.Workflow.LogicalJobID == "enabled.action"
+		key := "BETA_KEY"
+		if enabled {
+			key = "ALPHA_KEY"
+		}
+		if (job.GitHubToken != nil) != enabled || job.HasCapability("provider-token-write") != enabled || !reflect.DeepEqual(job.RequiredSecrets, []string{key}) {
+			t.Fatalf("authority for %q = token %v, secrets %v", job.Workflow.LogicalJobID, job.GitHubToken, job.RequiredSecrets)
+		}
+		if want := "${{ secrets['" + key + "'] }}"; job.Env["KEY"] != want {
+			t.Fatalf("input-selected secret source = %q, want %q", job.Env["KEY"], want)
+		}
+	}
+}
+
+func TestCompileReusableDeferredInputTokenAuthority(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.meta.outputs.value }}
+    steps:
+      - id: meta
+        run: echo value=yes >> "$GITHUB_OUTPUT"
+  call:
+    needs: meta
+    uses: ./.github/workflows/reusable.yml
+    with:
+      key: value
+      enabled: false
+      value: ${{ needs.meta.outputs.value }}
+`)
+	writeAction(t, repository, ".github/actions/token", `name: synthetic token consumer
+inputs:
+  key: {}
+  enabled: {}
+  value: {}
+  token: {}
+runs:
+  using: node24
+  main: index.js
+`)
+	for _, tc := range []struct {
+		name       string
+		expression string
+		wantToken  bool
+	}{
+		{"computed input", "inputs[inputs.key] && github.token || ''", true},
+		{"JSON aggregate", "contains(toJSON(inputs), 'yes') && github.token || ''", true},
+		{"JSON round trip", "fromJSON(toJSON(inputs)).value && github.token || ''", true},
+		{"known false named input", "inputs.enabled && github.token || ''", false},
+	} {
+		for _, position := range []string{"run", "with"} {
+			t.Run(tc.name+"/"+position, func(t *testing.T) {
+				step := "run: echo ${{ " + tc.expression + " }}"
+				if position == "with" {
+					// Deliberately shadow the workflow inputs with false action inputs.
+					step = "uses: ./.github/actions/token\n        with:\n          key: ''\n          enabled: ''\n          value: ''\n          token: ${{ " + tc.expression + " }}"
+				}
+				writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      key: {type: string, required: true}
+      enabled: {type: boolean, required: true}
+      value: {type: string, required: true}
+jobs:
+  consume:
+    runs-on: ubuntu-latest
+    steps:
+      - `+step+"\n")
+				plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(plans) != 2 || plans[1].Workflow.LogicalJobID != "call.consume" {
+					t.Fatalf("plans = %#v, want producer and reusable consumer", plans)
+				}
+				job := plans[1]
+				if (job.GitHubToken != nil) != tc.wantToken || job.HasCapability("provider-token-write") != tc.wantToken {
+					t.Errorf("token authority = token %v, provider-token-write %t; want token %t", job.GitHubToken, job.HasCapability("provider-token-write"), tc.wantToken)
+				}
+			})
+		}
+	}
+}
+
+func TestCompileReusableDeferredInputSecretSelectors(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.meta.outputs.value }}
+    steps:
+      - id: meta
+        run: echo value=SYNTHETIC_SELECTED_KEY >> "$GITHUB_OUTPUT"
+  call:
+    needs: meta
+    uses: ./.github/workflows/reusable.yml
+    secrets: inherit
+    with:
+      key: value
+      name: SYNTHETIC_KNOWN_KEY
+      sentinel: synthetic-input-value-must-not-leak
+      value: ${{ needs.meta.outputs.value }}
+`)
+	for _, tc := range []struct {
+		name     string
+		selector string
+		wantKey  string
+	}{
+		{"deferred computed input", "inputs[inputs.key] || 'FALLBACK_KEY'", ""},
+		{"deferred JSON aggregate", "fromJSON(toJSON(inputs)).value || 'FALLBACK_KEY'", ""},
+		{"known named input with unrelated deferred data", "inputs.name", "SYNTHETIC_KNOWN_KEY"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      key: {type: string, required: true}
+      name: {type: string, required: true}
+      sentinel: {type: string, required: true}
+      value: {type: string, required: true}
+jobs:
+  consume:
+    runs-on: ubuntu-latest
+    env:
+      KEY: ${{ secrets[`+tc.selector+`] }}
+    steps:
+      - run: echo synthetic
+`)
+			plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+			if tc.wantKey == "" {
+				if err == nil {
+					var selected []string
+					for _, job := range plans {
+						selected = append(selected, job.RequiredSecrets...)
+					}
+					t.Fatalf("compiled deferred secret selector; required secrets = %v", selected)
+				}
+				if !strings.Contains(err.Error(), "compile-known workflow inputs") {
+					t.Errorf("error = %v, want compile-known input diagnostic", err)
+				}
+				for _, value := range []string{"SYNTHETIC_KNOWN_KEY", "synthetic-input-value-must-not-leak", "SYNTHETIC_SELECTED_KEY"} {
+					if strings.Contains(err.Error(), value) {
+						t.Errorf("diagnostic exposed an input-derived value: %v", err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 2 || plans[1].Workflow.LogicalJobID != "call.consume" || !reflect.DeepEqual(plans[1].RequiredSecrets, []string{tc.wantKey}) {
+				t.Fatalf("plans = %#v, want only named secret %q on consumer", plans, tc.wantKey)
+			}
+		})
 	}
 }
 
@@ -1883,6 +2783,42 @@ func TestCompilePlansContainersWithRemoteActionsRequireResolution(t *testing.T) 
 	}
 }
 
+func TestCheckoutPostHogRefExpression(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := writeWorkflow(t, workspace, "checkout.yml", "")
+	const commit = "de0fac2e4500dabe0009e67214ff5f5447ce83dd"
+	const ref = "${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'PostHog/posthog') && github.event.pull_request.head.ref || github.ref }}"
+	writeAction(t, remote, "", checkoutTestManifest(commit))
+	for _, test := range []struct {
+		name, event, headRepo, eventRef, wantRef string
+	}{
+		{"same repository", "pull_request", "PostHog/posthog", "refs/pull/42/merge", "feature/migrations"},
+		{"fork", "pull_request", "contributor/posthog", "refs/pull/42/merge", "refs/pull/42/merge"},
+		{"mirrored repository probe", "pull_request", "buildkite/posthog", "refs/pull/2688/head", "refs/pull/2688/head"},
+		{"push", "push", "", "refs/heads/master", "refs/heads/master"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflow := []byte("on: [push, pull_request]\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@" + commit + "\n        with:\n          ref: " + ref + "\n          clean: false\n")
+			event := []byte(fmt.Sprintf(`{"provider":"github","event":%q,"repository":{"owner":"PostHog","name":"posthog","default_branch":"master"},"ref":%q,"sha":%q,"actor":"test","payload":{"action":"opened","pull_request":{"head":{"ref":"feature/migrations","repo":{"full_name":%q}}}}}`, test.event, test.eventRef, strings.Repeat("a", 40), test.headRepo))
+			plans, err := compilePlansForTest(t.Context(), workflowPath, workflow, event, "checkout-test", testDistributionDigest, Options{
+				EventTrust:     EventUntrusted,
+				Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+				ResolveActions: true,
+				ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 1 || plans[0].GitHubToken != nil || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network", "provider-token-read"}) {
+				t.Fatalf("checkout authority = %#v", plans)
+			}
+			if got := programBindingMap(plans[0].Program.Job.Steps[0].Invocation.With)["ref"]; got != test.wantRef {
+				t.Fatalf("checkout ref = %q, want %q", got, test.wantRef)
+			}
+		})
+	}
+}
+
 func TestCheckoutAdapterInputBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
@@ -2174,6 +3110,8 @@ func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 		actionintegration.UploadArtifactV1Commit,
 		actionintegration.UploadArtifactV2Commit,
 		actionintegration.UploadArtifactV3Commit,
+		actionintegration.UploadArtifactV322Commit,
+		actionintegration.UploadArtifactV322Node20Commit,
 		"c7d193f32edcb7bfad88892161225aeda64e9392", // v4.0.0
 		actionintegration.UploadArtifactV460Commit,
 		actionintegration.UploadArtifactCommit,
@@ -2219,6 +3157,10 @@ func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 	}
 
 	bundle = compile("      - uses: actions/upload-artifact@c7d193f32edcb7bfad88892161225aeda64e9392\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV322Commit + "\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV322Node20Commit + "\n" +
 		"        with:\n          path: payload\n" +
 		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV460Commit + "\n" +
 		"        with:\n          path: payload\n" +
@@ -2483,6 +3425,53 @@ runs:
 	}
 }
 
+func TestReusableUploadArtifactValidatesInputsWithoutRewritingSource(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	caller := writeWorkflow(t, workspace, "caller.yml", "")
+	writeAction(t, remote, "", uploadArtifactTestManifest(actionintegration.UploadArtifactV6Commit))
+	writeWorkflow(t, workspace, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      path: {type: string, required: true}
+      hidden: {type: boolean, default: false}
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@`+actionintegration.UploadArtifactV6Commit+`
+        with:
+          path: ${{ inputs.path }}
+          include-hidden-files: ${{ inputs.hidden }}
+`)
+	compile := func(path string) ([]plan.Job, error) {
+		source := []byte(fmt.Sprintf("on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    with:\n      path: %s\n      hidden: true\n", path))
+		if err := os.WriteFile(caller, source, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return compilePlansForTest(t.Context(), caller, source, pushEvent(t), "artifact-test", testDistributionDigest, Options{
+			EventTrust:     EventUntrusted,
+			Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+			ResolveActions: true,
+			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+		})
+	}
+	plans, err := compile("payload/result.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("plans = %d, want one reusable upload", len(plans))
+	}
+	with := testBindingSources(plans[0].ExecutionJob().Steps[0].Invocation.With)
+	if with["path"] != "${{ inputs.path }}" || with["include-hidden-files"] != "${{ inputs.hidden }}" || plans[0].Inputs["hidden"] != true {
+		t.Fatalf("adapter rewrote workflow inputs: %v / %v", with, plans[0].Inputs)
+	}
+	_, err = compile("synthetic-input-sentinel/../result.txt")
+	if err == nil || !strings.Contains(err.Error(), "bounded upload-artifact adapter") || strings.Contains(err.Error(), "synthetic-input-sentinel") {
+		t.Fatalf("expected value-safe adapter rejection, got %v", err)
+	}
+}
+
 func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
@@ -2578,8 +3567,11 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if plans, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n          archive: true\n"); err != nil || len(plans) != 1 {
 		t.Fatalf("unknown upload-artifact fallback plans = %#v, error = %v", plans, err)
 	}
-	if _, err := compile("c6a366c94c3e0affe28c06c8df20a878f24da3cf", "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), "does not admit resolved commit") {
-		t.Fatalf("known unsupported upload-artifact commit error = %v", err)
+	for _, commit := range []string{actionintegration.UploadArtifactV322Commit, actionintegration.UploadArtifactV322Node20Commit} {
+		plans, err := compile(commit, "        with:\n          path: payload\n")
+		if err != nil || len(plans) != 1 || len(plans[0].Actions) != 1 || plans[0].Actions[0].Commit != commit {
+			t.Fatalf("GHES upload-artifact plans = %#v, error = %v", plans, err)
+		}
 	}
 
 	matrixWorkflow := []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        mode: [production, test]\n    steps:\n      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV6Commit + "\n        if: matrix.mode == 'test'\n        with:\n          name: ${{ github.sha }}\n          path: ./artifacts.tar.gz\n          retention-days: '0'\n")

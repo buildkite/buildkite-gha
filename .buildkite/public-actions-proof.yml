@@ -6,7 +6,7 @@ steps:
     key: "public-actions-importer"
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-          version: "2026.5.12"
+          version: "2026.10.17"
     command: |
       set -euo pipefail
       commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-$${BUILDKITE_COMMIT:-}}}"

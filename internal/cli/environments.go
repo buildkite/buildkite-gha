@@ -9,6 +9,7 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
 
@@ -62,7 +63,7 @@ func seedUploadEnvironmentResolutions(ctx context.Context, source compiler.Envir
 	if len(names) == 0 {
 		return
 	}
-	_, _ = batch.ResolveEnvironments(ctx, event.Repository.Owner, event.Repository.Name, names)
+	_, _ = batch.ResolveEnvironments(ctx, event.ServerURL, event.Repository.Owner, event.Repository.Name, names)
 }
 
 // agentEnvironmentSource resolves environments through the Agent API and
@@ -89,8 +90,8 @@ type agentEnvironmentResolution struct {
 	err        error
 }
 
-func (a *agentEnvironmentSource) ResolveEnvironment(ctx context.Context, owner, repository, name string) (compiler.EnvironmentProtection, error) {
-	protections, err := a.ResolveEnvironments(ctx, owner, repository, []string{name})
+func (a *agentEnvironmentSource) ResolveEnvironment(ctx context.Context, serverURL, owner, repository, name string) (compiler.EnvironmentProtection, error) {
+	protections, err := a.ResolveEnvironments(ctx, serverURL, owner, repository, []string{name})
 	if err != nil {
 		return compiler.EnvironmentProtection{}, err
 	}
@@ -103,8 +104,9 @@ func (a *agentEnvironmentSource) ResolveEnvironment(ctx context.Context, owner, 
 // it unsplit and its rejection fails the compile. A request failure memoizes
 // that failure for every name it carried, so retried compiles fail
 // consistently without new requests.
-func (a *agentEnvironmentSource) ResolveEnvironments(ctx context.Context, owner, repository string, names []string) ([]compiler.EnvironmentProtection, error) {
+func (a *agentEnvironmentSource) ResolveEnvironments(ctx context.Context, serverURL, owner, repository string, names []string) ([]compiler.EnvironmentProtection, error) {
 	repo := owner + "/" + repository
+	identityPrefix := plan.EventServerURL("github", serverURL) + "/" + repo + "\x00"
 	a.mu.Lock()
 	var missing []string
 	seen := map[string]bool{}
@@ -114,14 +116,14 @@ func (a *agentEnvironmentSource) ResolveEnvironments(ctx context.Context, owner,
 			return nil, err
 		}
 		identity := strings.ToLower(name)
-		if _, ok := a.resolved[repo+"\x00"+identity]; !ok && !seen[identity] {
+		if _, ok := a.resolved[identityPrefix+identity]; !ok && !seen[identity] {
 			seen[identity] = true
 			missing = append(missing, name)
 		}
 	}
 	a.mu.Unlock()
 	if len(missing) != 0 {
-		snapshots, err := a.resolver.ResolveEnvironments(ctx, repo, missing)
+		snapshots, err := a.resolver.ResolveEnvironments(ctx, serverURL, repo, missing)
 		if err != nil {
 			err = fmt.Errorf("environments: %w", err)
 		} else if len(snapshots) != len(missing) {
@@ -142,7 +144,7 @@ func (a *agentEnvironmentSource) ResolveEnvironments(ctx context.Context, owner,
 					Variables:         snapshot.Variables,
 				}}
 			}
-			a.resolved[repo+"\x00"+strings.ToLower(name)] = result
+			a.resolved[identityPrefix+strings.ToLower(name)] = result
 		}
 		a.mu.Unlock()
 	}
@@ -150,7 +152,7 @@ func (a *agentEnvironmentSource) ResolveEnvironments(ctx context.Context, owner,
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, name := range names {
-		result, ok := a.resolved[repo+"\x00"+strings.ToLower(name)]
+		result, ok := a.resolved[identityPrefix+strings.ToLower(name)]
 		if !ok {
 			return nil, fmt.Errorf("environments: environment %q was not resolved", name)
 		}

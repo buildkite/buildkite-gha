@@ -48,6 +48,7 @@ type Runner struct {
 	ToolCache             string
 	Docker                string
 	DockerBuildLoad       bool // see enableDockerBuildLoad
+	RepairHostname        bool // native Namespace hosts only
 	RuntimeExecutable     string
 	Git                   string
 	GitLFS                string
@@ -457,6 +458,12 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandOutputProcesso
 			{host: jobContainerTemp, target: "/github/runner_temp"},
 		}}
 	}
+	if eventPath != "" {
+		if siblingPaths == nil {
+			siblingPaths = &jobContainerBackend{}
+		}
+		siblingPaths.mounts = append(siblingPaths.mounts, containerMount{host: filepath.Dir(eventPath), target: containerEventDirectory})
+	}
 	for _, name := range sortedKeys(action.Env) {
 		if name == "GITHUB_EVENT_PATH" && eventPath != "" {
 			continue
@@ -668,10 +675,12 @@ func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandOutpu
 	env = removeCacheServiceEnvironment(env)
 	if action.Cache {
 		var err error
-		env, err = isolateCacheActionEnvironment(env)
+		var cleanup func()
+		env, cleanup, err = isolateCacheActionEnvironment(env)
 		if err != nil {
 			return fmt.Errorf("configure actions/cache tools: %w", err)
 		}
+		defer cleanup()
 	}
 	if action.Cache || action.CacheClientCompatibility {
 		applyGitHubServerURLOverride(env)

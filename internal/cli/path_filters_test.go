@@ -443,11 +443,8 @@ func TestParseChangedPathsFailsClosed(t *testing.T) {
 	if paths, err := parseChangedPaths([]byte("D\x00docs/old.md\x00M\x00src/main.go\x00")); err != nil || !reflect.DeepEqual(paths, []string{"docs/old.md", "src/main.go"}) {
 		t.Fatalf("deleted and modified paths = %#v, %v", paths, err)
 	}
-	if _, err := parseChangedPaths([]byte("R100\x00old.go\x00new.go\x00")); err == nil || !strings.Contains(err.Error(), "renamed") {
-		t.Fatalf("rename error = %v", err)
-	}
-	if _, err := parseChangedPaths([]byte("D\x00old.go\x00A\x00new.go\x00")); err == nil || !strings.Contains(err.Error(), "rename conformance") {
-		t.Fatalf("undetected rename error = %v", err)
+	if _, err := parseChangedPaths([]byte("R100\x00old.go\x00new.go\x00")); err == nil || !strings.Contains(err.Error(), "unsupported changed-path status") {
+		t.Fatalf("unexpected rename-detection output error = %v", err)
 	}
 	var output bytes.Buffer
 	for i := range maxLocallyEvaluatedPathFilterFiles {

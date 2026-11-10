@@ -428,8 +428,8 @@ func TestEvaluateActionInputDefaultSupportsJobStatus(t *testing.T) {
 	if _, err := EvaluateActionInputDefault("${{ job.status }}", Context{}); err == nil {
 		t.Fatal("EvaluateActionInputDefault() accepted unavailable job.status")
 	}
-	if _, err := Evaluate("${{ job.status }}", Context{JobStatus: "success"}); err == nil {
-		t.Fatal("Evaluate() accepted action-default-only job.status")
+	if err := ValidateRuntimeTemplate("${{ job.status }}"); err == nil {
+		t.Fatal("ValidateRuntimeTemplate() accepted job.status before steps run")
 	}
 }
 
@@ -626,7 +626,7 @@ func TestServiceRuntimeContext(t *testing.T) {
 			t.Fatalf("unknown Analyze(%q) = %#v, %v", source, got, err)
 		}
 	}
-	for _, source := range []string{"job", "job['services']", "job.services[env.NAME].id", "job.services.s3.docker.test.id", "true || job['status']"} {
+	for _, source := range []string{"job", "job['services']", "job.services[env.NAME].id", "job.services.s3.docker.test.id", "true || job['name']"} {
 		if _, err := engine.Validate(Site{Source: source, Profile: ProfileStepCondition, Result: ResultBoolean}); err == nil {
 			t.Errorf("Validate(%q) unexpectedly succeeded", source)
 		}
@@ -1094,7 +1094,7 @@ func TestEvaluateJobSurfacesErrors(t *testing.T) {
 		{name: "projected needs", evaluate: EvaluateJobDefault, template: "${{ false && toJSON(needs.*) || 'ok' }}"},
 		{name: "aggregate steps", evaluate: EvaluateJobOutput, template: "${{ false && toJSON(steps) || 'ok' }}"},
 		{name: "dynamic service", evaluate: EvaluateJobOutput, template: "${{ false && job.services[env.KEY].id || 'ok' }}"},
-		{name: "job status", evaluate: EvaluateJobOutput, template: "${{ false && job.status || 'ok' }}"},
+		{name: "job identity", evaluate: EvaluateJobOutput, template: "${{ false && job.name || 'ok' }}"},
 		{name: "hash files", evaluate: EvaluateJobDefault, template: "${{ false && hashFiles('go.sum') || 'ok' }}"},
 	}
 	for _, test := range tests {
@@ -1998,40 +1998,6 @@ func TestCompileInputLiteralRepresentations(t *testing.T) {
 	}
 }
 
-func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
-	template := "${{ !inputs.enabled && matrix.run-new && 'inputs.enabled' || inputs['label'] }}"
-	got, err := SubstituteCompileInputs(template, map[string]any{"enabled": false, "label": "it''s ready"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "${{ !false && matrix.run-new && 'inputs.enabled' || 'it''''s ready' }}"
-	if got != want {
-		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
-	}
-}
-
-func TestSubstituteCompileInputsResolvesNestedComputedInputIndex(t *testing.T) {
-	got, err := SubstituteCompileInputs("${{ inputs[inputs.key] }}", map[string]any{"key": "target", "target": "release"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := "${{ 'release' }}"; got != want {
-		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
-	}
-}
-
-func TestSubstituteCompileInputsIgnoresNestedInputsProperties(t *testing.T) {
-	template := "${{ inputs.debug }} ${{ github.event.inputs.debug }} ${{ steps.inputs.name }} ${{ fromJSON(vars.CFG).inputs.name }}"
-	got, err := SubstituteCompileInputs(template, map[string]any{"debug": true, "name": "prod"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "${{ true }} ${{ github.event.inputs.debug }} ${{ steps.inputs.name }} ${{ fromJSON(vars.CFG).inputs.name }}"
-	if got != want {
-		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
-	}
-}
-
 func TestEvaluateAvailableCompileTemplatePreservesRuntimeExpressions(t *testing.T) {
 	got, err := EvaluateAvailableCompileTemplate("echo ${{ 'target' }} ${{ fromJSON('1e20') }} ${{ github.ref }}", CompileContext{})
 	if err != nil {
@@ -2129,12 +2095,12 @@ func TestEvaluateCompileTemplateUsesGitHubNumberRendering(t *testing.T) {
 }
 
 func TestValidateServiceCredentialTemplateContexts(t *testing.T) {
-	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER || 'user' }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}", "${{ needs.build.outputs.user }}", "${{ strategy.job-index }}"} {
+	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER || 'user' }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}", "${{ needs.build.outputs.user }}", "${{ strategy.job-index }}", "${{ inputs.user }}"} {
 		if err := ValidateServiceCredentialTemplate(template); err != nil {
 			t.Errorf("ValidateServiceCredentialTemplate(%q) = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ env.USER.extra }}", "${{ secrets }}", "${{ 'safe' || inputs.user }}", "${{ 'safe' || secrets[env.KEY] }}", "${{ 'safe' || secrets[needs.build.outputs.key] }}", "${{ 'safe' || toJSON(github) }}"} {
+	for _, template := range []string{"${{ matrix.user }}", "${{ env.USER.extra }}", "${{ secrets }}", "${{ 'safe' || secrets[env.KEY] }}", "${{ 'safe' || secrets[needs.build.outputs.key] }}", "${{ 'safe' || toJSON(github) }}"} {
 		if err := ValidateServiceCredentialTemplate(template); err == nil {
 			t.Errorf("ValidateServiceCredentialTemplate(%q) succeeded", template)
 		}
@@ -2167,6 +2133,8 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 		{expression: "${{ case(true, 'safe', github.token) }}", want: `unavailable value "github.token"`},
 		{expression: "${{ case(true, 'safe', secrets.TOKEN) }}", want: `unsupported compile-time context "secrets"`},
 		{expression: "${{ toJSON(github.event) }}", want: `unavailable value "github.event"`},
+		{expression: "${{ github.run_attempt }}", want: `unavailable value "github.run_attempt": run identity is unavailable in this import-time expression position; github values available at import: actor, actor_id, base_ref, event.<property>, event_name, head_ref, ref, ref_name, ref_type, repository, repository_id, repository_owner, repository_owner_id, sha, workflow`},
+		{expression: "${{ github.job }}", want: `unavailable value "github.job"; github values available at import: actor,`},
 		{expression: "${{ toJSON(github.event.*) }}", want: `whole event projection is unsupported`},
 		{expression: "${{ toJSON(event) }}", want: `whole event access is unsupported`},
 		{expression: "${{ hashFiles('go.sum') }}", want: `unsupported compile-time function "hashFiles"`},

@@ -37,11 +37,11 @@ const (
 	workflowCheckSummaryNotice    = "\n\n_Additional diagnostics omitted at the provider check summary size limit._\n"
 )
 
-func upload(args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
-	return uploadFromPlatform(runtime.GOOS, runtime.GOARCH, args, stdout, stderr, commandVersion(clientVersion), clientVersion, agent)
+func upload(ctx context.Context, args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
+	return uploadFromPlatform(ctx, runtime.GOOS, runtime.GOARCH, args, stdout, stderr, commandVersion(clientVersion), clientVersion, agent)
 }
 
-func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) int {
+func uploadFromPlatform(ctx context.Context, goos, goarch string, args []string, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) int {
 	platform, err := importerPlatform(goos, goarch)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
@@ -54,7 +54,7 @@ func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Wr
 		if err != nil {
 			return usageError(stderr, "upload: %v", err)
 		}
-		return uploadStage(options, stdout, stderr, version, clientVersion, agent)
+		return uploadStage(ctx, options, stdout, stderr, version, clientVersion, agent)
 	}
 	uploadArguments, err := parseUploadArgs(args)
 	if err != nil {
@@ -62,11 +62,11 @@ func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Wr
 	}
 	uploadArguments.importerPlatform = platform
 	uploadArguments.clientVersion = clientVersion
-	return uploadParsed(uploadArguments, stdout, stderr, version, agent)
+	return uploadParsed(ctx, uploadArguments, stdout, stderr, version, agent)
 }
 
-func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+func uploadParsed(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return uploadParsedContext(ctx, uploadArguments, stdout, stderr, version, agent)
 }
@@ -264,6 +264,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			processingReports[i] = compatibility.InitialProcessingReport(workflows[i].Path, hostedProfile, false, parsed, err)
 			processingReports[i].Result = "incompatible"
 			workflows[i].Applicable = true
+			uploadArguments.telemetry.addPathFilter(workflows[i], effectiveEvent, workflowTriggerSelection{}, err)
 			continue
 		}
 		workflowEvent := effectiveEvent
@@ -274,6 +275,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if workflows[i].PathFiltersError != "" && !workflows[i].PathFiltersIdentityVerified {
 			triggerErr = &buildkitepipeline.UnsupportedPathFiltersError{Event: effectiveEvent.Event.Event, Reason: workflows[i].PathFiltersError}
 		}
+		uploadArguments.telemetry.addPathFilter(workflows[i], effectiveEvent, selection, triggerErr)
 		switch {
 		case triggerErr != nil:
 			workflows[i].Applicable = true
@@ -324,6 +326,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			WorkflowPath:      input.Path,
 			WorkflowSource:    input.Source,
 			EventSource:       effectiveEvent.Source,
+			BuildID:           os.Getenv("BUILDKITE_BUILD_ID"),
 			EventFile:         effectiveEvent.Origin != effectiveEventFromBuild,
 			Version:           version,
 			StepKeyNamespace:  input.StepKeyNamespace,
@@ -976,8 +979,10 @@ func deferredRuntimePlatforms(uploadArguments parsedUploadArgs) map[compiler.Pla
 		if _, configured := uploadArguments.runtimeDistributionPaths[platform]; configured {
 			platforms[platform] = true
 		}
-		if acquisition := uploadArguments.pluginAcquisition; acquisition != nil && (stableVersionPattern.MatchString(acquisition.version) || os.Getenv(pluginDevRuntimeEnvironment(platform)) != "") {
-			platforms[platform] = true
+		if acquisition := uploadArguments.pluginAcquisition; acquisition != nil {
+			if acquisition.binaries[platform] != "" || (acquisition.binaries == nil && (releaseVersionPattern.MatchString(acquisition.version) || os.Getenv(pluginDevRuntimeEnvironment(platform)) != "")) {
+				platforms[platform] = true
+			}
 		}
 	}
 	return platforms
@@ -993,6 +998,7 @@ type workflowInput struct {
 	TriggerCondition, SkipReason, AnnotationReason  string
 	PathFiltersError                                string
 	PathFiltersIdentityVerified                     bool
+	PathFiltersComparisonBase                       string
 	ReusableOnly, Applicable                        bool
 	// ReferencesVars records whether the event-independent validation found
 	// any vars reference in the workflow or a reusable workflow it calls.

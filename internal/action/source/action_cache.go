@@ -77,6 +77,7 @@ func (s *Store) cachedManifest(base string, resolved Resolved) (manifest, error)
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&cached) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
 		cached.Schema != "buildkite-gha-action-source/v1" ||
+		ServerURL(cached.ServerURL) != ServerURL(resolved.Reference.ServerURL) ||
 		cached.Owner != strings.ToLower(resolved.Reference.Owner) ||
 		cached.Repository != strings.ToLower(resolved.Reference.Repository) ||
 		cached.Commit != resolved.Commit || cached.Digest == "" ||
@@ -248,7 +249,33 @@ func (s *Store) writeCacheSize(size int64) error {
 }
 
 func (s *Store) cacheEntries() ([]cacheEntry, []string, error) {
-	owners, err := os.ReadDir(s.root)
+	entries, partials, err := cacheEntriesAt(s.root)
+	if err != nil {
+		return nil, nil, err
+	}
+	servers, err := os.ReadDir(filepath.Join(s.root, ".servers"))
+	if errors.Is(err, os.ErrNotExist) {
+		return entries, partials, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, server := range servers {
+		if !server.IsDir() {
+			continue
+		}
+		serverEntries, serverPartials, err := cacheEntriesAt(filepath.Join(s.root, ".servers", server.Name()))
+		if err != nil {
+			return nil, nil, err
+		}
+		entries = append(entries, serverEntries...)
+		partials = append(partials, serverPartials...)
+	}
+	return entries, partials, nil
+}
+
+func cacheEntriesAt(root string) ([]cacheEntry, []string, error) {
+	owners, err := os.ReadDir(root)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -258,7 +285,7 @@ func (s *Store) cacheEntries() ([]cacheEntry, []string, error) {
 		if !owner.IsDir() || strings.HasPrefix(owner.Name(), ".") {
 			continue
 		}
-		ownerPath := filepath.Join(s.root, owner.Name())
+		ownerPath := filepath.Join(root, owner.Name())
 		repositories, readErr := os.ReadDir(ownerPath)
 		if readErr != nil {
 			return nil, nil, readErr

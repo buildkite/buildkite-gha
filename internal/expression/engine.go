@@ -2,7 +2,10 @@ package expression
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/rhysd/actionlint"
@@ -15,6 +18,7 @@ type ProfileID string
 const (
 	ProfileCompile                  ProfileID = "compile"
 	ProfileCompileTemplate          ProfileID = "compile-template"
+	ProfileWorkflowConcurrency      ProfileID = "workflow-concurrency"
 	ProfileCompileContainerImage    ProfileID = "compile-container-image"
 	ProfileRunsOn                   ProfileID = "runs-on"
 	ProfileRunsOnTemplate           ProfileID = "runs-on-template"
@@ -27,6 +31,7 @@ const (
 	ProfileRunName                  ProfileID = "run-name"
 	ProfileJobCondition             ProfileID = "job-condition"
 	ProfileJobControl               ProfileID = "job-control"
+	ProfileStrategyParallel         ProfileID = "strategy-parallel"
 	ProfileStepCondition            ProfileID = "step-condition"
 	ProfileActionStepCondition      ProfileID = "action-step-condition"
 	ProfileActionStepTemplate       ProfileID = "action-step-template"
@@ -97,6 +102,7 @@ type profileSemantics uint8
 const (
 	semanticsCompile profileSemantics = iota
 	semanticsCompileTemplate
+	semanticsWorkflowConcurrency
 	semanticsCompileStringTemplate
 	semanticsRunsOn
 	semanticsPartialTemplate
@@ -132,6 +138,7 @@ var profiles = map[ProfileID]Profile{
 	ProfileRunsOnTemplate:           {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars", "needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsRunsOn},
 	ProfileCompile:                  {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompile},
 	ProfileCompileTemplate:          {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileTemplate},
+	ProfileWorkflowConcurrency:      {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsWorkflowConcurrency},
 	ProfileCompileContainerImage:    {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileStringTemplate},
 	ProfilePartialTemplate:          {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"env", "event", "github", "inputs", "job", "jobs", "matrix", "needs", "runner", "secrets", "steps", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsPartialTemplate},
 	ProfileCompileJobCondition:      {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "needs", "runner", "strategy", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileCondition, condition: JobCondition},
@@ -141,8 +148,9 @@ var profiles = map[ProfileID]Profile{
 	ProfileRunName:                  {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"github", "inputs", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsRunName},
 	ProfileJobCondition:             {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "runner", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: JobCondition},
 	ProfileJobControl:               {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobControl},
+	ProfileStrategyParallel:         {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"github", "inputs", "needs", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobControl},
 	ProfileStepCondition:            {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "strategy", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "hashFiles", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: StepCondition},
-	ProfileActionStepCondition:      {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "hashFiles", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: StepCondition},
+	ProfileActionStepCondition:      {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "hashFiles", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: actionStepCondition},
 	ProfileActionStepTemplate:       {Form: FormTemplate, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions("hashFiles"), Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsStepTemplate},
 	ProfileCallCondition:            {Form: FormExpression, Scope: ScopeCall, Contexts: ContextSet{"github", "inputs", "needs", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: CallCondition},
 	ProfileActionLifecycle:          {Form: FormExpression, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "runner", "steps"}, Functions: profileFunctions("always", "cancelled", "failure", "hashFiles", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsActionLifecycle, condition: actionLifecycleCondition},
@@ -156,11 +164,11 @@ var profiles = map[ProfileID]Profile{
 	ProfileWorkflowEnvironment:      {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "secrets", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
 	ProfileServiceTemplate:          {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsServiceTemplate},
 	ProfileServiceEnvironment:       {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
-	ProfileDeferredInput:            {Form: FormTemplate, Scope: ScopeCall, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDeferredInput},
-	ProfileSchedulingGroup:          {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsDeferredInput},
+	ProfileDeferredInput:            {Form: FormTemplate, Scope: ScopeCall, Contexts: ContextSet{"needs", "inputs"}, Functions: profileFunctions(), Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDeferredInput},
+	ProfileSchedulingGroup:          {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"needs", "inputs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsDeferredInput},
 	ProfileSchedulingParallel:       {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"needs"}, Functions: FunctionSet{"fromJSON"}, Missing: MissingError, Token: TokenDenied, semantics: semanticsJobControl},
-	ProfileCompileServiceCredential: {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"env", "github", "matrix", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsServiceCredential},
-	ProfileServiceCredential:        {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsServiceCredential},
+	ProfileCompileServiceCredential: {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsServiceCredential},
+	ProfileServiceCredential:        {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "needs", "secrets", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsServiceCredential},
 	ProfileServiceMap:               {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsServiceMap},
 	ProfileActionInputDefault:       {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsActionInputDefault},
 	ProfileDockerActionArg:          {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"inputs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsDockerActionArg},
@@ -221,6 +229,16 @@ type Values struct {
 // Reference keys are canonical names such as github.server_url.
 type AbstractValues struct {
 	References map[string]any
+	Inputs     InputScope
+}
+
+// InputScope distinguishes known properties from a complete input object.
+// Deferred properties are absent from Values until runtime hydrates them.
+type InputScope struct {
+	Values   map[string]any
+	Complete bool
+	// Absent names are known missing, even when other properties are deferred.
+	Absent []string
 }
 
 type Reduced struct {
@@ -379,6 +397,10 @@ func (Engine) Validate(site Site) (Validation, error) {
 		}
 	case semanticsCompileTemplate, semanticsCompileStringTemplate:
 		err = visitTemplateExpressions(site.Source, validateCompileExpressionNode)
+	case semanticsWorkflowConcurrency:
+		err = visitTemplateExpressions(site.Source, func(node actionlint.ExprNode) error {
+			return validateCompileExpressionNodeWithRunID(node, true)
+		})
 	case semanticsRunsOn:
 		if profile.Form == FormExpression {
 			var node actionlint.ExprNode
@@ -442,10 +464,12 @@ func (Engine) Validate(site Site) (Validation, error) {
 			var node actionlint.ExprNode
 			node, err = parseCompleteExpression(site.Source)
 			if err == nil {
-				err = validateDeferredInputNode(node)
+				err = validateDeferredInputNode(node, profileContextMap(profile))
 			}
 		} else {
-			err = visitTemplateExpressions(site.Source, validateDeferredInputNode)
+			err = visitTemplateExpressions(site.Source, func(node actionlint.ExprNode) error {
+				return validateDeferredInputNode(node, profileContextMap(profile))
+			})
 		}
 	case semanticsServiceCredential:
 		err = validateStepProfile(site.Source, profile)
@@ -576,6 +600,18 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 		}
 	case semanticsCompileTemplate:
 		value, err = evaluateCompileTemplate(site.Source, values.Compile)
+	case semanticsWorkflowConcurrency:
+		context := values.Compile
+		if context.WorkflowRunID != "" {
+			context.GitHub = maps.Clone(context.GitHub)
+			if context.GitHub == nil {
+				context.GitHub = make(map[string]any)
+			}
+			context.GitHub["run_id"] = context.WorkflowRunID
+		}
+		value, err = evaluateRuntimeTemplate(site.Source, Context{}, func(node actionlint.ExprNode, _ Context) (any, error) {
+			return evaluateCompileNode(node, context)
+		})
 	case semanticsCompileStringTemplate:
 		value, err = evaluateCompileStringTemplate(site.Source, values.Compile)
 	case semanticsRunsOn:
@@ -642,7 +678,11 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 		err = fmt.Errorf("unknown expression profile %q", site.Profile)
 	}
 	if err != nil {
-		return nil, siteError(site, err)
+		if site.Profile == ProfileActionStepTemplate && errors.Is(err, errUnavailableGitHubToken) {
+			err = fmt.Errorf("%w: this job has no available workflow token. Declare a token input on the action, pass it from the workflow step with: token: ${{ github.token }}, and use ${{ inputs.token }} inside the composite", err)
+			return nil, siteError(site, err)
+		}
+		return nil, siteError(site, inputEvaluationError(site, err))
 	}
 	if !matchesEngineResult(value, site.Result) {
 		return nil, siteError(site, fmt.Errorf("expression produced %T, want %s", value, site.Result))
@@ -747,13 +787,37 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 		if _, err := engine.Validate(site); err != nil {
 			return Reduced{}, err
 		}
-		reduced, err := reduceAvailableCompileTemplate(site.Source, values.Compile, site.Profile == ProfileCompileServiceCredential)
-		if err != nil {
-			return Reduced{}, siteError(site, err)
+		context := values.Compile
+		if site.Profile == ProfileCompileServiceCredential {
+			// Credentials read only named inputs the compiler knows, but keep
+			// those reads so the runtime evaluates them against the job's inputs.
+			if err := requireKnownNamedInputs(engine, site, context.Inputs); err != nil {
+				return Reduced{}, err
+			}
 		}
-		reduced, err = evaluateAvailableCompileTemplate(reduced, values.Compile)
+		var reduced string
+		var err error
+		switch {
+		case site.Profile == ProfileCompileServiceCredential:
+			reduced, err = reduceCredentialMatrix(engine, site, context)
+			if err != nil {
+				return Reduced{}, err
+			}
+			context.Inputs, context.InputsComplete = nil, false
+		case profile.semantics == semanticsPartialTemplate:
+			// Service residuals read only needs, so input subtrees fold even
+			// inside expressions that also read needs outputs.
+			reduced, err = reduceAvailableCompileTemplate(site.Source, context, "inputs")
+		default:
+			reduced, err = reduceAvailableCompileTemplate(site.Source, context, "")
+		}
+		if err == nil {
+			reduced, err = evaluateAvailableCompileTemplate(reduced, context)
+		}
 		if err != nil {
-			return Reduced{}, siteError(site, err)
+			// Evaluator errors, such as an invalid format placeholder, can
+			// quote input values.
+			return Reduced{}, siteError(site, inputEvaluationError(site, err))
 		}
 		if site.Profile == ProfileCompileServiceCredential {
 			// Authored validation precedes reduction so lazy evaluation cannot
@@ -807,7 +871,7 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 		}
 		return Reduced{Source: residual.Source}, nil
 	}
-	reduced, err := reduceAvailableCompileTemplate(site.Source, values.Compile, false)
+	reduced, err := reduceAvailableCompileTemplate(site.Source, values.Compile, "")
 	if err != nil {
 		return Reduced{}, siteError(site, err)
 	}
@@ -852,7 +916,14 @@ func (engine Engine) Analyze(site Site, values AbstractValues) (Analysis, error)
 		return Analysis{}, siteError(site, staticErr)
 	}
 
-	knownReferences := canonicalAbstractReferences(values.References)
+	knownReferences := canonicalAbstractReferences(values.References, values.Inputs)
+	for _, name := range values.Inputs.Absent {
+		var missing any
+		if site.Profile == ProfileActionStepTemplate || site.Profile == ProfileActionInputDefault {
+			missing = ""
+		}
+		knownReferences["inputs."+strings.ToLower(name)] = missing
+	}
 	analyzeNode := func(node actionlint.ExprNode) (Analysis, error) {
 		if profile.semantics == semanticsActionInputDefault {
 			return analyzeActionInputDefault(node, knownReferences)
@@ -877,7 +948,7 @@ func (engine Engine) Analyze(site Site, values AbstractValues) (Analysis, error)
 		analysis, err = analyzeTemplate(site.Source, analyzeNode)
 	}
 	if err != nil {
-		return Analysis{}, siteError(site, err)
+		return Analysis{}, siteError(site, inputEvaluationError(site, err))
 	}
 	return analysis, nil
 }
@@ -893,10 +964,19 @@ func (Engine) Truthy(value any) bool {
 // RunnerEnvironment is the runner.environment value for Buildkite agents.
 const RunnerEnvironment = "self-hosted"
 
-func canonicalAbstractReferences(source map[string]any) map[string]any {
+func canonicalAbstractReferences(source map[string]any, inputs InputScope) map[string]any {
 	result := make(map[string]any, len(source))
 	for name, value := range source {
 		result[strings.ToLower(name)] = value
+	}
+	// A partial scope exposes known named reads, not a concrete root object:
+	// computed reads and serialization could observe its deferred properties.
+	delete(result, "inputs")
+	for name, value := range inputs.Values {
+		result["inputs."+strings.ToLower(name)] = value
+	}
+	if inputs.Complete {
+		result["inputs"] = inputs.Values
 	}
 	return result
 }
@@ -937,6 +1017,43 @@ func zeroResult(result ResultType) any {
 	default:
 		return nil
 	}
+}
+
+// reduceCredentialMatrix folds the compile-only matrix out of a credential.
+// Input reads stay for the runtime unless an input selects a matrix value,
+// such as matrix[inputs.key]; only then does matrix folding use the inputs.
+func reduceCredentialMatrix(engine Engine, site Site, context CompileContext) (string, error) {
+	withoutInputs := context
+	withoutInputs.Inputs, withoutInputs.InputsComplete = nil, false
+	reduced, err := reduceAvailableCompileTemplate(site.Source, withoutInputs, "matrix")
+	if err != nil {
+		return "", siteError(site, err)
+	}
+	residual := site
+	residual.Source = reduced
+	if readsMatrix, err := engine.ReferencesContext(residual, "matrix", false); err != nil || !readsMatrix {
+		return reduced, err
+	}
+	reduced, err = reduceAvailableCompileTemplate(site.Source, context, "matrix")
+	return reduced, siteError(site, err)
+}
+
+// requireKnownNamedInputs rejects input reads the compiler cannot prove
+// present: computed selectors, and names absent from known, including
+// deferred inputs that the runtime would hydrate later.
+func requireKnownNamedInputs(engine Engine, site Site, known map[string]any) error {
+	names, dynamic, err := engine.InputReferences(site)
+	if err != nil {
+		return err
+	}
+	unknown := dynamic || slices.ContainsFunc(names, func(name string) bool {
+		_, ok, _ := objectValue(known, name)
+		return !ok
+	})
+	if unknown {
+		return siteError(site, fmt.Errorf("runtime context %q is unavailable in this field: service credentials require compile-known named inputs", "inputs"))
+	}
+	return nil
 }
 
 func siteError(site Site, err error) error {

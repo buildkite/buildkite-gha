@@ -39,7 +39,7 @@ func runsOnSites(job workflow.Job) []expression.Site {
 
 func hasRuntimeRunsOn(sourced sourcedJob) bool {
 	for _, site := range runsOnSites(sourced.Job) {
-		if usesNeeds(site.Source) || referencesDeferredInput(site.Source, sourced.inputs.deferred) {
+		if usesNeeds(site.Source) || len(deferredInputsRead(site.Source, sourced.inputs.deferred)) != 0 {
 			return true
 		}
 	}
@@ -96,10 +96,8 @@ func describeRuntimeRunsOn(sourced sourcedJob, context expression.CompileContext
 		if err := bind(references, sourced.needBindings, context.Needs); err != nil {
 			return descriptor, context, err
 		}
-		for name := range sourced.inputs.deferred {
-			if referencesInput(site.Source, name) {
-				inputs[name] = true
-			}
+		for _, name := range deferredInputsRead(site.Source, sourced.inputs.deferred) {
+			inputs[name] = true
 		}
 	}
 	for _, name := range sortedKeys(inputs) {
@@ -113,9 +111,11 @@ func describeRuntimeRunsOn(sourced sourcedJob, context expression.CompileContext
 			return descriptor, context, err
 		}
 		if output != nil {
-			value, err := engine.Evaluate(expression.Site{Source: input.template, Profile: expression.ProfileRunsOnTemplate, Result: expression.ResultString}, expression.Values{Compile: expression.CompileContext{Needs: values}})
+			value, err := engine.Evaluate(expression.Site{Source: input.template, Profile: expression.ProfileRunsOnTemplate, Result: expression.ResultString}, expression.Values{Compile: expression.CompileContext{Needs: values, Inputs: input.inputs, InputsComplete: true}})
 			if err != nil {
-				return descriptor, context, fmt.Errorf("resolve scheduling input %q: %w", name, err)
+				// The template reads captured caller inputs and a producer
+				// output, so its error can quote either.
+				return descriptor, context, fmt.Errorf("resolve scheduling input %q: the value cannot be evaluated with the producer output", name)
 			}
 			if context.Inputs == nil {
 				context.Inputs = make(map[string]any)
@@ -133,8 +133,51 @@ func describeRuntimeRunsOn(sourced sourcedJob, context expression.CompileContext
 }
 
 func (e *jobGraphExpansion) rejectRuntimeRunsOn(sourced sourcedJob, err error) {
-	position := runsOnPosition(sourced.Job)
-	e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", sourced.path, position.Line, position.Column, sourced.ID, "", "", 0, locatedJobError(sourced.path, sourced.Job, position.Line, position.Column, err.Error())))
+	e.diagnostics = append(e.diagnostics, runsOnFinding(sourced, "", err))
 	e.failedJobs[sourced.ID] = true
 	e.failedMatrices[sourced.ID] = true
+}
+
+// runsOnInputsMessage replaces runs-on errors that can quote workflow input
+// values or job outputs.
+const runsOnInputsMessage = "runs-on cannot be resolved" + inputValueHiddenNote
+
+// runsOnFinding reports a runs-on error. It quotes the error unless the error
+// can quote input values or job outputs, in which case a fixed message
+// replaces it. Shape errors never quote the value, so they are always shown.
+func runsOnFinding(sourced sourcedJob, instance string, err error) error {
+	job := sourced.Job
+	position := runsOnPosition(job)
+	var shape runsOnShapeError
+	if sourced.runsOnDetailUnsafe && !errors.As(err, &shape) {
+		message := fmt.Sprintf("job %q: %s", job.ID, runsOnInputsMessage)
+		return &ProcessingFinding{
+			Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
+			Path: sourced.path, Line: position.Line, Column: position.Column, Job: job.ID, Instance: instance,
+			Message: message,
+			Err:     locatedJobError(sourced.path, job, position.Line, position.Column, runsOnInputsMessage),
+		}
+	}
+	return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", sourced.path, position.Line, position.Column, job.ID, instance, "", 0, locatedJobError(sourced.path, job, position.Line, position.Column, err.Error()))
+}
+
+// rejectRuntimeRunsOnConcurrency reports a job whose runner comes from a job
+// output while a workflow-level concurrency group holds the run. The
+// expression is valid; the job graph cannot be scheduled that way.
+func (e *jobGraphExpansion) rejectRuntimeRunsOnConcurrency(sourced sourcedJob) {
+	scope := "workflow"
+	if !e.workflowConcurrency {
+		scope = "reusable-workflow"
+	}
+	err := deferredConcurrencyError(scope, "job-output-derived runs-on", "runs-on")
+	position := runsOnPosition(sourced.Job)
+	e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", sourced.path, position.Line, position.Column, sourced.ID, "", "", 0, locatedJobError(sourced.path, sourced.Job, position.Line, position.Column, err.Error())))
+	e.failedJobs[sourced.ID] = true
+	e.failedMatrices[sourced.ID] = true
+}
+
+// deferredConcurrencyError describes deferred workflow-concurrency
+// combinations that remain unsupported.
+func deferredConcurrencyError(scope, feature, static string) error {
+	return fmt.Errorf("%s concurrency cannot be combined with %s: this combination of deferred jobs and workflow concurrency is not yet supported; move concurrency to the job level, where it holds one job rather than the whole run, or use a static %s", scope, feature, static)
 }

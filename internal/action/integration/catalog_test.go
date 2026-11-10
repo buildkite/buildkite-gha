@@ -29,9 +29,22 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 			name += "/" + test.identity.Path
 		}
 		t.Run(name, func(t *testing.T) {
-			got, ok := Lookup(test.identity)
-			if !ok || got != test.want {
-				t.Fatalf("Lookup(%#v) = %#v, %t, want %#v, true", test.identity, got, ok, test.want)
+			for _, host := range []string{"", "https://github.com", "https://ghe.example", "https://github.com/"} {
+				identity := test.identity
+				identity.ServerURL = host
+				want, known := test.want, true
+				if host != "" && host != "https://github.com" {
+					want, known = Descriptor{}, false
+				}
+				got, ok := Lookup(identity)
+				if ok != known || got != want {
+					t.Fatalf("Lookup(%#v) = %#v, %t, want %#v, %t", identity, got, ok, want, known)
+				}
+				if !known {
+					if got, ok, err := Admit(identity, CheckoutV7Commit); err != nil || ok || got != (Descriptor{}) {
+						t.Fatalf("Admit(%#v) aliased a github.com integration: %#v, %t, %v", identity, got, ok, err)
+					}
+				}
 			}
 		})
 	}

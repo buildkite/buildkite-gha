@@ -51,8 +51,9 @@ func TestEmitGolden(t *testing.T) {
 	}
 	var document struct {
 		Steps []struct {
-			Key      string `yaml:"key"`
-			Command  string `yaml:"command"`
+			Key      string            `yaml:"key"`
+			Command  string            `yaml:"command"`
+			Env      map[string]string `yaml:"env"`
 			Checkout struct {
 				Skip bool `yaml:"skip"`
 			} `yaml:"checkout"`
@@ -68,7 +69,11 @@ func TestEmitGolden(t *testing.T) {
 	if len(document.Steps) != 3 {
 		t.Fatalf("emitted steps = %#v", document.Steps)
 	}
+	wantDigests := map[string]string{"gha-producer": producerDigest, "gha-consumer-one": consumerOneDigest, "gha-consumer-two": consumerTwoDigest}
 	for _, step := range document.Steps {
+		if step.Env["BUILDKITE_GHA_PLAN_DIGEST"] != wantDigests[step.Key] {
+			t.Fatalf("step %q plan binding = %#v", step.Key, step.Env)
+		}
 		if !step.Checkout.Skip {
 			t.Fatalf("step %q does not skip checkout", step.Key)
 		}
@@ -116,11 +121,15 @@ func TestEmitWindowsBootstrap(t *testing.T) {
 	}
 	var document struct {
 		Steps []struct {
-			Command string `yaml:"command"`
+			Command string            `yaml:"command"`
+			Env     map[string]string `yaml:"env"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(output, &document); err != nil {
 		t.Fatal(err)
+	}
+	if document.Steps[0].Env["BUILDKITE_GHA_PLAN_DIGEST"] != testDigest("windows plan") {
+		t.Fatalf("Windows plan binding = %#v", document.Steps[0].Env)
 	}
 	invocation := document.Steps[0].Command
 	if !strings.HasPrefix(invocation, "pwsh -NoLogo -NoProfile -NonInteractive") || len(invocation) >= 8191 {
@@ -1218,8 +1227,8 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 	if step.Cache.Name != runtimeCacheName+"-linux-amd64" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != platformMiseCachePath("linux/amd64") {
 		t.Fatalf("mise cache volume = %#v", step.Cache)
 	}
-	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() {
-		t.Fatalf("mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
+	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() || step.Env["BUILDKITE_GHA_PLAN_DIGEST"] != testDigest("plan") {
+		t.Fatalf("mise job environment = %#v", step.Env)
 	}
 }
 
@@ -1336,8 +1345,8 @@ func TestEmitDarwinActionRuntimeUsesNativePlatformCache(t *testing.T) {
 	if step.Image != "" || step.Cache.Name != "buildkite-gha-darwin-arm64" || !slices.Equal(step.Cache.Paths, []string{"/tmp/bkcache/buildkite-gha/mise/darwin-arm64"}) {
 		t.Fatalf("Darwin runtime placement = %#v", step)
 	}
-	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir("darwin/arm64") {
-		t.Fatalf("Darwin mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
+	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir("darwin/arm64") || step.Env["BUILDKITE_GHA_PLAN_DIGEST"] != testDigest("darwin plan") {
+		t.Fatalf("Darwin job environment = %#v", step.Env)
 	}
 	if !strings.Contains(step.Command, `shasum -a 256 "$distribution"`) || !strings.Contains(step.Command, "--hosted-tool-cache") || strings.Contains(step.Command, HostedToolCachePath) {
 		t.Fatalf("Darwin bootstrap is not native and portable:\n%s", step.Command)
@@ -1387,6 +1396,27 @@ func TestEmitUsesImmutableRuntimeImageToolCache(t *testing.T) {
 		}
 		if strings.Contains(document.Steps[0].Command, "--hosted-tool-cache") != test.want || strings.Contains(document.Steps[0].Command, "/opt/hostedtoolcache") != test.want {
 			t.Fatalf("hosted tool cache selection: want %t, command %q", test.want, document.Steps[0].Command)
+		}
+	}
+}
+
+func TestEmitHostnameRepairOnlyForNativeLinux(t *testing.T) {
+	for _, platform := range []string{"linux/amd64", "linux/arm64", "darwin/arm64", "windows/amd64"} {
+		for _, native := range []bool{false, true} {
+			if native && platform != "linux/amd64" && platform != "darwin/arm64" {
+				continue // These platforms do not admit agent tags.
+			}
+			job := Job{Key: "job", Label: "Job", Platform: platform, PlanDigest: testDigest("plan"), DistributionDigest: testDigest("distribution")}
+			if native {
+				job.Agents = map[string]string{"nsc-gha-image": "ubuntu-24.04"}
+			}
+			output, err := Emit(Pipeline{CompilerStep: "importer", Jobs: []Job{job}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(output), "--repair-hostname") != (native && platform == "linux/amd64") {
+				t.Fatalf("hostname repair scope for %s, native=%v:\n%s", platform, native, output)
+			}
 		}
 	}
 }
@@ -1545,11 +1575,11 @@ func TestEmitStageStepAndDeferredUpload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The closing concurrency marker can wait only for the steps of the
-	// initial upload, so a gated workflow cannot hold a deferred upload step.
+	// Buildkite extends the closing gate's dependency on the uploader to
+	// its uploaded jobs without changing ordinary retry behavior.
 	workflows[0].ConcurrencyGate = &ConcurrencyGate{Group: "buildkite-gha/concurrency/ci"}
-	if _, err := Emit(Pipeline{ArtifactProducer: importer, DistributionDigest: testDigest("distribution"), EventProvider: "github", Workflows: workflows}); err == nil || !strings.Contains(err.Error(), `cannot hold deferred upload step "gha-build-matrix"`) {
-		t.Fatalf("concurrency gate accepted a deferred upload step: %v", err)
+	if _, err := Emit(Pipeline{ArtifactProducer: importer, DistributionDigest: testDigest("distribution"), EventProvider: "github", Workflows: workflows}); err != nil {
+		t.Fatalf("concurrency gate rejected a deferred upload step: %v", err)
 	}
 	type dependency struct {
 		Step         string `yaml:"step"`

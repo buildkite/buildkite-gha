@@ -201,6 +201,9 @@ type Step struct {
 	Name            Site          `json:"name"`
 	Run             *Run          `json:"run,omitempty"`
 	Invocation      *Invocation   `json:"invocation,omitempty"`
+	// GitHubAction is the value of github.action while this run or uses step
+	// and any action it invokes run: GitHub's authored or generated step ID.
+	GitHubAction string `json:"github_action,omitempty"`
 }
 
 type Guard struct {

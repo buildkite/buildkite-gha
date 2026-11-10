@@ -71,8 +71,9 @@ func (ir IR) VarsBeforeEnvironment() map[string]string {
 // WorkflowConcurrencyGate is one statically resolved called-workflow
 // concurrency scope inherited by a flattened job.
 type WorkflowConcurrencyGate struct {
-	ID    string `json:"id"`
-	Group string `json:"group"`
+	ID               string `json:"id"`
+	Group            string `json:"group"`
+	CancelInProgress bool   `json:"cancel_in_progress,omitempty"`
 }
 
 // Warning is one source-located, non-fatal compatibility diagnostic.
@@ -101,6 +102,7 @@ type WorkflowSource struct {
 	RunName                       string             `json:"run_name,omitempty"`
 	Digest                        string             `json:"digest"`
 	ConcurrencyGroup              string             `json:"concurrency_group,omitempty"`
+	CancelInProgress              bool               `json:"cancel_in_progress,omitempty"`
 	Triggers                      []workflow.Trigger `json:"-"`
 	WorkflowTokenPolicyFilename   string             `json:"-"`
 	WorkflowTokenPermissions      map[string]string  `json:"-"`
@@ -131,6 +133,7 @@ type JobInstance struct {
 	FailFast                  *bool                     `json:"fail_fast,omitempty"`
 	MaxParallel               *int                      `json:"max_parallel,omitempty"`
 	ConcurrencyGroup          string                    `json:"concurrency_group,omitempty"`
+	CancelInProgress          bool                      `json:"cancel_in_progress,omitempty"`
 	ConcurrencyGates          []WorkflowConcurrencyGate `json:"workflow_concurrency_gates,omitempty"`
 	Environment               string                    `json:"environment,omitempty"`
 	EnvironmentApproval       bool                      `json:"environment_approval,omitempty"`
@@ -162,6 +165,12 @@ type JobInstance struct {
 	reusableCall              workflow.Position
 }
 
+// inputScope is the workflow input scope for this job's runtime expressions.
+// Deferred inputs are absent until the runtime hydrates them.
+func (instance JobInstance) inputScope() expression.InputScope {
+	return expression.InputScope{Values: instance.Inputs, Complete: len(instance.DeferredInputs) == 0}
+}
+
 // CallGuard is one immutable caller-scoped condition inherited by a flattened
 // reusable-workflow job.
 type CallGuard struct {
@@ -180,6 +189,7 @@ type CallGuard struct {
 type DeferredInput struct {
 	Template    string                  `json:"template"`
 	Type        string                  `json:"type,omitempty"`
+	Inputs      map[string]any          `json:"inputs,omitempty"`
 	NeedGroups  map[string][]string     `json:"need_groups"`
 	NeedOutputs map[string][]NeedOutput `json:"need_outputs"`
 }
@@ -265,14 +275,15 @@ func ValidateWithOptionsContext(ctx context.Context, path string, source []byte,
 		Payload: map[string]any{},
 	}
 	context := compileContext(event, nil, path, parsed.Name)
+	context.WorkflowRunID = options.BuildID
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	context.GitHub["head_ref"] = "validation"
 	runNameErr := ValidateWorkflowRunName(path, parsed)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
-	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
+	cancelInProgress, cancellationErr := resolveCancellation(path, "", parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options, event.ServerURL)
 	if err := errors.Join(optionsErr, triggerErr, runNameErr, concurrencyErr, cancellationErr, expandErr); err != nil {
 		return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
@@ -320,13 +331,14 @@ func ValidateEventWithOptionsContext(ctx context.Context, path string, source, e
 	}
 	event.Trust = options.EventTrust
 	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
+	context.WorkflowRunID = options.BuildID
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	_, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
-	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
+	cancelInProgress, cancellationErr := resolveCancellation(path, "", parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options, event.ServerURL)
 	if err := errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr); err != nil {
 		return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
@@ -390,13 +402,14 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	event.Trust = options.EventTrust
 	organizationVars, repositoryVars := cloneMap(options.Vars.Organization), cloneMap(options.Vars.Repository)
 	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
+	context.WorkflowRunID = options.BuildID
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	runName, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
-	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
+	cancelInProgress, cancellationErr := resolveCancellation(path, "", parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options, event.ServerURL)
 	jobGraphComplete := expandErr == nil
 	if jobGraphComplete {
 		expandErr = resolveJobEnvironments(ctx, expanded.instances, event, options)
@@ -405,7 +418,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	ir = IR{
 		Schema: schema,
 		Workflow: WorkflowSource{
-			Path: path, Name: parsed.Name, RunName: runName, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
+			Path: path, Name: parsed.Name, RunName: runName, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, CancelInProgress: cancelInProgress, Triggers: parsed.Triggers,
 			WorkflowTokenPolicyFilename: workflowTokenPolicyFilename, WorkflowTokenPermissions: workflowTokenPermissions, WorkflowTokenPolicyDiagnostic: workflowTokenPolicyDiagnostic,
 		},
 		Event:            event,
@@ -560,10 +573,10 @@ func mergeGroupPathFiltersWarning(position workflow.Position) Warning {
 
 func workflowCancellationWarning(position workflow.Position) Warning {
 	return Warning{
-		Code:    "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED",
+		Code:    "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT",
 		Line:    position.Line,
 		Column:  position.Column,
-		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+		Message: "Workflow cancel-in-progress requests cancellation through the opening concurrency gate only. Older gate steps can be canceled, but jobs that already passed their gate can keep running and overlap with the newer workflow. Cancellation is asynchronous, not atomic latest-wins. A reusable call whose condition is decided at runtime can request cancellation even when that condition is false.",
 	}
 }
 
@@ -760,13 +773,6 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 				values[j] = resolvedValue
 			}
 		}
-		for _, value := range append(append([]string{container.Image, container.Options, container.Command, container.Entrypoint}, container.Ports...), container.Volumes...) {
-			if strings.Contains(value, "${{") {
-				if err := validateCompileSite(value, expression.ProfileServiceTemplate, expression.ResultString); err != nil {
-					return nil, fmt.Errorf("service %q: %w", service.Name, err)
-				}
-			}
-		}
 		if container.Image == "" {
 			continue
 		}
@@ -781,7 +787,11 @@ func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, c
 		return "", nil
 	}
 	context.Matrix = matrix
-	value, err := evaluateCompileSite(concurrency.Group, expression.ProfileCompileTemplate, expression.ResultString, context)
+	profile := expression.ProfileCompileTemplate
+	if jobID == "" {
+		profile = expression.ProfileWorkflowConcurrency
+	}
+	value, err := evaluateCompileSite(concurrency.Group, profile, expression.ResultString, context)
 	group, _ := value.(string)
 	if err != nil {
 		message := fmt.Sprintf("concurrency group cannot be resolved at compile time: %v", err)
@@ -799,27 +809,24 @@ func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, c
 	return group, nil
 }
 
-func rejectJobCancellation(path string, job workflow.Job) error {
-	if job.Concurrency == nil || (!job.Concurrency.CancelInProgress && job.Concurrency.CancelInProgressExpression == nil) {
-		return nil
-	}
-	position := job.Concurrency.CancelInProgressPosition
-	return locatedJobError(path, job, position.Line, position.Column, "concurrency cancel-in-progress is unsupported")
-}
-
-func resolveWorkflowCancellation(path string, concurrency *workflow.Concurrency, context expression.CompileContext) (bool, error) {
+func resolveCancellation(path, jobID string, concurrency *workflow.Concurrency, context expression.CompileContext) (bool, error) {
 	if concurrency == nil || concurrency.CancelInProgressExpression == nil {
 		return concurrency != nil && concurrency.CancelInProgress, nil
 	}
+	failure := func(message string) (bool, error) {
+		position := concurrency.CancelInProgressPosition
+		if jobID != "" {
+			return false, locatedJobError(path, workflow.Job{ID: jobID}, position.Line, position.Column, message)
+		}
+		return false, fmt.Errorf("%s:%d:%d: workflow %s", path, position.Line, position.Column, message)
+	}
 	value, err := evaluateCompileSite(concurrency.CancelInProgressExpression.Text, expression.ProfileCompile, expression.ResultAny, context)
 	if err != nil {
-		position := concurrency.CancelInProgressPosition
-		return false, fmt.Errorf("%s:%d:%d: workflow concurrency cancel-in-progress cannot be resolved at compile time: %v", path, position.Line, position.Column, err)
+		return failure(fmt.Sprintf("concurrency cancel-in-progress cannot be resolved at compile time: %v", err))
 	}
 	cancelInProgress, ok := value.(bool)
 	if !ok {
-		position := concurrency.CancelInProgressPosition
-		return false, fmt.Errorf("%s:%d:%d: workflow concurrency cancel-in-progress resolved to %T, want boolean", path, position.Line, position.Column, value)
+		return failure(fmt.Sprintf("concurrency cancel-in-progress resolved to %T, want boolean", value))
 	}
 	return cancelInProgress, nil
 }
@@ -873,6 +880,8 @@ func supported(path string, job workflow.Job) error {
 func resolveCompileTimeConditions(job workflow.Job, context expression.CompileContext, matrix map[string]any) workflow.Job {
 	context.Matrix = matrix
 	context.Vars = nil
+	// Runtime conditions read inputs from the plan; keep them residual.
+	context.Inputs, context.InputsComplete = nil, false
 	if resolved, ok := resolveCompileTimeCondition(job.If, expression.ProfileCompileJobCondition, context); ok {
 		job.If = resolved
 	}

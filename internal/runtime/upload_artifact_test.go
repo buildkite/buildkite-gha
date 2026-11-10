@@ -877,16 +877,30 @@ func TestUploadArtifactLegacyManifestsUseNativeAdapter(t *testing.T) {
 	for _, test := range []struct {
 		name, commit, manifest string
 		inputs                 map[string]string
+		wantHidden             bool
 	}{
 		{
 			name: "v1 runner plugin", commit: actionintegration.UploadArtifactV1Commit,
-			manifest: "name: upload artifact\ninputs:\n  name:\n    required: true\n  path:\n    required: true\nruns:\n  plugin: publish\n",
-			inputs:   map[string]string{"name": "legacy-v1", "path": "payload"},
+			manifest:   "name: upload artifact\ninputs:\n  name:\n    required: true\n  path:\n    required: true\nruns:\n  plugin: publish\n",
+			inputs:     map[string]string{"name": "legacy-v1", "path": "payload"},
+			wantHidden: true,
 		},
 		{
 			name: "v2 node12", commit: actionintegration.UploadArtifactV2Commit,
-			manifest: "name: upload artifact\ninputs:\n  path:\n    required: true\nruns:\n  using: node12\n  main: dist/index.js\n",
+			manifest:   "name: upload artifact\ninputs:\n  path:\n    required: true\nruns:\n  using: node12\n  main: dist/index.js\n",
+			inputs:     map[string]string{"path": "payload"},
+			wantHidden: true,
+		},
+		{
+			name: "GHES v3.2.2 node24", commit: "c6a366c94c3e0affe28c06c8df20a878f24da3cf",
+			manifest: "name: upload artifact\ninputs:\n  path:\n    required: true\nruns:\n  using: node24\n  main: dist/index.js\n",
 			inputs:   map[string]string{"path": "payload"},
+		},
+		{
+			name: "GHES v3.2.2 node20 with hidden files", commit: "c6a3b2bd78b3985e4b2f15397fec357f0fd808de",
+			manifest:   "name: upload artifact\ninputs:\n  path:\n    required: true\nruns:\n  using: node20\n  main: dist/index.js\n",
+			inputs:     map[string]string{"path": "payload", "include-hidden-files": "true"},
+			wantHidden: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -894,6 +908,7 @@ func TestUploadArtifactLegacyManifestsUseNativeAdapter(t *testing.T) {
 			workflowPath := ".github/workflows/upload.yml"
 			writeFixtureFile(t, workspace, workflowPath, "name: legacy upload proof\n")
 			writeFixtureFile(t, workspace, "payload/result.txt", "payload")
+			writeFixtureFile(t, workspace, "payload/.hidden", "hidden")
 			remote := canonicalTempDir(t)
 			writeFixtureFile(t, remote, "action.yml", test.manifest)
 			digest, err := source.DigestTree(remote)
@@ -916,6 +931,13 @@ func TestUploadArtifactLegacyManifestsUseNativeAdapter(t *testing.T) {
 			result, err := (Runner{Actions: materializer, Artifacts: uploader}).runTestJob(t.Context(), job, workspace)
 			if err != nil || result.Conclusion != "success" || len(result.Artifacts) != 1 || len(uploader.uploads) != 1 || materializer.calls != 1 {
 				t.Fatalf("legacy RunJob() result = %#v, uploads = %d, materializations = %d, error = %v", result, len(uploader.uploads), materializer.calls, err)
+			}
+			want := map[string]string{"result.txt": "payload"}
+			if test.wantHidden {
+				want[".hidden"] = "hidden"
+			}
+			if got := readUploadZIP(t, uploader.uploads[0].data); !reflect.DeepEqual(got, want) {
+				t.Fatalf("archive entries = %#v, want %#v", got, want)
 			}
 		})
 	}

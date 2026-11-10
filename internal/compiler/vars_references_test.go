@@ -47,6 +47,22 @@ jobs:
     runs-on: ${{ vars.RUNNER }}
     steps: [{run: true}]
 `, true},
+		"job timeout": {`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(vars.TIMEOUT) }}
+    steps: [{run: true}]
+`, true},
+		"matrix parallelism": {`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: ${{ fromJSON(vars.PARALLEL) }}
+      matrix: {shard: [one, two]}
+    steps: [{run: true}]
+`, true},
 		"workflow concurrency": {`on: push
 concurrency: deploy-${{ vars.TARGET }}
 jobs:

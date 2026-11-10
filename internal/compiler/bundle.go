@@ -84,6 +84,7 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 // stops before pipeline generation so callers can apply admission policy.
 func CompileBundlePlansContext(ctx context.Context, path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest string, options Options) (Bundle, error) {
 	ctx = actionsource.WithPublicRepositoryChecks(ctx)
+	ctx = actionsource.WithMissingRefResolutions(ctx)
 	if compilerVersion == "" {
 		return Bundle{}, fmt.Errorf("compiler version is required")
 	}
@@ -96,7 +97,7 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	}
 	ir, reductionErr := reducePlanEventExpressions(ir)
 	options.ActionSource = newPinnedActionSource(options.ActionSource, options.RuntimeMatrixActionLocks)
-	graphs := newActionGraphCache(options)
+	graphs := newActionGraphCache(options, ir.Event.ServerURL)
 	directFailures := failedInstancesFromError(compileErr)
 	for key := range failedInstancesFromError(reductionErr) {
 		directFailures[key] = true
@@ -166,7 +167,7 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 				continue
 			}
 			for _, lock := range reachableActionLocks(locks, step.Invocation.Lock) {
-				descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+				descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path})
 				switch descriptor.Adapter {
 				case actionintegration.AdapterCheckoutExactEventSHA:
 					if actionintegration.CheckoutUsesFallbackContract(lock.Commit) {
@@ -562,7 +563,7 @@ func GeneratePlannedWorkflow(bundle Bundle, options Options) (buildkitepipeline.
 		}
 		for _, gate := range instance.ConcurrencyGates {
 			jobs[i].ConcurrencyGates = append(jobs[i].ConcurrencyGates, buildkitepipeline.ConcurrencyGate{
-				ID: gate.ID, Group: buildkiteConcurrencyGroup(ir.Event.Repository, gate.Group),
+				ID: gate.ID, Group: buildkiteConcurrencyGroup(ir.Event.Repository, gate.Group), CancelInProgress: gate.CancelInProgress,
 			})
 		}
 		if instance.Platform == PlatformLinuxAMD64 {
@@ -574,6 +575,7 @@ func GeneratePlannedWorkflow(bundle Bundle, options Options) (buildkitepipeline.
 		if instance.ConcurrencyGroup != "" {
 			jobs[i].Concurrency = 1
 			jobs[i].ConcurrencyGroup = buildkiteConcurrencyGroup(ir.Event.Repository, instance.ConcurrencyGroup)
+			jobs[i].CancelInProgress = instance.CancelInProgress
 		} else if instance.MaxParallel != nil {
 			jobs[i].Concurrency = *instance.MaxParallel
 			workflowScope := strings.TrimPrefix(ir.Workflow.Digest, "sha256:")
@@ -615,8 +617,16 @@ func GeneratePlannedWorkflow(bundle Bundle, options Options) (buildkitepipeline.
 	var concurrencyGate *buildkitepipeline.ConcurrencyGate
 	if ir.Workflow.ConcurrencyGroup != "" && len(jobs) != 0 {
 		concurrencyGate = &buildkitepipeline.ConcurrencyGate{
-			Group: buildkiteConcurrencyGroup(ir.Event.Repository, ir.Workflow.ConcurrencyGroup),
-			Queue: jobs[0].Queue,
+			Group:            buildkiteConcurrencyGroup(ir.Event.Repository, ir.Workflow.ConcurrencyGroup),
+			Queue:            jobs[0].Queue,
+			CancelInProgress: ir.Workflow.CancelInProgress,
+		}
+		// Continuations omit the existing root gate when emitted, so reject
+		// members that would queue behind their own closing marker here.
+		for _, job := range jobs {
+			if job.Concurrency > 0 && job.ConcurrencyGroup == concurrencyGate.Group {
+				return buildkitepipeline.Workflow{}, fmt.Errorf("workflow concurrency gate shares group with member job %q", job.Key)
+			}
 		}
 	}
 	return buildkitepipeline.Workflow{

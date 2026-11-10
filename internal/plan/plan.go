@@ -39,6 +39,10 @@ var compilerVersionPattern = regexp.MustCompile(`^[ -~]{1,256}$`)
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var logicalJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$`)
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// secretAliasPattern matches a workflow_call secret ID, which names the
+// callee's view of a mapped secret and, unlike a secret name, may contain -.
+var secretAliasPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
 var actionLockIDPattern = regexp.MustCompile(`^a-[0-9a-f]{16}$`)
 var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
@@ -49,6 +53,12 @@ var githubWorkflowFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._
 // Docker image reference.
 func ValidContainerImageReference(image string) bool {
 	return metadata.ValidDockerImageReference(image)
+}
+
+// ValidSecretName reports whether name can name a GitHub or Buildkite secret.
+// Looking up any other name yields an empty value.
+func ValidSecretName(name string) bool {
+	return secretNamePattern.MatchString(name)
 }
 
 var githubTokenPermissionAccess = map[string]map[string]bool{
@@ -92,6 +102,7 @@ type ActionSelector struct {
 type ActionLock struct {
 	ID           string `json:"id"`
 	Source       string `json:"source"`
+	ServerURL    string `json:"server_url,omitempty"`
 	Repository   string `json:"repository,omitempty"`
 	RequestedRef string `json:"requested_ref,omitempty"`
 	Commit       string `json:"commit,omitempty"`
@@ -115,6 +126,7 @@ type Runtime struct {
 
 type Event struct {
 	Provider        string          `json:"provider"`
+	ServerURL       string          `json:"server_url,omitempty"`
 	Name            string          `json:"name"`
 	PayloadDigest   string          `json:"payload_digest"`
 	PayloadArtifact bool            `json:"payload_artifact,omitempty"`
@@ -132,6 +144,34 @@ type Event struct {
 func EventRepositoryOwner(repository string) string {
 	owner, _, _ := strings.Cut(repository, "/")
 	return owner
+}
+
+// EventIdentityIDs exposes GitHub IDs only when the payload's named identity
+// agrees with the selected event. Missing IDs are unavailable, never inferred
+// from names, another provider, or the Buildkite build's creator.
+func EventIdentityIDs(provider, repository, actor string, payload map[string]any) map[string]any {
+	ids := map[string]any{}
+	if provider != "github" {
+		return ids
+	}
+	add := func(name string, object map[string]any, key, expected string) {
+		actual, _ := object[key].(string)
+		id, _ := object["id"].(json.Number)
+		number, err := id.Int64()
+		if expected != "" && strings.EqualFold(actual, expected) && err == nil && number > 0 {
+			ids[name] = id.String()
+		}
+	}
+	sender, _ := payload["sender"].(map[string]any)
+	add("actor_id", sender, "login", actor)
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	if strings.EqualFold(fullName, repository) {
+		add("repository_id", repo, "full_name", repository)
+		owner, _ := repo["owner"].(map[string]any)
+		add("repository_owner_id", owner, "login", EventRepositoryOwner(repository))
+	}
+	return ids
 }
 
 // EventRefName returns the short branch, tag, or pull request ref name.
@@ -161,15 +201,40 @@ func EventRefType(event, ref string) string {
 
 // EventServerURL returns the repository provider URL exposed through the
 // GitHub-compatible expression context and environment.
-func EventServerURL(provider string) string {
+func EventServerURL(provider, serverURL string) string {
 	switch provider {
 	case "github":
+		if serverURL != "" {
+			return serverURL
+		}
 		return "https://github.com"
 	case "cursor-origin":
 		return "https://origin.cursor.com"
 	default:
 		return ""
 	}
+}
+
+// EventAPIURLs returns GitHub REST and GraphQL endpoints for the event server.
+// Non-GitHub providers do not expose GitHub APIs.
+func EventAPIURLs(provider, serverURL string) (rest, graphql string) {
+	if provider != "github" {
+		return "", ""
+	}
+	serverURL = EventServerURL(provider, serverURL)
+	if serverURL == "https://github.com" {
+		return "https://api.github.com", "https://api.github.com/graphql"
+	}
+	return serverURL + "/api/v3", serverURL + "/api/graphql"
+}
+
+// ValidateGitHubServerURL accepts a canonical HTTPS origin, never credentials,
+// a repository path, or a query. The backend separately authorizes the host.
+func ValidateGitHubServerURL(serverURL string) error {
+	if serverURL == "" {
+		return fmt.Errorf("GitHub server URL must be a canonical HTTPS origin without credentials, path, query, or fragment")
+	}
+	return source.ValidateServerURL(serverURL)
 }
 
 type Workflow struct {
@@ -189,6 +254,7 @@ type Workflow struct {
 // RemoteWorkflowSource binds a workflow file to one immutable remote
 // repository tree. Workflow.Digest binds the selected file bytes.
 type RemoteWorkflowSource struct {
+	ServerURL    string `json:"server_url,omitempty"`
 	Repository   string `json:"repository"`
 	RequestedRef string `json:"requested_ref"`
 	Commit       string `json:"commit"`
@@ -286,7 +352,9 @@ type ServiceContainer struct {
 type DeferredInput struct {
 	Template string `json:"template"`
 	// An omitted type retains string rendering for existing plans.
-	Type        string                  `json:"type,omitempty"`
+	Type string `json:"type,omitempty"`
+	// Inputs are the caller inputs Template reads.
+	Inputs      map[string]any          `json:"inputs,omitempty"`
 	NeedSources map[string][]NeedSource `json:"need_sources"`
 	NeedOutputs map[string][]NeedOutput `json:"need_outputs"`
 }
@@ -626,6 +694,14 @@ func (job Job) Validate() error {
 	if (job.Event.Provider != "github" && job.Event.Provider != "cursor-origin") || job.Event.Name == "" || !digestPattern.MatchString(job.Event.PayloadDigest) {
 		return fmt.Errorf("job plan requires a supported event binding")
 	}
+	if job.Event.ServerURL != "" {
+		if job.Event.Provider != "github" {
+			return fmt.Errorf("job plan server_url requires a GitHub event")
+		}
+		if err := ValidateGitHubServerURL(job.Event.ServerURL); err != nil {
+			return err
+		}
+	}
 	if job.Event.PayloadFile && !job.Event.PayloadArtifact {
 		return fmt.Errorf("job plan event file requires a payload artifact")
 	}
@@ -771,7 +847,7 @@ func (job Job) Validate() error {
 		}
 	}
 	for alias, source := range job.SecretMappings {
-		if !secretNamePattern.MatchString(alias) || strings.EqualFold(alias, "GITHUB_TOKEN") || !secretNamePattern.MatchString(source) {
+		if !secretAliasPattern.MatchString(alias) || strings.EqualFold(alias, "GITHUB_TOKEN") || !secretNamePattern.MatchString(source) {
 			return fmt.Errorf("job plan contains invalid secret mapping %q to %q", alias, source)
 		}
 		if _, ok := requiredSecrets[source]; !ok {
@@ -806,7 +882,7 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job plan GitHub token aliases must be sorted")
 		}
 		for i, alias := range job.GitHubToken.Aliases {
-			if !secretNamePattern.MatchString(alias) || strings.EqualFold(alias, "GITHUB_TOKEN") || i > 0 && strings.EqualFold(job.GitHubToken.Aliases[i-1], alias) {
+			if !secretAliasPattern.MatchString(alias) || strings.EqualFold(alias, "GITHUB_TOKEN") || i > 0 && strings.EqualFold(job.GitHubToken.Aliases[i-1], alias) {
 				return fmt.Errorf("job plan contains invalid or repeated GitHub token alias %q", alias)
 			}
 			if _, exists := ordinaryAliases[strings.ToUpper(alias)]; exists {
@@ -985,6 +1061,9 @@ func validateRemoteWorkflowSource(workflow Workflow) error {
 		return nil
 	}
 	remote := workflow.Remote
+	if err := source.ValidateServerURL(remote.ServerURL); err != nil {
+		return fmt.Errorf("job plan remote workflow: %w", err)
+	}
 	if remote.Repository == "" || remote.Repository != strings.ToLower(remote.Repository) || len(remote.Repository) > 140 || remote.RequestedRef == "" || len(remote.RequestedRef) > 1024 || !utf8.ValidString(remote.RequestedRef) || hasControl(remote.RequestedRef) || !git.ValidObjectID(remote.Commit) || !digestPattern.MatchString(remote.SourceDigest) {
 		return fmt.Errorf("job plan remote workflow has invalid immutable source provenance")
 	}
@@ -1125,6 +1204,21 @@ func validateDeferredInputs(inputs map[string]any, deferred map[string]DeferredI
 		}
 		if _, err := expression.NewEngine().Validate(expression.Site{Source: input.Template, Profile: expression.ProfileDeferredInput, Result: expression.ResultType(input.Type)}); err != nil {
 			return nil, fmt.Errorf("input %q has an invalid template: %w", name, err)
+		}
+		if err := validateInputs(input.Inputs); err != nil {
+			return nil, fmt.Errorf("input %q captured inputs: %w", name, err)
+		}
+		inputNames, dynamic, err := expression.NewEngine().InputReferences(expression.Site{Source: input.Template, Profile: expression.ProfileDeferredInput, Result: expression.ResultAny})
+		if err != nil {
+			return nil, fmt.Errorf("input %q has an invalid template: %w", name, err)
+		}
+		for _, inputName := range inputNames {
+			if dynamic {
+				break
+			}
+			if _, ok := lowerKey(input.Inputs, inputName); !ok {
+				return nil, fmt.Errorf("input %q template reads uncaptured input %q", name, inputName)
+			}
 		}
 		references, err := expression.DeferredInputReferences(input.Template)
 		if err != nil {
@@ -1533,7 +1627,7 @@ func validateActionLocks(job Job) error {
 				containing := job.Workflow.selfRepositorySource()
 				containingActionRef := ""
 				if lock.Source == "github" {
-					containing = &RemoteWorkflowSource{Repository: lock.Repository, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
+					containing = &RemoteWorkflowSource{ServerURL: lock.ServerURL, Repository: lock.Repository, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
 					containingActionRef = lock.RequestedRef
 				}
 				identityErr = validateSelfRepositoryIdentity(uses, child, containing, containingActionRef)
@@ -1614,7 +1708,7 @@ func validateActionLocks(job Job) error {
 		if _, ok := job.Program.Actions[id]; ok {
 			continue
 		}
-		if _, native, err := integration.AdmitNativeAdapter(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit); err != nil {
+		if _, native, err := integration.AdmitNativeAdapter(integration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path}, lock.Commit); err != nil {
 			return fmt.Errorf("action lock %q is not an admitted native-adapter release: %w", id, err)
 		} else if native {
 			continue
@@ -1627,10 +1721,13 @@ func validateActionLocks(job Job) error {
 func validateLockIdentity(lock ActionLock) error {
 	switch lock.Source {
 	case "workspace":
-		if lock.Repository != "" || lock.RequestedRef != "" || lock.Commit != "" || lock.Path != "" && !cleanActionPath(lock.Path) {
+		if lock.ServerURL != "" || lock.Repository != "" || lock.RequestedRef != "" || lock.Commit != "" || lock.Path != "" && !cleanActionPath(lock.Path) {
 			return fmt.Errorf("invalid workspace identity")
 		}
 	case "github":
+		if err := source.ValidateServerURL(lock.ServerURL); err != nil {
+			return err
+		}
 		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !git.ValidObjectID(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) {
 			return fmt.Errorf("invalid GitHub identity")
 		}
@@ -1656,7 +1753,7 @@ func validateSelfRepositoryIdentity(uses string, lock ActionLock, containing *Re
 	if containingActionRef == "" && containing != nil {
 		containingActionRef = containing.Commit
 	}
-	if containing == nil || p != "" && !cleanActionPath(p) || strings.ContainsAny(p, "@?#") || lock.Source != "github" || lock.Repository != containing.Repository || lock.Commit != containing.Commit || lock.SourceDigest != containing.SourceDigest || lock.Path != p || lock.RequestedRef != containingActionRef {
+	if containing == nil || p != "" && !cleanActionPath(p) || strings.ContainsAny(p, "@?#") || lock.Source != "github" || source.ServerURL(lock.ServerURL) != source.ServerURL(containing.ServerURL) || lock.Repository != containing.Repository || lock.Commit != containing.Commit || lock.SourceDigest != containing.SourceDigest || lock.Path != p || lock.RequestedRef != containingActionRef {
 		return fmt.Errorf("self-repository action reference does not match containing source")
 	}
 	return nil

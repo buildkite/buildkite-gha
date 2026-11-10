@@ -21,14 +21,16 @@ const (
 	// The v1, v2, and v3 commits are the floating legacy major releases used on
 	// github.com and are admitted exactly. Raw v7 uploads remain explicitly
 	// unsupported by ValidateUploadArtifactInputs.
-	UploadArtifactV1Commit   = "3446296876d12d4e3a0f3145a3c87e67bf0a16b5"
-	UploadArtifactV2Commit   = "82c141cc518b40d92cc801eee768e7aafc9c2fa2"
-	UploadArtifactV3Commit   = "ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5"
-	UploadArtifactV460Commit = "65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08"
-	UploadArtifactCommit     = "ea165f8d65b6e75b540449e92b4886f43607fa02"
-	UploadArtifactV5Commit   = "330a01c490aca151604b8cf639adc76d48f6c5d4"
-	UploadArtifactV6Commit   = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
-	UploadArtifactV7Commit   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+	UploadArtifactV1Commit         = "3446296876d12d4e3a0f3145a3c87e67bf0a16b5"
+	UploadArtifactV2Commit         = "82c141cc518b40d92cc801eee768e7aafc9c2fa2"
+	UploadArtifactV3Commit         = "ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5"
+	UploadArtifactV322Commit       = "c6a366c94c3e0affe28c06c8df20a878f24da3cf"
+	UploadArtifactV322Node20Commit = "c6a3b2bd78b3985e4b2f15397fec357f0fd808de"
+	UploadArtifactV460Commit       = "65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08"
+	UploadArtifactCommit           = "ea165f8d65b6e75b540449e92b4886f43607fa02"
+	UploadArtifactV5Commit         = "330a01c490aca151604b8cf639adc76d48f6c5d4"
+	UploadArtifactV6Commit         = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+	UploadArtifactV7Commit         = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	// UploadArtifactFallbackContractRelease identifies the stable contract used
 	// for immutable commits outside the exact admission set.
 	UploadArtifactFallbackContractRelease = "v7.0.1"
@@ -38,22 +40,17 @@ const (
 	MaxUploadArtifactPathBytes = 4096
 )
 
-// uploadArtifactUnsupportedCommits are GHES-only legacy security backports
-// that remain outside the github.com native adapter contract.
-var uploadArtifactUnsupportedCommits = map[string]bool{
-	"c6a366c94c3e0affe28c06c8df20a878f24da3cf": true, // v3.2.2
-	"c6a3b2bd78b3985e4b2f15397fec357f0fd808de": true, // v3.2.2-node20
-}
-
 var uploadArtifactCommits = map[string]string{
-	UploadArtifactV1Commit:   "v1.0.0",
-	UploadArtifactV2Commit:   "v2.3.1",
-	UploadArtifactV3Commit:   "v3.2.1",
-	UploadArtifactV460Commit: "v4.6.0",
-	UploadArtifactCommit:     "v4.6.2",
-	UploadArtifactV5Commit:   "v5.0.0",
-	UploadArtifactV6Commit:   "v6.0.0",
-	UploadArtifactV7Commit:   "v7.0.1",
+	UploadArtifactV1Commit:         "v1.0.0",
+	UploadArtifactV2Commit:         "v2.3.1",
+	UploadArtifactV3Commit:         "v3.2.1",
+	UploadArtifactV322Commit:       "v3.2.2",
+	UploadArtifactV322Node20Commit: "v3.2.2-node20",
+	UploadArtifactV460Commit:       "v4.6.0",
+	UploadArtifactCommit:           "v4.6.2",
+	UploadArtifactV5Commit:         "v5.0.0",
+	UploadArtifactV6Commit:         "v6.0.0",
+	UploadArtifactV7Commit:         "v7.0.1",
 }
 
 // uploadArtifactContract records the adapter-visible contract declared by one
@@ -75,12 +72,10 @@ func (c uploadArtifactContract) declaresOutput(name string) bool {
 }
 
 func uploadArtifactContractForCommit(commit string) (uploadArtifactContract, bool) {
-	if !uploadArtifactUnsupportedCommits[commit] {
-		if contract, exact := uploadArtifactCommitContracts[commit]; exact {
-			return contract, true
-		}
+	if contract, exact := uploadArtifactCommitContracts[commit]; exact {
+		return contract, true
 	}
-	if !git.ValidObjectID(commit) || uploadArtifactUnsupportedCommits[commit] {
+	if !git.ValidObjectID(commit) {
 		return uploadArtifactContract{}, false
 	}
 	return uploadArtifactCommitContracts[UploadArtifactV7Commit], false
@@ -89,7 +84,7 @@ func uploadArtifactContractForCommit(commit string) (uploadArtifactContract, boo
 // UploadArtifactUsesFallbackContract reports whether an immutable commit is
 // absent from the frozen snapshot and therefore uses the stable v7 contract.
 func UploadArtifactUsesFallbackContract(commit string) bool {
-	if !git.ValidObjectID(commit) || uploadArtifactUnsupportedCommits[commit] {
+	if !git.ValidObjectID(commit) {
 		return false
 	}
 	_, exact := uploadArtifactCommitContracts[commit]
@@ -117,8 +112,8 @@ func UploadArtifactUsesV1Contract(commit string) bool {
 	return contract.v1
 }
 
-// LegacyUploadArtifactRelease reports the release label for admitted v1
-// through v3 commits, which warrant an upgrade warning.
+// LegacyUploadArtifactRelease reports the release label for obsolete principal
+// releases. The current GHES v3.2.2 releases do not warrant an upgrade warning.
 func LegacyUploadArtifactRelease(commit string) (string, bool) {
 	if commit == UploadArtifactV1Commit || commit == UploadArtifactV2Commit || commit == UploadArtifactV3Commit {
 		return uploadArtifactCommits[commit], true
@@ -127,7 +122,7 @@ func LegacyUploadArtifactRelease(commit string) (string, bool) {
 }
 
 func validateUploadArtifactCommit(commit string) error {
-	if !git.ValidObjectID(commit) || uploadArtifactUnsupportedCommits[commit] {
+	if !git.ValidObjectID(commit) {
 		return versionError("actions/upload-artifact", "native adapter", commit, supportedUploadArtifactContracts())
 	}
 	return nil

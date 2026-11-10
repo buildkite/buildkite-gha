@@ -20,6 +20,80 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
+func TestEventIdentityIDs(t *testing.T) {
+	const source = `{"sender":{"login":"Octocat","id":9007199254740993},"repository":{"full_name":"Acme/Widgets","id":42,"owner":{"login":"Acme","id":73}}}`
+	for _, test := range []struct {
+		name, provider, old, replacement string
+		want                             map[string]any
+	}{
+		{"original", "github", "", "", map[string]any{"actor_id": "9007199254740993", "repository_id": "42", "repository_owner_id": "73"}},
+		{"other provider", "cursor-origin", "", "", map[string]any{}},
+		{"no payload", "github", source, `{}`, map[string]any{}},
+		{"different sender", "github", `"Octocat"`, `"someone-else"`, map[string]any{"repository_id": "42", "repository_owner_id": "73"}},
+		{"different repository", "github", `"Acme/Widgets"`, `"other/Widgets"`, map[string]any{"actor_id": "9007199254740993"}},
+		{"different owner", "github", `"Acme"`, `"other"`, map[string]any{"actor_id": "9007199254740993", "repository_id": "42"}},
+		{"zero ID", "github", `9007199254740993`, `0`, map[string]any{"repository_id": "42", "repository_owner_id": "73"}},
+		{"negative ID", "github", `9007199254740993`, `-1`, map[string]any{"repository_id": "42", "repository_owner_id": "73"}},
+		{"fractional ID", "github", `9007199254740993`, `1.5`, map[string]any{"repository_id": "42", "repository_owner_id": "73"}},
+		{"string ID", "github", `9007199254740993`, `"123"`, map[string]any{"repository_id": "42", "repository_owner_id": "73"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := source
+			if test.old != "" {
+				data = strings.Replace(data, test.old, test.replacement, 1)
+			}
+			payload, err := DecodeEventPayload([]byte(data), fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(data))))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := EventIdentityIDs(test.provider, "acme/widgets", "octocat", payload)
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("EventIdentityIDs() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestGitHubServerPlanBoundary(t *testing.T) {
+	if err := ValidateGitHubServerURL(""); err == nil {
+		t.Fatal("explicit event origin validator accepted an empty origin")
+	}
+	for _, server := range []string{"", "https://github.com", "https://buildkite-ghe.com", "https://ghe.example:8443"} {
+		job := validJob()
+		job.Event.ServerURL = server
+		encoded, err := Encode(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		validateJobPlanSchema(t, encoded)
+		decoded, err := Decode(encoded)
+		if err != nil || decoded.Event.ServerURL != server {
+			t.Fatalf("server %q: decoded %q, error %v", server, decoded.Event.ServerURL, err)
+		}
+		if server == "" && bytes.Contains(encoded, []byte(`"server_url"`)) {
+			t.Fatal("legacy plan gained a server_url field")
+		}
+	}
+	for _, test := range []struct{ provider, server string }{
+		{"cursor-origin", "https://buildkite-ghe.com"},
+		{"github", "http://buildkite-ghe.com"},
+		{"github", "https://user:password@buildkite-ghe.com"},
+		{"github", "https://buildkite-ghe.com/api/v3"},
+		{"github", "https://buildkite-ghe.com?token=secret"},
+		{"github", "https://buildkite-ghe.com#fragment"},
+	} {
+		job := validJob()
+		job.Event.Provider, job.Event.ServerURL = test.provider, test.server
+		source, err := json.Marshal(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Decode(source); err == nil {
+			t.Fatalf("decoded invalid server identity %q / %q", test.provider, test.server)
+		}
+	}
+}
+
 func TestCacheModePlanBoundary(t *testing.T) {
 	for _, mode := range []string{"", "read", "write", "write-only", "none"} {
 		job := validJob()
@@ -185,14 +259,20 @@ func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 	job.Workflow.Remote = &RemoteWorkflowSource{
 		Repository: "owner/repository", RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
 	}
-	encoded, err := Encode(job)
-	if err != nil {
-		t.Fatal(err)
-	}
-	validateJobPlanSchema(t, encoded)
-	decoded, err := Decode(encoded)
-	if err != nil || !reflect.DeepEqual(decoded.Workflow, job.Workflow) {
-		t.Fatalf("Decode() remote workflow = %#v, %v", decoded.Workflow, err)
+	for _, host := range []string{"", "https://github.com", "https://ghe.example:8443"} {
+		job.Workflow.Remote.ServerURL = host
+		encoded, err := Encode(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		validateJobPlanSchema(t, encoded)
+		decoded, err := Decode(encoded)
+		if err != nil || !reflect.DeepEqual(decoded.Workflow, job.Workflow) {
+			t.Fatalf("Decode() remote workflow = %#v, %v", decoded.Workflow, err)
+		}
+		if host == "" && bytes.Contains(encoded, []byte(`"server_url"`)) {
+			t.Fatal("legacy workflow gained a source host field")
+		}
 	}
 
 	tests := []struct {
@@ -200,6 +280,7 @@ func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 		edit func(*Job)
 		want string
 	}{
+		{name: "server path", edit: func(job *Job) { job.Workflow.Remote.ServerURL = "https://ghe.example/repo" }, want: "canonical HTTPS origin"},
 		{name: "repository case", edit: func(job *Job) { job.Workflow.Remote.Repository = "Owner/repository" }, want: "invalid immutable source provenance"},
 		{name: "path repository", edit: func(job *Job) { job.Workflow.Path = "other/repository/.github/workflows/ci.yml@v1" }, want: "path does not match"},
 		{name: "path ref", edit: func(job *Job) { job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v2" }, want: "path does not match"},
@@ -303,6 +384,14 @@ func TestDeferredInputTemplateValidation(t *testing.T) {
 			input.Type = "number"
 			input.Template = "${{ fromJSON(needs.prepare.outputs.tag) }}"
 		}},
+		{name: "captured caller inputs", edit: func(input *DeferredInput) {
+			input.Template = "${{ inputs.prefix }}-${{ needs.prepare.outputs.tag }}-${{ needs.prepare.outputs.flavor }}"
+			input.Inputs = map[string]any{"prefix": "outer", "enabled": true}
+		}},
+		{name: "uncaptured input", edit: func(input *DeferredInput) {
+			input.Template = "${{ inputs.prefix }}-${{ needs.prepare.outputs.tag }}-${{ needs.prepare.outputs.flavor }}"
+		}, want: `reads uncaptured input "prefix"`},
+		{name: "captured input type", edit: func(input *DeferredInput) { input.Inputs = map[string]any{"prefix": []any{"outer"}} }, want: `captured inputs: job plan input "prefix" has unsupported type`},
 		{name: "unknown type", edit: func(input *DeferredInput) { input.Type = "object" }, want: "invalid type"},
 		{name: "boolean template", edit: func(input *DeferredInput) { input.Type = "boolean" }, want: "invalid template"},
 		{name: "empty template", edit: func(input *DeferredInput) { input.Template = "" }, want: "has an invalid template"},
@@ -794,7 +883,7 @@ func TestSecretMappingsRoundTripAsNamesOnlyAndValidateAuthority(t *testing.T) {
 	job := validJob()
 	job.RequiredCapabilities = []string{"secrets"}
 	job.RequiredSecrets = []string{"ORIGINAL"}
-	job.SecretMappings = map[string]string{"ALIAS": "ORIGINAL"}
+	job.SecretMappings = map[string]string{"ALIAS": "ORIGINAL", "ACCESS-TOKEN": "ORIGINAL"}
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -814,6 +903,8 @@ func TestSecretMappingsRoundTripAsNamesOnlyAndValidateAuthority(t *testing.T) {
 	}{
 		{name: "missing source", edit: func(j *Job) { j.SecretMappings["ALIAS"] = "OTHER" }, want: "undeclared source"},
 		{name: "reserved alias", edit: func(j *Job) { j.SecretMappings = map[string]string{"GITHUB_TOKEN": "ORIGINAL"} }, want: "invalid secret mapping"},
+		// Aliases are workflow_call secret IDs; sources are real secret names.
+		{name: "hyphenated source", edit: func(j *Job) { j.SecretMappings["ALIAS"] = "ORIGINAL-NAME" }, want: "invalid secret mapping"},
 		{name: "missing capability", edit: func(j *Job) { j.RequiredCapabilities = nil }, want: "secrets capability"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -946,6 +1037,11 @@ func TestReachableActionLocksRequireProgramsExceptNativeAdapters(t *testing.T) {
 	if err := job.Validate(); err != nil {
 		t.Fatalf("Validate() native adapter error = %v", err)
 	}
+	job.Actions[0].ServerURL = "https://ghe.example"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "has no normalized execution program") {
+		t.Fatalf("Validate() cross-host native alias error = %v", err)
+	}
+	job.Actions[0].ServerURL = ""
 	job.Actions[0].Commit = strings.Repeat("z", 40)
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "invalid GitHub identity") {
 		t.Fatalf("Validate() malformed native commit error = %v", err)
@@ -1087,6 +1183,48 @@ func TestRemoteNestedActionLocks(t *testing.T) {
 	}
 }
 
+func TestSelfRepositoryActionsBindSourceHost(t *testing.T) {
+	for _, host := range []string{"", "https://github.com", "https://ghe.example"} {
+		t.Run(host, func(t *testing.T) {
+			job := validJob()
+			commit, digest := strings.Repeat("a", 40), "sha256:"+strings.Repeat("b", 64)
+			job.Workflow.SelfRepository = &RemoteWorkflowSource{ServerURL: host, Repository: "owner/repo", RequestedRef: commit, Commit: commit, SourceDigest: digest}
+			setTestSteps(&job, []testStep{{ID: "self", Kind: "uses", Uses: "$/root", Action: &ActionSelector{Lock: "a-0000000000000001"}}})
+			job.Actions = []ActionLock{
+				{ID: "a-0000000000000001", Source: "github", ServerURL: host, Repository: "owner/repo", RequestedRef: commit, Commit: commit, Path: "root", SourceDigest: digest, Children: map[string]ActionSelector{"$/child": {Lock: "a-0000000000000002"}}},
+				{ID: "a-0000000000000002", Source: "github", ServerURL: host, Repository: "owner/repo", RequestedRef: commit, Commit: commit, Path: "child", SourceDigest: digest},
+			}
+			synchronizeExecutionProgram(&job)
+			encoded, err := Encode(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			validateJobPlanSchema(t, encoded)
+			decoded, err := Decode(encoded)
+			if err != nil || !reflect.DeepEqual(decoded.Actions, job.Actions) || !reflect.DeepEqual(decoded.Workflow, job.Workflow) {
+				t.Fatalf("source host round trip: %#v, %v", decoded, err)
+			}
+			if host == "" {
+				if bytes.Contains(encoded, []byte(`"server_url"`)) {
+					t.Fatal("legacy locks gained a source host field")
+				}
+				job.Actions[0].ServerURL = "https://github.com"
+				if err := job.Validate(); err != nil {
+					t.Fatalf("legacy and explicit github.com must share identity: %v", err)
+				}
+				job.Actions[0].ServerURL = host
+			}
+			for i := range job.Actions {
+				job.Actions[i].ServerURL = "https://other.example"
+				if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "does not match containing source") {
+					t.Fatalf("cross-host self action %d was accepted: %v", i, err)
+				}
+				job.Actions[i].ServerURL = host
+			}
+		})
+	}
+}
+
 func TestActionLockValidationMatrix(t *testing.T) {
 	remote := func() Job {
 		job := validJob()
@@ -1105,6 +1243,8 @@ func TestActionLockValidationMatrix(t *testing.T) {
 		want string
 	}{
 		{"uppercase canonical repository", func(j *Job) { j.Actions[0].Repository = "Owner/repo" }, "invalid GitHub identity"},
+		{"server credentials", func(j *Job) { j.Actions[0].ServerURL = "https://user:secret@ghe.example" }, "canonical HTTPS origin"},
+		{"server path", func(j *Job) { j.Actions[0].ServerURL = "https://ghe.example/repo" }, "canonical HTTPS origin"},
 		{"ref case is exact", func(j *Job) { j.Program.Job.Steps[0].Invocation.Uses.Source = "owner/repo/root@V1" }, "does not match"},
 		{"path case is exact", func(j *Job) { j.Program.Job.Steps[0].Invocation.Uses.Source = "owner/repo/Root@v1" }, "does not match"},
 		{"malformed step selector", func(j *Job) { j.Program.Job.Steps[0].Invocation.Lock = "bad" }, "malformed action selector"},
@@ -1205,6 +1345,7 @@ func TestActionSelectorsAndPathsRejectInvalidValues(t *testing.T) {
 			j.Program.Job.Steps[0].Invocation = &program.Invocation{Uses: testPlanSite("./actions/build"), Lock: "a-0000000000000001"}
 		}, want: "incompatible execution"},
 		{name: "local identity mismatch", edit: func(j *Job) { j.Program.Job.Steps[0].Invocation.Uses.Source = "./actions/other" }, want: "does not match"},
+		{name: "workspace host", edit: func(j *Job) { j.Actions[0].ServerURL = "https://github.com" }, want: "invalid workspace identity"},
 		{name: "absolute path", edit: func(j *Job) { j.Actions[0].Path = "/actions/build" }, want: "invalid workspace identity"},
 		{name: "backslash path", edit: func(j *Job) { j.Actions[0].Path = `actions\build` }, want: "invalid workspace identity"},
 		{name: "dot segment", edit: func(j *Job) { j.Actions[0].Path = "actions/../build" }, want: "invalid workspace identity"},
@@ -1387,7 +1528,7 @@ func programFromTestJob(job Job) program.Program {
 	}
 	result.Actions = make(map[string]program.Action)
 	for _, lock := range job.Actions {
-		_, native, err := integration.AdmitNativeAdapter(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
+		_, native, err := integration.AdmitNativeAdapter(integration.Identity{Source: lock.Source, ServerURL: lock.ServerURL, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
 		if err == nil && native {
 			continue
 		}

@@ -42,7 +42,7 @@ type EnvironmentProtection struct {
 // Callers should share one memoized source for the complete validate,
 // compile, and upload operation.
 type EnvironmentSource interface {
-	ResolveEnvironment(ctx context.Context, owner, repository, name string) (EnvironmentProtection, error)
+	ResolveEnvironment(ctx context.Context, serverURL, owner, repository, name string) (EnvironmentProtection, error)
 }
 
 // EnvironmentBatchSource resolves several distinct environments together,
@@ -51,7 +51,7 @@ type EnvironmentSource interface {
 // environments resolve in one request instead of one request per name. Any
 // error fails the whole batch.
 type EnvironmentBatchSource interface {
-	ResolveEnvironments(ctx context.Context, owner, repository string, names []string) ([]EnvironmentProtection, error)
+	ResolveEnvironments(ctx context.Context, serverURL, owner, repository string, names []string) ([]EnvironmentProtection, error)
 }
 
 type environmentResolution struct {
@@ -99,7 +99,7 @@ func resolveJobEnvironments(ctx context.Context, instances []JobInstance, event 
 		identity := strings.ToLower(instance.Environment)
 		result, ok := resolved[identity]
 		if !ok {
-			protection, err := options.EnvironmentSource.ResolveEnvironment(ctx, event.Repository.Owner, event.Repository.Name, instance.Environment)
+			protection, err := options.EnvironmentSource.ResolveEnvironment(ctx, event.ServerURL, event.Repository.Owner, event.Repository.Name, instance.Environment)
 			result = environmentResolution{protection: protection, err: err}
 			resolved[identity] = result
 		}
@@ -138,7 +138,7 @@ func seedBatchResolutions(ctx context.Context, instances []JobInstance, event Ev
 	if len(names) == 0 {
 		return resolved
 	}
-	protections, err := batch.ResolveEnvironments(ctx, event.Repository.Owner, event.Repository.Name, names)
+	protections, err := batch.ResolveEnvironments(ctx, event.ServerURL, event.Repository.Owner, event.Repository.Name, names)
 	if err == nil && len(protections) != len(names) {
 		err = fmt.Errorf("environment resolution returned %d environments for %d names", len(protections), len(names))
 	}

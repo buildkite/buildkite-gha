@@ -36,7 +36,7 @@ func TestAgentVariableResolverResolvesBothScopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := resolver.ResolveVariables(t.Context(), "buildkite/buildkite-gha")
+	snapshot, err := resolver.ResolveVariables(t.Context(), "", "buildkite/buildkite-gha")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestAgentVariableResolverDecodesEmptyScopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := resolver.ResolveVariables(t.Context(), "buildkite/buildkite-gha")
+	snapshot, err := resolver.ResolveVariables(t.Context(), "", "buildkite/buildkite-gha")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,12 +76,17 @@ func TestAgentVariableResolverRejectsInvalidInputBeforeNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, repository := range []string{"", "other", "../other/repo", "owner/..", "owner/repo/extra", "owner/repo?permission=write"} {
-		if _, err := resolver.ResolveVariables(t.Context(), repository); err == nil {
+		if _, err := resolver.ResolveVariables(t.Context(), "", repository); err == nil {
 			t.Errorf("ResolveVariables(%q) succeeded", repository)
 		}
 	}
+	for _, serverURL := range []string{"http://ghe.example.com", "https://user@ghe.example.com", "https://ghe.example.com/path"} {
+		if _, err := resolver.ResolveVariables(t.Context(), serverURL, "owner/repo"); err == nil {
+			t.Errorf("ResolveVariables(%q) succeeded", serverURL)
+		}
+	}
 	var unconfigured *AgentVariableResolver
-	if _, err := unconfigured.ResolveVariables(t.Context(), "buildkite/buildkite-gha"); err == nil {
+	if _, err := unconfigured.ResolveVariables(t.Context(), "", "buildkite/buildkite-gha"); err == nil {
 		t.Error("ResolveVariables() on a nil resolver succeeded")
 	}
 	if requests != 0 {
@@ -156,7 +161,7 @@ func TestAgentVariableResolverStatusErrors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = resolver.ResolveVariables(t.Context(), "buildkite/buildkite-gha")
+			_, err = resolver.ResolveVariables(t.Context(), "", "buildkite/buildkite-gha")
 			if err == nil || (test.status == http.StatusBadRequest && err.Error() != test.want) || (test.status != http.StatusBadRequest && !strings.Contains(err.Error(), test.want)) {
 				t.Fatalf("ResolveVariables() error = %v, want %q", err, test.want)
 			}
@@ -207,7 +212,7 @@ func TestAgentVariableResolverRejectsUntrustedResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = resolver.ResolveVariables(t.Context(), "buildkite/buildkite-gha")
+			_, err = resolver.ResolveVariables(t.Context(), "", "buildkite/buildkite-gha")
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("ResolveVariables() error = %v, want %q", err, test.want)
 			}
@@ -231,7 +236,7 @@ func TestAgentVariableResolverRejectsUntrustedResponses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolver.ResolveVariables(t.Context(), "buildkite/buildkite-gha"); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
+	if _, err := resolver.ResolveVariables(t.Context(), "", "buildkite/buildkite-gha"); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
 		t.Fatalf("redirect ResolveVariables() error/redirected = %v / %v", err, redirected)
 	}
 }
@@ -263,7 +268,7 @@ func TestAgentVariableResolverDecodesMaximalEscapedVariables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := resolver.ResolveVariables(t.Context(), "buildkite/buildkite-gha")
+	snapshot, err := resolver.ResolveVariables(t.Context(), "", "buildkite/buildkite-gha")
 	if err != nil {
 		t.Fatalf("ResolveVariables() = %v", err)
 	}

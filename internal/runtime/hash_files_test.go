@@ -510,7 +510,7 @@ func TestCompositePreHashFilesUsesResolvedDeadline(t *testing.T) {
 				}
 			}
 			run := newJobRun(Runner{})
-			_, err := run.prepareRemoteAction(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), workspace, job.Program.Job.Steps[0], "0/0", nil, eval, &postRegistry{}, newActionLockResolver(job, workspace, materializer), remotePreparations{}, &remotePreparationStatus{}, false, nil, timeout, nil)
+			_, err := run.prepareRemoteAction(t.Context(), t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), workspace, job.Program.Job.Steps[0], "0/0", nil, eval, &postRegistry{}, newActionLockResolver(job, workspace, materializer), remotePreparations{}, &remotePreparationStatus{}, false, nil, timeout, nil)
 			if !errors.Is(err, stopHash) || hashContext == nil || timeout.bounded == nil {
 				t.Fatalf("preparation hashing = %v, context = %v, timeout = %v", err, hashContext, timeout.bounded)
 			}
