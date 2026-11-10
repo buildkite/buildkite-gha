@@ -207,11 +207,11 @@ for reported observations and their limits.
 ## Monitor dependency security
 
 Renovate runs every four hours, including weekends. `renovate.json` copies the
-shared `buildkite/renovate-config` policy instead of extending it, because the
-preset repository is private and this repository is public. Non-major updates
-merge after required checks pass; major updates require review. Vulnerability
-updates bypass the three-day release age and receive the `security` label.
-Failed Renovate builds notify `#team-platform-blerts`.
+shared policy instead of extending a private preset, so it can resolve without
+access to other repositories. Keep the copy in sync when the shared policy
+changes. Non-major updates merge after required checks pass; major updates
+require review. Vulnerability updates bypass the three-day release age and
+receive the `security` label. Failed Renovate builds notify the owning team.
 
 The [Renovate rules](../renovate.json) disable GitHub Actions updates in examples
 and compatibility fixtures to preserve their version coverage. CI workflows,
