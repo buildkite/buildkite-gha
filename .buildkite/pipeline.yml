@@ -70,6 +70,8 @@ steps:
         cache: ".buildkite/cache-volume"
         env:
           BUILDKITE_GHA_LIVE_REQUIRED: "1"
+          # Unit tests select their own events, not the proof build's dispatch.
+          GITHUB_EVENT_NAME: ""
         plugins:
           - setup-go#v0.1.1:
               mise-version: "2026.10.17"
@@ -88,6 +90,8 @@ steps:
         if: build.env("DEMO_SUITE") != "plugin"
         parallelism: 1
         cache: ".buildkite/cache-volume"
+        env:
+          GITHUB_EVENT_NAME: ""
         plugins:
           - setup-go#v0.1.1:
               mise-version: "2026.10.17"
@@ -105,6 +109,8 @@ steps:
         timeout_in_minutes: 20
         agents:
           queue: "mac-small"
+        env:
+          GITHUB_EVENT_NAME: ""
         plugins:
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
               version: "2026.10.17"
