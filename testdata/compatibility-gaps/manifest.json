@@ -3,7 +3,7 @@
   "source": "https://slopcannon.tail952194.ts.net/simone/gha-plugin-what-to-build-next/",
   "gaps": [
     {"id":"runner-labels","title":"Windows runner labels","workflow":"runner-labels.yml","event":"push","mode":"profile"},
-    {"id":"github-environments","title":"GitHub environments","workflow":"github-environments.yml","event":"push","mode":"profile"},
+    {"id":"github-environments","title":"GitHub environments (simulated Agent API)","mode":"agent-api","test":"TestRunUploadResolvesEnvironmentsThroughAgent"},
     {"id":"other-shells","title":"Shells other than bash/sh","workflow":"other-shells.yml","event":"push","mode":"runtime","test":"TestCompatibilityGapOtherShells"},
     {"id":"upload-artifact-versions","title":"actions/upload-artifact versions","workflow":"upload-artifact-versions.yml","event":"push","mode":"profile"},
     {"id":"secret-forwarding","title":"Secret forwarding (inherit + maps)","workflow":"secret-forwarding.yml","event":"push","mode":"profile"},

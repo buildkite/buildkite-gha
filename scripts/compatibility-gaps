@@ -21,12 +21,16 @@ jq -e '
   all(.gaps[];
     (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
     (.title | type == "string" and length > 0) and
-    (.workflow | test("^[a-z0-9]+(?:-[a-z0-9]+)*\\.yml$")) and
-    (.event | IN("push", "pull_request", "merge_group", "release")) and
-    (.mode | IN("profile", "runtime")) and
-    (if .mode == "runtime" then (.test | test("^TestCompatibilityGap[A-Za-z]+$")) else (has("test") | not) end)) and
+    (.mode | IN("profile", "runtime", "agent-api")) and
+    (if .mode == "agent-api" then
+      (.test | test("^TestRun[A-Za-z]+$")) and (has("workflow") or has("event") | not)
+    else
+      (.workflow | test("^[a-z0-9]+(?:-[a-z0-9]+)*\\.yml$")) and
+      (.event | IN("push", "pull_request", "merge_group", "release")) and
+      (if .mode == "runtime" then (.test | test("^TestCompatibilityGap[A-Za-z]+$")) else (has("test") | not) end)
+    end)) and
   ([.gaps[].id] | length == (unique | length)) and
-  ([.gaps[].workflow] | length == (unique | length))
+  ([.gaps[].workflow // empty] | length == (unique | length))
 ' "$manifest" >/dev/null
 
 while IFS= read -r workflow; do
@@ -34,7 +38,7 @@ while IFS= read -r workflow; do
     echo "missing compatibility gap workflow: $workflow" >&2
     exit 1
   }
-done < <(jq -r '.gaps[].workflow' "$manifest")
+done < <(jq -r '.gaps[].workflow // empty' "$manifest")
 
 CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$work/buildkite-gha" ./cmd/buildkite-gha
 
@@ -60,6 +64,15 @@ while IFS=$'\t' read -r id title workflow event mode test_name; do
     else
       outcome=blocked
       reason="$(jq -r '[.diagnostics[]?.message] | unique | join(" ") | if length == 0 then "Validation did not produce a diagnostic." else . end' "$report" 2>/dev/null || echo 'Validation report could not be read.')"
+    fi
+  elif [[ "$mode" == agent-api ]]; then
+    mise exec -- go test ./internal/cli -run "^${test_name}$" -count=1 >"$report" 2>&1 || status=$?
+    if [[ "$status" == 0 ]]; then
+      outcome=passing
+      reason="Approval gates, secret-name mapping, and variables passed with a simulated Agent API; live access and GitHub reviewer identity parity are not assessed."
+    else
+      outcome=blocked
+      reason="The simulated Agent API integration test failed."
     fi
   else
     mise exec -- go test -tags compatibility_gaps ./internal/runtime \
@@ -88,7 +101,7 @@ while IFS=$'\t' read -r id title workflow event mode test_name; do
     fi
   fi
   printf -- '- %s **%s** — %s\n' "$icon" "$title" "$reason" >>"$summary"
-done < <(jq -r '.gaps[] | [.id, .title, .workflow, .event, .mode, (.test // "-")] | @tsv' "$manifest")
+done < <(jq -r '.gaps[] | [.id, .title, (.workflow // "-"), (.event // "-"), .mode, (.test // "-")] | @tsv' "$manifest")
 
 if [[ "${BUILDKITE:-}" == true ]] && command -v buildkite-agent >/dev/null; then
   style=success
