@@ -147,107 +147,6 @@ func TestRunNullActivityTypes(t *testing.T) {
 	}
 }
 
-func TestRunPullRequestTagFilterValidation(t *testing.T) {
-	for _, test := range []struct {
-		name, configuration, wantError string
-	}{
-		{name: "tag only", configuration: "tags: [v*]"},
-		{name: "ignore only", configuration: "tags-ignore: ['**']"},
-		{name: "empty tags", configuration: "tags: []"},
-		{name: "null tags", configuration: "tags: null"},
-		{name: "empty ignored tags", configuration: "tags-ignore: []"},
-		{name: "null ignored tags", configuration: "tags-ignore: null"},
-		{name: "scalar patterns", configuration: "tags: v*, branches: main"},
-		{name: "negative-only tags", configuration: "tags: ['!v*'], branches: [main]"},
-		{name: "empty branch filters", configuration: "tags: [v*], branches: []"},
-		{name: "unknown activity", configuration: "tags: [v*], branches: [main], types: [not-real]"},
-		{name: "ignored tag patterns do not constrain branches", configuration: "tags-ignore: ['**'], branches: [main]"},
-		{name: "null include and populated ignore", configuration: "tags: null, tags-ignore: ['**'], branches: [main]"},
-		{name: "conflicting empty tag filters", configuration: "tags: [], tags-ignore: []", wantError: "include and ignore filters cannot be combined"},
-		{name: "conflicting tag filters with branches", configuration: "tags: [v*], tags-ignore: ['**'], branches: [main]", wantError: "include and ignore filters cannot be combined"},
-		{name: "conflicting empty branch filters", configuration: "tags: [v*], branches: [], branches-ignore: []", wantError: "include and ignore filters cannot be combined"},
-		{name: "null member", configuration: "tags: [null], branches: [main]", wantError: "null list members are invalid"},
-		{name: "null activity member", configuration: "types: [null]", wantError: "null list members are invalid"},
-		{name: "aliased null activity member", configuration: "branches: &empty null, types: [*empty]", wantError: "null list members are invalid"},
-		{name: "aliased quoted null activity", configuration: "types: [&pattern 'null', *pattern]"},
-		{name: "empty pattern", configuration: "tags: [''], branches: [main]", wantError: "string should not be empty"},
-		{name: "invalid glob", configuration: "tags: ['['], branches: [main]", wantError: "glob"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "workflow.yml")
-			// A PR declaration must not prevent a valid push workflow from being
-			// admitted; malformed declarations still fail validation.
-			source := "on:\n  push:\n  pull_request: {" + test.configuration + "}\njobs:\n  probe:\n    runs-on: ubuntu-latest\n    steps: [{run: 'echo ok'}]\n"
-			if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			var stdout, stderr bytes.Buffer
-			code := Run([]string{"validate", "--format", "json", path}, &stdout, &stderr, "dev")
-			var report compatibility.ProcessingReport
-			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
-				t.Fatalf("decode report: %v; stderr = %s", err, &stderr)
-			}
-			if test.wantError == "" {
-				if code != 0 || report.Result != "compilable" || len(report.Diagnostics) != 0 {
-					t.Fatalf("validate code = %d, report = %#v, stderr = %s", code, report, &stderr)
-				}
-			} else if code != 1 || report.Result != "incompatible" || !strings.Contains(stdout.String(), test.wantError) {
-				t.Fatalf("validate code = %d, report = %s; want %q", code, &stdout, test.wantError)
-			}
-		})
-	}
-}
-
-func TestRunPullRequestTagFilterFixture(t *testing.T) {
-	requireImporterHost(t)
-	t.Setenv("BUILDKITE", "true")
-	t.Setenv("BUILDKITE_STEP_KEY", "tag-filter-importer")
-	source, err := os.ReadFile(filepath.Join("..", "..", "testdata", "compatibility-gaps", ".github", "workflows", "pull-request-tag-filters.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct{ name, filter, condition string }{
-		{"tag only", "", "(false)"},
-		{"matching base", "branches: [main]", `(true && "main" =~ /^main$/ && ("opened" == "opened" || "opened" == "synchronize" || "opened" == "reopened"))`},
-		{"head is not base", "branches: [feature]", `(true && "main" =~ /^feature$/ && ("opened" == "opened" || "opened" == "synchronize" || "opened" == "reopened"))`},
-		{"ignore re-includes base", "branches-ignore: ['**', '!main']", `(true && ((true && !("main" =~ /^.*$/)) || "main" =~ /^main$/) && ("opened" == "opened" || "opened" == "synchronize" || "opened" == "reopened"))`},
-		{"ignore excludes base last", "branches-ignore: ['!main', '**']", `(true && ((true || "main" =~ /^main$/) && !("main" =~ /^.*$/)) && ("opened" == "opened" || "opened" == "synchronize" || "opened" == "reopened"))`},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			workflowSource := string(source)
-			if test.filter != "" {
-				workflowSource = strings.Replace(workflowSource, "  pull_request:\n", "  pull_request:\n    "+test.filter+"\n", 1)
-			}
-			repository := writeUploadWorkflowRepository(t, map[string]string{"pull-request.yml": workflowSource})
-			eventPath := writeUploadEvent(t, repository, "pull_request", "refs/pull/42/head", map[string]any{
-				"action": "opened", "pull_request": map[string]any{"base": map[string]any{"ref": "main"}, "head": map[string]any{"ref": "feature"}},
-			})
-			t.Chdir(repository)
-			var stdout, stderr bytes.Buffer
-			if code := Run([]string{"validate", "--profile", "hosted", "--event", "pull_request", ".github/workflows/pull-request.yml"}, &stdout, &stderr, "dev"); code != 0 {
-				t.Fatalf("validate code=%d, stderr=%s", code, &stderr)
-			}
-			runner := &cliCaptureRunner{}
-			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/pull-request.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
-				t.Fatalf("upload code=%d, stderr=%s", code, &stderr)
-			}
-			var pipeline struct {
-				Steps []struct {
-					Condition string `yaml:"if"`
-					Skip      any    `yaml:"skip"`
-					Steps     []any  `yaml:"steps"`
-				} `yaml:"steps"`
-			}
-			if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
-				t.Fatal(err)
-			}
-			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Condition != test.condition || pipeline.Steps[0].Skip != nil || len(pipeline.Steps[0].Steps) != 1 {
-				t.Fatalf("pipeline steps=%#v; want condition %q on the compiled workflow", pipeline.Steps, test.condition)
-			}
-		})
-	}
-}
-
 func TestRunValidateAndCompile(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -269,8 +168,9 @@ func TestRunValidateAndCompile(t *testing.T) {
 			{name: "unsupported event", trigger: "repository_dispatch", want: `unsupported GitHub trigger event "repository_dispatch"`},
 			{name: "malformed path filter", trigger: "push:\n    paths: ['!src/**']", want: "must follow a positive pattern"},
 			{name: "mixed branch filters", trigger: "push:\n    branches: [main]\n    branches-ignore: [release]", want: "include and ignore filters cannot be combined"},
-			{name: "pull request workflow filter", trigger: "pull_request:\n    workflows: [CI]", want: "pull_request does not support the workflows filter"},
-			{name: "conflicting pull request tag filters", trigger: "pull_request:\n    tags: []\n    tags-ignore: []", want: "include and ignore filters cannot be combined"},
+			{name: "pull request tag filter", trigger: "pull_request:\n    tags: [v1]", want: "pull_request does not support the tags filter"},
+			{name: "pull request tag ignore filter", trigger: "pull_request:\n    tags-ignore: [v1]", want: "pull_request does not support the tags-ignore filter"},
+			{name: "pull request activity", trigger: "pull_request:\n    types: [auto_merge_enabled, submitted]", want: `activity type "submitted" cannot be mapped exactly`},
 			{name: "unknown release activity", trigger: "release:\n    types: [not-real]", want: `release activity type "not-real" cannot be mapped exactly`},
 			{name: "release workflow filter", trigger: "release:\n    types: [published]\n    workflows: [CI]", want: "release does not support the workflows filter"},
 			{name: "unknown issues activity", trigger: "issues:\n    types: [not-real]", want: `issues activity type "not-real" cannot be mapped exactly`},
