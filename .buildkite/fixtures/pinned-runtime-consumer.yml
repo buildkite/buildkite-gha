@@ -1,0 +1,40 @@
+name: Scheduled runtime consumer
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      value: ${{ steps.probe.outputs.value }}
+    steps:
+      - id: probe
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          test -n "$TOKEN"
+          test "$(id -un)" = runner
+          test "$HOME" = /home/runner
+          sudo -n true
+          test ! -e .git
+          echo 'value=42' >> "$GITHUB_OUTPUT"
+          echo 'SCHEDULED_PROOF runner home=/home/runner value=42 token=present'
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VALUE: ${{ needs.producer.outputs.value }}
+    steps:
+      - run: |
+          test "$VALUE" = 42
+          echo 'SCHEDULED_PROOF transported value=42'
+  failure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - run: |
+          echo 'SCHEDULED_PROOF expected failure=37'
+          exit 37

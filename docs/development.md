@@ -507,6 +507,20 @@ and normal plugin installation through nested agent bootstrap. Its warm case
 replays retry context on the same worker; it is not a scheduler retry or a
 cross-worker cache proof. It also checks failure status and bad-digest rejection.
 
+Set `PINNED_RUNTIME_SCHEDULED=1` to submit the candidate's emitted pipeline
+unchanged instead. This checks normal scheduling, checkout skip, token/redactor
+access, transported job outputs, and an allowed failure using fixture metadata.
+
+After publication, use `COMPATIBILITY_PROOF=pinned-runtime-consumer` with
+`PINNED_CONSUMER_MODE=release` and `PINNED_CONSUMER_VERSION=<published-tag>`.
+Set `PINNED_CONSUMER_DISTRIBUTIONS` to the expected importer binary-artifact count.
+The other modes are `old-plugin` (previous plugin with default latest CLI),
+`historical` (an earlier CLI pin), `custom`, `local`, and `mixed` (Linux/macOS).
+Custom and local modes need `PINNED_CONSUMER_BINARY_URL`; local also needs
+`PINNED_CONSUMER_SHA256`. These run normal generated jobs, not nested bootstrap.
+Inspect their logs and result artifacts as well as the inventory assertion;
+the workflow's failure control must exit 37, not fail during setup.
+
 Use `COMPATIBILITY_PROOF=scheduling` to probe output-derived matrix concurrency
 and parallel limits. Check job start and finish times: the group consumers must
 not overlap, the parallel consumers must run at most two at a time, and each

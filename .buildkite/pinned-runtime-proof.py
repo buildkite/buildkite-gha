@@ -72,6 +72,8 @@ def import_workflow(name):
     binary = download(f".pinned-runtime-proof/{name}", assets["producer"])
     assert hashlib.sha256(binary.read_bytes()).hexdigest() == assets[name]["sha256"]
     binary.chmod(0o755)
+    scheduled = os.environ.get("PINNED_RUNTIME_SCHEDULED") == "1"
+    workflow = ".buildkite/fixtures/pinned-runtime-consumer.yml" if scheduled else ".buildkite/fixtures/pinned-runtime-proof.yml"
     pipeline_path = OUTPUT / f"{name}-pipeline.yml"
     with tempfile.TemporaryDirectory(prefix="pinned-import-") as tmp:
         wrapper_dir = Path(tmp) / "bin"
@@ -79,11 +81,11 @@ def import_workflow(name):
         env = dict(os.environ, PROOF_REAL_AGENT=shutil.which("buildkite-agent"),
                    PROOF_PIPELINE_FILE=str(pipeline_path), PATH=f"{wrapper_dir}:{os.environ['PATH']}",
                    BUILDKITE_GHA_TELEMETRY_DISABLED="true",
-                   BUILDKITE_PLUGIN_CONFIGURATION=json.dumps({"workflow": ".buildkite/fixtures/pinned-runtime-proof.yml", "runners": [{"runs-on": "ubuntu-latest", "queue": "hosted"}]}),
+                   BUILDKITE_PLUGIN_CONFIGURATION=json.dumps({"workflow": workflow, "runners": [{"runs-on": "ubuntu-latest", "queue": "hosted"}]}),
                    BUILDKITE_GHA_PLUGIN_RELEASE=json.dumps({"tag_name": "v0.0.0-proof", "assets": [{"name": "buildkite-gha_linux_x86_64", "browser_download_url": assets[name]["url"], "digest": "sha256:" + assets[name]["sha256"]}]}))
         subprocess.run([str(binary), "plugin"], env=env, check=True)
     pipeline = json.loads(capture(["buildkite-agent", "pipeline", "upload", "--dry-run", "--no-interpolation", "--format", "json", str(pipeline_path)]))
-    assert len(pipeline["steps"]) == 1 and len(pipeline["steps"][0]["steps"]) == 1
+    assert len(pipeline["steps"]) == 1 and len(pipeline["steps"][0]["steps"]) == (3 if scheduled else 1)
     step = pipeline["steps"][0]["steps"][0]
     paths = inventory(os.environ["BUILDKITE_JOB_ID"])
     distributions = [path for path in paths if "/distributions/" in path]
@@ -102,6 +104,10 @@ def import_workflow(name):
     save_metadata(f"pinned-runtime-proof-{name}", os.environ["BUILDKITE_JOB_ID"])
     print(f"{name}: runtime distribution artifacts={len(distributions)}")
     if name == "candidate":
+        if scheduled:
+            # Submit the exact emitted pipeline, including checkout and plugins.
+            subprocess.run(["buildkite-agent", "pipeline", "upload", "--no-interpolation", str(pipeline_path)], check=True)
+            return
         # Preserve the actual generated job identity. The outer harness runs
         # each unmodified command/config through agent bootstrap, not hooks.
         del step["plugins"]
