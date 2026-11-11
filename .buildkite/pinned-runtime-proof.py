@@ -136,6 +136,8 @@ def run_cases():
             env.update(PROOF_REAL_AGENT=real_agent, PROOF_REAL_CURL=real_curl, PROOF_CALLS=str(calls),
                        PROOF_RUNTIME_URL=assets["candidate"]["url"],
                        PATH=f"{wrapper_dir}:{os.environ['PATH']}", BUILDKITE_GHA_CACHE_DIR=str(root / "cache"),
+                       # Bootstrap can clean this directory even with --skip-checkout.
+                       BUILDKITE_BUILD_CHECKOUT_PATH=str(root / "workspace"),
                        BUILDKITE_GHA_TELEMETRY_DISABLED="true", BUILDKITE_PLUGIN_VALIDATION="true")
             bootstrap = [real_agent, "bootstrap", "--skip-checkout", "--plugins-path", str(root / "plugins"),
                          "--sockets-path", str(root / "sockets"), "--bin-path", str(wrapper_dir),
@@ -157,8 +159,8 @@ def run_cases():
                 output = result.stdout
                 for name in ("baseline", "candidate"):
                     output = output.replace(assets[name]["url"], "<fixture-runtime-url>")
+                print(output, flush=True)
                 (OUTPUT / f"{case}.log").write_text(output)
-                print(output)
                 observed = [json.loads(line) for line in calls.read_text().splitlines()]
                 record = {"case": case, "status": result.returncode, "binary_downloads": observed.count("runtime"),
                           "release_lookups": observed.count("metadata"),
