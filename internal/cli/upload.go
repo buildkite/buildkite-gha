@@ -626,7 +626,12 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		for j := range generatedWorkflows[i].Jobs {
 			job := &generatedWorkflows[i].Jobs[j]
 			if job.Failure == nil && job.SkipReason == "" {
-				job.RuntimeURL = runtimeDistributions[compiler.PlatformLinuxAMD64].url
+				platform, err := compiler.ParsePlatform(job.Platform)
+				if err != nil {
+					_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+					return 1
+				}
+				job.RuntimeURL = runtimeDistributions[platform].url
 			}
 		}
 	}
@@ -947,7 +952,7 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 // requiredRuntimePlatforms compiles the request once before any runtime
 // distribution is acquired, with the importer's own digest standing in for
 // every platform, to learn which platforms the planned jobs need, whether the
-// workflow defers jobs to a later stage, whether it can use the pinned Linux
+// workflow defers jobs to a later stage, whether it can use the pinned runtime
 // launcher, and whether hosted admission rejects it. These plans are discarded.
 func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest) (map[compiler.Platform]bool, bool, bool, error) {
 	request.RuntimeDistributions = map[compiler.Platform]string{
@@ -961,10 +966,10 @@ func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest)
 	options.ResolveActions = true
 	options.ActionSource = request.RepositorySource
 	bundle, _ := compiler.CompileBundlePlansContext(ctx, request.WorkflowPath, request.WorkflowSource, request.EventSource, request.Version, request.DistributionDigest, options)
-	return runtimePlatformsForBundle(bundle)
+	return runtimePlatformsForBundle(bundle, os.Getenv(pluginMultiplatformRunEnvironment) == "1")
 }
 
-func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bool, bool, bool, error) {
+func runtimePlatformsForBundle(bundle compiler.Bundle, multiplatformRun bool) (map[compiler.Platform]bool, bool, bool, error) {
 	platforms := make(map[compiler.Platform]bool, 2)
 	deferred := len(bundle.IR.Continuations) != 0
 	if err := validateUnprivilegedBundle(bundle); err != nil {
@@ -976,7 +981,9 @@ func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bo
 			continue
 		}
 		platforms[job.Platform] = true
-		pinned = pinned && job.Platform == compiler.PlatformLinuxAMD64 && job.Cache == nil && len(job.Agents) == 0
+		// Older plugins provide release metadata but only implement Linux amd64
+		// run mode. Keep their whole-import fallback unless the hook opts in.
+		pinned = pinned && (multiplatformRun || job.Platform == compiler.PlatformLinuxAMD64) && job.Cache == nil && len(job.Agents) == 0
 	}
 	return platforms, deferred, pinned, nil
 }

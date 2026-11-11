@@ -673,7 +673,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" {
 				return fmt.Errorf("job %q requires an HTTPS runtime URL without credentials or a fragment", job.Key)
 			}
-			if pipeline.Deferred || pipeline.DisableRunnerUser || !uuidPattern.MatchString(artifactProducer) || platform != "linux/amd64" || job.Stage != nil || job.Cache != nil || len(job.Agents) != 0 {
+			if pipeline.Deferred || pipeline.DisableRunnerUser || !uuidPattern.MatchString(artifactProducer) || job.Stage != nil || job.Cache != nil || len(job.Agents) != 0 {
 				return fmt.Errorf("job %q cannot use the pinned runtime plugin", job.Key)
 			}
 		}

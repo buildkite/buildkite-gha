@@ -101,12 +101,17 @@ reviewer-policy parity.
 
 ### Pinned runtime delivery
 
-Plugin imports may use plugin run mode only when all runnable jobs
-are static Linux amd64, runner-user setup is enabled, and no job needs custom
-cache-volume ownership or agent-tag setup. Make this decision before acquiring
-counterpart bytes or publishing jobs. Deferred and mixed-platform imports,
-custom URLs, local distributions, and importers without release metadata retain
-their existing artifact delivery.
+Plugin imports may use plugin run mode when all runnable jobs are static,
+runner-user setup is enabled, and no job needs custom cache-volume ownership or
+agent-tag setup. Linux arm64, Darwin arm64, Windows amd64, and mixed-platform
+imports also require `BUILDKITE_GHA_PLUGIN_MULTIPLATFORM_RUN=1` from the invoking
+plugin hook. Without it, retain the Linux-amd64-only boundary: release metadata
+alone does not prove consumer support. Windows remains an execution target,
+not an importer host.
+
+Make this whole-import decision before acquiring counterpart bytes or publishing
+jobs. Deferred imports, custom URLs, local distributions, and importers without
+release metadata retain their existing artifact delivery.
 
 Resolve runtime URLs and SHA-256 digests from the plugin's release metadata
 handoff, not another catalogue. Verify same-host metadata against the running
@@ -116,7 +121,8 @@ commit references. Fall back to bare `github-actions` when the reference is
 unversioned or cannot be determined. A fresh checkout uses repository HEAD;
 agents may reuse cached checkouts. The selected plugin must support run mode; a moving
 reference does not guarantee identical plugin code across workers or retries.
-Emit the runtime URL and digest, plan digest, and producer job UUID. Do not
+Select each job's runtime URL and digest for its platform, and emit its plan
+digest and producer job UUID. Do not
 upload executable artifacts for this path. Retries must keep the runtime pins
 and never resolve CLI releases at execution.
 Keep plan, event, target, source, and executable verification unchanged.

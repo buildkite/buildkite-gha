@@ -26,7 +26,9 @@ func TestPinnedRuntimePreservesSchedulingAndRetryPolicy(t *testing.T) {
 		ApprovalGates:      []ApprovalGate{{Key: "approval", Environment: "production"}},
 		Jobs: []Job{
 			{Key: "build", Label: "Build", Platform: "linux/amd64", PlanDigest: testDigest("build"), RequiresMise: true},
-			{Key: "deploy", Label: "Deploy", Platform: "linux/amd64", PlanDigest: testDigest("deploy"), Dependencies: []string{"build"}, ApprovalGate: "approval", SoftFail: true, Concurrency: 1, ConcurrencyGroup: "deploy"},
+			{Key: "arm", Label: "ARM", Platform: "linux/arm64", PlanDigest: testDigest("arm"), Dependencies: []string{"build"}},
+			{Key: "mac", Label: "Mac", Platform: "darwin/arm64", PlanDigest: testDigest("mac"), Dependencies: []string{"arm"}},
+			{Key: "deploy", Label: "Deploy", Platform: "windows/amd64", PlanDigest: testDigest("deploy"), Dependencies: []string{"mac"}, ApprovalGate: "approval", SoftFail: true, Concurrency: 1, ConcurrencyGroup: "deploy"},
 		},
 	}
 	legacy, err := Emit(pipeline)

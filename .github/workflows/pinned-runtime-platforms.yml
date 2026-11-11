@@ -1,0 +1,96 @@
+name: Pinned runtime platform proof
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.probe.outputs.value }}
+    steps:
+      - id: probe
+        env:
+          TOKEN: ${{ github.token }}
+          NAMESPACE: ${{ github.event.inputs.namespace }}
+        run: |
+          test -n "$TOKEN"
+          test -z "${BUILDKITE_AGENT_ACCESS_TOKEN:-}"
+          test ! -e .git
+          test "$(id -un)" = runner
+          test "$HOME" = /home/runner
+          sudo -n true
+          test "$RUNNER_ARCH" = X64
+          if test "$NAMESPACE" = true; then
+            rustc --version
+            printf 'FROM scratch\nLABEL proof=namespace\n' | docker build --load --platform linux/amd64 -t pinned-runtime-proof -
+            docker image inspect pinned-runtime-proof >/dev/null
+            docker image rm pinned-runtime-proof
+          fi
+          echo 'value=41' >> "$GITHUB_OUTPUT"
+          echo 'PLATFORM_PROOF linux/amd64 value=41 token=present'
+  arm:
+    needs: linux
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      value: ${{ steps.probe.outputs.value }}
+    steps:
+      - id: probe
+        env:
+          VALUE: ${{ needs.linux.outputs.value }}
+          TOKEN: ${{ github.token }}
+        run: |
+          test "$VALUE" = 41
+          test -n "$TOKEN"
+          test -z "${BUILDKITE_AGENT_ACCESS_TOKEN:-}"
+          test ! -e .git
+          test "$(id -un)" = runner
+          test "$HOME" = /home/runner
+          sudo -n true
+          test "$RUNNER_ARCH" = ARM64
+          echo 'value=42' >> "$GITHUB_OUTPUT"
+          echo 'PLATFORM_PROOF linux/arm64 value=42 token=present'
+  mac:
+    needs: arm
+    runs-on: macos-14
+    outputs:
+      value: ${{ steps.probe.outputs.value }}
+    steps:
+      - id: probe
+        env:
+          VALUE: ${{ needs.arm.outputs.value }}
+          TOKEN: ${{ github.token }}
+        run: |
+          test "$VALUE" = 42
+          test -n "$TOKEN"
+          test -z "${BUILDKITE_AGENT_ACCESS_TOKEN:-}"
+          test ! -e .git
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = ARM64
+          test -w /Users/runner/hostedtoolcache
+          echo 'value=43' >> "$GITHUB_OUTPUT"
+          echo 'PLATFORM_PROOF darwin/arm64 value=43 token=present'
+  windows:
+    needs: mac
+    runs-on: windows-2022
+    steps:
+      - env:
+          VALUE: ${{ needs.mac.outputs.value }}
+          TOKEN: ${{ github.token }}
+        run: |
+          if ($env:VALUE -ne '43') { throw 'output transport failed' }
+          if (-not $env:TOKEN) { throw 'missing provider token' }
+          if ($env:BUILDKITE_AGENT_ACCESS_TOKEN) { throw 'agent token leaked' }
+          if (Test-Path .git) { throw 'checkout was not skipped' }
+          if ($env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ARCH -ne 'X64') { throw 'wrong platform' }
+          Write-Output 'PLATFORM_PROOF windows/amd64 value=43 token=present'
+  failure:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - shell: bash
+        run: |
+          echo "PLATFORM_PROOF $RUNNER_OS/$RUNNER_ARCH expected failure=37"
+          exit 37

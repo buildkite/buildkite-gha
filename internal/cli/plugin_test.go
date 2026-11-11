@@ -997,6 +997,103 @@ func TestPluginPinsStaticLinuxRuntimeWithoutBinaryArtifacts(t *testing.T) {
 	}
 }
 
+func TestPluginPinsEachPlatformInMixedWorkflow(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{"mixed.yml": `on: push
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps: [{run: echo linux}]
+  arm:
+    runs-on: ubuntu-24.04-arm
+    steps: [{run: echo arm}]
+  mac:
+    runs-on: macos-14
+    steps: [{run: echo mac}]
+  windows:
+    needs: [linux, arm, mac]
+    runs-on: windows-2022
+    steps: [{run: Write-Output windows}]
+`})
+	t.Chdir(repository)
+	setCLIPluginBuildkiteEnvironment(t, "importer")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv(pluginMultiplatformRunEnvironment, "1")
+	configuration := map[string]any{"workflow": ".github/workflows/mixed.yml"}
+	t.Setenv(pluginConfigurationEnvironment, string(mustJSON(t, configuration)))
+	const reference = "github-actions#candidate-branch"
+	t.Setenv("BUILDKITE_PLUGINS", string(mustJSON(t, []any{map[string]any{reference: configuration}})))
+	platforms := map[string]compiler.Platform{
+		"ubuntu-latest": compiler.PlatformLinuxAMD64, "ubuntu-24.04-arm": compiler.PlatformLinuxARM64,
+		"macos-14": compiler.PlatformDarwinARM64, "windows-2022": compiler.PlatformWindowsAMD64,
+	}
+	assets := map[string]pluginReleaseAsset{}
+	resolutions := map[string]map[string]any{}
+	release := pluginRelease{TagName: "v1.2.3"}
+	for label, platform := range platforms {
+		digest := transport.Digest([]byte(platform.String()))
+		if platform.String() == runtime.GOOS+"/"+runtime.GOARCH {
+			digest = cliTestRuntimeDigest()
+		}
+		asset := pluginReleaseAsset{Name: pluginRuntimeAsset(platform), URL: "https://example.com/" + platform.String(), Digest: digest}
+		assets[platform.String()] = asset
+		release.Assets = append(release.Assets, asset)
+		resolutions[label] = map[string]any{"target": map[string]any{"queue": "runtime", "platform": platform.String()}}
+	}
+	t.Setenv(pluginReleaseEnvironment, string(mustJSON(t, release)))
+	server, _ := runnerResolutionServer(t, http.StatusOK, resolutions)
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "1.2.3", runner); code != 0 {
+		t.Fatalf("plugin code=%d: %s", code, &stderr)
+	}
+	for path := range runner.uploaded {
+		if strings.Contains(path, "/distributions/") {
+			t.Fatalf("pinned import published an executable: %s", path)
+		}
+	}
+	var pipeline struct {
+		Steps []struct {
+			Steps []struct {
+				Command string
+				Plugins []map[string]struct {
+					Run struct {
+						Plan    struct{ Digest, Producer string }
+						Runtime struct{ Platform, URL, SHA256 string }
+					}
+				}
+			}
+		}
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 4 {
+		t.Fatalf("expected four scheduled consumers:\n%s\n%s", runner.commands[len(runner.commands)-1].stdin, &stderr)
+	}
+	for _, step := range pipeline.Steps[0].Steps {
+		if step.Command != "" || len(step.Plugins) != 1 {
+			t.Fatalf("runtime was not delegated: %+v", step)
+		}
+		invocation := step.Plugins[0][reference].Run
+		asset, ok := assets[invocation.Runtime.Platform]
+		if !ok || invocation.Runtime.URL != asset.URL || invocation.Runtime.SHA256 != strings.TrimPrefix(asset.Digest, "sha256:") || invocation.Plan.Producer != cliTestJobID {
+			t.Fatalf("incorrect platform pin: %+v", invocation)
+		}
+		path, err := buildkitepipeline.PlanPath(invocation.Plan.Digest)
+		if err != nil || transport.Digest(runner.uploaded[path]) != invocation.Plan.Digest {
+			t.Fatalf("plan does not address uploaded bytes: %v", err)
+		}
+		job, err := plan.Decode(runner.uploaded[path])
+		if err != nil || job.RuntimeDistributionDigest() != asset.Digest {
+			t.Fatalf("plan executable binding differs from plugin pin: %v", err)
+		}
+		delete(assets, invocation.Runtime.Platform)
+	}
+}
+
 func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
