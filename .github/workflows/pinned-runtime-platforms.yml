@@ -11,6 +11,7 @@ jobs:
       - id: probe
         env:
           TOKEN: ${{ github.token }}
+          NAMESPACE: ${{ github.event.inputs.namespace }}
         run: |
           test -n "$TOKEN"
           test -z "${BUILDKITE_AGENT_ACCESS_TOKEN:-}"
@@ -19,6 +20,12 @@ jobs:
           test "$HOME" = /home/runner
           sudo -n true
           test "$RUNNER_ARCH" = X64
+          if test "$NAMESPACE" = true; then
+            rustc --version
+            printf 'FROM scratch\nLABEL proof=namespace\n' | docker build -t pinned-runtime-proof -
+            docker image inspect pinned-runtime-proof >/dev/null
+            docker image rm pinned-runtime-proof
+          fi
           echo 'value=41' >> "$GITHUB_OUTPUT"
           echo 'PLATFORM_PROOF linux/amd64 value=41 token=present'
   arm:
