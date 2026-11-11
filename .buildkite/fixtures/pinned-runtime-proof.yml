@@ -1,0 +1,12 @@
+name: Pinned runtime proof
+on: [push, workflow_dispatch]
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          test "$(id -un)" = runner
+          test "$HOME" = /home/runner
+          sudo -n true
+          printf 'PINNED_PROOF user=%s home=%s value=42\n' "$(id -un)" "$HOME"
+          exit "$(cat /tmp/buildkite-gha-proof-exit 2>/dev/null || echo 0)"

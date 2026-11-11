@@ -498,6 +498,15 @@ bk build create --pipeline buildkite/buildkite-gha \
 
 This suite covers shell jobs, concurrent steps, public and Docker actions, container runtime behavior, summaries, annotations, artifact upload, and artifact roundtrip. Use `COMPATIBILITY_PROOF=<target>` with `COMPATIBILITY_PROOF_COMMIT=<commit>` only when diagnosing one target. The available target names are in [`.buildkite/pipeline.yml`](../.buildkite/pipeline.yml).
 
+Use `COMPATIBILITY_PROOF=pinned-runtime` with
+`PINNED_RUNTIME_BASE_REVISION=<exact-baseline-commit>` to compare runtime delivery.
+The setup job publishes test executables; separate importer artifact inventories
+distinguish baseline distribution uploads from artifact-free pinned delivery.
+The proof uses real backend and artifact transport, fixture release metadata,
+and normal plugin installation through nested agent bootstrap. Its warm case
+replays retry context on the same worker; it is not a scheduler retry or a
+cross-worker cache proof. It also checks failure status and bad-digest rejection.
+
 Use `COMPATIBILITY_PROOF=scheduling` to probe output-derived matrix concurrency
 and parallel limits. Check job start and finish times: the group consumers must
 not overlap, the parallel consumers must run at most two at a time, and each
