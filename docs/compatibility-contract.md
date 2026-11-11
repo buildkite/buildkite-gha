@@ -74,6 +74,27 @@ qualifications in the user reference until their prerequisites are established.
 The following obligations explain boundaries that a refactor or compatibility
 extension could accidentally remove. They are not a second feature inventory.
 
+### Pinned runtime delivery
+
+Plugin imports may use the pinned execution plugin only when all runnable jobs
+are static Linux amd64, runner-user setup is enabled, and no job needs custom
+cache-volume ownership or agent-tag setup. Make this decision before acquiring
+counterpart bytes or publishing jobs. Deferred and mixed-platform imports,
+custom URLs, local distributions, and importers without release metadata retain
+their existing artifact delivery.
+
+Resolve runtime URLs and SHA-256 digests from the plugin's release metadata
+handoff, not another catalogue. Verify same-host metadata against the running
+executable. Emit an exact published plugin version, runtime URL and digest,
+plan digest, and producer job UUID. Do not upload executable artifacts for this
+path. Retries must keep those pins and never resolve releases at execution.
+Keep plan, event, target, source, and executable verification unchanged.
+
+The [import tests](../internal/cli/plugin_test.go) check artifact-free emission
+and legacy controls. The [pipeline tests](../internal/buildkite/pipeline_test.go)
+check unchanged scheduling and retry policy. These checks do not establish
+hosted plugin installation, cross-worker cache reuse, or platform parity.
+
 ### Event identity and workflow selection
 
 Preserve the original event identity through compilation, deferred uploads,

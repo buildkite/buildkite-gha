@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -17,6 +18,46 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"go.yaml.in/yaml/v4"
 )
+
+func TestPinnedRuntimePreservesSchedulingAndRetryPolicy(t *testing.T) {
+	pipeline := Pipeline{
+		CompilerStep: "importer", ArtifactProducer: "11111111-1111-4111-8111-111111111111",
+		DistributionDigest: testDigest("runtime"),
+		ApprovalGates:      []ApprovalGate{{Key: "approval", Environment: "production"}},
+		Jobs: []Job{
+			{Key: "build", Label: "Build", Platform: "linux/amd64", PlanDigest: testDigest("build"), RequiresMise: true},
+			{Key: "deploy", Label: "Deploy", Platform: "linux/amd64", PlanDigest: testDigest("deploy"), Dependencies: []string{"build"}, ApprovalGate: "approval", SoftFail: true, Concurrency: 1, ConcurrencyGroup: "deploy"},
+		},
+	}
+	legacy, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range pipeline.Jobs {
+		pipeline.Jobs[i].RuntimeURL = "https://example.com/runtime"
+	}
+	pinned, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before, after struct{ Steps []map[string]any }
+	if err := yaml.Unmarshal(legacy, &before); err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(pinned, &after); err != nil {
+		t.Fatal(err)
+	}
+	for i := range pipeline.Jobs {
+		if after.Steps[i]["command"] != nil || after.Steps[i]["plugins"] == nil {
+			t.Fatalf("job did not select the execution plugin: %v", after.Steps[i])
+		}
+		delete(before.Steps[i], "command")
+		delete(after.Steps[i], "plugins")
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("delivery changed scheduling, cache, environment or retry policy:\nbefore=%v\nafter=%v", before, after)
+	}
+}
 
 func TestEmitGolden(t *testing.T) {
 	producerDigest := testDigest("producer plan")

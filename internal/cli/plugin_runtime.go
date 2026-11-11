@@ -39,6 +39,7 @@ var pluginHTTPClient = securePluginHTTPClient()
 type pluginRuntimeAcquisition struct {
 	version  string
 	binaries map[compiler.Platform]string
+	pinned   bool
 }
 
 type pluginRelease struct {
@@ -88,6 +89,23 @@ func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[com
 				return nil, fmt.Errorf("%s is test/dev-only and is rejected by release builds", pluginDevRuntimeEnvironment(platform))
 			}
 		}
+	}
+	if a.pinned && len(required) != 0 {
+		release, err := loadPluginRelease(ctx, a.version)
+		if err != nil {
+			return nil, err
+		}
+		for platform := range required {
+			asset, err := pluginRuntimeReleaseAsset(*release, platform)
+			if err != nil {
+				return nil, err
+			}
+			if platform == hostPlatform && asset.Digest != host.digest {
+				return nil, errors.New("importer binary checksum does not match release metadata")
+			}
+			distributions[platform] = runtimeDistribution{digest: asset.Digest, url: asset.URL}
+		}
+		return distributions, nil
 	}
 	var release *pluginRelease
 	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformLinuxARM64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
@@ -227,7 +245,7 @@ func loadPluginRelease(ctx context.Context, version string) (*pluginRelease, err
 	return &release, nil
 }
 
-func acquirePluginRuntime(ctx context.Context, version string, platform compiler.Platform, client *http.Client, release pluginRelease, cachePath string) (runtimeDistribution, error) {
+func pluginRuntimeReleaseAsset(release pluginRelease, platform compiler.Platform) (pluginReleaseAsset, error) {
 	name := pluginRuntimeAsset(platform)
 	var selected pluginReleaseAsset
 	matches := 0
@@ -238,17 +256,27 @@ func acquirePluginRuntime(ctx context.Context, version string, platform compiler
 		}
 	}
 	if matches != 1 {
-		return runtimeDistribution{}, fmt.Errorf("release must contain exactly one raw asset %s", name)
+		return pluginReleaseAsset{}, fmt.Errorf("release must contain exactly one raw asset %s", name)
 	}
 	hash, ok := strings.CutPrefix(selected.Digest, "sha256:")
 	decoded, err := hex.DecodeString(hash)
 	if !ok || err != nil || len(decoded) != sha256.Size {
-		return runtimeDistribution{}, fmt.Errorf("release asset %s requires a valid SHA-256 digest", name)
+		return pluginReleaseAsset{}, fmt.Errorf("release asset %s requires a valid SHA-256 digest", name)
 	}
 	parsed, err := url.Parse(selected.URL)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" {
-		return runtimeDistribution{}, fmt.Errorf("release asset %s requires an HTTPS URL without credentials or a fragment", name)
+		return pluginReleaseAsset{}, fmt.Errorf("release asset %s requires an HTTPS URL without credentials or a fragment", name)
 	}
+	selected.Digest = "sha256:" + hex.EncodeToString(decoded)
+	return selected, nil
+}
+
+func acquirePluginRuntime(ctx context.Context, version string, platform compiler.Platform, client *http.Client, release pluginRelease, cachePath string) (runtimeDistribution, error) {
+	selected, err := pluginRuntimeReleaseAsset(release, platform)
+	if err != nil {
+		return runtimeDistribution{}, err
+	}
+	decoded, _ := hex.DecodeString(strings.TrimPrefix(selected.Digest, "sha256:"))
 	expected := [sha256.Size]byte(decoded)
 	contents := readVerifiedPluginRuntimeCache(cachePath, expected)
 	if contents == nil {
