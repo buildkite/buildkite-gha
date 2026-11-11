@@ -30,10 +30,9 @@ whether a template currently passes:
 | `rubyonrails` | PostgreSQL service container and a second lint job. |
 | `swift` | macOS runner and native Swift toolchain. |
 
-The CMake case runs by default. Both scans supply declared Windows mappings
-through `validate --runner-queue`; they do not need a Windows agent. These
-mappings test compilation and admission, not queue availability, automatic
-routing, or Windows execution.
+The CMake case runs by default. Validation needs neither runner mappings nor a
+Windows agent. These scans test compilation and admission, not queue availability,
+automatic routing, or Windows execution.
 
 Run the networked compile and production-profile scans with:
 

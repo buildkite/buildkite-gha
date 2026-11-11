@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,51 +14,52 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 )
 
-func TestValidateExplicitRunnerQueues(t *testing.T) {
+func TestValidateWindowsWithoutRunnerQueues(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "workflow.yml")
 	source := "on: [push, pull_request]\njobs:\n  test:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest, windows-2022]\n    runs-on: ${{ matrix.os }}\n    steps: [{run: 'echo compatible'}]\n"
 	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, mode := range [][]string{nil, {"--event-path", filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")}, {"--profile", "hosted", "--event", "push"}, {"--profile", "hosted", "--all-events"}} {
-		for _, mapped := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%v/mapped=%v", mode, mapped), func(t *testing.T) {
-				args := append([]string{"validate", "--format", "json"}, mode...)
-				if mapped {
-					args = append(args, "--runner-queue", "UBUNTU-latest=example-linux", "--runner-queue", "WINDOWS-latest=example-windows", "--runner-queue", "windows-2022=example-windows")
-				}
-				var stdout, stderr bytes.Buffer
-				code := Run(append(args, path), &stdout, &stderr, "test")
-				if (code == 0) != mapped {
-					t.Fatalf("code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
-				}
-				var report struct {
-					Result string `json:"result"`
-				}
-				if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
-					t.Fatal(err)
-				}
-				if mapped && report.Result != "admitted" && report.Result != "compilable" {
-					t.Fatalf("report=%s", &stdout)
-				}
-				if !mapped && !strings.Contains(stdout.String(), "No Windows runner target is configured") {
-					t.Fatalf("report=%s", &stdout)
-				}
-			})
-		}
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			args := append([]string{"validate", "--format", "json"}, mode...)
+			var stdout, stderr bytes.Buffer
+			if code := Run(append(args, path), &stdout, &stderr, "test"); code != 0 {
+				t.Fatalf("code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+			}
+			var report struct {
+				Result string `json:"result"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			want := "compilable"
+			if slices.Contains(mode, "hosted") {
+				want = "admitted"
+			}
+			if report.Result != want {
+				t.Fatalf("report=%s, want %s", &stdout, want)
+			}
+		})
 	}
-	for _, values := range [][]string{
-		{"--runner-queue"},
-		{"--runner-queue", "windows-latest"},
-		{"--runner-queue", "windows-latest=invalid/queue"},
-		{"--runner-queue", "windows-2019=example-windows"},
-		{"--runner-queue", "windows-latest=one", "--runner-queue", "WINDOWS-LATEST=two"},
-	} {
-		var stdout, stderr bytes.Buffer
-		args := append([]string{"validate", path}, values...)
-		if code := Run(args, &stdout, &stderr, "test"); code != 2 {
-			t.Fatalf("args=%v code=%d stdout=%s stderr=%s", args, code, &stdout, &stderr)
-		}
+}
+
+func TestValidateWindowsRejectsContainersWithoutRunnerQueues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workflow.yml")
+	source := "on: push\njobs:\n  test:\n    runs-on: windows-latest\n    container: alpine:3.20\n    steps: [{run: 'echo incompatible'}]\n"
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--profile", "hosted", "--event", "push", "--format", "json", path}, &stdout, &stderr, "test"); code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != compatibility.Failed || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodePlanConstruction || !strings.Contains(report.Diagnostics[0].Message, "requires Docker, which is unavailable on windows/amd64") {
+		t.Fatalf("report=%s", &stdout)
 	}
 }
 
@@ -166,7 +168,7 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 
 	t.Run("error", func(t *testing.T) {
 		workflowPath := filepath.Join(t.TempDir(), "unsupported.yml")
-		if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: windows-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: windows-2019\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		runner := &cliCaptureRunner{}
@@ -183,10 +185,8 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		}
 		for _, want := range []string{
 			`<h2 class="h4 mb2">Workflow could not be run</h2>`,
-			`<p><strong>No Windows runner target is configured.</strong></p>`,
-			`Windows jobs require a Windows Server 2022 x86-64 queue.`,
-			`Ask a pipeline administrator to map windows-latest or windows-2022 to that queue`,
-			`contact Buildkite support to check hosted Windows access and automatic routing.`,
+			`<p><strong>This Windows runner variant has no local mapping.</strong></p>`,
+			`Explicit Windows mappings support only windows-latest and windows-2022 on Windows Server 2022 x86-64.`,
 			`href="https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#windows-jobs"`,
 			"Job <code>test</code>",
 		} {

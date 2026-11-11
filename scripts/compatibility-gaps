@@ -42,7 +42,7 @@ blocked=0
 passed=0
 summary="$work/summary.md"
 printf '## Compatibility gap assessment\n\nSource: %s\n\n' "$(jq -r .source "$manifest")" >"$summary"
-printf 'Synthetic fixtures with declared runner mappings. This assessment does not check live queues, automatic routing, or Windows execution.\n\n' >>"$summary"
+printf 'Synthetic compatibility checks. Profile validation does not check live queues, automatic routing, or Windows execution.\n\n' >>"$summary"
 while IFS=$'\t' read -r id title workflow event mode test_name; do
   status=0
   report="$work/$id.out"
@@ -51,8 +51,6 @@ while IFS=$'\t' read -r id title workflow event mode test_name; do
     (
       cd "$fixture_root"
       "$work/buildkite-gha" validate --profile hosted --format json \
-        --runner-queue windows-latest=corpus-windows \
-        --runner-queue windows-2022=corpus-windows \
         --event "$event" ".github/workflows/$workflow"
     ) >"$report" 2>"$report_stderr" || status=$?
     result="$(jq -r '.result // "invalid-report"' "$report" 2>/dev/null || echo invalid-report)"

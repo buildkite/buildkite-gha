@@ -22,7 +22,7 @@ import (
 )
 
 func validate(ctx context.Context, args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
-	args, actionCacheDir, runnerTargets, err := validateConfigurationArgs(args)
+	args, actionCacheDir, err := validateActionCacheArgs(args)
 	if err != nil {
 		return usageError(stderr, "validate: %v", err)
 	}
@@ -44,15 +44,20 @@ func validate(ctx context.Context, args []string, stdout, stderr io.Writer, clie
 		return usageError(stderr, "validate: --profile hosted requires --event, --event-path, or --all-events; use bare validate <workflow> for event-independent syntax and trigger compatibility validation")
 	}
 	out := newProcessingOutput(ctx, "validate", format, stdout, stderr, agent)
-	var runtime *profileValidationRuntime
-	if len(runnerTargets) != 0 {
-		_, _, digest, executableErr := executable()
-		runtime = &profileValidationRuntime{runnerTargets: runnerTargets, distributionDigest: digest, executableErr: executableErr}
-	}
 	if allEvents {
-		return validateAllEvents(ctx, out, workflowPath, clientVersion, actionCacheDir, runtime, stderr)
+		return validateAllEvents(ctx, out, workflowPath, clientVersion, actionCacheDir, nil, stderr)
 	}
-	return validateOne(ctx, out, workflowPath, eventPath, eventName, profile, clientVersion, actionCacheDir, runtime, stderr)
+	return validateOne(ctx, out, workflowPath, eventPath, eventName, profile, clientVersion, actionCacheDir, nil, stderr)
+}
+
+// validationRunnerTargets supplements the compiler's presets for offline
+// compatibility checks. The queue is a placeholder required by the compiler;
+// validation never uploads these plans. Upload must resolve real targets.
+func validationRunnerTargets() map[string]compiler.RunnerTarget {
+	return map[string]compiler.RunnerTarget{
+		"windows-latest": {Platform: compiler.PlatformWindowsAMD64, Queue: "validation-windows"},
+		"windows-2022":   {Platform: compiler.PlatformWindowsAMD64, Queue: "validation-windows"},
+	}
 }
 
 func validateOne(ctx context.Context, out processingOutput, workflowPath, eventPath, eventName, profile, clientVersion, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
@@ -128,8 +133,7 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 			}
 		}
 	}
-	// Profile validation applies the hosted runner policy so validate and
-	// upload agree on supported labels, including the default macOS queue.
+	// Validation checks platform compatibility, not live queue availability.
 	request := hostedCompileRequest{
 		WorkflowPath:     workflowPath,
 		WorkflowSource:   source,
@@ -137,14 +141,11 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		Version:          commandVersion(clientVersion),
 		ImporterStep:     "buildkite-gha-profile-importer",
 		RepositorySource: repositorySource,
-	}
-	if runtime != nil {
-		request.RunnerTargets = runtime.runnerTargets
+		RunnerTargets:    validationRunnerTargets(),
 	}
 	validationOptions := compiler.DefaultOptions()
 	validationOptions.Runners.Targets = request.RunnerTargets
-	for label, target := range request.RunnerTargets {
-		delete(validationOptions.Runners.Labels, label)
+	for _, target := range request.RunnerTargets {
 		validationOptions.Runners.UntrustedQueues = append(validationOptions.Runners.UntrustedQueues, target.Queue)
 	}
 	if profile != "" {
@@ -224,7 +225,6 @@ type profileValidationRuntime struct {
 	actionSource       compiler.ActionSource
 	distributionDigest string
 	executableErr      error
-	runnerTargets      map[string]compiler.RunnerTarget
 }
 
 func validateAllEvents(ctx context.Context, out processingOutput, workflowPath, clientVersion, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
@@ -258,12 +258,11 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 		} else {
 			runtime = &profileValidationRuntime{
 				actionSource: actionSource, distributionDigest: runtime.distributionDigest, executableErr: runtime.executableErr,
-				runnerTargets: runtime.runnerTargets,
 			}
 		}
 	}
 	defer cleanup()
-	validationOptions := hostedOptions("", runtime.runnerTargets, nil)
+	validationOptions := hostedOptions("", validationRunnerTargets(), nil)
 	validationOptions.RepositorySource = runtime.actionSource
 	validation, validationErr := compiler.ValidateWithOptionsContext(ctx, workflowPath, source, validationOptions)
 	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)
@@ -314,46 +313,26 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 	return 0
 }
 
-func validateConfigurationArgs(args []string) ([]string, string, map[string]compiler.RunnerTarget, error) {
+func validateActionCacheArgs(args []string) ([]string, string, error) {
 	filtered := make([]string, 0, len(args))
 	var cacheDir string
-	targets := make(map[string]compiler.RunnerTarget)
 	seen := false
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--runner-queue" {
-			i++
-			if i == len(args) {
-				return nil, "", nil, fmt.Errorf("--runner-queue requires runs-on=value")
-			}
-			label, queue, ok := strings.Cut(args[i], "=")
-			if !ok || label == "" || queue == "" {
-				return nil, "", nil, fmt.Errorf("--runner-queue requires runs-on=value")
-			}
-			canonical, target, err := configuredRunnerTarget(label, queue, "")
-			if err != nil {
-				return nil, "", nil, err
-			}
-			if _, duplicate := targets[canonical]; duplicate {
-				return nil, "", nil, fmt.Errorf("--runner-queue for %q may only be specified once", canonical)
-			}
-			targets[canonical] = target
-			continue
-		}
 		if args[i] != "--action-cache-dir" {
 			filtered = append(filtered, args[i])
 			continue
 		}
 		if seen {
-			return nil, "", nil, fmt.Errorf("--action-cache-dir may only be specified once")
+			return nil, "", fmt.Errorf("--action-cache-dir may only be specified once")
 		}
 		seen = true
 		i++
 		if i == len(args) || strings.TrimSpace(args[i]) == "" {
-			return nil, "", nil, fmt.Errorf("--action-cache-dir requires a path")
+			return nil, "", fmt.Errorf("--action-cache-dir requires a path")
 		}
 		cacheDir = args[i]
 	}
-	return filtered, cacheDir, targets, nil
+	return filtered, cacheDir, nil
 }
 
 func validateArgs(args []string) (workflowPath, eventPath, eventName, format, profile string, allEvents bool, err error) {
