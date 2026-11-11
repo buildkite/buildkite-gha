@@ -437,7 +437,7 @@ func TestRequiredRuntimePlatformsFailsClosedBeforePartialAdmission(t *testing.T)
 			{Job: plan.Job{Workflow: plan.Workflow{LogicalJobID: "rejected"}, Target: plan.Target{StepKey: "rejected"}, RequiredCapabilities: []string{"privileged-container"}}},
 		},
 	}
-	platforms, _, _, admissionErr := runtimePlatformsForBundle(bundle)
+	platforms, _, _, admissionErr := runtimePlatformsForBundle(bundle, true)
 	if admissionErr == nil {
 		t.Fatal("requiredRuntimePlatforms() admission error = nil")
 	}
@@ -446,7 +446,7 @@ func TestRequiredRuntimePlatformsFailsClosedBeforePartialAdmission(t *testing.T)
 	}
 }
 
-func TestPinnedRuntimeAdmissionKeepsDeferredAndOtherPlatformsOnArtifacts(t *testing.T) {
+func TestPinnedRuntimeAdmissionRequiresConsumerCapabilityAndStaticJobs(t *testing.T) {
 	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformLinuxARM64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		for _, deferred := range []bool{false, true} {
 			bundle := compiler.Bundle{
@@ -459,9 +459,11 @@ func TestPinnedRuntimeAdmissionKeepsDeferredAndOtherPlatformsOnArtifacts(t *test
 			if deferred {
 				bundle.IR.Continuations = []compiler.RuntimeContinuation{{}}
 			}
-			_, _, pinned, err := runtimePlatformsForBundle(bundle)
-			if err != nil || pinned != (platform == compiler.PlatformLinuxAMD64 && !deferred) {
-				t.Fatalf("platform=%s deferred=%t: pinned=%t, error=%v", platform, deferred, pinned, err)
+			for _, capable := range []bool{false, true} {
+				_, _, pinned, err := runtimePlatformsForBundle(bundle, capable)
+				if err != nil || pinned != ((capable || platform == compiler.PlatformLinuxAMD64) && !deferred) {
+					t.Fatalf("platform=%s deferred=%t capable=%t: pinned=%t, error=%v", platform, deferred, capable, pinned, err)
+				}
 			}
 		}
 	}
