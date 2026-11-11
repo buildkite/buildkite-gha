@@ -85,24 +85,36 @@ func Parse(path string, source []byte) (*Workflow, error) {
 				trigger.Types = nil
 			}
 		}
-		if trigger.Event == "pull_request" {
+		if slices.Contains([]string{"pull_request", "issues", "issue_comment", "pull_request_review"}, trigger.Event) {
 			for _, field := range []struct {
 				name   string
 				values *[]string
 			}{
+				{"workflows", &trigger.Workflows},
 				{"branches", &trigger.Branches}, {"branches-ignore", &trigger.BranchesIgnore},
 				{"tags", &trigger.Tags}, {"tags-ignore", &trigger.TagsIgnore}, {"types", &trigger.Types},
 			} {
+				if trigger.Event != "pull_request" && field.name != "workflows" {
+					continue
+				}
 				filter := mappingValue(node, field.name)
 				if filter == nil {
 					continue
 				}
 				if filter.Tag == "!!null" {
 					*field.values = nil
+					continue
 				}
-				for _, item := range filter.Content {
+				items := filter.Content
+				if field.name == "workflows" && filter.Kind == yaml.ScalarNode {
+					items = []*yaml.Node{filter}
+				}
+				for _, item := range items {
 					if resolveAlias(item).Tag == "!!null" {
-						return nil, fmt.Errorf("%s:%d:%d: pull_request %s: null list members are invalid", path, item.Line, item.Column, field.name)
+						return nil, fmt.Errorf("%s:%d:%d: %s %s: null list members are invalid", path, item.Line, item.Column, trigger.Event, field.name)
+					}
+					if field.name == "workflows" && resolveAlias(item).Tag != "!!str" {
+						return nil, fmt.Errorf("%s:%d:%d: %s workflows: workflow names must be strings", path, item.Line, item.Column, trigger.Event)
 					}
 				}
 			}
@@ -339,6 +351,14 @@ func acceptedEmptyTriggerListsDiagnostics(document *yaml.Node) []expectedActionl
 		if types != nil && types.Kind == yaml.SequenceNode && len(types.Content) == 0 {
 			diagnostics = append(diagnostics, expectedActionlintDiagnostic{
 				Position: nodePosition(types), Prefix: `"types" section should not be empty`,
+			})
+		}
+	}
+	for _, event := range []string{"pull_request", "issues", "issue_comment", "pull_request_review"} {
+		filter := mappingValue(mappingValue(on, event), "workflows")
+		if filter != nil && filter.Kind == yaml.SequenceNode && len(filter.Content) == 0 {
+			diagnostics = append(diagnostics, expectedActionlintDiagnostic{
+				Position: nodePosition(filter), Prefix: `"workflows" section should not be empty`,
 			})
 		}
 	}

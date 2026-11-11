@@ -657,9 +657,6 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return strings.Join(parts, " && "), true, nil
 	case "pull_request":
-		if t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t, "workflows")
-		}
 		if t.Tags != nil && t.TagsIgnore != nil {
 			return "", false, triggerFilterError(t, fmt.Errorf("pull_request tags: include and ignore filters cannot be combined"), "tags", "tags-ignore")
 		}
@@ -882,9 +879,6 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "issues":
-		if t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t, "workflows")
-		}
 		if expressions.EventPredicate == "" || expressions.IssuesAction == "" {
 			return "", false, fmt.Errorf("issues requires effective event and action expressions")
 		}
@@ -903,7 +897,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "pull_request_review", "pull_request_review_comment":
-		if t.Workflows != nil {
+		if t.Event == "pull_request_review_comment" && t.Workflows != nil {
 			return "", false, unsupportedEventFilter(t, "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.PullRequestReviewAction == "" || expressions.PullRequestReviewAction == "null" {
@@ -924,9 +918,6 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "issue_comment":
-		if t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t, "workflows")
-		}
 		if expressions.EventPredicate == "" || expressions.IssueCommentAction == "" {
 			return "", false, fmt.Errorf("issue_comment requires effective event and action expressions")
 		}

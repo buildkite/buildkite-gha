@@ -12,10 +12,8 @@ func TestTriggerFilterErrorLocations(t *testing.T) {
 	for _, test := range []struct {
 		event, filter, value, message string
 	}{
-		{"pull_request_review", "workflows", "[CI]", "does not support the workflows filter"},
-		{"issue_comment", "workflows", "[CI]", "does not support the workflows filter"},
+		{"pull_request_review_comment", "workflows", "[CI]", "does not support the workflows filter"},
 		{"merge_group", "tags-ignore", "[v1]", "does not support the tags-ignore filter"},
-		{"pull_request", "workflows", "[CI]", "does not support the workflows filter"},
 		{"push", "types", "[created]", "does not support the types filter"},
 		{"release", "workflows", "[CI]", "does not support the workflows filter"},
 		{"deployment", "types", "[created]", "does not support the types filter"},
@@ -36,6 +34,41 @@ func TestTriggerFilterErrorLocations(t *testing.T) {
 			var located *TriggerError
 			if !errors.As(err, &located) || located.Position != (workflow.Position{Line: 4, Column: 5}) || !strings.Contains(err.Error(), test.message) {
 				t.Fatalf("error = %v, location = %#v", err, located)
+			}
+		})
+	}
+}
+
+func TestIgnoredWorkflowFilters(t *testing.T) {
+	for _, test := range []struct{ event, action string }{
+		{"pull_request", "opened"}, {"issues", "opened"},
+		{"issue_comment", "created"}, {"pull_request_review", "submitted"},
+	} {
+		t.Run(test.event, func(t *testing.T) {
+			trigger := workflow.Trigger{Event: test.event, Types: []string{test.action}, Workflows: []string{"nonexistent-workflow"}}
+			for _, action := range []string{test.action, "edited"} {
+				expressions := TriggerConditionExpressions{
+					EventPredicate: "true", PullRequestAction: yamlScalar(action), IssuesAction: yamlScalar(action),
+					IssueCommentAction: yamlScalar(action), PullRequestReviewAction: yamlScalar(action),
+				}
+				snapshot := TriggerEventSnapshot{
+					PullRequestAction: &action, IssuesAction: &action,
+					IssueCommentAction: &action, PullRequestReviewAction: &action,
+				}
+				condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, test.event, expressions, snapshot)
+				want := "(true && (" + yamlScalar(action) + " == " + yamlScalar(test.action) + "))"
+				if err != nil || !applicable || condition != want {
+					t.Fatalf("condition = %q, applicable = %t, error = %v; want %q", condition, applicable, err, want)
+				}
+				reason, err := TriggerFilterMismatchReason([]workflow.Trigger{trigger}, test.event, snapshot)
+				if err != nil || (reason == "") != (action == test.action) {
+					t.Fatalf("action %q: reason = %q, error = %v", action, reason, err)
+				}
+			}
+			condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger, {Event: "push"}}, "push",
+				TriggerConditionExpressions{EventPredicate: "true", Branch: `"feature"`, Tag: "null"}, TriggerEventSnapshot{})
+			if err != nil || !applicable || condition != "(true)" {
+				t.Fatalf("mixed push condition = %q, applicable = %t, error = %v", condition, applicable, err)
 			}
 		})
 	}
@@ -176,9 +209,7 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 		{name: "unknown release type", triggers: []workflow.Trigger{{Event: "release", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
 		{name: "release workflows", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Workflows: []string{"CI"}}}, want: "does not support the workflows filter"},
 		{name: "unknown issues type", triggers: []workflow.Trigger{{Event: "issues", Types: []string{"not-real"}}}, want: `issues activity type "not-real" cannot be mapped exactly`},
-		{name: "issues workflows", triggers: []workflow.Trigger{{Event: "issues", Workflows: []string{"CI"}}}, want: "issues does not support the workflows filter"},
 		{name: "unknown issue comment type", triggers: []workflow.Trigger{{Event: "issue_comment", Types: []string{"not-real"}}}, want: `issue_comment activity type "not-real" cannot be mapped exactly`},
-		{name: "issue comment workflows", triggers: []workflow.Trigger{{Event: "issue_comment", Workflows: []string{"CI"}}}, want: "issue_comment does not support the workflows filter"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -661,6 +692,10 @@ func TestTranslateEventTriggerConditionMatchesPullRequestPaths(t *testing.T) {
 			name:    "tag patterns do not constrain branch and path match",
 			trigger: workflow.Trigger{Event: "pull_request", Branches: []string{"main"}, TagsIgnore: []string{"**"}, Paths: []string{"**", "!docs/**"}},
 		},
+		{
+			name:    "workflow names do not constrain branch and path match",
+			trigger: workflow.Trigger{Event: "pull_request", Workflows: []string{"nonexistent-workflow"}, Branches: []string{"main"}, Paths: []string{"src/**"}},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{test.trigger}, "pull_request", expressions, snapshot)
@@ -670,7 +705,7 @@ func TestTranslateEventTriggerConditionMatchesPullRequestPaths(t *testing.T) {
 		})
 	}
 	condition, applicable, err := TranslateEventTriggerCondition(
-		[]workflow.Trigger{{Event: "pull_request", Branches: []string{"main"}, Tags: []string{"v*"}, Paths: []string{"web/**"}}},
+		[]workflow.Trigger{{Event: "pull_request", Workflows: []string{"nonexistent-workflow"}, Branches: []string{"main"}, Tags: []string{"v*"}, Paths: []string{"web/**"}}},
 		"pull_request",
 		expressions,
 		snapshot,

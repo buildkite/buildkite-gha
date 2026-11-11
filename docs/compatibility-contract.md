@@ -873,6 +873,43 @@ These experiments do not establish GHES, fork, or merge-group behavior. Release
 and activate the compatible CLI before the backend admits newly eligible PR
 workflows; otherwise selected builds can reach the old CLI rejection.
 
+### Workflow-name filters on other events
+
+Native GitHub.com experiments on November 11, 2026 admitted `workflows: [name]`
+on `pull_request`, `issues`, `issue_comment`, and `pull_request_review`. Each
+event selected both a real workflow name and an impossible name, alongside an
+unfiltered control. The [immutable fixtures](https://github.com/sj26-testier/gha-e2e-onboarding-r-5745e8ec0a6e/tree/62731440250a7841633fc55b7596f3754ed2cd40/.github/workflows)
+and impossible-name runs establish the tested selection behavior:
+
+| Event and activity | Successful native run |
+| --- | --- |
+| `pull_request.opened` | [Pull request](https://github.com/sj26-testier/gha-e2e-onboarding-r-5745e8ec0a6e/actions/runs/42952008365) |
+| `issues.opened` | [Issue](https://github.com/sj26-testier/gha-e2e-onboarding-r-5745e8ec0a6e/actions/runs/42952007364) |
+| `issue_comment.created` on an issue | [Comment](https://github.com/sj26-testier/gha-e2e-onboarding-r-5745e8ec0a6e/actions/runs/42952008500) |
+| `pull_request_review.submitted`, COMMENT review | [Review](https://github.com/sj26-testier/gha-e2e-onboarding-r-5745e8ec0a6e/actions/runs/42952008999) |
+
+Ignore workflow names for these four events without changing their activity,
+branch, path, identity, or credential rules. The [CLI tests](../internal/cli/cli_test.go)
+protect mixed-trigger admission; [trigger tests](../internal/buildkite/triggers_test.go)
+protect selection and retained constraints. Release and activate the compatible
+CLI before backend admission changes.
+
+The [value-shape fixtures](https://github.com/sj26-testier/gha-e2e-onboarding-r-d68291e45441/tree/7b4f52ae954a4988fc1fa1449bff40ad92a2f50a/.github/workflows)
+admit whole-value null, empty arrays, scalar strings, and two-name string lists
+for all four events. Each form also ran on its declared event. Maps produced
+[explicit validation errors](https://github.com/sj26-testier/gha-e2e-onboarding-r-d68291e45441/actions/runs/42952711199),
+as did [null list members](https://github.com/sj26-testier/gha-e2e-onboarding-r-d68291e45441/actions/runs/42952709946).
+Preserve that distinction through YAML aliases. Accept nonempty strings, arrays
+of nonempty strings, and whole-value null; numeric and boolean coercion remains
+unsupported. Those coercions and empty-string values lack native evidence.
+
+The [mixed-push fixtures](https://github.com/sj26-testier/gha-e2e-onboarding-r-5745e8ec0a6e/tree/d96dfc074f6e16974839f1d351d03887bb5dd975/.github/workflows)
+also admitted `merge_group.workflows` and `release.workflows`, but no merge-group
+or release event was generated. Their selection behavior remains unresolved;
+retained rejection is a compatibility limitation, not proven GitHub rejection.
+This evidence does not establish GHES, forks, other activities, or other value
+shapes. It does not add `workflow_run` delivery or workflow chaining.
+
 ### Merge-group destruction
 
 The reference reports a September 24, 2026 single-pull-request queue experiment:

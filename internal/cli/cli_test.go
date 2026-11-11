@@ -248,6 +248,52 @@ func TestRunPullRequestTagFilterFixture(t *testing.T) {
 	}
 }
 
+func TestRunValidateIgnoredWorkflowFilters(t *testing.T) {
+	for _, event := range []string{"pull_request", "issues", "issue_comment", "pull_request_review"} {
+		for _, test := range []struct{ value, wantError string }{
+			{value: "[nonexistent-workflow]"},
+			{value: "nonexistent-workflow"},
+			{value: "[first-missing, second-missing]"},
+			{value: "null"},
+			{value: "[]"},
+			{value: "['null']"},
+			{value: "[&name 'null', *name]"},
+			{value: "*empty"},
+			{value: "{unexpected: name}", wantError: "sequence node"},
+			{value: "[name, null]", wantError: "null list members are invalid"},
+			{value: "[name, *empty]", wantError: "null list members are invalid"},
+			{value: "false", wantError: "workflow names must be strings"},
+			{value: "[42]", wantError: "workflow names must be strings"},
+			{value: "['']", wantError: "string should not be empty"},
+		} {
+			t.Run(event+"/"+test.value, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "workflow.yml")
+				anchor := ""
+				if strings.Contains(test.value, "*empty") {
+					anchor = "    branches: &empty null\n"
+				}
+				source := "on:\n  push:\n  " + event + ":\n" + anchor + "    workflows: " + test.value + "\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: 'echo ok'}]\n"
+				if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var stdout, stderr bytes.Buffer
+				code := Run([]string{"validate", "--format", "json", path}, &stdout, &stderr, "dev")
+				var report compatibility.ProcessingReport
+				if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+					t.Fatal(err)
+				}
+				if test.wantError != "" {
+					if code != 1 || report.Result != "incompatible" || !strings.Contains(stdout.String(), test.wantError) {
+						t.Fatalf("validate code = %d, report = %s; want %q", code, &stdout, test.wantError)
+					}
+				} else if code != 0 || report.Result != "compilable" || len(report.Diagnostics) != 0 {
+					t.Fatalf("validate code = %d, report = %s, stderr = %s", code, &stdout, &stderr)
+				}
+			})
+		}
+	}
+}
+
 func TestRunValidateAndCompile(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -269,14 +315,11 @@ func TestRunValidateAndCompile(t *testing.T) {
 			{name: "unsupported event", trigger: "repository_dispatch", want: `unsupported GitHub trigger event "repository_dispatch"`},
 			{name: "malformed path filter", trigger: "push:\n    paths: ['!src/**']", want: "must follow a positive pattern"},
 			{name: "mixed branch filters", trigger: "push:\n    branches: [main]\n    branches-ignore: [release]", want: "include and ignore filters cannot be combined"},
-			{name: "pull request workflow filter", trigger: "pull_request:\n    workflows: [CI]", want: "pull_request does not support the workflows filter"},
 			{name: "conflicting pull request tag filters", trigger: "pull_request:\n    tags: []\n    tags-ignore: []", want: "include and ignore filters cannot be combined"},
 			{name: "unknown release activity", trigger: "release:\n    types: [not-real]", want: `release activity type "not-real" cannot be mapped exactly`},
 			{name: "release workflow filter", trigger: "release:\n    types: [published]\n    workflows: [CI]", want: "release does not support the workflows filter"},
 			{name: "unknown issues activity", trigger: "issues:\n    types: [not-real]", want: `issues activity type "not-real" cannot be mapped exactly`},
-			{name: "issues workflow filter", trigger: "issues:\n    workflows: [CI]", want: "issues does not support the workflows filter"},
 			{name: "unknown issue comment activity", trigger: "issue_comment:\n    types: [not-real]", want: `issue_comment activity type "not-real" cannot be mapped exactly`},
-			{name: "issue comment workflow filter", trigger: "issue_comment:\n    workflows: [CI]", want: "issue_comment does not support the workflows filter"},
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
