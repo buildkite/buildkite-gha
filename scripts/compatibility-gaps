@@ -66,13 +66,14 @@ while IFS=$'\t' read -r id title workflow event mode test_name; do
       reason="$(jq -r '[.diagnostics[]?.message] | unique | join(" ") | if length == 0 then "Validation did not produce a diagnostic." else . end' "$report" 2>/dev/null || echo 'Validation report could not be read.')"
     fi
   elif [[ "$mode" == agent-api ]]; then
-    mise exec -- go test ./internal/cli -run "^${test_name}$" -count=1 >"$report" 2>&1 || status=$?
-    if [[ "$status" == 0 ]]; then
+    mise exec -- go test -json ./internal/cli -run "^${test_name}$" -count=1 >"$report" || status=$?
+    if [[ "$status" == 0 ]] && jq -se --arg test "$test_name" \
+      'any(.[]; .Action == "pass" and .Test == $test)' "$report" >/dev/null; then
       outcome=passing
       reason="Approval gates, secret-name mapping, and variables passed with a simulated Agent API; live access and GitHub reviewer identity parity are not assessed."
     else
       outcome=blocked
-      reason="The simulated Agent API integration test failed."
+      reason="The simulated Agent API integration test did not pass (failed, skipped, or missing); run it on Linux amd64."
     fi
   else
     mise exec -- go test -tags compatibility_gaps ./internal/runtime \

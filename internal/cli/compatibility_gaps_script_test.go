@@ -30,7 +30,14 @@ EOF
 fi
 if [ "$1" = exec ] && [ "$2" = -- ] && [ "$3" = go ] && [ "$4" = test ]; then
   case "$*" in
-    *./internal/cli*) exit "$ENVIRONMENT_TEST_STATUS" ;;
+    *./internal/cli*)
+      echo 'go: downloading test dependencies' >&2
+      if [ "$ENVIRONMENT_TEST_RESULT" != missing ]; then
+        printf '{"Action":"%s","Test":"TestRunUploadResolvesEnvironmentsThroughAgent"}\n' "$ENVIRONMENT_TEST_RESULT"
+      fi
+      echo '{"Action":"pass","Package":"github.com/buildkite/buildkite-gha/internal/cli"}'
+      if [ "$ENVIRONMENT_TEST_RESULT" = fail ]; then exit 1; fi
+      ;;
   esac
   exit 0
 fi
@@ -42,8 +49,8 @@ exit 2
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, status := range []string{"0", "1"} {
-		t.Run("environment-test-status-"+status, func(t *testing.T) {
+	for _, result := range []string{"pass", "fail", "skip", "missing"} {
+		t.Run("environment-test-"+result, func(t *testing.T) {
 			annotationPath := filepath.Join(t.TempDir(), "annotation.md")
 			cmd := exec.Command(filepath.Join(root, "scripts", "compatibility-gaps"))
 			cmd.Dir = root
@@ -51,16 +58,16 @@ exit 2
 				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 				"BUILDKITE=true",
 				"BUILDKITE_JOB_ID=test-job",
-				"ENVIRONMENT_TEST_STATUS="+status,
+				"ENVIRONMENT_TEST_RESULT="+result,
 				"ANNOTATION_PATH="+annotationPath,
 			)
 			output, err := cmd.CombinedOutput()
-			if (err == nil) != (status == "0") {
+			if (err == nil) != (result == "pass") {
 				t.Fatalf("compatibility-gaps: %v\n%s", err, output)
 			}
 			text := string(output)
 			tally := "Compatibility gaps: 16 passing; 0 blocked."
-			if status == "1" {
+			if result != "pass" {
 				tally = "Compatibility gaps: 15 passing; 1 blocked."
 			}
 			if !strings.Contains(text, "upload-artifact-versions: passing") || !strings.Contains(text, tally) {
