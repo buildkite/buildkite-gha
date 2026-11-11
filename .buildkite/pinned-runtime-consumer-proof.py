@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -59,19 +58,13 @@ def plugin_platforms():
     # contract. The plugin proof preserves plans but adapts their delivery.
     ref = os.environ["PINNED_PROOF_PLUGIN_REF"]
     assert re.fullmatch(r"[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+", ref)
-    fixture = Path(".github/workflows/pinned-runtime-platforms.yml")
-    assert not fixture.exists()
     with tempfile.TemporaryDirectory(prefix="pinned-plugin-proof-") as tmp:
         run("git", "clone", "--filter=blob:none", "--no-checkout",
             "https://github.com/buildkite-plugins/github-actions-buildkite-plugin.git", tmp)
         run("git", "fetch", "--depth=1", "origin", ref, cwd=tmp)
         run("git", "checkout", "--detach", "FETCH_HEAD", cwd=tmp)
-        shutil.copyfile(Path(tmp) / fixture, fixture)
-        try:
-            env = dict(os.environ, PINNED_PROOF_REPOSITORY="buildkite/buildkite-gha")
-            run("python3", str(Path(tmp) / ".buildkite/pinned-runtime-proof.py"), "platforms", env=env)
-        finally:
-            fixture.unlink()
+        env = dict(os.environ, PINNED_PROOF_REPOSITORY="buildkite/buildkite-gha")
+        run("python3", str(Path(tmp) / ".buildkite/pinned-runtime-proof.py"), "platforms", env=env)
 
 
 def local():
