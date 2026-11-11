@@ -19,12 +19,12 @@ func TestValidateExplicitRunnerQueues(t *testing.T) {
 	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range [][]string{nil, {"--profile", "hosted", "--event", "push"}, {"--profile", "hosted", "--all-events"}} {
+	for _, mode := range [][]string{nil, {"--event-path", filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")}, {"--profile", "hosted", "--event", "push"}, {"--profile", "hosted", "--all-events"}} {
 		for _, mapped := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%v/mapped=%v", mode, mapped), func(t *testing.T) {
 				args := append([]string{"validate", "--format", "json"}, mode...)
 				if mapped {
-					args = append(args, "--runner-queue", "WINDOWS-latest=example-windows", "--runner-queue", "windows-2022=example-windows")
+					args = append(args, "--runner-queue", "UBUNTU-latest=example-linux", "--runner-queue", "WINDOWS-latest=example-windows", "--runner-queue", "windows-2022=example-windows")
 				}
 				var stdout, stderr bytes.Buffer
 				code := Run(append(args, path), &stdout, &stderr, "test")

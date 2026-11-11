@@ -143,7 +143,8 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 	}
 	validationOptions := compiler.DefaultOptions()
 	validationOptions.Runners.Targets = request.RunnerTargets
-	for _, target := range request.RunnerTargets {
+	for label, target := range request.RunnerTargets {
+		delete(validationOptions.Runners.Labels, label)
 		validationOptions.Runners.UntrustedQueues = append(validationOptions.Runners.UntrustedQueues, target.Queue)
 	}
 	if profile != "" {
