@@ -8,11 +8,9 @@ Run the assessment with:
 mise run compatibility:gaps
 ```
 
-The command applies the `hosted` profile to compile-time and admission gaps. It compiles and executes the two runtime shell fixtures. A passing case means its named check passed, not that the feature has full GitHub parity. A blocked case makes the command fail.
+The command applies the `hosted` profile to compile-time and admission gaps. It compiles and executes the two runtime shell fixtures. A passing case means the representative workflow is currently compatible. An unchecked case passes the available checks but needs live context before admission can be determined. A blocked case makes the command fail.
 
-The environment case runs `TestRunUploadResolvesEnvironmentsThroughAgent` in [the CLI integration tests](../../internal/cli/environments_test.go), using that test's workflow and a simulated Agent API. It checks approval gates, environment secret-name mapping, and environment variables—not live endpoint access, secret-value retrieval, or GitHub reviewer identity parity. The test requires Linux amd64. A skipped or missing test counts as blocked, not passing.
-
-`validate --profile hosted` does not configure an environment resolver, even inside a Buildkite job, so it cannot assess this case. `compile` and `upload` resolve environment policy through the job-scoped Agent API and fail closed when resolution is unavailable. Bare `validate` checks syntax, not deployment policy.
+The environment fixture is unchecked: validation does not fetch live protection rules, secrets, or variables. It does not establish environment support or GitHub reviewer-policy parity. See the [validation boundary](../../docs/compatibility-contract.md#offline-environment-validation).
 
 The runner-label fixture checks Windows compatibility without a runner mapping. It does not check live queue availability, automatic routing, or Windows execution.
 

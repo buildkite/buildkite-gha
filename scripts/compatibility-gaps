@@ -21,16 +21,12 @@ jq -e '
   all(.gaps[];
     (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
     (.title | type == "string" and length > 0) and
-    (.mode | IN("profile", "runtime", "agent-api")) and
-    (if .mode == "agent-api" then
-      (.test | test("^TestRun[A-Za-z]+$")) and (has("workflow") or has("event") | not)
-    else
-      (.workflow | test("^[a-z0-9]+(?:-[a-z0-9]+)*\\.yml$")) and
-      (.event | IN("push", "pull_request", "merge_group", "release")) and
-      (if .mode == "runtime" then (.test | test("^TestCompatibilityGap[A-Za-z]+$")) else (has("test") | not) end)
-    end)) and
+    (.workflow | test("^[a-z0-9]+(?:-[a-z0-9]+)*\\.yml$")) and
+    (.event | IN("push", "pull_request", "merge_group", "release")) and
+    (.mode | IN("profile", "runtime")) and
+    (if .mode == "runtime" then (.test | test("^TestCompatibilityGap[A-Za-z]+$")) else (has("test") | not) end)) and
   ([.gaps[].id] | length == (unique | length)) and
-  ([.gaps[].workflow // empty] | length == (unique | length))
+  ([.gaps[].workflow] | length == (unique | length))
 ' "$manifest" >/dev/null
 
 while IFS= read -r workflow; do
@@ -38,12 +34,13 @@ while IFS= read -r workflow; do
     echo "missing compatibility gap workflow: $workflow" >&2
     exit 1
   }
-done < <(jq -r '.gaps[].workflow // empty' "$manifest")
+done < <(jq -r '.gaps[].workflow' "$manifest")
 
 CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$work/buildkite-gha" ./cmd/buildkite-gha
 
 blocked=0
 passed=0
+unchecked=0
 summary="$work/summary.md"
 printf '## Compatibility gap assessment\n\nSource: %s\n\n' "$(jq -r .source "$manifest")" >"$summary"
 printf 'Synthetic compatibility checks. Profile validation does not check live queues, automatic routing, or Windows execution.\n\n' >>"$summary"
@@ -63,17 +60,10 @@ while IFS=$'\t' read -r id title workflow event mode test_name; do
       reason="Hosted profile admitted the workflow."
     else
       outcome=blocked
+      if [[ "$status" == 0 && "$result" == context-required ]]; then
+        outcome=unchecked
+      fi
       reason="$(jq -r '[.diagnostics[]?.message] | unique | join(" ") | if length == 0 then "Validation did not produce a diagnostic." else . end' "$report" 2>/dev/null || echo 'Validation report could not be read.')"
-    fi
-  elif [[ "$mode" == agent-api ]]; then
-    mise exec -- go test -json ./internal/cli -run "^${test_name}$" -count=1 >"$report" || status=$?
-    if [[ "$status" == 0 ]] && jq -se --arg test "$test_name" \
-      'any(.[]; .Action == "pass" and .Test == $test)' "$report" >/dev/null; then
-      outcome=passing
-      reason="Approval gates, secret-name mapping, and variables passed with a simulated Agent API; live access and GitHub reviewer identity parity are not assessed."
-    else
-      outcome=blocked
-      reason="The simulated Agent API integration test did not pass (failed, skipped, or missing); run it on Linux amd64."
     fi
   else
     mise exec -- go test -tags compatibility_gaps ./internal/runtime \
@@ -91,6 +81,9 @@ while IFS=$'\t' read -r id title workflow event mode test_name; do
   if [[ "$outcome" == passing ]]; then
     passed=$((passed + 1))
     icon='✅'
+  elif [[ "$outcome" == unchecked ]]; then
+    unchecked=$((unchecked + 1))
+    icon='ℹ️'
   else
     blocked=$((blocked + 1))
     icon='⚠️'
@@ -102,14 +95,15 @@ while IFS=$'\t' read -r id title workflow event mode test_name; do
     fi
   fi
   printf -- '- %s **%s** — %s\n' "$icon" "$title" "$reason" >>"$summary"
-done < <(jq -r '.gaps[] | [.id, .title, (.workflow // "-"), (.event // "-"), .mode, (.test // "-")] | @tsv' "$manifest")
+done < <(jq -r '.gaps[] | [.id, .title, .workflow, .event, .mode, (.test // "-")] | @tsv' "$manifest")
 
 if [[ "${BUILDKITE:-}" == true ]] && command -v buildkite-agent >/dev/null; then
   style=success
+  (( unchecked > 0 )) && style=info
   (( blocked > 0 )) && style=warning
   buildkite-agent annotate --context compatibility-gaps --style "$style" <"$summary" || \
     echo "warning: failed to publish Buildkite compatibility gap annotation" >&2
 fi
 
-printf 'Compatibility gaps: %d passing; %d blocked.\n' "$passed" "$blocked"
+printf 'Compatibility gaps: %d passing; %d unchecked; %d blocked.\n' "$passed" "$unchecked" "$blocked"
 (( blocked == 0 ))

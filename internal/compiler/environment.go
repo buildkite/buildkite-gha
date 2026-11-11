@@ -79,10 +79,6 @@ func resolveJobEnvironments(ctx context.Context, instances []JobInstance, event 
 			finding(fmt.Errorf("job %q declares environment %q inside a reusable workflow; environments are only supported on jobs of the top-level workflow", instance.LogicalJobID, instance.Environment))
 			continue
 		}
-		if options.EnvironmentSource == nil {
-			finding(fmt.Errorf("job %q declares environment %q, but environments resolve only through the job-scoped Buildkite Agent API; run this command in a Buildkite job, or remove the environment", instance.LogicalJobID, instance.Environment))
-			continue
-		}
 		if event.Provider != "github" {
 			finding(fmt.Errorf("job %q declares environment %q, but environments require a GitHub event repository", instance.LogicalJobID, instance.Environment))
 			continue
@@ -96,6 +92,11 @@ func resolveJobEnvironments(ctx context.Context, instances []JobInstance, event 
 			continue
 		}
 		prefixes[prefix] = instance.Environment
+		if options.EnvironmentSource == nil {
+			err := fmt.Errorf("job %q declares environment %q, but environments resolve only through the job-scoped Buildkite Agent API; run compile or upload in a Buildkite job with Agent API access", instance.LogicalJobID, instance.Environment)
+			errs = append(errs, attributedProcessingFinding(StageGraph, CodeContextRequired, "context", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, instance.Key, "", 0, err))
+			continue
+		}
 		identity := strings.ToLower(instance.Environment)
 		result, ok := resolved[identity]
 		if !ok {
