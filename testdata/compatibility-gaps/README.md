@@ -10,6 +10,8 @@ mise run compatibility:gaps
 
 The command applies the `hosted` profile to compile-time and admission gaps. It compiles and executes the two runtime shell fixtures. A passing case means the representative workflow is currently compatible. A blocked case makes the command fail.
 
+The runner-label fixture checks Windows compatibility without a runner mapping. It does not check live queue availability, automatic routing, or Windows execution.
+
 The pull-request tag fixture checks admission, not positive selection. Its nonempty tag-only filter does not select pull requests. Blocking CLI and trigger tests cover this distinction and matching branch combinations; see the [native evidence contract](../../docs/compatibility-contract.md#pull-request-tag-filter-admission-and-selection).
 
 The PowerShell fixture requires `pwsh` on `PATH` and runs the installed interpreter.

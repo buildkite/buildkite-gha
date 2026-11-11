@@ -50,6 +50,16 @@ func validate(ctx context.Context, args []string, stdout, stderr io.Writer, clie
 	return validateOne(ctx, out, workflowPath, eventPath, eventName, profile, clientVersion, actionCacheDir, nil, stderr)
 }
 
+// validationRunnerTargets supplements the compiler's presets for offline
+// compatibility checks. The queue is a placeholder required by the compiler;
+// validation never uploads these plans. Upload must resolve real targets.
+func validationRunnerTargets() map[string]compiler.RunnerTarget {
+	return map[string]compiler.RunnerTarget{
+		"windows-latest": {Platform: compiler.PlatformWindowsAMD64, Queue: "validation-windows"},
+		"windows-2022":   {Platform: compiler.PlatformWindowsAMD64, Queue: "validation-windows"},
+	}
+}
+
 func validateOne(ctx context.Context, out processingOutput, workflowPath, eventPath, eventName, profile, clientVersion, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
 	return validateOneSource(ctx, out, workflowPath, nil, eventPath, eventName, profile, clientVersion, actionCacheDir, runtime, stderr)
 }
@@ -123,8 +133,7 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 			}
 		}
 	}
-	// Profile validation applies the hosted runner policy so validate and
-	// upload agree on supported labels, including the default macOS queue.
+	// Validation checks platform compatibility, not live queue availability.
 	request := hostedCompileRequest{
 		WorkflowPath:     workflowPath,
 		WorkflowSource:   source,
@@ -132,8 +141,13 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		Version:          commandVersion(clientVersion),
 		ImporterStep:     "buildkite-gha-profile-importer",
 		RepositorySource: repositorySource,
+		RunnerTargets:    validationRunnerTargets(),
 	}
 	validationOptions := compiler.DefaultOptions()
+	validationOptions.Runners.Targets = request.RunnerTargets
+	for _, target := range request.RunnerTargets {
+		validationOptions.Runners.UntrustedQueues = append(validationOptions.Runners.UntrustedQueues, target.Queue)
+	}
 	if profile != "" {
 		validationOptions = request.validationOptions()
 	}
@@ -161,9 +175,10 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		// digest stands in for every platform's runtime distribution.
 		request.DistributionDigest = distributionDigest
 		request.RuntimeDistributions = map[compiler.Platform]string{
-			compiler.PlatformLinuxAMD64:  distributionDigest,
-			compiler.PlatformLinuxARM64:  distributionDigest,
-			compiler.PlatformDarwinARM64: distributionDigest,
+			compiler.PlatformLinuxAMD64:   distributionDigest,
+			compiler.PlatformLinuxARM64:   distributionDigest,
+			compiler.PlatformDarwinARM64:  distributionDigest,
+			compiler.PlatformWindowsAMD64: distributionDigest,
 		}
 		preflight, profileErr := compileHostedRequest(ctx, request)
 		applyHostedCompilation(&processingReport, workflowPath, preflight, profileErr)
@@ -247,7 +262,7 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 		}
 	}
 	defer cleanup()
-	validationOptions := hostedOptions("", nil, nil)
+	validationOptions := hostedOptions("", validationRunnerTargets(), nil)
 	validationOptions.RepositorySource = runtime.actionSource
 	validation, validationErr := compiler.ValidateWithOptionsContext(ctx, workflowPath, source, validationOptions)
 	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)

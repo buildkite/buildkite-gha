@@ -561,7 +561,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate generated pull request still finds body incompatibility", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  pull_request:\n    paths: [src/**]\njobs:\n  test:\n    runs-on: windows-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  pull_request:\n    paths: [src/**]\njobs:\n  test:\n    runs-on: windows-2019\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -1041,7 +1041,7 @@ jobs:
       - if: ${{ unsupported('go.sum') }}
         run: true
   bad-runner:
-    runs-on: windows-latest
+    runs-on: windows-2019
     steps:
       - run: true
 `)
@@ -1081,7 +1081,7 @@ func TestProcessingReportStageAttributionDoesNotDependOnWorkflowPath(t *testing.
 	for _, name := range []string{"matrix.yml", "workflow.yml"} {
 		t.Run(name, func(t *testing.T) {
 			workflowPath := filepath.Join(t.TempDir(), name)
-			workflow := []byte("on: push\njobs:\n  test:\n    runs-on: windows-latest\n    steps:\n      - run: true\n")
+			workflow := []byte("on: push\njobs:\n  test:\n    runs-on: windows-2019\n    steps:\n      - run: true\n")
 			if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -1215,7 +1215,7 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-2019]
     runs-on: ${{ matrix.os }}
     steps:
       - run: true
@@ -1326,7 +1326,7 @@ func TestProcessingReportRedactsEventDerivedRunnerValues(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Diagnostics) != 1 || strings.Contains(report.Diagnostics[0].Message, sentinel) || strings.Contains(report.Diagnostics[0].Detail, sentinel) || report.Diagnostics[0].Message != "Runner label has no runner-target mapping. Configure a mapping for this label or use a mapped runner label." || report.Diagnostics[0].Detail != "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest." {
+	if len(report.Diagnostics) != 1 || strings.Contains(report.Diagnostics[0].Message, sentinel) || strings.Contains(report.Diagnostics[0].Detail, sentinel) || report.Diagnostics[0].Message != "Runner label has no runner-target mapping. Configure a mapping for this label or use a mapped runner label." || report.Diagnostics[0].Detail != "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest, windows-2022, windows-latest." {
 		t.Fatalf("diagnostics = %#v", report.Diagnostics)
 	}
 }
@@ -1660,7 +1660,7 @@ jobs:
     steps:
       - run: true
   bad:
-    runs-on: windows-latest
+    runs-on: windows-2019
     steps:
       - run: true
 `)
@@ -1739,7 +1739,7 @@ func TestProcessingReportAggregatesIndependentExpressionChecksPerInstance(t *tes
 jobs:
   test:
     if: ${{ hashFiles('condition') }}
-    runs-on: windows-latest
+    runs-on: windows-2019
     concurrency: ${{ hashFiles('concurrency') }}
     steps:
       - run: true

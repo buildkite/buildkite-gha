@@ -74,6 +74,15 @@ qualifications in the user reference until their prerequisites are established.
 The following obligations explain boundaries that a refactor or compatibility
 extension could accidentally remove. They are not a second feature inventory.
 
+### Offline runner validation
+
+Standalone validation must accept `windows-latest` and `windows-2022` without
+user queue mappings, while retaining Windows platform restrictions. Its
+placeholder targets and runtime digests must not become upload fallbacks.
+[CLI regression tests](../internal/cli/validate_test.go) cover acceptance across
+validation modes and rejection of Windows job containers. These tests establish
+offline compatibility, not queue availability or successful Windows execution.
+
 ### Pinned runtime delivery
 
 Plugin imports may use plugin run mode only when all runnable jobs

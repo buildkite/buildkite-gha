@@ -303,10 +303,10 @@ indeterminate repositories separately and excludes them from the compatibility
 percentage. The tally records workflow result counts; each workflow report
 keeps its diagnostics.
 
-Windows jobs require a [configured Windows runner](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#windows-jobs-configure-a-windows-runner).
-Corpus validation has no Windows preset, so it still rejects unmapped Windows
-labels. Keep those workflows in raw results so the benchmark describes the full
-sample; a rejected mapping is not proof of runtime incompatibility.
+Corpus validation accepts `windows-latest` and `windows-2022` without runner
+mappings or a Windows agent. These checks assess compatibility, not live queue
+availability, automatic routing, or Windows execution. Running Windows jobs
+still requires a [compatible Windows runner](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility#windows-jobs).
 
 An in-scope view must classify each record and account for overlapping
 findings. Do not calculate its denominator by subtracting aggregate diagnostic
