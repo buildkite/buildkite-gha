@@ -45,7 +45,7 @@ exit 2
 		t.Fatalf("compatibility-gaps: %v\n%s", err, output)
 	}
 	text := string(output)
-	if !strings.Contains(text, "upload-artifact-versions: passing") || !strings.Contains(text, "Compatibility gaps: 16 passing; 0 blocked.") {
+	if !strings.Contains(text, "upload-artifact-versions: passing") || !strings.Contains(text, "Compatibility gaps: 15 passing; 0 blocked.") {
 		t.Fatalf("compatibility-gaps output:\n%s", text)
 	}
 }

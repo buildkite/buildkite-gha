@@ -361,7 +361,7 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 				if trigger.Branches == nil && trigger.BranchesIgnore == nil && (trigger.Tags != nil || trigger.TagsIgnore != nil) {
 					return fmt.Sprintf("Branch push %q does not match this workflow's push tag filters.", *snapshot.Branch), nil
 				}
-				matches, err := refFilterMatches(trigger.Event, *snapshot.Branch, trigger.Branches, trigger.BranchesIgnore)
+				matches, err := refFilterMatches(*snapshot.Branch, trigger.Branches, trigger.BranchesIgnore)
 				if err != nil {
 					return "", fmt.Errorf("push branches: %w", err)
 				}
@@ -390,7 +390,7 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 				if trigger.Tags == nil && trigger.TagsIgnore == nil && (trigger.Branches != nil || trigger.BranchesIgnore != nil) {
 					return fmt.Sprintf("Tag push %q does not match this workflow's push branch filters.", *snapshot.Tag), nil
 				}
-				matches, err := refFilterMatches(trigger.Event, *snapshot.Tag, trigger.Tags, trigger.TagsIgnore)
+				matches, err := refFilterMatches(*snapshot.Tag, trigger.Tags, trigger.TagsIgnore)
 				if err != nil {
 					return "", fmt.Errorf("push tags: %w", err)
 				}
@@ -399,12 +399,8 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 				}
 			}
 		case "pull_request":
-			hasBranchFilter := len(trigger.Branches) != 0 || len(trigger.BranchesIgnore) != 0
-			if !hasBranchFilter && (len(trigger.Tags) != 0 || len(trigger.TagsIgnore) != 0) {
-				return "Pull requests do not match tag-only filters; add a branch filter to select pull requests.", nil
-			}
-			if hasBranchFilter && snapshot.PullRequestBaseBranch != nil {
-				matches, err := refFilterMatches(trigger.Event, *snapshot.PullRequestBaseBranch, trigger.Branches, trigger.BranchesIgnore)
+			if snapshot.PullRequestBaseBranch != nil {
+				matches, err := refFilterMatches(*snapshot.PullRequestBaseBranch, trigger.Branches, trigger.BranchesIgnore)
 				if err != nil {
 					return "", fmt.Errorf("pull_request branches: %w", err)
 				}
@@ -414,7 +410,7 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 			}
 			if snapshot.PullRequestAction != nil {
 				types := trigger.Types
-				if len(types) == 0 {
+				if types == nil {
 					types = []string{"opened", "synchronize", "reopened"}
 				}
 				matched := false
@@ -427,7 +423,7 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 			}
 		case "merge_group":
 			if snapshot.MergeGroupBaseBranch != nil {
-				matches, err := refFilterMatches(trigger.Event, *snapshot.MergeGroupBaseBranch, trigger.Branches, trigger.BranchesIgnore)
+				matches, err := refFilterMatches(*snapshot.MergeGroupBaseBranch, trigger.Branches, trigger.BranchesIgnore)
 				if err != nil {
 					return "", fmt.Errorf("merge_group branches: %w", err)
 				}
@@ -613,11 +609,11 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 			return "", false, fmt.Errorf("push event snapshot requires ref to start with refs/heads/ or refs/tags/")
 		}
 		parts := []string{expressions.EventPredicate}
-		branch, hasBranchFilter, err := refFilters(t.Event, expressions.Branch, t.Branches, t.BranchesIgnore)
+		branch, hasBranchFilter, err := refFilters(expressions.Branch, t.Branches, t.BranchesIgnore)
 		if err != nil {
 			return "", false, triggerFilterError(t, fmt.Errorf("push branches: %w", err), "branches", "branches-ignore")
 		}
-		tag, hasTagFilter, err := refFilters(t.Event, expressions.Tag, t.Tags, t.TagsIgnore)
+		tag, hasTagFilter, err := refFilters(expressions.Tag, t.Tags, t.TagsIgnore)
 		if err != nil {
 			return "", false, triggerFilterError(t, fmt.Errorf("push tags: %w", err), "tags", "tags-ignore")
 		}
@@ -635,7 +631,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 				if !hasBranchFilter && hasTagFilter {
 					branchMatches = false
 				} else if hasBranchFilter {
-					branchMatches, err = refFilterMatches(t.Event, *snapshot.Branch, t.Branches, t.BranchesIgnore)
+					branchMatches, err = refFilterMatches(*snapshot.Branch, t.Branches, t.BranchesIgnore)
 					if err != nil {
 						return "", false, triggerFilterError(t, fmt.Errorf("push branches: %w", err), "branches", "branches-ignore")
 					}
@@ -657,22 +653,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return strings.Join(parts, " && "), true, nil
 	case "pull_request":
-		if t.Workflows != nil {
-			return "", false, unsupportedEventFilter(t, "workflows")
-		}
-		if t.Tags != nil && t.TagsIgnore != nil {
-			return "", false, triggerFilterError(t, fmt.Errorf("pull_request tags: include and ignore filters cannot be combined"), "tags", "tags-ignore")
-		}
-		// GitHub admits tag filters on pull_request, including negative-only
-		// patterns, but uses only branch filters to select branch events.
-		for _, pattern := range slices.Concat(t.Tags, t.TagsIgnore) {
-			pattern = strings.TrimPrefix(pattern, "!")
-			if pattern == "" {
-				return "", false, triggerFilterError(t, fmt.Errorf("pull_request tags: empty ref glob"), "tags", "tags-ignore")
-			}
-			if _, err := githubRefGlob(pattern); err != nil {
-				return "", false, triggerFilterError(t, fmt.Errorf("pull_request tags: %w", err), "tags", "tags-ignore")
-			}
+		if t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "tags", "tags-ignore", "workflows")
 		}
 		if expressions.EventPredicate == "" || expressions.PullRequestAction == "" {
 			return "", false, fmt.Errorf("pull_request requires effective event and action expressions")
@@ -681,14 +663,14 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 			return "", false, fmt.Errorf("pull_request event snapshot requires payload.action")
 		}
 		parts := []string{expressions.EventPredicate}
-		hasBranchFilter := len(t.Branches) != 0 || len(t.BranchesIgnore) != 0
+		hasBranchFilter := t.Branches != nil || t.BranchesIgnore != nil
 		if hasBranchFilter && expressions.PullRequestBaseBranch == "" {
 			return "", false, triggerFilterError(t, fmt.Errorf("pull_request branch filters require a base branch expression"), "branches", "branches-ignore")
 		}
 		if hasBranchFilter && expressions.PullRequestBaseBranch == "null" {
 			return "", false, triggerFilterError(t, fmt.Errorf("pull_request branch filters require payload.pull_request.base.ref"), "branches", "branches-ignore")
 		}
-		b, _, err := refFilters(t.Event, expressions.PullRequestBaseBranch, t.Branches, t.BranchesIgnore)
+		b, hasBranchFilter, err := refFilters(expressions.PullRequestBaseBranch, t.Branches, t.BranchesIgnore)
 		if err != nil {
 			return "", false, triggerFilterError(t, fmt.Errorf("pull_request branches: %w", err), "branches", "branches-ignore")
 		}
@@ -696,26 +678,26 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 			parts = append(parts, b)
 		}
 		types := t.Types
-		if len(types) == 0 {
+		if types == nil {
 			types = []string{"opened", "synchronize", "reopened"}
+		}
+		if len(types) == 0 {
+			return "", false, triggerFilterError(t, fmt.Errorf("pull_request types is explicitly empty"), "types")
 		}
 		var actions []string
 		for _, a := range types {
-			if a == "" {
-				return "", false, triggerFilterError(t, fmt.Errorf("pull_request activity type cannot be empty"), "types")
+			if !supportedPullRequestAction[a] {
+				return "", false, triggerFilterError(t, fmt.Errorf("pull_request activity type %q cannot be mapped exactly", a), "types")
 			}
 			actions = append(actions, expressions.PullRequestAction+` == `+yamlScalar(a))
 		}
 		parts = append(parts, "("+strings.Join(actions, " || ")+")")
-		if !hasBranchFilter && (len(t.Tags) != 0 || len(t.TagsIgnore) != 0) {
-			return "false", true, nil
-		}
 		if pathFilters && selected {
 			if snapshot.PullRequestAction != nil && !slices.Contains(types, *snapshot.PullRequestAction) {
 				return strings.Join(parts, " && "), true, nil
 			}
-			if hasBranchFilter && snapshot.PullRequestBaseBranch != nil {
-				matches, err := refFilterMatches(t.Event, *snapshot.PullRequestBaseBranch, t.Branches, t.BranchesIgnore)
+			if snapshot.PullRequestBaseBranch != nil {
+				matches, err := refFilterMatches(*snapshot.PullRequestBaseBranch, t.Branches, t.BranchesIgnore)
 				if err != nil {
 					return "", false, triggerFilterError(t, fmt.Errorf("pull_request branches: %w", err), "branches", "branches-ignore")
 				}
@@ -767,7 +749,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		if hasBranchFilter && (expressions.MergeGroupBaseBranch == "" || expressions.MergeGroupBaseBranch == "null") {
 			return "", false, triggerFilterError(t, fmt.Errorf("merge_group branch filters require payload.merge_group.base_ref"), "branches", "branches-ignore")
 		}
-		branch, hasBranchFilter, err := refFilters(t.Event, expressions.MergeGroupBaseBranch, t.Branches, t.BranchesIgnore)
+		branch, hasBranchFilter, err := refFilters(expressions.MergeGroupBaseBranch, t.Branches, t.BranchesIgnore)
 		if err != nil {
 			return "", false, triggerFilterError(t, fmt.Errorf("merge_group branches: %w", err), "branches", "branches-ignore")
 		}
@@ -1024,11 +1006,20 @@ func pathFiltersMatch(paths, include, exclude []string) (bool, error) {
 	return false, nil
 }
 
+var supportedPullRequestAction = map[string]bool{
+	"assigned": true, "unassigned": true, "labeled": true, "unlabeled": true,
+	"opened": true, "edited": true, "closed": true, "reopened": true,
+	"synchronize": true, "converted_to_draft": true, "locked": true, "unlocked": true,
+	"enqueued": true, "dequeued": true, "milestoned": true, "demilestoned": true,
+	"ready_for_review": true, "review_requested": true, "review_request_removed": true,
+	"auto_merge_enabled": true, "auto_merge_disabled": true,
+}
+
 func hasWebhookFilters(t workflow.Trigger) bool {
 	return t.Types != nil || t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil
 }
 
-func refFilters(event, field string, include, exclude []string) (string, bool, error) {
+func refFilters(field string, include, exclude []string) (string, bool, error) {
 	if include != nil && exclude != nil {
 		return "", false, fmt.Errorf("include and ignore filters cannot be combined")
 	}
@@ -1048,8 +1039,6 @@ func refFilters(event, field string, include, exclude []string) (string, bool, e
 			state = match
 		case positive:
 			state = "(" + state + " || " + match + ")"
-		case state == "" && event == "pull_request":
-			state = "false"
 		case state == "":
 			state = "!(" + match + ")"
 		default:
@@ -1067,7 +1056,7 @@ func refFilters(event, field string, include, exclude []string) (string, bool, e
 		if p == "" {
 			return "", false, fmt.Errorf("empty ref glob")
 		}
-		if !positive && !positiveSeen && event != "pull_request" {
+		if !positive && !positiveSeen {
 			return "", false, fmt.Errorf("negative pattern %q must follow a positive pattern", "!"+p)
 		}
 		if err := apply(p, positive); err != nil {
@@ -1084,23 +1073,18 @@ func refFilters(event, field string, include, exclude []string) (string, bool, e
 		state = "true"
 	}
 	for _, p := range exclude {
-		positive := false
 		if strings.HasPrefix(p, "!") {
-			if event != "pull_request" {
-				return "", false, fmt.Errorf("ignore filter pattern %q cannot be negated", p)
-			}
-			p = strings.TrimPrefix(p, "!")
-			positive = true
+			return "", false, fmt.Errorf("ignore filter pattern %q cannot be negated", p)
 		}
-		if err := apply(p, positive); err != nil {
+		if err := apply(p, false); err != nil {
 			return "", false, err
 		}
 	}
 	return state, true, nil
 }
 
-func refFilterMatches(event, value string, include, exclude []string) (bool, error) {
-	if _, configured, err := refFilters(event, "ref", include, exclude); err != nil || !configured {
+func refFilterMatches(value string, include, exclude []string) (bool, error) {
+	if _, configured, err := refFilters("ref", include, exclude); err != nil || !configured {
 		return !configured, err
 	}
 	matched := include == nil
@@ -1111,7 +1095,7 @@ func refFilterMatches(event, value string, include, exclude []string) (bool, err
 	for _, pattern := range patterns {
 		positive := include != nil
 		if strings.HasPrefix(pattern, "!") {
-			positive = !positive
+			positive = false
 			pattern = strings.TrimPrefix(pattern, "!")
 		}
 		expression, err := githubRefGlob(pattern)
