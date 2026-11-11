@@ -17,7 +17,7 @@ def run(*args, **kwargs):
 def configuration():
     mode = os.environ["PINNED_CONSUMER_MODE"]
     assert mode in ("release", "old-plugin", "historical", "custom", "local", "mixed")
-    config = {"workflow": ".buildkite/fixtures/pinned-runtime-consumer.yml",
+    config = {"workflow": ".github/workflows/pinned-runtime-consumer.yml",
               "runners": [{"runs-on": "ubuntu-latest", "queue": "hosted"}]}
     if mode not in ("old-plugin", "custom"):
         config["version"] = os.environ["PINNED_CONSUMER_VERSION"]
@@ -30,6 +30,7 @@ def configuration():
 
 
 def load():
+    assert os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "Set GITHUB_EVENT_NAME=workflow_dispatch on the proof build"
     mode, config = configuration()
     importer = {"key": "runtime-consumer-importer", "label": f"Runtime consumer: {mode}",
                 "timeout_in_minutes": 15, "retry": {"automatic": False}}

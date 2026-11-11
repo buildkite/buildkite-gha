@@ -73,7 +73,9 @@ def import_workflow(name):
     assert hashlib.sha256(binary.read_bytes()).hexdigest() == assets[name]["sha256"]
     binary.chmod(0o755)
     scheduled = os.environ.get("PINNED_RUNTIME_SCHEDULED") == "1"
-    workflow = ".buildkite/fixtures/pinned-runtime-consumer.yml" if scheduled else ".buildkite/fixtures/pinned-runtime-proof.yml"
+    if scheduled:
+        assert os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "Set GITHUB_EVENT_NAME=workflow_dispatch on the proof build"
+    workflow = ".github/workflows/pinned-runtime-consumer.yml" if scheduled else ".buildkite/fixtures/pinned-runtime-proof.yml"
     pipeline_path = OUTPUT / f"{name}-pipeline.yml"
     with tempfile.TemporaryDirectory(prefix="pinned-import-") as tmp:
         wrapper_dir = Path(tmp) / "bin"

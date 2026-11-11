@@ -510,6 +510,9 @@ cross-worker cache proof. It also checks failure status and bad-digest rejection
 Set `PINNED_RUNTIME_SCHEDULED=1` to submit the candidate's emitted pipeline
 unchanged instead. This checks normal scheduling, checkout skip, token/redactor
 access, transported job outputs, and an allowed failure using fixture metadata.
+The token-bearing workflow lives directly under `.github/workflows`. Set
+`GITHUB_EVENT_NAME=workflow_dispatch` on scheduled and release-consumer proof
+builds so import and generated-job conditions select the same manual event.
 
 After publication, use `COMPATIBILITY_PROOF=pinned-runtime-consumer` with
 `PINNED_CONSUMER_MODE=release` and `PINNED_CONSUMER_VERSION=<published-tag>`.
@@ -519,7 +522,8 @@ The other modes are `old-plugin` (previous plugin with default latest CLI),
 Custom and local modes need `PINNED_CONSUMER_BINARY_URL`; local also needs
 `PINNED_CONSUMER_SHA256`. These run normal generated jobs, not nested bootstrap.
 Inspect their logs and result artifacts as well as the inventory assertion;
-the workflow's failure control must exit 37, not fail during setup.
+the failure control must reach its workflow command and exit 37. The CLI maps
+that tolerated failure to agent exit 78; setup failures are not proof.
 
 Use `COMPATIBILITY_PROOF=scheduling` to probe output-derived matrix concurrency
 and parallel limits. Check job start and finish times: the group consumers must
