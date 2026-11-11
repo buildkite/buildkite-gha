@@ -10,8 +10,6 @@ import subprocess
 import sys
 import tempfile
 
-import yaml
-
 
 ROOT = Path.cwd()
 OUTPUT = ROOT / ".pinned-runtime-proof"
@@ -84,7 +82,7 @@ def import_workflow(name):
                    BUILDKITE_PLUGIN_CONFIGURATION=json.dumps({"workflow": ".buildkite/fixtures/pinned-runtime-proof.yml", "runners": [{"runs-on": "ubuntu-latest", "queue": "hosted"}]}),
                    BUILDKITE_GHA_PLUGIN_RELEASE=json.dumps({"tag_name": "v0.0.0-proof", "assets": [{"name": "buildkite-gha_linux_x86_64", "browser_download_url": assets[name]["url"], "digest": "sha256:" + assets[name]["sha256"]}]}))
         subprocess.run([str(binary), "plugin"], env=env, check=True)
-    pipeline = yaml.safe_load(pipeline_path.read_text())
+    pipeline = json.loads(capture(["buildkite-agent", "pipeline", "upload", "--dry-run", "--no-interpolation", "--format", "json", str(pipeline_path)]))
     assert len(pipeline["steps"]) == 1 and len(pipeline["steps"][0]["steps"]) == 1
     step = pipeline["steps"][0]["steps"][0]
     paths = inventory(os.environ["BUILDKITE_JOB_ID"])
@@ -92,8 +90,8 @@ def import_workflow(name):
     if name == "baseline":
         assert len(distributions) == 1 and "command" in step and "plugins" not in step
     else:
-        assert not distributions and "command" not in step
-        config = step["plugins"][0]["github-actions#v0.15.1"]
+        assert not distributions and step["command"] == ""
+        config = step["plugins"][0][PLUGIN]
         assert config["run"]["runtime"]["sha256"] == assets[name]["sha256"]
         assert config["run"]["plan"]["producer"] == os.environ["BUILDKITE_JOB_ID"]
     (OUTPUT / f"{name}-inventory.json").write_text(json.dumps(paths, indent=2))
@@ -150,7 +148,7 @@ def run_cases():
                 jobenv = dict(env, **step["env"])
                 jobenv["BUILDKITE_RETRY_COUNT"] = "1" if case == "warm-retry-replay" else "0"
                 jobenv["BUILDKITE_COMMAND"] = step.get("command", "")
-                config = json.loads(json.dumps(step.get("plugins", [{}])[0].get("github-actions#v0.15.1", {})))
+                config = json.loads(json.dumps(step.get("plugins", [{}])[0].get(PLUGIN, {})))
                 if case == "bad-digest":
                     config["run"]["runtime"]["sha256"] = "0" * 64
                 jobenv["BUILDKITE_PLUGINS"] = json.dumps([{PLUGIN: config}]) if config else "[]"
