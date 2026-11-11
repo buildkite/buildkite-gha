@@ -16,6 +16,12 @@ if [ "$1" = exec ] && [ "$2" = -- ] && [ "$3" = go ] && [ "$4" = build ]; then
   while [ "$1" != -o ]; do shift; done
   cat >"$2" <<'EOF'
 #!/bin/sh
+case "$*" in
+  *github-environments.yml*)
+    echo '{"result":"context-required","diagnostics":[{"message":"Environment settings were not checked."}]}'
+    exit 0
+    ;;
+esac
 echo '{"result":"admitted","diagnostics":[{"message":"legacy release warning"}]}'
 echo 'buildkite-agent: annotation published' >&2
 EOF
@@ -45,7 +51,7 @@ exit 2
 		t.Fatalf("compatibility-gaps: %v\n%s", err, output)
 	}
 	text := string(output)
-	if !strings.Contains(text, "upload-artifact-versions: passing") || !strings.Contains(text, "Compatibility gaps: 16 passing; 0 blocked.") {
+	if !strings.Contains(text, "upload-artifact-versions: passing") || !strings.Contains(text, "github-environments: unchecked") || !strings.Contains(text, "Compatibility gaps: 15 passing; 1 unchecked; 0 blocked.") {
 		t.Fatalf("compatibility-gaps output:\n%s", text)
 	}
 }

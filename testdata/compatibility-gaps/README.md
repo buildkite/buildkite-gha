@@ -8,7 +8,9 @@ Run the assessment with:
 mise run compatibility:gaps
 ```
 
-The command applies the `hosted` profile to compile-time and admission gaps. It compiles and executes the two runtime shell fixtures. A passing case means the representative workflow is currently compatible. A blocked case makes the command fail.
+The command applies the `hosted` profile to compile-time and admission gaps. It compiles and executes the two runtime shell fixtures. A passing case means the representative workflow is currently compatible. An unchecked case passes the available checks but needs live context before admission can be determined. A blocked case makes the command fail.
+
+The environment fixture is unchecked: validation does not fetch live protection rules, secrets, or variables. It does not establish environment support or GitHub reviewer-policy parity. See the [validation boundary](../../docs/compatibility-contract.md#offline-environment-validation).
 
 The runner-label fixture checks Windows compatibility without a runner mapping. It does not check live queue availability, automatic routing, or Windows execution.
 

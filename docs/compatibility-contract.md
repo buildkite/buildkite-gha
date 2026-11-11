@@ -83,6 +83,22 @@ placeholder targets and runtime digests must not become upload fallbacks.
 validation modes and rejection of Windows job containers. These tests establish
 offline compatibility, not queue availability or successful Windows execution.
 
+### Offline environment validation
+
+Hosted validation must not reject a supported environment declaration solely
+because live environment settings are unavailable. It does not configure an
+environment resolver, even inside a Buildkite job. Report that missing context
+as a warning and `context-required`, with exit status zero only if no other
+error was found. Do not claim compilation or admission succeeded, or fabricate
+an unprotected environment snapshot. Environment jobs and their dependents
+remain unplanned; independent jobs still receive the available checks.
+
+Compilation and upload retain the job-scoped Agent API requirement and fail
+closed when resolution or protection checks fail. The
+[CLI regressions](../internal/cli/environments_test.go) cover both boundaries;
+they establish command behavior, not live service access or native GitHub
+reviewer-policy parity.
+
 ### Pinned runtime delivery
 
 Plugin imports may use plugin run mode only when all runnable jobs
