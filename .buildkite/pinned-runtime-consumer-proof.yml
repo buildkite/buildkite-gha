@@ -1,0 +1,5 @@
+agents:
+  queue: "hosted"
+steps:
+  - label: ":pipeline: Schedule released runtime consumer"
+    command: python3 .buildkite/pinned-runtime-consumer-proof.py load

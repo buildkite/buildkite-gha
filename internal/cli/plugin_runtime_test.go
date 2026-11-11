@@ -159,6 +159,29 @@ func TestPluginAcquiresVerifiedLinuxRuntimeForDarwinHost(t *testing.T) {
 	}
 }
 
+func TestPluginResolvesPinnedCounterpartWithoutDownloadingBytes(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("metadata handoff must avoid all import-time requests: %s", r.URL)
+		http.Error(w, "unexpected download", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	previousClient, previousAPI := pluginHTTPClient, pluginReleaseAPIURL
+	pluginHTTPClient, pluginReleaseAPIURL = server.Client(), server.URL+"/tags/"
+	t.Cleanup(func() { pluginHTTPClient, pluginReleaseAPIURL = previousClient, previousAPI })
+	digest := transport.Digest([]byte("linux counterpart"))
+	t.Setenv(pluginReleaseEnvironment, string(mustJSON(t, pluginRelease{TagName: "v1.2.3", Assets: []pluginReleaseAsset{
+		{Name: pluginLinuxAsset, URL: server.URL + "/linux", Digest: "sha256:" + strings.ToUpper(strings.TrimPrefix(digest, "sha256:"))},
+	}})))
+	got, err := (&pluginRuntimeAcquisition{version: "1.2.3", pinned: true}).acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, compiler.PlatformDarwinARM64, runtimeDistribution{digest: transport.Digest([]byte("darwin importer"))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	linux := got[compiler.PlatformLinuxAMD64]
+	if len(got) != 1 || len(linux.contents) != 0 || linux.digest != digest || linux.url != server.URL+"/linux" {
+		t.Fatalf("pinned counterpart = %#v", got)
+	}
+}
+
 func TestPluginWindowsSelectionIsLazy(t *testing.T) {
 	host := runtimeDistribution{contents: []byte("host"), digest: "sha256:host"}
 	t.Setenv(pluginDevWindowsRuntimeEnvironment, "")

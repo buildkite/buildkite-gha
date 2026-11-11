@@ -74,6 +74,33 @@ qualifications in the user reference until their prerequisites are established.
 The following obligations explain boundaries that a refactor or compatibility
 extension could accidentally remove. They are not a second feature inventory.
 
+### Pinned runtime delivery
+
+Plugin imports may use plugin run mode only when all runnable jobs
+are static Linux amd64, runner-user setup is enabled, and no job needs custom
+cache-volume ownership or agent-tag setup. Make this decision before acquiring
+counterpart bytes or publishing jobs. Deferred and mixed-platform imports,
+custom URLs, local distributions, and importers without release metadata retain
+their existing artifact delivery.
+
+Resolve runtime URLs and SHA-256 digests from the plugin's release metadata
+handoff, not another catalogue. Verify same-host metadata against the running
+executable. Reuse the invoking plugin reference from `BUILDKITE_PLUGINS`, matched
+to the active `BUILDKITE_PLUGIN_CONFIGURATION`; preserve tags, branches, and
+commit references. Fall back to bare `github-actions` when the reference is
+unversioned or cannot be determined. A fresh checkout uses repository HEAD;
+agents may reuse cached checkouts. The selected plugin must support run mode; a moving
+reference does not guarantee identical plugin code across workers or retries.
+Emit the runtime URL and digest, plan digest, and producer job UUID. Do not
+upload executable artifacts for this path. Retries must keep the runtime pins
+and never resolve CLI releases at execution.
+Keep plan, event, target, source, and executable verification unchanged.
+
+The [import tests](../internal/cli/plugin_test.go) check artifact-free emission
+and legacy controls. The [pipeline tests](../internal/buildkite/pipeline_test.go)
+check unchanged scheduling and retry policy. These checks do not establish
+hosted plugin installation, cross-worker cache reuse, or platform parity.
+
 ### Event identity and workflow selection
 
 Preserve the original event identity through compilation, deferred uploads,

@@ -367,16 +367,15 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	}
 	seedUploadEnvironmentResolutions(ctx, uploadArguments.environmentSource, workflows, validations, processingReports, effectiveEvent.Event)
 	requiredPlatforms := make(map[compiler.Platform]bool, 2)
+	_, releaseProvided := os.LookupEnv(pluginReleaseEnvironment)
+	pinnedRuntime := releaseProvided && uploadArguments.experimentalRunnerUser && importerJobID != ""
 	preparationAdmissionFailures := make([]error, len(workflows))
 	for i, request := range requests {
 		if request == nil || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
-		platforms, deferred, admissionErr, platformErr := requiredRuntimePlatforms(ctx, *request)
-		if platformErr != nil {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", platformErr)
-			return 1
-		}
+		platforms, deferred, pinned, admissionErr := requiredRuntimePlatforms(ctx, *request)
+		pinnedRuntime = pinnedRuntime && pinned
 		preparationAdmissionFailures[i] = admissionErr
 		for platform := range platforms {
 			requiredPlatforms[platform] = true
@@ -388,6 +387,10 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 	}
 	if uploadArguments.pluginAcquisition != nil {
+		acquisition := uploadArguments.pluginAcquisition
+		// Local and custom binaries retain their existing byte acquisition and
+		// artifact semantics, including custom URLs without a checksum.
+		acquisition.pinned = pinnedRuntime && acquisition.binaries == nil && releaseVersionPattern.MatchString(acquisition.version)
 		runtimeDistributions, acquireErr := uploadArguments.pluginAcquisition.acquire(ctx, requiredPlatforms, uploadArguments.importerPlatform, importerDistribution)
 		if acquireErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", acquireErr)
@@ -620,10 +623,17 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	}
 	for i := range generatedWorkflows {
 		generatedWorkflows[i].Ungrouped = ungrouped
+		for j := range generatedWorkflows[i].Jobs {
+			job := &generatedWorkflows[i].Jobs[j]
+			if job.Failure == nil && job.SkipReason == "" {
+				job.RuntimeURL = runtimeDistributions[compiler.PlatformLinuxAMD64].url
+			}
+		}
 	}
 	aggregatePipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:      importerStep,
 		ArtifactProducer:  importerJobID,
+		RuntimePlugin:     pluginRuntimeReference(),
 		EventProvider:     effectiveEvent.Event.Provider,
 		DisableRunnerUser: !uploadArguments.experimentalRunnerUser,
 		Workflows:         generatedWorkflows,
@@ -674,7 +684,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	}
 	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformLinuxARM64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		runtimeDistribution, ok := runtimeDistributions[platform]
-		if !ok {
+		if !ok || runtimeDistribution.url != "" {
 			continue
 		}
 		path, pathErr := buildkitepipeline.DistributionPath(runtimeDistribution.digest)
@@ -937,9 +947,9 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 // requiredRuntimePlatforms compiles the request once before any runtime
 // distribution is acquired, with the importer's own digest standing in for
 // every platform, to learn which platforms the planned jobs need, whether the
-// workflow defers jobs to a later stage, and whether hosted admission would
-// reject the workflow. The plans it produces are discarded.
-func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest) (map[compiler.Platform]bool, bool, error, error) {
+// workflow defers jobs to a later stage, whether it can use the pinned Linux
+// launcher, and whether hosted admission rejects it. These plans are discarded.
+func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest) (map[compiler.Platform]bool, bool, bool, error) {
 	request.RuntimeDistributions = map[compiler.Platform]string{
 		compiler.PlatformLinuxAMD64:   request.DistributionDigest,
 		compiler.PlatformLinuxARM64:   request.DistributionDigest,
@@ -954,19 +964,21 @@ func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest)
 	return runtimePlatformsForBundle(bundle)
 }
 
-func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bool, bool, error, error) {
+func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bool, bool, bool, error) {
 	platforms := make(map[compiler.Platform]bool, 2)
 	deferred := len(bundle.IR.Continuations) != 0
 	if err := validateUnprivilegedBundle(bundle); err != nil {
-		return platforms, deferred, err, nil
+		return platforms, deferred, false, err
 	}
+	pinned := !deferred
 	for _, job := range bundle.IR.Jobs {
 		if bundle.JobOutcomes[job.Key] != compiler.JobPlanned {
 			continue
 		}
 		platforms[job.Platform] = true
+		pinned = pinned && job.Platform == compiler.PlatformLinuxAMD64 && job.Cache == nil && len(job.Agents) == 0
 	}
-	return platforms, deferred, nil, nil
+	return platforms, deferred, pinned, nil
 }
 
 // deferredRuntimePlatforms lists the platforms whose runtime distribution the

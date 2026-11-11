@@ -381,10 +381,7 @@ jobs:
 		"ubuntu-latest": {Queue: "linux", Platform: compiler.PlatformLinuxAMD64},
 		"macos-latest":  {Queue: "macos", Platform: compiler.PlatformDarwinARM64},
 	}
-	platforms, _, admissionErr, err := requiredRuntimePlatforms(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: source, EventSource: event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("1", 64), RunnerTargets: targets})
-	if err != nil {
-		t.Fatal(err)
-	}
+	platforms, _, _, admissionErr := requiredRuntimePlatforms(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: source, EventSource: event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("1", 64), RunnerTargets: targets})
 	if admissionErr != nil {
 		t.Fatal(admissionErr)
 	}
@@ -419,10 +416,7 @@ jobs:
 		"ubuntu-latest": {Queue: "linux", Platform: compiler.PlatformLinuxAMD64},
 		"macos-latest":  {Queue: "macos", Platform: compiler.PlatformDarwinARM64},
 	}
-	platforms, _, admissionErr, err := requiredRuntimePlatforms(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: source, EventSource: event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("1", 64), RunnerTargets: targets})
-	if err != nil {
-		t.Fatal(err)
-	}
+	platforms, _, _, admissionErr := requiredRuntimePlatforms(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: source, EventSource: event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("1", 64), RunnerTargets: targets})
 	if admissionErr != nil {
 		t.Fatal(admissionErr)
 	}
@@ -443,15 +437,33 @@ func TestRequiredRuntimePlatformsFailsClosedBeforePartialAdmission(t *testing.T)
 			{Job: plan.Job{Workflow: plan.Workflow{LogicalJobID: "rejected"}, Target: plan.Target{StepKey: "rejected"}, RequiredCapabilities: []string{"privileged-container"}}},
 		},
 	}
-	platforms, _, admissionErr, err := runtimePlatformsForBundle(bundle)
-	if err != nil {
-		t.Fatal(err)
-	}
+	platforms, _, _, admissionErr := runtimePlatformsForBundle(bundle)
 	if admissionErr == nil {
 		t.Fatal("requiredRuntimePlatforms() admission error = nil")
 	}
 	if len(platforms) != 0 {
 		t.Fatalf("partial admission requested runtime platforms = %#v, want fail-closed empty set", platforms)
+	}
+}
+
+func TestPinnedRuntimeAdmissionKeepsDeferredAndOtherPlatformsOnArtifacts(t *testing.T) {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformLinuxARM64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
+		for _, deferred := range []bool{false, true} {
+			bundle := compiler.Bundle{
+				IR: compiler.IR{Jobs: []compiler.JobInstance{
+					{Key: "linux", Platform: compiler.PlatformLinuxAMD64},
+					{Key: "other", Platform: platform},
+				}},
+				JobOutcomes: map[string]compiler.JobOutcome{"linux": compiler.JobPlanned, "other": compiler.JobPlanned},
+			}
+			if deferred {
+				bundle.IR.Continuations = []compiler.RuntimeContinuation{{}}
+			}
+			_, _, pinned, err := runtimePlatformsForBundle(bundle)
+			if err != nil || pinned != (platform == compiler.PlatformLinuxAMD64 && !deferred) {
+				t.Fatalf("platform=%s deferred=%t: pinned=%t, error=%v", platform, deferred, pinned, err)
+			}
+		}
 	}
 }
 

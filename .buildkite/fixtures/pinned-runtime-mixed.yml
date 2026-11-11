@@ -1,0 +1,13 @@
+name: Mixed runtime delivery control
+on: [push, workflow_dispatch]
+jobs:
+  probe:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - run: |
+          test -n "$RUNNER_OS"
+          printf 'MIXED_PROOF os=%s arch=%s\n' "$RUNNER_OS" "$RUNNER_ARCH"

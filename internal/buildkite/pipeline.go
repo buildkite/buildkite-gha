@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -122,6 +123,8 @@ func ValidateCacheVolume(cache CacheVolume) error {
 type Pipeline struct {
 	CompilerStep     string
 	ArtifactProducer string
+	// RuntimePlugin is the invoking plugin's reference, independent of CLI pins.
+	RuntimePlugin string
 	// DistributionDigest and RuntimeImage retain the single-platform emitter
 	// contract for direct callers. Mixed-platform bundles set these per Job.
 	DistributionDigest string
@@ -231,8 +234,10 @@ type Job struct {
 	Queue              string
 	Platform           string
 	DistributionDigest string
-	RuntimeImage       string
-	Agents             map[string]string
+	// RuntimeURL selects the pinned execution plugin instead of binary artifacts.
+	RuntimeURL   string
+	RuntimeImage string
+	Agents       map[string]string
 	// ToolCache overrides image/platform-based defaults when supplied.
 	ToolCache        *bool
 	PlanDigest       string
@@ -663,6 +668,15 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if err := ValidateRunnerAgents(platform, runtimeImage, job.Agents); err != nil {
 			return fmt.Errorf("job %q: %w", job.Key, err)
 		}
+		if job.RuntimeURL != "" {
+			parsed, err := url.Parse(job.RuntimeURL)
+			if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" {
+				return fmt.Errorf("job %q requires an HTTPS runtime URL without credentials or a fragment", job.Key)
+			}
+			if pipeline.Deferred || pipeline.DisableRunnerUser || !uuidPattern.MatchString(artifactProducer) || platform != "linux/amd64" || job.Stage != nil || job.Cache != nil || len(job.Agents) != 0 {
+				return fmt.Errorf("job %q cannot use the pinned runtime plugin", job.Key)
+			}
+		}
 		hostedToolCache := runtimeImage != "" || platform == "darwin/arm64"
 		if job.ToolCache != nil {
 			hostedToolCache = *job.ToolCache
@@ -784,7 +798,18 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if platform == "windows/amd64" {
 			command = windowsBootstrapCommand(command)
 		}
-		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
+		if job.RuntimeURL != "" {
+			reference := pipeline.RuntimePlugin
+			if reference == "" {
+				reference = "github-actions"
+			}
+			_, _ = fmt.Fprintf(out, "%splugins:\n%s  - %s:\n%s      run:\n", attributeIndent, attributeIndent, yamlScalar(reference), attributeIndent)
+			_, _ = fmt.Fprintf(out, "%s        plan:\n%s          digest: %s\n%s          producer: %s\n", attributeIndent, attributeIndent, yamlScalar(job.PlanDigest), attributeIndent, yamlScalar(artifactProducer))
+			_, _ = fmt.Fprintf(out, "%s        runtime:\n%s          platform: %s\n%s          url: %s\n%s          sha256: %s\n", attributeIndent, attributeIndent, yamlScalar(platform), attributeIndent, yamlScalar(job.RuntimeURL), attributeIndent, yamlScalar(strings.TrimPrefix(distributionDigest, "sha256:")))
+			_, _ = fmt.Fprintf(out, "%s        hosted-tool-cache: %t\n", attributeIndent, hostedToolCache)
+		} else {
+			_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
+		}
 		if workflow.Aggregate {
 			checkLabel := job.CheckLabel
 			if checkLabel == "" {
@@ -1236,7 +1261,7 @@ func validateJob(compilerStep string, job Job) error {
 		if _, err := PlanPath(job.PlanDigest); err != nil {
 			return fmt.Errorf("job %q: %w", job.Key, err)
 		}
-	case job.PlanDigest != "" || job.Queue != "" || job.Platform != "" || job.DistributionDigest != "" || job.RuntimeImage != "" || len(job.Agents) != 0 || job.ToolCache != nil || job.EventPayload || job.ApprovalGate != "" || job.RequiresMise || job.Cache != nil || job.Concurrency != 0 || job.ConcurrencyGroup != "" || len(job.ConcurrencyGates) != 0:
+	case job.PlanDigest != "" || job.Queue != "" || job.Platform != "" || job.DistributionDigest != "" || job.RuntimeURL != "" || job.RuntimeImage != "" || len(job.Agents) != 0 || job.ToolCache != nil || job.EventPayload || job.ApprovalGate != "" || job.RequiresMise || job.Cache != nil || job.Concurrency != 0 || job.ConcurrencyGroup != "" || len(job.ConcurrencyGates) != 0:
 		return fmt.Errorf("job %q preparation result cannot include runnable job configuration", job.Key)
 	}
 	if job.Concurrency < 0 {

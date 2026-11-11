@@ -1,0 +1,38 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":package: Build pinned runtime proof fixtures"
+    key: "pinned-runtime-proof-build"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.10.17"
+    command: |
+      set -euo pipefail
+      base="$${PINNED_RUNTIME_BASE_REVISION:?Specify an exact baseline commit}"
+      [[ "$$base" =~ ^[0-9a-f]{40}$$ ]]
+      mkdir -p .pinned-runtime-proof/base
+      git fetch origin "$$base"
+      git archive "$$base" | tar -x -C .pinned-runtime-proof/base
+      mise exec -- go build -trimpath -buildvcs=false -ldflags '-X main.version=0.0.0-proof' -o .pinned-runtime-proof/candidate ./cmd/buildkite-gha
+      mise exec -- go -C .pinned-runtime-proof/base build -trimpath -buildvcs=false -ldflags '-X main.version=0.0.0-proof' -o "$${PWD}/.pinned-runtime-proof/baseline" ./cmd/buildkite-gha
+      python3 .buildkite/pinned-runtime-proof.py publish
+
+  - label: ":pipeline: Baseline artifact delivery control"
+    key: "pinned-runtime-proof-baseline"
+    depends_on: "pinned-runtime-proof-build"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    command: python3 .buildkite/pinned-runtime-proof.py import baseline
+
+  - label: ":pipeline: Pinned runtime importer"
+    key: "pinned-runtime-proof-importer"
+    depends_on: "pinned-runtime-proof-baseline"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    command: python3 .buildkite/pinned-runtime-proof.py import candidate

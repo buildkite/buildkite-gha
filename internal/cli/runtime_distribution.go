@@ -34,6 +34,8 @@ func importerPlatform(goos, goarch string) (compiler.Platform, error) {
 type runtimeDistribution struct {
 	contents []byte
 	digest   string
+	// url selects pinned plugin delivery instead of a runtime artifact.
+	url string
 }
 
 func loadRuntimeDistributions(paths map[compiler.Platform]string) (map[compiler.Platform]runtimeDistribution, error) {

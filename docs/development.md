@@ -498,6 +498,35 @@ bk build create --pipeline buildkite/buildkite-gha \
 
 This suite covers shell jobs, concurrent steps, public and Docker actions, container runtime behavior, summaries, annotations, artifact upload, and artifact roundtrip. Use `COMPATIBILITY_PROOF=<target>` with `COMPATIBILITY_PROOF_COMMIT=<commit>` only when diagnosing one target. The available target names are in [`.buildkite/pipeline.yml`](../.buildkite/pipeline.yml).
 
+Use `COMPATIBILITY_PROOF=pinned-runtime` with
+`PINNED_RUNTIME_BASE_REVISION=<exact-baseline-commit>` to compare runtime delivery.
+The setup job publishes test executables; separate importer artifact inventories
+distinguish baseline distribution uploads from artifact-free pinned delivery.
+The proof uses real backend and artifact transport, fixture release metadata,
+and normal importer and runtime plugin installation through nested agent
+bootstrap. By default it uses bare plugin HEAD; set `PINNED_RUNTIME_PLUGIN_REF`
+to exercise an explicit tag, branch, or commit reference. Its warm case
+replays retry context on the same worker; it is not a scheduler retry or a
+cross-worker cache proof. It also checks failure status and bad-digest rejection.
+
+Set `PINNED_RUNTIME_SCHEDULED=1` to submit the candidate's emitted pipeline
+unchanged instead. This checks normal scheduling, checkout skip, token/redactor
+access, transported job outputs, and an allowed failure using fixture metadata.
+The token-bearing workflow lives directly under `.github/workflows`. Set
+`GITHUB_EVENT_NAME=workflow_dispatch` on scheduled and release-consumer proof
+builds so import and generated-job conditions select the same manual event.
+
+After publication, use `COMPATIBILITY_PROOF=pinned-runtime-consumer` with
+`PINNED_CONSUMER_MODE=release` and `PINNED_CONSUMER_VERSION=<published-tag>`.
+Set `PINNED_CONSUMER_DISTRIBUTIONS` to the expected importer binary-artifact count.
+The other modes are `old-plugin` (previous plugin with default latest CLI),
+`historical` (an earlier CLI pin), `custom`, `local`, and `mixed` (Linux/macOS).
+Custom and local modes need `PINNED_CONSUMER_BINARY_URL`; local also needs
+`PINNED_CONSUMER_SHA256`. These run normal generated jobs, not nested bootstrap.
+Inspect their logs and result artifacts as well as the inventory assertion;
+the failure control must reach its workflow command and exit 37. The CLI maps
+that tolerated failure to agent exit 78; setup failures are not proof.
+
 Use `COMPATIBILITY_PROOF=scheduling` to probe output-derived matrix concurrency
 and parallel limits. Check job start and finish times: the group consumers must
 not overlap, the parallel consumers must run at most two at a time, and each

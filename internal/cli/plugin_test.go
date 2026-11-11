@@ -851,6 +851,152 @@ func TestParsePluginConfiguration(t *testing.T) {
 	}
 }
 
+func TestPluginPinsStaticLinuxRuntimeWithoutBinaryArtifacts(t *testing.T) {
+	requireImporterHost(t)
+	for _, mode := range []string{"release", "release tag", "release branch", "release SHA", "release unversioned", "release mismatched config", "runner opt-out", "custom", "dev", "no metadata", "cache", "agents", "mismatch", "invalid URL"} {
+		t.Run(mode, func(t *testing.T) {
+			repository := writeUploadWorkflowRepository(t, map[string]string{
+				"shell.yml": "on: push\njobs:\n  hello:\n    runs-on: ubuntu-latest\n    steps: [{run: echo hello}]\n",
+			})
+			t.Chdir(repository)
+			setCLIPluginBuildkiteEnvironment(t, "importer")
+			t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+			configuration := map[string]any{"workflow": ".github/workflows/shell.yml"}
+			target := map[string]any{"queue": "linux", "platform": "linux/amd64", "tool-cache": false}
+			version := "1.2.3"
+			digest := cliTestRuntimeDigest()
+			const source = "https://example.com/v1.2.3/buildkite-gha_linux_x86_64"
+			asset := pluginReleaseAsset{Name: pluginLinuxAsset, URL: source, Digest: digest}
+			switch mode {
+			case "runner opt-out":
+				configuration["experimental-runner-user"] = false
+			case "custom":
+				configuration["binary"] = source
+			case "dev":
+				version = "dev"
+			case "cache":
+				configuration["runners"] = []map[string]any{{"runs-on": "ubuntu-latest", "queue": "linux", "cache": map[string]any{"paths": []string{"/home/runner/cache"}}}}
+			case "agents":
+				target["agents"] = map[string]string{"nsc-gha-image": "ubuntu-latest"}
+			case "mismatch":
+				asset.Digest = "sha256:" + strings.Repeat("0", 64)
+			case "invalid URL":
+				asset.URL = "http://example.com/runtime"
+			}
+			t.Setenv(pluginConfigurationEnvironment, string(mustJSON(t, configuration)))
+			reference := "github-actions"
+			t.Setenv("BUILDKITE_PLUGINS", "")
+			switch mode {
+			case "release tag", "release branch", "release SHA", "release unversioned", "release mismatched config":
+				source := "github.com/buildkite-plugins/github-actions-buildkite-plugin"
+				switch mode {
+				case "release tag", "release mismatched config":
+					source += "#v0.15.1"
+				case "release branch":
+					source += "#feature/run-mode"
+				case "release SHA":
+					source = "https://" + source + ".git#25e8895c064a8dae24c8721796dbaf04b12e17e9"
+				}
+				active := configuration
+				if mode == "release mismatched config" {
+					active = map[string]any{"workflow": "other.yml"}
+				} else if mode != "release unversioned" {
+					reference = source
+				}
+				t.Setenv("BUILDKITE_PLUGINS", string(mustJSON(t, []any{
+					"github.com/example/no-config-buildkite-plugin#v1.0.0",
+					map[string]any{"github.com/buildkite-plugins/github-actions-buildkite-plugin#unrelated": map[string]any{"workflow": "different.yml"}},
+					map[string]any{source: active},
+				})))
+			}
+			t.Setenv(pluginReleaseEnvironment, string(mustJSON(t, pluginRelease{TagName: "v1.2.3", Assets: []pluginReleaseAsset{asset}})))
+			if mode == "no metadata" {
+				if err := os.Unsetenv(pluginReleaseEnvironment); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resolution := map[string]any{"target": target}
+			if mode == "cache" {
+				resolution["validated"] = true
+			}
+			server, _ := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{"ubuntu-latest": resolution})
+			t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+			t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+			// No catalogue or executable request is allowed, including the host.
+			noDownload := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("unexpected acquisition: %s", r.URL)
+				http.Error(w, "unexpected download", http.StatusInternalServerError)
+			}))
+			defer noDownload.Close()
+			previousClient, previousAPI := pluginHTTPClient, pluginReleaseAPIURL
+			pluginHTTPClient, pluginReleaseAPIURL = noDownload.Client(), noDownload.URL+"/tags/"
+			t.Cleanup(func() { pluginHTTPClient, pluginReleaseAPIURL = previousClient, previousAPI })
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"plugin"}, &stdout, &stderr, version, runner)
+			if mode == "mismatch" || mode == "invalid URL" {
+				if code == 0 || len(runner.uploaded) != 0 {
+					t.Fatalf("invalid metadata published work: code=%d, commands=%v, stderr=%s", code, runner.commands, &stderr)
+				}
+				for _, command := range runner.commands {
+					if len(command.args) != 0 && command.args[0] == "pipeline" {
+						t.Fatal("invalid metadata uploaded runnable jobs")
+					}
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("plugin code=%d: %s", code, &stderr)
+			}
+			pipeline := runner.commands[len(runner.commands)-1].stdin
+			var emitted struct {
+				Steps []struct {
+					Steps []struct {
+						Command string
+						Plugins []map[string]struct {
+							Run struct {
+								Plan            struct{ Digest, Producer string }
+								Runtime         struct{ Platform, URL, SHA256 string }
+								HostedToolCache bool `yaml:"hosted-tool-cache"`
+							}
+						}
+					}
+				}
+			}
+			if err := yaml.Unmarshal(pipeline, &emitted); err != nil {
+				t.Fatal(err)
+			}
+			if len(emitted.Steps) != 1 || len(emitted.Steps[0].Steps) != 1 {
+				t.Fatalf("unexpected pipeline: %s", pipeline)
+			}
+			step := emitted.Steps[0].Steps[0]
+			path, _ := buildkitepipeline.DistributionPath(digest)
+			_, hasBinary := runner.uploaded[path]
+			if !strings.HasPrefix(mode, "release") {
+				if !hasBinary || !strings.Contains(step.Command, "artifact download") || len(step.Plugins) != 0 {
+					t.Fatalf("legacy path changed: binary=%t, pipeline=%s", hasBinary, pipeline)
+				}
+				return
+			}
+			if hasBinary || step.Command != "" || len(step.Plugins) != 1 {
+				t.Fatalf("runtime was not delegated: binary=%t, pipeline=%s", hasBinary, pipeline)
+			}
+			invocation := step.Plugins[0][reference].Run
+			if invocation.Plan.Producer != cliTestJobID || invocation.Runtime.Platform != "linux/amd64" || invocation.Runtime.URL != source || invocation.Runtime.SHA256 != strings.TrimPrefix(digest, "sha256:") || invocation.HostedToolCache {
+				t.Fatalf("incorrect plugin contract: %+v", invocation)
+			}
+			planPath, err := buildkitepipeline.PlanPath(invocation.Plan.Digest)
+			if err != nil || transport.Digest(runner.uploaded[planPath]) != invocation.Plan.Digest {
+				t.Fatalf("plan reference does not address uploaded bytes: %v", err)
+			}
+			job, err := plan.Decode(runner.uploaded[planPath])
+			if err != nil || job.RuntimeDistributionDigest() != digest {
+				t.Fatalf("plan runtime binding changed: %v", err)
+			}
+		})
+	}
+}
+
 func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
