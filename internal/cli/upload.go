@@ -633,6 +633,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	aggregatePipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:      importerStep,
 		ArtifactProducer:  importerJobID,
+		RuntimePlugin:     pluginRuntimeReference(),
 		EventProvider:     effectiveEvent.Event.Provider,
 		DisableRunnerUser: !uploadArguments.experimentalRunnerUser,
 		Workflows:         generatedWorkflows,

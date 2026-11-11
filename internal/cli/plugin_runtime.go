@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -35,6 +36,39 @@ var releaseVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*
 var pluginReleaseAPIURL = "https://api.github.com/repos/buildkite/buildkite-gha/releases/tags/"
 
 var pluginHTTPClient = securePluginHTTPClient()
+
+// The agent supplies normalized plugin sources and the active hook's config.
+// Match both so another GitHub Actions entry cannot choose this import's ref.
+func pluginRuntimeReference() string {
+	var plugins []any
+	var configuration map[string]any
+	if json.Unmarshal([]byte(os.Getenv("BUILDKITE_PLUGINS")), &plugins) != nil ||
+		json.Unmarshal([]byte(os.Getenv(pluginConfigurationEnvironment)), &configuration) != nil {
+		return "github-actions"
+	}
+	reference := ""
+	for _, entry := range plugins {
+		plugin, _ := entry.(map[string]any)
+		for source, config := range plugin {
+			location, version, _ := strings.Cut(source, "#")
+			location = strings.TrimSuffix(strings.TrimPrefix(location, "https://"), ".git")
+			switch location {
+			case "github-actions", "buildkite-plugins/github-actions", "github.com/buildkite-plugins/github-actions-buildkite-plugin":
+				if version == "" || !reflect.DeepEqual(config, configuration) {
+					continue
+				}
+				if reference != "" && reference != source {
+					return "github-actions"
+				}
+				reference = source
+			}
+		}
+	}
+	if reference == "" {
+		return "github-actions"
+	}
+	return reference
+}
 
 type pluginRuntimeAcquisition struct {
 	version  string

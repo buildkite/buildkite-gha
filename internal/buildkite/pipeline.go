@@ -25,9 +25,6 @@ const stageDirectory = ".buildkite-gha/stages"
 const maxConcurrencyGroupLength = 200
 const runtimeCacheName = "buildkite-gha"
 
-// PinnedRuntimePlugin is the execution consumer, independent of the CLI release.
-const PinnedRuntimePlugin = "github-actions#v0.15.1"
-
 // etcEnvironmentPATHCommand prepends /etc/environment PATH entries that the
 // agent's PATH lacks, so the agent's buildkite-agent and docker still win.
 const etcEnvironmentPATHCommand = `etc_path="$(sed -n 's/^PATH=//p' /etc/environment 2>/dev/null | tail -n 1)"; etc_path="${etc_path#\"}"; etc_path="${etc_path%\"}"; missing_path=''; IFS=: read -r -a etc_entries <<< "$etc_path"; for entry in "${etc_entries[@]}"; do case ":$PATH:$missing_path:" in *":$entry:"*) ;; *) test -z "$entry" || missing_path="$missing_path${missing_path:+:}$entry";; esac; done; if test -n "$missing_path"; then PATH="$missing_path:$PATH"; export PATH; fi`
@@ -126,6 +123,8 @@ func ValidateCacheVolume(cache CacheVolume) error {
 type Pipeline struct {
 	CompilerStep     string
 	ArtifactProducer string
+	// RuntimePlugin is the invoking plugin's reference, independent of CLI pins.
+	RuntimePlugin string
 	// DistributionDigest and RuntimeImage retain the single-platform emitter
 	// contract for direct callers. Mixed-platform bundles set these per Job.
 	DistributionDigest string
@@ -800,7 +799,11 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			command = windowsBootstrapCommand(command)
 		}
 		if job.RuntimeURL != "" {
-			_, _ = fmt.Fprintf(out, "%splugins:\n%s  - %s:\n%s      run:\n", attributeIndent, attributeIndent, PinnedRuntimePlugin, attributeIndent)
+			reference := pipeline.RuntimePlugin
+			if reference == "" {
+				reference = "github-actions"
+			}
+			_, _ = fmt.Fprintf(out, "%splugins:\n%s  - %s:\n%s      run:\n", attributeIndent, attributeIndent, yamlScalar(reference), attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s        plan:\n%s          digest: %s\n%s          producer: %s\n", attributeIndent, attributeIndent, yamlScalar(job.PlanDigest), attributeIndent, yamlScalar(artifactProducer))
 			_, _ = fmt.Fprintf(out, "%s        runtime:\n%s          platform: %s\n%s          url: %s\n%s          sha256: %s\n", attributeIndent, attributeIndent, yamlScalar(platform), attributeIndent, yamlScalar(job.RuntimeURL), attributeIndent, yamlScalar(strings.TrimPrefix(distributionDigest, "sha256:")))
 			_, _ = fmt.Fprintf(out, "%s        hosted-tool-cache: %t\n", attributeIndent, hostedToolCache)

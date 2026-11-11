@@ -13,7 +13,9 @@ import tempfile
 
 ROOT = Path.cwd()
 OUTPUT = ROOT / ".pinned-runtime-proof"
-PLUGIN = "github.com/buildkite-plugins/github-actions-buildkite-plugin#v0.15.1"
+PLUGIN = "github.com/buildkite-plugins/github-actions-buildkite-plugin"
+if os.environ.get("PINNED_RUNTIME_PLUGIN_REF"):
+    PLUGIN += "#" + os.environ["PINNED_RUNTIME_PLUGIN_REF"]
 MARKER = "PINNED_PROOF user=runner home=/home/runner value=42"
 
 
@@ -81,11 +83,30 @@ def import_workflow(name):
         wrapper_dir = Path(tmp) / "bin"
         wrappers(wrapper_dir)
         env = dict(os.environ, PROOF_REAL_AGENT=shutil.which("buildkite-agent"),
+                   PROOF_REAL_CURL=shutil.which("curl"), PROOF_RUNTIME_URL=assets[name]["url"],
                    PROOF_PIPELINE_FILE=str(pipeline_path), PATH=f"{wrapper_dir}:{os.environ['PATH']}",
                    BUILDKITE_GHA_TELEMETRY_DISABLED="true",
                    BUILDKITE_PLUGIN_CONFIGURATION=json.dumps({"workflow": workflow, "runners": [{"runs-on": "ubuntu-latest", "queue": "hosted"}]}),
                    BUILDKITE_GHA_PLUGIN_RELEASE=json.dumps({"tag_name": "v0.0.0-proof", "assets": [{"name": "buildkite-gha_linux_x86_64", "browser_download_url": assets[name]["url"], "digest": "sha256:" + assets[name]["sha256"]}]}))
-        subprocess.run([str(binary), "plugin"], env=env, check=True)
+        if name == "candidate":
+            # Install the real importer plugin. Only release metadata is a fixture;
+            # the agent supplies the plugin reference and active configuration.
+            cache = Path(tmp) / "cache"
+            release = cache / "releases/tags/v0.0.0-proof.json"
+            release.parent.mkdir(parents=True)
+            release.write_text(env.pop("BUILDKITE_GHA_PLUGIN_RELEASE"))
+            config = json.loads(env.pop("BUILDKITE_PLUGIN_CONFIGURATION"))
+            config["version"] = "v0.0.0-proof"
+            env.update(BUILDKITE_PLUGINS=json.dumps([{PLUGIN: config}]),
+                       BUILDKITE_GHA_CACHE_DIR=str(cache), BUILDKITE_CLEAN_CHECKOUT="false",
+                       BUILDKITE_PLUGIN_VALIDATION="true")
+            subprocess.run([env["PROOF_REAL_AGENT"], "bootstrap", "--skip-checkout",
+                            "--plugins-path", str(Path(tmp) / "plugins"),
+                            "--sockets-path", str(Path(tmp) / "sockets"),
+                            "--bin-path", str(wrapper_dir), "--plugin-validation",
+                            "--phases", "plugin,command"], env=env, check=True)
+        else:
+            subprocess.run([str(binary), "plugin"], env=env, check=True)
     pipeline = json.loads(capture(["buildkite-agent", "pipeline", "upload", "--dry-run", "--no-interpolation", "--format", "json", str(pipeline_path)]))
     assert len(pipeline["steps"]) == 1 and len(pipeline["steps"][0]["steps"]) == (3 if scheduled else 1)
     step = pipeline["steps"][0]["steps"][0]

@@ -503,7 +503,9 @@ Use `COMPATIBILITY_PROOF=pinned-runtime` with
 The setup job publishes test executables; separate importer artifact inventories
 distinguish baseline distribution uploads from artifact-free pinned delivery.
 The proof uses real backend and artifact transport, fixture release metadata,
-and normal plugin installation through nested agent bootstrap. Its warm case
+and normal importer and runtime plugin installation through nested agent
+bootstrap. By default it uses bare plugin HEAD; set `PINNED_RUNTIME_PLUGIN_REF`
+to exercise an explicit tag, branch, or commit reference. Its warm case
 replays retry context on the same worker; it is not a scheduler retry or a
 cross-worker cache proof. It also checks failure status and bad-digest rejection.
 

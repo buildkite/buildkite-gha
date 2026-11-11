@@ -76,7 +76,7 @@ extension could accidentally remove. They are not a second feature inventory.
 
 ### Pinned runtime delivery
 
-Plugin imports may use the pinned execution plugin only when all runnable jobs
+Plugin imports may use plugin run mode only when all runnable jobs
 are static Linux amd64, runner-user setup is enabled, and no job needs custom
 cache-volume ownership or agent-tag setup. Make this decision before acquiring
 counterpart bytes or publishing jobs. Deferred and mixed-platform imports,
@@ -85,9 +85,15 @@ their existing artifact delivery.
 
 Resolve runtime URLs and SHA-256 digests from the plugin's release metadata
 handoff, not another catalogue. Verify same-host metadata against the running
-executable. Emit an exact published plugin version, runtime URL and digest,
-plan digest, and producer job UUID. Do not upload executable artifacts for this
-path. Retries must keep those pins and never resolve releases at execution.
+executable. Reuse the invoking plugin reference from `BUILDKITE_PLUGINS`, matched
+to the active `BUILDKITE_PLUGIN_CONFIGURATION`; preserve tags, branches, and
+commit references. Fall back to bare `github-actions` when the reference is
+unversioned or cannot be determined. A fresh checkout uses repository HEAD;
+agents may reuse cached checkouts. The selected plugin must support run mode; a moving
+reference does not guarantee identical plugin code across workers or retries.
+Emit the runtime URL and digest, plan digest, and producer job UUID. Do not
+upload executable artifacts for this path. Retries must keep the runtime pins
+and never resolve CLI releases at execution.
 Keep plan, event, target, source, and executable verification unchanged.
 
 The [import tests](../internal/cli/plugin_test.go) check artifact-free emission

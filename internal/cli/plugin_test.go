@@ -853,7 +853,7 @@ func TestParsePluginConfiguration(t *testing.T) {
 
 func TestPluginPinsStaticLinuxRuntimeWithoutBinaryArtifacts(t *testing.T) {
 	requireImporterHost(t)
-	for _, mode := range []string{"release", "runner opt-out", "custom", "dev", "no metadata", "cache", "agents", "mismatch", "invalid URL"} {
+	for _, mode := range []string{"release", "release tag", "release branch", "release SHA", "release unversioned", "release mismatched config", "runner opt-out", "custom", "dev", "no metadata", "cache", "agents", "mismatch", "invalid URL"} {
 		t.Run(mode, func(t *testing.T) {
 			repository := writeUploadWorkflowRepository(t, map[string]string{
 				"shell.yml": "on: push\njobs:\n  hello:\n    runs-on: ubuntu-latest\n    steps: [{run: echo hello}]\n",
@@ -884,6 +884,31 @@ func TestPluginPinsStaticLinuxRuntimeWithoutBinaryArtifacts(t *testing.T) {
 				asset.URL = "http://example.com/runtime"
 			}
 			t.Setenv(pluginConfigurationEnvironment, string(mustJSON(t, configuration)))
+			reference := "github-actions"
+			t.Setenv("BUILDKITE_PLUGINS", "")
+			switch mode {
+			case "release tag", "release branch", "release SHA", "release unversioned", "release mismatched config":
+				source := "github.com/buildkite-plugins/github-actions-buildkite-plugin"
+				switch mode {
+				case "release tag", "release mismatched config":
+					source += "#v0.15.1"
+				case "release branch":
+					source += "#feature/run-mode"
+				case "release SHA":
+					source = "https://" + source + ".git#25e8895c064a8dae24c8721796dbaf04b12e17e9"
+				}
+				active := configuration
+				if mode == "release mismatched config" {
+					active = map[string]any{"workflow": "other.yml"}
+				} else if mode != "release unversioned" {
+					reference = source
+				}
+				t.Setenv("BUILDKITE_PLUGINS", string(mustJSON(t, []any{
+					"github.com/example/no-config-buildkite-plugin#v1.0.0",
+					map[string]any{"github.com/buildkite-plugins/github-actions-buildkite-plugin#unrelated": map[string]any{"workflow": "different.yml"}},
+					map[string]any{source: active},
+				})))
+			}
 			t.Setenv(pluginReleaseEnvironment, string(mustJSON(t, pluginRelease{TagName: "v1.2.3", Assets: []pluginReleaseAsset{asset}})))
 			if mode == "no metadata" {
 				if err := os.Unsetenv(pluginReleaseEnvironment); err != nil {
@@ -947,7 +972,7 @@ func TestPluginPinsStaticLinuxRuntimeWithoutBinaryArtifacts(t *testing.T) {
 			step := emitted.Steps[0].Steps[0]
 			path, _ := buildkitepipeline.DistributionPath(digest)
 			_, hasBinary := runner.uploaded[path]
-			if mode != "release" {
+			if !strings.HasPrefix(mode, "release") {
 				if !hasBinary || !strings.Contains(step.Command, "artifact download") || len(step.Plugins) != 0 {
 					t.Fatalf("legacy path changed: binary=%t, pipeline=%s", hasBinary, pipeline)
 				}
@@ -956,7 +981,7 @@ func TestPluginPinsStaticLinuxRuntimeWithoutBinaryArtifacts(t *testing.T) {
 			if hasBinary || step.Command != "" || len(step.Plugins) != 1 {
 				t.Fatalf("runtime was not delegated: binary=%t, pipeline=%s", hasBinary, pipeline)
 			}
-			invocation := step.Plugins[0][buildkitepipeline.PinnedRuntimePlugin].Run
+			invocation := step.Plugins[0][reference].Run
 			if invocation.Plan.Producer != cliTestJobID || invocation.Runtime.Platform != "linux/amd64" || invocation.Runtime.URL != source || invocation.Runtime.SHA256 != strings.TrimPrefix(digest, "sha256:") || invocation.HostedToolCache {
 				t.Fatalf("incorrect plugin contract: %+v", invocation)
 			}
