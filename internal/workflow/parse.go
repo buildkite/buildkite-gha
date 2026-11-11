@@ -62,7 +62,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if err != nil {
 		return nil, err
 	}
-	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, acceptedEmptyTriggerListsDiagnostics(&document), cacheDiagnostics)
+	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, acceptedEmptyTriggerDiagnostics(&document), cacheDiagnostics)
 	if err := filterActionlintDiagnostics(path, errs, expectedDiagnostics); err != nil {
 		return nil, err
 	}
@@ -337,10 +337,10 @@ func parseCacheModes(path string, document *yaml.Node) (string, map[string]strin
 	return mode, jobs, diagnostics, nil
 }
 
-// The pinned actionlint parser rejects empty trigger lists more strictly than
-// GitHub. Accept only that diagnostic at each verified sequence, leaving the
+// The pinned actionlint parser rejects empty trigger values more strictly than
+// GitHub. Accept only known diagnostics at each verified node, leaving the
 // source and all other diagnostics (including alias errors) intact.
-func acceptedEmptyTriggerListsDiagnostics(document *yaml.Node) []expectedActionlintDiagnostic {
+func acceptedEmptyTriggerDiagnostics(document *yaml.Node) []expectedActionlintDiagnostic {
 	if len(document.Content) == 0 {
 		return nil
 	}
@@ -359,6 +359,10 @@ func acceptedEmptyTriggerListsDiagnostics(document *yaml.Node) []expectedActionl
 		if filter != nil && filter.Kind == yaml.SequenceNode && len(filter.Content) == 0 {
 			diagnostics = append(diagnostics, expectedActionlintDiagnostic{
 				Position: nodePosition(filter), Prefix: `"workflows" section should not be empty`,
+			})
+		} else if filter != nil && filter.Tag == "!!null" && filter.Value == "" {
+			diagnostics = append(diagnostics, expectedActionlintDiagnostic{
+				Position: nodePosition(filter), Prefix: "string should not be empty",
 			})
 		}
 	}

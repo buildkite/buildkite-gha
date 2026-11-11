@@ -255,6 +255,7 @@ func TestRunValidateIgnoredWorkflowFilters(t *testing.T) {
 			{value: "nonexistent-workflow"},
 			{value: "[first-missing, second-missing]"},
 			{value: "null"},
+			{value: ""},
 			{value: "[]"},
 			{value: "['null']"},
 			{value: "[&name 'null', *name]"},
@@ -264,6 +265,7 @@ func TestRunValidateIgnoredWorkflowFilters(t *testing.T) {
 			{value: "[name, *empty]", wantError: "null list members are invalid"},
 			{value: "false", wantError: "workflow names must be strings"},
 			{value: "[42]", wantError: "workflow names must be strings"},
+			{value: "''", wantError: "string should not be empty"},
 			{value: "['']", wantError: "string should not be empty"},
 		} {
 			t.Run(event+"/"+test.value, func(t *testing.T) {
