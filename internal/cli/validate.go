@@ -22,7 +22,7 @@ import (
 )
 
 func validate(ctx context.Context, args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
-	args, actionCacheDir, err := validateActionCacheArgs(args)
+	args, actionCacheDir, runnerTargets, err := validateConfigurationArgs(args)
 	if err != nil {
 		return usageError(stderr, "validate: %v", err)
 	}
@@ -44,10 +44,15 @@ func validate(ctx context.Context, args []string, stdout, stderr io.Writer, clie
 		return usageError(stderr, "validate: --profile hosted requires --event, --event-path, or --all-events; use bare validate <workflow> for event-independent syntax and trigger compatibility validation")
 	}
 	out := newProcessingOutput(ctx, "validate", format, stdout, stderr, agent)
-	if allEvents {
-		return validateAllEvents(ctx, out, workflowPath, clientVersion, actionCacheDir, nil, stderr)
+	var runtime *profileValidationRuntime
+	if len(runnerTargets) != 0 {
+		_, _, digest, executableErr := executable()
+		runtime = &profileValidationRuntime{runnerTargets: runnerTargets, distributionDigest: digest, executableErr: executableErr}
 	}
-	return validateOne(ctx, out, workflowPath, eventPath, eventName, profile, clientVersion, actionCacheDir, nil, stderr)
+	if allEvents {
+		return validateAllEvents(ctx, out, workflowPath, clientVersion, actionCacheDir, runtime, stderr)
+	}
+	return validateOne(ctx, out, workflowPath, eventPath, eventName, profile, clientVersion, actionCacheDir, runtime, stderr)
 }
 
 func validateOne(ctx context.Context, out processingOutput, workflowPath, eventPath, eventName, profile, clientVersion, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
@@ -133,7 +138,14 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		ImporterStep:     "buildkite-gha-profile-importer",
 		RepositorySource: repositorySource,
 	}
+	if runtime != nil {
+		request.RunnerTargets = runtime.runnerTargets
+	}
 	validationOptions := compiler.DefaultOptions()
+	validationOptions.Runners.Targets = request.RunnerTargets
+	for _, target := range request.RunnerTargets {
+		validationOptions.Runners.UntrustedQueues = append(validationOptions.Runners.UntrustedQueues, target.Queue)
+	}
 	if profile != "" {
 		validationOptions = request.validationOptions()
 	}
@@ -161,9 +173,10 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		// digest stands in for every platform's runtime distribution.
 		request.DistributionDigest = distributionDigest
 		request.RuntimeDistributions = map[compiler.Platform]string{
-			compiler.PlatformLinuxAMD64:  distributionDigest,
-			compiler.PlatformLinuxARM64:  distributionDigest,
-			compiler.PlatformDarwinARM64: distributionDigest,
+			compiler.PlatformLinuxAMD64:   distributionDigest,
+			compiler.PlatformLinuxARM64:   distributionDigest,
+			compiler.PlatformDarwinARM64:  distributionDigest,
+			compiler.PlatformWindowsAMD64: distributionDigest,
 		}
 		preflight, profileErr := compileHostedRequest(ctx, request)
 		applyHostedCompilation(&processingReport, workflowPath, preflight, profileErr)
@@ -210,6 +223,7 @@ type profileValidationRuntime struct {
 	actionSource       compiler.ActionSource
 	distributionDigest string
 	executableErr      error
+	runnerTargets      map[string]compiler.RunnerTarget
 }
 
 func validateAllEvents(ctx context.Context, out processingOutput, workflowPath, clientVersion, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
@@ -243,11 +257,12 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 		} else {
 			runtime = &profileValidationRuntime{
 				actionSource: actionSource, distributionDigest: runtime.distributionDigest, executableErr: runtime.executableErr,
+				runnerTargets: runtime.runnerTargets,
 			}
 		}
 	}
 	defer cleanup()
-	validationOptions := hostedOptions("", nil, nil)
+	validationOptions := hostedOptions("", runtime.runnerTargets, nil)
 	validationOptions.RepositorySource = runtime.actionSource
 	validation, validationErr := compiler.ValidateWithOptionsContext(ctx, workflowPath, source, validationOptions)
 	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)
@@ -298,26 +313,46 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 	return 0
 }
 
-func validateActionCacheArgs(args []string) ([]string, string, error) {
+func validateConfigurationArgs(args []string) ([]string, string, map[string]compiler.RunnerTarget, error) {
 	filtered := make([]string, 0, len(args))
 	var cacheDir string
+	targets := make(map[string]compiler.RunnerTarget)
 	seen := false
 	for i := 0; i < len(args); i++ {
+		if args[i] == "--runner-queue" {
+			i++
+			if i == len(args) {
+				return nil, "", nil, fmt.Errorf("--runner-queue requires runs-on=value")
+			}
+			label, queue, ok := strings.Cut(args[i], "=")
+			if !ok || label == "" || queue == "" {
+				return nil, "", nil, fmt.Errorf("--runner-queue requires runs-on=value")
+			}
+			canonical, target, err := configuredRunnerTarget(label, queue, "")
+			if err != nil {
+				return nil, "", nil, err
+			}
+			if _, duplicate := targets[canonical]; duplicate {
+				return nil, "", nil, fmt.Errorf("--runner-queue for %q may only be specified once", canonical)
+			}
+			targets[canonical] = target
+			continue
+		}
 		if args[i] != "--action-cache-dir" {
 			filtered = append(filtered, args[i])
 			continue
 		}
 		if seen {
-			return nil, "", fmt.Errorf("--action-cache-dir may only be specified once")
+			return nil, "", nil, fmt.Errorf("--action-cache-dir may only be specified once")
 		}
 		seen = true
 		i++
 		if i == len(args) || strings.TrimSpace(args[i]) == "" {
-			return nil, "", fmt.Errorf("--action-cache-dir requires a path")
+			return nil, "", nil, fmt.Errorf("--action-cache-dir requires a path")
 		}
 		cacheDir = args[i]
 	}
-	return filtered, cacheDir, nil
+	return filtered, cacheDir, targets, nil
 }
 
 func validateArgs(args []string) (workflowPath, eventPath, eventName, format, profile string, allEvents bool, err error) {

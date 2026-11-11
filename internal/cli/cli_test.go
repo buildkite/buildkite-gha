@@ -2633,14 +2633,14 @@ jobs:
 }
 
 func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
-	if _, _, err := validateActionCacheArgs([]string{"--action-cache-dir", "one", "--action-cache-dir", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
-		t.Fatalf("validateActionCacheArgs() error = %v, want duplicate cache directory error", err)
+	if _, _, _, err := validateConfigurationArgs([]string{"--action-cache-dir", "one", "--action-cache-dir", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("validateConfigurationArgs() error = %v, want duplicate cache directory error", err)
 	}
-	if _, _, err := validateActionCacheArgs([]string{"--action-cache-dir", ""}); err == nil || !strings.Contains(err.Error(), "requires a path") {
-		t.Fatalf("validateActionCacheArgs() error = %v, want empty cache directory error", err)
+	if _, _, _, err := validateConfigurationArgs([]string{"--action-cache-dir", ""}); err == nil || !strings.Contains(err.Error(), "requires a path") {
+		t.Fatalf("validateConfigurationArgs() error = %v, want empty cache directory error", err)
 	}
-	if args, cacheDir, err := validateActionCacheArgs([]string{"--profile", "hosted", "--action-cache-dir", "cache", "--all-events", "workflow.yml"}); err != nil || cacheDir != "cache" || !slices.Equal(args, []string{"--profile", "hosted", "--all-events", "workflow.yml"}) {
-		t.Fatalf("validateActionCacheArgs() = %q, %q, %v", args, cacheDir, err)
+	if args, cacheDir, _, err := validateConfigurationArgs([]string{"--profile", "hosted", "--action-cache-dir", "cache", "--all-events", "workflow.yml"}); err != nil || cacheDir != "cache" || !slices.Equal(args, []string{"--profile", "hosted", "--all-events", "workflow.yml"}) {
+		t.Fatalf("validateConfigurationArgs() = %q, %q, %v", args, cacheDir, err)
 	}
 	if _, err := runJobArgs([]string{"--plan", "one", "--plan", "two"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("runJobArgs() error = %v, want duplicate option error", err)

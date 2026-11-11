@@ -196,6 +196,8 @@ for id in "${case_ids[@]}"; do
   (
     cd "$case_root"
     clean_env "$work/buildkite-gha" validate "${validate_args[@]}" --format json \
+      --runner-queue windows-latest=corpus-windows \
+      --runner-queue windows-2022=corpus-windows \
       --event-path "$event_path" "$workflow"
   ) > "$report" || status=$?
   record_report "$id" "$status" "$report"
@@ -204,6 +206,7 @@ done
 if $profile; then
   printf '\n_Profile admission resolves and validates actions but does not execute action code._\n' >> "$summary"
 fi
+printf '\n_Windows labels use a declared corpus mapping. This scan does not check live queues, automatic routing, or Windows execution._\n' >> "$summary"
 printf '\n**%d passing; %d blocked; %d disabled.**\n' "$passed" "$blocked" "$disabled" >> "$summary"
 cat "$summary"
 if [[ "${BUILDKITE:-}" == true ]] && command -v buildkite-agent >/dev/null; then

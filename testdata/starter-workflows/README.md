@@ -30,8 +30,10 @@ whether a template currently passes:
 | `rubyonrails` | PostgreSQL service container and a second lint job. |
 | `swift` | macOS runner and native Swift toolchain. |
 
-The CMake case is disabled by default because its matrix requires a Windows
-runner. Passing its case ID explicitly runs it.
+The CMake case runs by default. Both scans supply declared Windows mappings
+through `validate --runner-queue`; they do not need a Windows agent. These
+mappings test compilation and admission, not queue availability, automatic
+routing, or Windows execution.
 
 Run the networked compile and production-profile scans with:
 

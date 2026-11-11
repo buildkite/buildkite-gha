@@ -13,6 +13,54 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 )
 
+func TestValidateExplicitRunnerQueues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workflow.yml")
+	source := "on: [push, pull_request]\njobs:\n  test:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest, windows-2022]\n    runs-on: ${{ matrix.os }}\n    steps: [{run: 'echo compatible'}]\n"
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range [][]string{nil, {"--profile", "hosted", "--event", "push"}, {"--profile", "hosted", "--all-events"}} {
+		for _, mapped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%v/mapped=%v", mode, mapped), func(t *testing.T) {
+				args := append([]string{"validate", "--format", "json"}, mode...)
+				if mapped {
+					args = append(args, "--runner-queue", "WINDOWS-latest=example-windows", "--runner-queue", "windows-2022=example-windows")
+				}
+				var stdout, stderr bytes.Buffer
+				code := Run(append(args, path), &stdout, &stderr, "test")
+				if (code == 0) != mapped {
+					t.Fatalf("code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+				}
+				var report struct {
+					Result string `json:"result"`
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+					t.Fatal(err)
+				}
+				if mapped && report.Result != "admitted" && report.Result != "compilable" {
+					t.Fatalf("report=%s", &stdout)
+				}
+				if !mapped && !strings.Contains(stdout.String(), "No Windows runner target is configured") {
+					t.Fatalf("report=%s", &stdout)
+				}
+			})
+		}
+	}
+	for _, values := range [][]string{
+		{"--runner-queue"},
+		{"--runner-queue", "windows-latest"},
+		{"--runner-queue", "windows-latest=invalid/queue"},
+		{"--runner-queue", "windows-2019=example-windows"},
+		{"--runner-queue", "windows-latest=one", "--runner-queue", "WINDOWS-LATEST=two"},
+	} {
+		var stdout, stderr bytes.Buffer
+		args := append([]string{"validate", path}, values...)
+		if code := Run(args, &stdout, &stderr, "test"); code != 2 {
+			t.Fatalf("args=%v code=%d stdout=%s stderr=%s", args, code, &stdout, &stderr)
+		}
+	}
+}
+
 func TestValidateReportsIndependentWorkflowAndEventSyntaxFailures(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, "invalid.yml")
