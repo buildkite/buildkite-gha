@@ -22,7 +22,7 @@ jobs:
           test "$RUNNER_ARCH" = X64
           if test "$NAMESPACE" = true; then
             rustc --version
-            printf 'FROM scratch\nLABEL proof=namespace\n' | docker build -t pinned-runtime-proof -
+            printf 'FROM scratch\nLABEL proof=namespace\n' | docker build --load --platform linux/amd64 -t pinned-runtime-proof -
             docker image inspect pinned-runtime-proof >/dev/null
             docker image rm pinned-runtime-proof
           fi
