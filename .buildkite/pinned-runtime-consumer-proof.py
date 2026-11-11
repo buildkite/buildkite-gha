@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,6 +33,12 @@ def configuration():
 
 def load():
     assert os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "Set GITHUB_EVENT_NAME=workflow_dispatch on the proof build"
+    if os.environ["PINNED_CONSUMER_MODE"] == "plugin-platforms":
+        run("buildkite-agent", "pipeline", "upload", "--no-interpolation", input=json.dumps({"steps": [{
+            "key": "runtime-consumer-importer", "label": "Native pinned plugin consumers",
+            "command": "python3 .buildkite/pinned-runtime-consumer-proof.py plugin-platforms",
+            "timeout_in_minutes": 20, "retry": {"automatic": False}}]}))
+        return
     mode, config = configuration()
     importer = {"key": "runtime-consumer-importer", "label": f"Runtime consumer: {mode}",
                 "timeout_in_minutes": 15, "retry": {"automatic": False}}
@@ -44,6 +52,26 @@ def load():
     verify = {"label": "Check importer runtime artifact inventory", "depends_on": "runtime-consumer-importer",
               "command": "python3 .buildkite/pinned-runtime-consumer-proof.py inventory"}
     run("buildkite-agent", "pipeline", "upload", "--no-interpolation", input=json.dumps({"steps": [importer, verify]}))
+
+
+def plugin_platforms():
+    # Use this pipeline's native platform queues before the CLI emits the new
+    # contract. The plugin proof preserves plans but adapts their delivery.
+    ref = os.environ["PINNED_PROOF_PLUGIN_REF"]
+    assert re.fullmatch(r"[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+", ref)
+    fixture = Path(".github/workflows/pinned-runtime-platforms.yml")
+    assert not fixture.exists()
+    with tempfile.TemporaryDirectory(prefix="pinned-plugin-proof-") as tmp:
+        run("git", "clone", "--filter=blob:none", "--no-checkout",
+            "https://github.com/buildkite-plugins/github-actions-buildkite-plugin.git", tmp)
+        run("git", "fetch", "--depth=1", "origin", ref, cwd=tmp)
+        run("git", "checkout", "--detach", "FETCH_HEAD", cwd=tmp)
+        shutil.copyfile(Path(tmp) / fixture, fixture)
+        try:
+            env = dict(os.environ, PINNED_PROOF_REPOSITORY="buildkite/buildkite-gha")
+            run("python3", str(Path(tmp) / ".buildkite/pinned-runtime-proof.py"), "platforms", env=env)
+        finally:
+            fixture.unlink()
 
 
 def local():
@@ -73,4 +101,4 @@ def inventory():
 
 
 if __name__ == "__main__":
-    {"load": load, "local": local, "inventory": inventory}[sys.argv[1]]()
+    {"load": load, "local": local, "inventory": inventory, "plugin-platforms": plugin_platforms}[sys.argv[1]]()
