@@ -31,7 +31,9 @@ type hostedCompileRequest struct {
 	EventSource    []byte
 	// EventFile records that the event came from a file instead of the
 	// build, so compiled jobs read the payload from an uploaded artifact.
-	EventFile bool
+	EventFile          bool
+	EventPayloadSource string
+	UnboundRuntime     bool
 	// BuildID is the build owning the importer and every later stage.
 	BuildID string
 
@@ -103,6 +105,8 @@ func (r hostedCompileRequest) options() compiler.Options {
 	options.BuildID = r.BuildID
 	options.WorkflowSource = candidateWorkflowSource(r.EventSource)
 	options.EventFile = r.EventFile
+	options.EventPayloadSource = r.EventPayloadSource
+	options.UnboundRuntime = r.UnboundRuntime
 	applyRunnerResolution(&options, r.RunnerResolution)
 	options.StepKeyNamespace = r.StepKeyNamespace
 	options.OIDC = r.OIDC

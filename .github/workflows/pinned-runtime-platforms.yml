@@ -66,7 +66,7 @@ jobs:
           test ! -e .git
           test "$RUNNER_OS" = macOS
           test "$RUNNER_ARCH" = ARM64
-          test -w /Users/runner/hostedtoolcache
+          test -w "$RUNNER_TOOL_CACHE"
           echo 'value=43' >> "$GITHUB_OUTPUT"
           echo 'PLATFORM_PROOF darwin/arm64 value=43 token=present'
   windows:

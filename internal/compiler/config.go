@@ -191,6 +191,10 @@ type Options struct {
 	// generated job. Set only for webhook or explicit snapshot input, not an
 	// event synthesized from the Buildkite environment. This grants no authority.
 	EventFile bool
+	// EventPayloadSource selects build-owned webhook metadata instead of artifacts.
+	EventPayloadSource string
+	// UnboundRuntime leaves executable acquisition to the host launcher.
+	UnboundRuntime bool
 	// RepositorySource resolves repositories used by static remote
 	// reusable-workflow calls. Callers should share one memoized source for the
 	// complete validate, compile, and upload operation.

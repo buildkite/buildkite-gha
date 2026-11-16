@@ -437,7 +437,7 @@ func TestRequiredRuntimePlatformsFailsClosedBeforePartialAdmission(t *testing.T)
 			{Job: plan.Job{Workflow: plan.Workflow{LogicalJobID: "rejected"}, Target: plan.Target{StepKey: "rejected"}, RequiredCapabilities: []string{"privileged-container"}}},
 		},
 	}
-	platforms, _, _, admissionErr := runtimePlatformsForBundle(bundle, true)
+	platforms, _, _, admissionErr := runtimePlatformsForBundle(bundle, true, false)
 	if admissionErr == nil {
 		t.Fatal("requiredRuntimePlatforms() admission error = nil")
 	}
@@ -460,7 +460,7 @@ func TestPinnedRuntimeAdmissionRequiresConsumerCapabilityAndStaticJobs(t *testin
 				bundle.IR.Continuations = []compiler.RuntimeContinuation{{}}
 			}
 			for _, capable := range []bool{false, true} {
-				_, _, pinned, err := runtimePlatformsForBundle(bundle, capable)
+				_, _, pinned, err := runtimePlatformsForBundle(bundle, capable, false)
 				if err != nil || pinned != ((capable || platform == compiler.PlatformLinuxAMD64) && !deferred) {
 					t.Fatalf("platform=%s deferred=%t capable=%t: pinned=%t, error=%v", platform, deferred, capable, pinned, err)
 				}

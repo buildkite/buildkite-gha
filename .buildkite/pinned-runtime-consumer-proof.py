@@ -116,10 +116,18 @@ def import_candidate():
         wrapper.parent.mkdir()
         wrapper.write_text(f'#!/bin/sh\nexec python3 "{source}" capture "$@"\n')
         wrapper.chmod(0o755)
+        host_selection = os.environ.get("PINNED_CONSUMER_HOST_SELECTION") == "1"
+        binary_map = {platform: next(a["browser_download_url"] + "#" + a["digest"].replace(":", "=", 1)
+                                    for a in release["assets"] if a["name"] == "buildkite-gha_" + suffix)
+                      for platform, suffix in PLATFORMS.items()}
         config = {"version": "v0.0.0-proof", "workflow": ".github/workflows/pinned-runtime-platforms.yml",
                   "runners": [{"runs-on": label, "queue": os.environ["PINNED_PROOF_" + key + "_QUEUE"]}
                               for label, key in [("ubuntu-latest", "LINUX"), ("ubuntu-24.04-arm", "ARM"),
                                                  ("macos-14", "MAC"), ("windows-2022", "WINDOWS")]]}
+        if host_selection:
+            config.pop("version")
+            config["binary"] = binary_map
+            config["hosted-tool-cache"] = False  # Explicit intent, preserved on every worker.
         plugin = "github.com/buildkite-plugins/github-actions-buildkite-plugin#" + ref
         pipeline = root / "pipeline.yml"
         env = dict(os.environ, PATH=f"{wrapper.parent}:{os.environ['PATH']}", PROOF_REAL_AGENT=real_agent,
@@ -138,11 +146,22 @@ def import_candidate():
             assert step.get("env", {}).get("BUILDKITE_GHA_PLAN_DIGEST"), "expected executable job"
             if pinned:
                 assert not step.get("command") and len(step["plugins"]) == 1
-                invocation = step["plugins"][0][plugin]["run"]
-                asset = assets["buildkite-gha_" + PLATFORMS[invocation["runtime"]["platform"]]]
-                assert "sha256:" + invocation["runtime"]["sha256"] == asset["digest"]
-                assert invocation["runtime"]["url"] == asset["browser_download_url"]
+                selected = step["plugins"][0][plugin]
+                invocation = selected["run"]
+                if host_selection:
+                    assert selected["binary"] == binary_map and selected["hosted-tool-cache"] is False
+                    assert set(invocation) == {"plan"} and "version" not in selected
+                else:
+                    asset = assets["buildkite-gha_" + PLATFORMS[invocation["runtime"]["platform"]]]
+                    assert "sha256:" + invocation["runtime"]["sha256"] == asset["digest"]
+                    assert invocation["runtime"]["url"] == asset["browser_download_url"]
                 assert invocation["plan"]["producer"] == os.environ["BUILDKITE_JOB_ID"]
+                if host_selection:
+                    plan_path = ".buildkite-gha/plans/" + invocation["plan"]["digest"][7:] + ".json"
+                    run(real_agent, "artifact", "download", plan_path, tmp, "--step", os.environ["BUILDKITE_JOB_ID"])
+                    plan_bytes = (root / plan_path).read_bytes()
+                    assert "sha256:" + hashlib.sha256(plan_bytes).hexdigest() == invocation["plan"]["digest"]
+                    assert "runtime" not in json.loads(plan_bytes)
             else:
                 assert step.get("command") and not step.get("plugins"), "legacy plugin received run mode"
         paths = run(real_agent, "artifact", "search", "*", "--step", os.environ["BUILDKITE_JOB_ID"],
@@ -154,7 +173,8 @@ def import_candidate():
         # Submit the original bytes. No command, target, environment, or plugin changes.
         run(real_agent, "pipeline", "upload", "--no-interpolation", str(pipeline))
         print(f"Scheduled eight unchanged emitted jobs; pinned={pinned}; plugin={ref}")
-        print("LIMIT: candidate binaries use fixture release metadata; runtime downloads and scheduled jobs are real")
+        print("LIMIT: candidate uses a full custom binary map" if host_selection else
+              "LIMIT: candidate binaries use fixture release metadata; runtime downloads and scheduled jobs are real")
 
 
 def capture():

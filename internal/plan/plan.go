@@ -130,6 +130,7 @@ type Event struct {
 	Name            string          `json:"name"`
 	PayloadDigest   string          `json:"payload_digest"`
 	PayloadArtifact bool            `json:"payload_artifact,omitempty"`
+	PayloadSource   string          `json:"payload_source,omitempty"`
 	PayloadFile     bool            `json:"payload_file,omitempty"`
 	Payload         *map[string]any `json:"-"`
 	Repository      string          `json:"repository,omitempty"`
@@ -678,8 +679,8 @@ func (job Job) Validate() error {
 	if job.RequiresMise == nil {
 		return fmt.Errorf("job plan requires an explicit requires_mise decision")
 	}
-	if job.Runtime == nil || !digestPattern.MatchString(job.Runtime.DistributionDigest) {
-		return fmt.Errorf("job plan runtime distribution digest is required")
+	if job.Runtime != nil && !digestPattern.MatchString(job.Runtime.DistributionDigest) {
+		return fmt.Errorf("job plan runtime distribution digest is required when runtime is present")
 	}
 	if job.RequiresMise != nil && !*job.RequiresMise {
 		for _, step := range executionJob.Steps {
@@ -702,8 +703,11 @@ func (job Job) Validate() error {
 			return err
 		}
 	}
-	if job.Event.PayloadFile && !job.Event.PayloadArtifact {
-		return fmt.Errorf("job plan event file requires a payload artifact")
+	if job.Event.PayloadSource != "" && (job.Event.PayloadSource != "buildkite-webhook" || job.Event.PayloadArtifact) {
+		return fmt.Errorf("job plan event payload source must be buildkite-webhook without a payload artifact")
+	}
+	if job.Event.PayloadFile && !job.Event.PayloadArtifact && job.Event.PayloadSource == "" {
+		return fmt.Errorf("job plan event file requires a payload artifact or source")
 	}
 	if len(job.Event.Repository) > 512 || len(job.Event.Ref) > 1024 || len(job.Event.HeadRef) > 1024 || len(job.Event.BaseRef) > 1024 || len(job.Event.SHA) > 128 || len(job.Event.Actor) > 256 {
 		return fmt.Errorf("job plan event identity exceeds its size limit")

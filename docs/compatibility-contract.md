@@ -74,6 +74,26 @@ qualifications in the user reference until their prerequisites are established.
 The following obligations explain boundaries that a refactor or compatibility
 extension could accidentally remove. They are not a second feature inventory.
 
+### Host-selected runtime delivery
+
+A capable plugin importer resolves `latest` once and emits the exact release
+selector on every static execution job. Each worker selects its own platform's
+executable. A custom binary map stays intact; it never falls back to official
+releases. Runner labels, queues, images and dependencies still select execution
+hosts independently of executable acquisition.
+
+New host-selected plans omit `runtime`. Plan schema, execution program and
+capabilities define compatibility; compiler provenance is not a runtime version
+equality gate. Launchers verify plan bytes and downloaded executable digests.
+Runtimes still enforce `runtime.distribution_digest` on legacy plans.
+
+Webhook-backed plans use `event.payload_source: buildkite-webhook`. The runtime
+parses the build's webhook metadata, canonicalizes JSON and verifies
+`payload_digest` before exposing the event. Explicit event snapshots retain
+artifact delivery; build-environment fallback and continuations retain their
+existing semantics. Namespace setup comes from the worker's `NSC_INSTANCE_ID`,
+not runner routing. Hosted tool-cache setup is explicit user intent.
+
 ### Offline runner validation
 
 Standalone validation must accept `windows-latest` and `windows-2022` without

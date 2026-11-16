@@ -71,6 +71,26 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %s does not match BUILDKITE_COMMIT after checkout: %q != %q\n", githubWorkflowSHAEnvironment, serverSelectedWorkflow.SHA, os.Getenv("BUILDKITE_COMMIT"))
 		return 1
 	}
+	var selection *buildkitepipeline.RuntimeSelection
+	if os.Getenv("BUILDKITE_GHA_PLUGIN_RUNTIME_SELECTION") == "1" {
+		selection = &buildkitepipeline.RuntimeSelection{HostedToolCache: configuration.hostedToolCache}
+		if configuration.binaries != nil {
+			selection.Binary = make(map[string]string, len(configuration.binaries))
+			for platform, source := range configuration.binaries {
+				selection.Binary[platform.String()] = source
+			}
+		} else {
+			selection.Version = configuration.version
+			if selection.Version == "" || selection.Version == "latest" {
+				release, err := loadPluginRelease(ctx, version)
+				if err != nil {
+					_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: resolve runtime release: %v\n", err)
+					return 1
+				}
+				selection.Version = release.TagName
+			}
+		}
+	}
 	return uploadParsedContext(ctx, parsedUploadArgs{
 		workflowOperands:         workflowOperands,
 		explicitWorkflowPaths:    true,
@@ -82,6 +102,7 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		experimentalRunnerUser:   configuration.ExperimentalRunnerUser,
 		privateReusableWorkflows: configuration.PrivateReusableWorkflows,
 		pluginAcquisition:        &pluginRuntimeAcquisition{version: version, binaries: configuration.binaries},
+		runtimeSelection:         selection,
 		importerPlatform:         importerPlatform,
 		telemetry:                details,
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
@@ -94,6 +115,8 @@ type pluginConfiguration struct {
 	OIDC                     *plan.OIDCConfiguration
 	runnerTargets            map[string]compiler.RunnerTarget
 	binaries                 map[compiler.Platform]string
+	version                  string
+	hostedToolCache          *bool
 }
 
 func parsePluginConfiguration(source string) (pluginConfiguration, error) {
@@ -117,7 +140,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	for key := range encoded {
 		switch key {
-		case "workflow", "workflows", "runners", "oidc", "version", "source-ref", "minimum-release-age", "binary", "experimental-runner-user", "private-reusable-workflows":
+		case "workflow", "workflows", "runners", "oidc", "version", "source-ref", "minimum-release-age", "binary", "hosted-tool-cache", "experimental-runner-user", "private-reusable-workflows":
 		default:
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
 		}
@@ -262,9 +285,25 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			return pluginConfiguration{}, err
 		}
 	}
+	var hostedToolCache *bool
+	if value, present := encoded["hosted-tool-cache"]; present {
+		enabled, ok := value.(bool)
+		if !ok {
+			return pluginConfiguration{}, fmt.Errorf("hosted-tool-cache must be a boolean")
+		}
+		hostedToolCache = &enabled
+	}
+	version := ""
+	if value, present := encoded["version"]; present {
+		var ok bool
+		version, ok = value.(string)
+		if !ok || (version != "latest" && !releaseVersionPattern.MatchString(strings.TrimPrefix(version, "v"))) {
+			return pluginConfiguration{}, fmt.Errorf("version must be latest or an exact release tag")
+		}
+	}
 	return pluginConfiguration{
 		Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, PrivateReusableWorkflows: privateReusableWorkflows,
-		OIDC: oidc, runnerTargets: targets, binaries: binaries,
+		OIDC: oidc, runnerTargets: targets, binaries: binaries, version: version, hostedToolCache: hostedToolCache,
 	}, nil
 }
 

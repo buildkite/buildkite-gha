@@ -997,6 +997,101 @@ func TestPluginPinsStaticLinuxRuntimeWithoutBinaryArtifacts(t *testing.T) {
 	}
 }
 
+func TestPluginSharesHostSelectedRuntimeWithoutExecutableOrWebhookArtifacts(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{"mixed.yml": `on: workflow_dispatch
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps: [{run: echo ready}]
+`})
+	t.Chdir(repository)
+	setCLIPluginBuildkiteEnvironment(t, "importer")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "workflow_dispatch")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_GHA_PLUGIN_RUNTIME_SELECTION", "1")
+	setRunnerResolutionVerdicts(t, map[string]map[string]any{
+		"ubuntu-latest":    {"target": map[string]any{"queue": "linux", "platform": "linux/amd64", "agents": map[string]string{"nsc-gha-image": "ubuntu-24.04"}}},
+		"ubuntu-24.04-arm": {"target": map[string]string{"queue": "arm", "platform": "linux/arm64"}},
+		"macos-14":         {"target": map[string]string{"queue": "mac", "platform": "darwin/arm64"}},
+		"windows-2022":     {"target": map[string]string{"queue": "windows", "platform": "windows/amd64"}},
+	})
+	binary := map[string]string{}
+	for _, platform := range []string{"linux/amd64", "linux/arm64", "darwin/arm64", "windows/amd64"} {
+		binary[platform] = "https://example.com/" + platform + "#sha256=" + strings.Repeat("a", 64)
+	}
+	for _, selector := range []map[string]any{{}, {"version": "latest"}, {"version": "1.2.3", "hosted-tool-cache": false}, {"binary": binary, "hosted-tool-cache": true}} {
+		t.Run(fmt.Sprint(selector), func(t *testing.T) {
+			configuration := map[string]any{"workflow": ".github/workflows/mixed.yml"}
+			for k, v := range selector {
+				configuration[k] = v
+			}
+			t.Setenv(pluginConfigurationEnvironment, string(mustJSON(t, configuration)))
+			const reference = "github-actions#candidate"
+			t.Setenv("BUILDKITE_PLUGINS", string(mustJSON(t, []any{map[string]any{reference: configuration}})))
+			t.Setenv(pluginReleaseEnvironment, string(mustJSON(t, pluginRelease{TagName: "v1.2.3"})))
+			runner := &cliCaptureRunner{webhook: []byte(`{"ref":"refs/heads/main","inputs":{}}`)}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "1.2.3", runner); code != 0 {
+				t.Fatalf("plugin=%d: %s", code, &stderr)
+			}
+			plans := 0
+			for path, contents := range runner.uploaded {
+				if strings.Contains(path, "/distributions/") || strings.Contains(path, "/events/") {
+					t.Fatalf("unexpected artifact: %s", path)
+				}
+				if strings.Contains(path, "/plans/") {
+					job, err := plan.Decode(contents)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if job.Runtime != nil || job.Event.PayloadSource != "buildkite-webhook" || !job.Event.PayloadFile || job.Event.PayloadArtifact {
+						t.Fatalf("plan bindings: %+v", job)
+					}
+					plans++
+				}
+			}
+			if plans != 4 {
+				t.Fatalf("plans=%d: %s", plans, &stderr)
+			}
+			var pipeline struct {
+				Steps []struct {
+					Steps []struct{ Plugins []map[string]map[string]any }
+				}
+			}
+			if err := yaml.Unmarshal(lastPipelineUpload(t, runner), &pipeline); err != nil {
+				t.Fatal(err)
+			}
+			for _, step := range pipeline.Steps[0].Steps {
+				config := step.Plugins[0][reference]
+				if !reflect.DeepEqual(config["hosted-tool-cache"], selector["hosted-tool-cache"]) {
+					t.Fatalf("cache intent changed: %v", config)
+				}
+				if selector["binary"] != nil {
+					if !bytes.Equal(mustJSON(t, config["binary"]), mustJSON(t, binary)) {
+						t.Fatalf("binary map changed: %v", config)
+					}
+				} else {
+					want := "v1.2.3"
+					if selector["version"] == "1.2.3" {
+						want = "1.2.3"
+					}
+					if config["version"] != want {
+						t.Fatalf("version=%v, want %s", config["version"], want)
+					}
+				}
+				run := config["run"].(map[string]any)
+				if len(run) != 1 || run["plan"] == nil {
+					t.Fatalf("unexpected run parameters: %v", run)
+				}
+			}
+		})
+	}
+}
+
 func TestPluginPinsEachPlatformInMixedWorkflow(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{"mixed.yml": `on: push

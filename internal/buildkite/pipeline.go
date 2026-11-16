@@ -119,8 +119,17 @@ func ValidateCacheVolume(cache CacheVolume) error {
 	return nil
 }
 
+// RuntimeSelection is shared unchanged by all execution hosts in an import.
+// Each host selects its own executable; this does not select a runner.
+type RuntimeSelection struct {
+	Version         string
+	Binary          map[string]string
+	HostedToolCache *bool
+}
+
 // Pipeline is the validated input required to emit generated compatibility jobs.
 type Pipeline struct {
+	RuntimeSelection *RuntimeSelection
 	CompilerStep     string
 	ArtifactProducer string
 	// RuntimePlugin is the invoking plugin's reference, independent of CLI pins.
@@ -798,7 +807,29 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if platform == "windows/amd64" {
 			command = windowsBootstrapCommand(command)
 		}
-		if job.RuntimeURL != "" {
+		if pipeline.RuntimeSelection != nil {
+			configuration := map[string]any{
+				"run": map[string]any{"plan": map[string]string{"digest": job.PlanDigest, "producer": artifactProducer}},
+			}
+			selection := pipeline.RuntimeSelection
+			if selection.Binary != nil {
+				configuration["binary"] = selection.Binary
+			} else {
+				configuration["version"] = selection.Version
+			}
+			if selection.HostedToolCache != nil {
+				configuration["hosted-tool-cache"] = *selection.HostedToolCache
+			}
+			encoded, err := json.Marshal(configuration)
+			if err != nil {
+				return err
+			}
+			reference := pipeline.RuntimePlugin
+			if reference == "" {
+				reference = "github-actions"
+			}
+			_, _ = fmt.Fprintf(out, "%splugins:\n%s  - %s: %s\n", attributeIndent, attributeIndent, yamlScalar(reference), encoded)
+		} else if job.RuntimeURL != "" {
 			reference := pipeline.RuntimePlugin
 			if reference == "" {
 				reference = "github-actions"
