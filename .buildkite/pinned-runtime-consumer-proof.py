@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Schedule unmodified imports against published releases, then check artifacts."""
 
+import glob
 import hashlib
 import json
 import os
@@ -36,6 +37,15 @@ def configuration():
 
 def load():
     assert os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "Set GITHUB_EVENT_NAME=workflow_dispatch on the proof build"
+    if os.environ["PINNED_CONSUMER_MODE"] == "host-environment":
+        steps = []
+        for label, agents in [("native-linux", {"queue": os.environ["PINNED_PROOF_LINUX_QUEUE"], "nsc-gha-image": "ubuntu-24.04"}),
+                              ("native-mac", {"queue": os.environ["PINNED_PROOF_MAC_QUEUE"]}),
+                              ("linux-control", {"queue": "hosted"})]:
+            steps.append({"label": label, "agents": agents,
+                          "command": "python3 .buildkite/pinned-runtime-consumer-proof.py host-environment"})
+        run("buildkite-agent", "pipeline", "upload", "--no-interpolation", input=json.dumps({"steps": steps}))
+        return
     if os.environ["PINNED_CONSUMER_MODE"] == "candidate-platforms":
         run("buildkite-agent", "pipeline", "upload", "--no-interpolation", input=json.dumps({"steps": [
             {"key": "runtime-candidate-build", "label": "Build candidate runtime assets",
@@ -194,6 +204,14 @@ def inventory():
     print(f"PASS: {os.environ['PINNED_CONSUMER_MODE']} runtime distributions={len(distributions)}")
 
 
+def host_environment():
+    # Report names and marker presence only, never credential values or file contents.
+    print(json.dumps({"environment_names": sorted(k for k in os.environ if k.startswith(("NSC_", "NAMESPACE_"))),
+                      "markers": [str(p) for pattern in ["/etc/*namespace*", "/var/run/*namespace*", "/var/run/*nsc*", "/opt/*namespace*"]
+                                  for p in glob.glob(pattern)],
+                      "tools": {k: shutil.which(k) for k in ["nsc", "spacectl"]}}, indent=2))
+
+
 if __name__ == "__main__":
-    {"load": load, "local": local, "inventory": inventory, "plugin-platforms": plugin_platforms,
+    {"host-environment": host_environment, "load": load, "local": local, "inventory": inventory, "plugin-platforms": plugin_platforms,
      "publish-candidate": publish_candidate, "import-candidate": import_candidate, "capture": capture}[sys.argv[1]]()
