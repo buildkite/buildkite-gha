@@ -16,7 +16,6 @@
     {"id":"permissions-write-all","title":"permissions: write-all","workflow":"permissions-write-all.yml","event":"push","mode":"profile"},
     {"id":"secrets-in-conditions","title":"Secrets in conditions or dynamic names","workflow":"secrets-in-conditions.yml","event":"push","mode":"profile"},
     {"id":"remote-reusable-workflows","title":"Remote reusable workflows","workflow":"remote-reusable-workflows.yml","event":"push","mode":"profile"},
-    {"id":"pull-request-tag-filters","title":"pull_request tag-only admission (not positive selection)","workflow":"pull-request-tag-filters.yml","event":"pull_request","mode":"profile"},
     {"id":"merge-group-filters","title":"merge_group filters or types","workflow":"merge-group-filters.yml","event":"merge_group","mode":"profile"}
   ]
 }

@@ -1,9 +1,0 @@
-name: Pull request tag-only admission
-on:
-  pull_request:
-    tags: ["v*"]
-jobs:
-  probe:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo compatible

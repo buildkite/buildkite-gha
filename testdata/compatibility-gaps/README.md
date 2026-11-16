@@ -1,6 +1,6 @@
 # Compatibility gap smoke tests
 
-These fixtures continuously assess the 16 gaps in the linked [compatibility analysis](https://slopcannon.tail952194.ts.net/simone/gha-plugin-what-to-build-next/).
+These fixtures continuously assess the remaining gaps in the linked [compatibility analysis](https://slopcannon.tail952194.ts.net/simone/gha-plugin-what-to-build-next/).
 
 Run the assessment with:
 
@@ -13,8 +13,6 @@ The command applies the `hosted` profile to compile-time and admission gaps. It 
 The environment fixture is unchecked: validation does not fetch live protection rules, secrets, or variables. It does not establish environment support or GitHub reviewer-policy parity. See the [validation boundary](../../docs/compatibility-contract.md#offline-environment-validation).
 
 The runner-label fixture checks Windows compatibility without a runner mapping. It does not check live queue availability, automatic routing, or Windows execution.
-
-The pull-request tag fixture checks admission, not positive selection. Its nonempty tag-only filter does not select pull requests. Blocking CLI and trigger tests cover this distinction and matching branch combinations; see the [native evidence contract](../../docs/compatibility-contract.md#pull-request-tag-filter-admission-and-selection).
 
 The PowerShell fixture requires `pwsh` on `PATH` and runs the installed interpreter.
 

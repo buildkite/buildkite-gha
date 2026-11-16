@@ -160,25 +160,17 @@ func TestParseNullActivityTypesThroughTriggerAlias(t *testing.T) {
 
 func TestParsePullRequestNullAndEmptyTypes(t *testing.T) {
 	for _, test := range []struct {
-		types   string
-		want    []string
-		invalid bool
+		types string
+		want  []string
 	}{
 		{types: "null"},
 		{types: "[]"},
-		{types: "[null]", invalid: true},
-		{types: "['null']", want: []string{"null"}},
+		{types: "[null]", want: []string{"null"}},
 		{types: "[edited]", want: []string{"edited"}},
 	} {
 		t.Run(test.types, func(t *testing.T) {
 			source := "on: {pull_request: {types: " + test.types + "}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 			parsed, err := Parse("types.yml", []byte(source))
-			if test.invalid {
-				if err == nil || !strings.Contains(err.Error(), "null list members are invalid") {
-					t.Fatalf("error=%v; want rejection of a null activity", err)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -17,7 +17,7 @@ cd "$root"
 jq -e '
   .schema == "buildkite-gha/compatibility-gaps/v1" and
   (.source | startswith("https://slopcannon.tail952194.ts.net/")) and
-  (.gaps | type == "array" and length == 16) and
+  (.gaps | type == "array" and length == 15) and
   all(.gaps[];
     (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
     (.title | type == "string" and length > 0) and
