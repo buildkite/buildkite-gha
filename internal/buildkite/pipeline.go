@@ -807,7 +807,8 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if platform == "windows/amd64" {
 			command = windowsBootstrapCommand(command)
 		}
-		if pipeline.RuntimeSelection != nil {
+		switch {
+		case pipeline.RuntimeSelection != nil:
 			configuration := map[string]any{
 				"run": map[string]any{"plan": map[string]string{"digest": job.PlanDigest, "producer": artifactProducer}},
 			}
@@ -829,7 +830,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 				reference = "github-actions"
 			}
 			_, _ = fmt.Fprintf(out, "%splugins:\n%s  - %s: %s\n", attributeIndent, attributeIndent, yamlScalar(reference), encoded)
-		} else if job.RuntimeURL != "" {
+		case job.RuntimeURL != "":
 			reference := pipeline.RuntimePlugin
 			if reference == "" {
 				reference = "github-actions"
@@ -838,7 +839,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			_, _ = fmt.Fprintf(out, "%s        plan:\n%s          digest: %s\n%s          producer: %s\n", attributeIndent, attributeIndent, yamlScalar(job.PlanDigest), attributeIndent, yamlScalar(artifactProducer))
 			_, _ = fmt.Fprintf(out, "%s        runtime:\n%s          platform: %s\n%s          url: %s\n%s          sha256: %s\n", attributeIndent, attributeIndent, yamlScalar(platform), attributeIndent, yamlScalar(job.RuntimeURL), attributeIndent, yamlScalar(strings.TrimPrefix(distributionDigest, "sha256:")))
 			_, _ = fmt.Fprintf(out, "%s        hosted-tool-cache: %t\n", attributeIndent, hostedToolCache)
-		} else {
+		default:
 			_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
 		}
 		if workflow.Aggregate {
