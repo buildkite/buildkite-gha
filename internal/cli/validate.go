@@ -50,6 +50,16 @@ func validate(ctx context.Context, args []string, stdout, stderr io.Writer, clie
 	return validateOne(ctx, out, workflowPath, eventPath, eventName, profile, clientVersion, actionCacheDir, nil, stderr)
 }
 
+// validationRunnerTargets supplements the compiler's presets for offline
+// compatibility checks. The queue is a placeholder required by the compiler;
+// validation never uploads these plans. Upload must resolve real targets.
+func validationRunnerTargets() map[string]compiler.RunnerTarget {
+	return map[string]compiler.RunnerTarget{
+		"windows-latest": {Platform: compiler.PlatformWindowsAMD64, Queue: "validation-windows"},
+		"windows-2022":   {Platform: compiler.PlatformWindowsAMD64, Queue: "validation-windows"},
+	}
+}
+
 func validateOne(ctx context.Context, out processingOutput, workflowPath, eventPath, eventName, profile, clientVersion, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
 	return validateOneSource(ctx, out, workflowPath, nil, eventPath, eventName, profile, clientVersion, actionCacheDir, runtime, stderr)
 }
@@ -123,8 +133,7 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 			}
 		}
 	}
-	// Profile validation applies the hosted runner policy so validate and
-	// upload agree on supported labels, including the default macOS queue.
+	// Validation checks platform compatibility, not live queue availability.
 	request := hostedCompileRequest{
 		WorkflowPath:     workflowPath,
 		WorkflowSource:   source,
@@ -132,8 +141,13 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		Version:          commandVersion(clientVersion),
 		ImporterStep:     "buildkite-gha-profile-importer",
 		RepositorySource: repositorySource,
+		RunnerTargets:    validationRunnerTargets(),
 	}
 	validationOptions := compiler.DefaultOptions()
+	validationOptions.Runners.Targets = request.RunnerTargets
+	for _, target := range request.RunnerTargets {
+		validationOptions.Runners.UntrustedQueues = append(validationOptions.Runners.UntrustedQueues, target.Queue)
+	}
 	if profile != "" {
 		validationOptions = request.validationOptions()
 	}
@@ -161,21 +175,25 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		// digest stands in for every platform's runtime distribution.
 		request.DistributionDigest = distributionDigest
 		request.RuntimeDistributions = map[compiler.Platform]string{
-			compiler.PlatformLinuxAMD64:  distributionDigest,
-			compiler.PlatformLinuxARM64:  distributionDigest,
-			compiler.PlatformDarwinARM64: distributionDigest,
+			compiler.PlatformLinuxAMD64:   distributionDigest,
+			compiler.PlatformLinuxARM64:   distributionDigest,
+			compiler.PlatformDarwinARM64:  distributionDigest,
+			compiler.PlatformWindowsAMD64: distributionDigest,
 		}
 		preflight, profileErr := compileHostedRequest(ctx, request)
 		applyHostedCompilation(&processingReport, workflowPath, preflight, profileErr)
+		environmentsUnchecked := markUncheckedEnvironments(&processingReport, preflight.Bundle)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
 				return 1
 			}
-			_ = out.write(ctx, processingReport)
-			return 1
+			if !environmentsUnchecked {
+				_ = out.write(ctx, processingReport)
+				return 1
+			}
 		}
-		if preflight.HasActions {
+		if preflight.HasActions && profileErr == nil {
 			processingReport.Diagnostics = append(processingReport.Diagnostics, compatibility.Diagnostic{
 				Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Category: "compatibility", Stage: workflowprocessing.StageAdmission,
 				Message: "Action runtime behavior was not evaluated. The action source, metadata, declared runtime, entrypoints, inputs, and nested actions were validated, but the action code was not executed and may depend on GitHub-only services. No action is required for admission; test the action on Buildkite if runtime compatibility is important.",
@@ -204,6 +222,63 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		return 1
 	}
 	return 0
+}
+
+// Validation cannot resolve live environment settings. Keep the compiler's
+// blocked plans, but distinguish missing context from an invalid workflow.
+func markUncheckedEnvironments(report *compatibility.ProcessingReport, bundle compiler.Bundle) bool {
+	unchecked := map[string]bool{}
+	for i := range report.Diagnostics {
+		diagnostic := &report.Diagnostics[i]
+		if diagnostic.Code != workflowprocessing.CodeContextRequired || diagnostic.Stage != workflowprocessing.StageGraph {
+			continue
+		}
+		unchecked[diagnostic.Job] = true
+		diagnostic.Level = "warning"
+		diagnostic.Code = "W_ENVIRONMENT_UNCHECKED"
+		diagnostic.Message = fmt.Sprintf("Job %q uses a GitHub environment. Validate does not fetch environment protection rules, secrets, or variables. Plans for this job and its dependents were not checked; compile or upload in a Buildkite job with Agent API access to check them.", diagnostic.Job)
+	}
+	if len(unchecked) == 0 {
+		return false
+	}
+	for _, instance := range bundle.IR.Jobs {
+		if bundle.JobOutcomes[instance.Key] == compiler.JobBlocked {
+			unchecked[instance.LogicalJobID] = true
+		}
+	}
+	failedStages := map[workflowprocessing.Stage]bool{}
+	hasErrors := false
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Level == "error" {
+			hasErrors = true
+			delete(unchecked, diagnostic.Job)
+			failedStages[diagnostic.Stage] = true
+		}
+	}
+	for i := range report.Jobs {
+		if unchecked[report.Jobs[i].ID] {
+			report.Jobs[i].Result = compatibility.NotEvaluated
+		}
+	}
+	if !failedStages[workflowprocessing.StageGraph] {
+		report.SetStage(workflowprocessing.StageGraph, compatibility.Passed)
+	}
+	for _, action := range report.Actions {
+		if action.Result == compatibility.NotEvaluated && !failedStages[workflowprocessing.StageResolution] {
+			report.SetStage(workflowprocessing.StageResolution, compatibility.NotEvaluated)
+			break
+		}
+	}
+	report.Compile.Result = compatibility.NotEvaluated
+	if !failedStages[workflowprocessing.StageAdmission] {
+		report.Admission.Result = compatibility.NotEvaluated
+		report.SetStage(workflowprocessing.StageAdmission, compatibility.NotEvaluated)
+	}
+	report.SetStage(workflowprocessing.StagePipeline, compatibility.NotEvaluated)
+	if !hasErrors {
+		report.Result = "context-required"
+	}
+	return !hasErrors
 }
 
 type profileValidationRuntime struct {
@@ -247,7 +322,7 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 		}
 	}
 	defer cleanup()
-	validationOptions := hostedOptions("", nil, nil)
+	validationOptions := hostedOptions("", validationRunnerTargets(), nil)
 	validationOptions.RepositorySource = runtime.actionSource
 	validation, validationErr := compiler.ValidateWithOptionsContext(ctx, workflowPath, source, validationOptions)
 	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)

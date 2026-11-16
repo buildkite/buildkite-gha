@@ -14,9 +14,103 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
+
+func TestRunValidateLeavesEnvironmentsUnchecked(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("offline validation requested %s", r.URL.Path)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer agent.Close()
+	for _, connected := range []bool{false, true} {
+		t.Run(fmt.Sprintf("agent-context-%t", connected), func(t *testing.T) {
+			setAgentResolutionEnvironment(t, agent.URL)
+			if !connected {
+				t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "")
+			}
+			workflow := filepath.Join(t.TempDir(), "deploy.yml")
+			source := environmentUploadWorkflow + `  after:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./unchecked-action
+  independent:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo checked
+`
+			if err := os.WriteFile(workflow, []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, allEvents := range []bool{false, true} {
+				var stdout, stderr bytes.Buffer
+				args := []string{"validate", "--profile", "hosted", "--format", "json"}
+				if allEvents {
+					args = append(args, "--all-events")
+				} else {
+					args = append(args, "--event", "push")
+				}
+				if code := Run(append(args, workflow), &stdout, &stderr, "dev"); code != 0 {
+					t.Fatalf("validate = %d: %s\n%s", code, stdout.String(), stderr.String())
+				}
+				var report compatibility.ProcessingReport
+				if allEvents {
+					var aggregate compatibility.ProcessingReportV3
+					if err := json.Unmarshal(stdout.Bytes(), &aggregate); err != nil {
+						t.Fatal(err)
+					}
+					if aggregate.Result != "context-required" || len(aggregate.Evaluations) != 1 {
+						t.Fatalf("aggregate report = %#v", aggregate)
+					}
+					report = aggregate.Evaluations[0].Report
+				} else if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+					t.Fatal(err)
+				}
+				if report.Result != "context-required" || report.Status == compatibility.Failed || report.Compile.Result != compatibility.NotEvaluated || report.Admission.Result != compatibility.NotEvaluated {
+					t.Fatalf("report claims failure or completed compilation: %#v", report)
+				}
+				if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "warning" || report.Diagnostics[0].Code != "W_ENVIRONMENT_UNCHECKED" || report.Diagnostics[0].Job != "deploy" {
+					t.Fatalf("diagnostics = %#v", report.Diagnostics)
+				}
+				if len(report.Actions) != 1 || report.Actions[0].Result != compatibility.NotEvaluated {
+					t.Fatalf("dependent action claimed evaluated: %#v", report.Actions)
+				}
+				for _, job := range report.Jobs {
+					want := compatibility.NotEvaluated
+					if job.ID == "independent" {
+						want = compatibility.Passed
+					}
+					if job.Result != want {
+						t.Fatalf("job result = %#v, want %s", job, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRunValidateEnvironmentDoesNotHideOtherFailures(t *testing.T) {
+	for _, source := range []string{
+		strings.Replace(environmentUploadWorkflow, "environment: production", "environment: ${{ github.ref_name }}", 1),
+		strings.Replace(environmentUploadWorkflow, "runs-on: ubuntu-latest", "runs-on: unsupported-runner", 1),
+		environmentUploadWorkflow + "  invalid:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ github.ref_protected }}'\n",
+		environmentUploadWorkflow + "  invalid:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./missing-action\n",
+		strings.Replace(environmentUploadWorkflow, "on: push", "on:\n  push:\n    paths: ['src/**']", 1),
+		strings.Replace(environmentUploadWorkflow, "production", "prod-us", 1) + "  collision:\n    runs-on: ubuntu-latest\n    environment: prod_us\n    steps:\n      - run: echo collision\n",
+	} {
+		workflow := filepath.Join(t.TempDir(), "deploy.yml")
+		if err := os.WriteFile(workflow, []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"validate", "--profile", "hosted", "--event", "push", "--format", "json", workflow}, &stdout, &stderr, "dev"); code == 0 {
+			t.Fatalf("invalid workflow passed: %s", stdout.String())
+		}
+	}
+}
 
 func TestRunCompileAndUploadResolveGHESActionsLookups(t *testing.T) {
 	requireImporterHost(t)
