@@ -116,7 +116,7 @@ def import_candidate():
         wrapper.parent.mkdir()
         wrapper.write_text(f'#!/bin/sh\nexec python3 "{source}" capture "$@"\n')
         wrapper.chmod(0o755)
-        host_selection = os.environ.get("PINNED_CONSUMER_HOST_SELECTION") == "1"
+        custom_binaries = os.environ.get("PINNED_CONSUMER_HOST_SELECTION") == "1"
         binary_map = {platform: next(a["browser_download_url"] + "#" + a["digest"].replace(":", "=", 1)
                                     for a in release["assets"] if a["name"] == "buildkite-gha_" + suffix)
                       for platform, suffix in PLATFORMS.items()}
@@ -124,7 +124,7 @@ def import_candidate():
                   "runners": [{"runs-on": label, "queue": os.environ["PINNED_PROOF_" + key + "_QUEUE"]}
                               for label, key in [("ubuntu-latest", "LINUX"), ("ubuntu-24.04-arm", "ARM"),
                                                  ("macos-14", "MAC"), ("windows-2022", "WINDOWS")]]}
-        if host_selection:
+        if custom_binaries:
             config.pop("version")
             config["binary"] = binary_map
             config["hosted-tool-cache"] = False  # Explicit intent, preserved on every worker.
@@ -148,9 +148,15 @@ def import_candidate():
                 assert not step.get("command") and len(step["plugins"]) == 1
                 selected = step["plugins"][0][plugin]
                 invocation = selected["run"]
+                host_selection = "version" in selected or "binary" in selected
                 if host_selection:
-                    assert selected["binary"] == binary_map and selected["hosted-tool-cache"] is False
-                    assert set(invocation) == {"plan"} and "version" not in selected
+                    assert set(invocation) == {"plan"}
+                    if custom_binaries:
+                        assert selected["binary"] == binary_map and "version" not in selected
+                        assert selected["hosted-tool-cache"] is False
+                    else:
+                        assert selected["version"] == config["version"] and "binary" not in selected
+                        assert "hosted-tool-cache" not in selected
                 else:
                     asset = assets["buildkite-gha_" + PLATFORMS[invocation["runtime"]["platform"]]]
                     assert "sha256:" + invocation["runtime"]["sha256"] == asset["digest"]
@@ -162,6 +168,8 @@ def import_candidate():
                     plan_bytes = (root / plan_path).read_bytes()
                     assert "sha256:" + hashlib.sha256(plan_bytes).hexdigest() == invocation["plan"]["digest"]
                     assert "runtime" not in json.loads(plan_bytes)
+                    if not custom_binaries:
+                        raise ValueError("validated version selector, but the candidate release exists only in the importer cache; set PINNED_CONSUMER_HOST_SELECTION=1 to schedule candidate binaries, or use plugin-platforms for a published release")
             else:
                 assert step.get("command") and not step.get("plugins"), "legacy plugin received run mode"
         paths = run(real_agent, "artifact", "search", "*", "--step", os.environ["BUILDKITE_JOB_ID"],
@@ -173,7 +181,7 @@ def import_candidate():
         # Submit the original bytes. No command, target, environment, or plugin changes.
         run(real_agent, "pipeline", "upload", "--no-interpolation", str(pipeline))
         print(f"Scheduled eight unchanged emitted jobs; pinned={pinned}; plugin={ref}")
-        print("LIMIT: candidate uses a full custom binary map" if host_selection else
+        print("LIMIT: candidate uses a full custom binary map" if custom_binaries else
               "LIMIT: candidate binaries use fixture release metadata; runtime downloads and scheduled jobs are real")
 
 

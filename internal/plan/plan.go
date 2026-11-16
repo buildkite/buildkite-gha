@@ -621,32 +621,32 @@ func Encode(job Job) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// DecodeEventPayload verifies and decodes one immutable event artifact.
+// DecodeEventPayload verifies and decodes one digest-bound event payload.
 func DecodeEventPayload(source []byte, expectedDigest string) (map[string]any, error) {
 	if len(source) > MaxEventPayloadBytes {
-		return nil, fmt.Errorf("event payload artifact exceeds the %d-byte limit", MaxEventPayloadBytes)
+		return nil, fmt.Errorf("event payload exceeds the %d-byte limit", MaxEventPayloadBytes)
 	}
 	digest := sha256.Sum256(source)
 	if "sha256:"+hex.EncodeToString(digest[:]) != expectedDigest {
-		return nil, fmt.Errorf("event payload artifact does not match its digest")
+		return nil, fmt.Errorf("event payload does not match its digest")
 	}
 	if err := rejectDuplicateKeys(source); err != nil {
-		return nil, fmt.Errorf("decode event payload artifact: %w", err)
+		return nil, fmt.Errorf("decode event payload: %w", err)
 	}
 	var payload map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(source))
 	decoder.UseNumber()
 	if err := decoder.Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode event payload artifact: %w", err)
+		return nil, fmt.Errorf("decode event payload: %w", err)
 	}
 	if payload == nil {
-		return nil, fmt.Errorf("event payload artifact must contain a JSON object")
+		return nil, fmt.Errorf("event payload must contain a JSON object")
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		if err == nil {
-			return nil, fmt.Errorf("decode event payload artifact: multiple JSON values")
+			return nil, fmt.Errorf("decode event payload: multiple JSON values")
 		}
-		return nil, fmt.Errorf("decode event payload artifact: %w", err)
+		return nil, fmt.Errorf("decode event payload: %w", err)
 	}
 	return payload, nil
 }
