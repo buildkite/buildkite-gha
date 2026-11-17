@@ -71,7 +71,7 @@ jobs:
           echo 'PLATFORM_PROOF darwin/arm64 value=43 token=present'
   windows:
     needs: mac
-    runs-on: windows-2022
+    runs-on: windows-2025
     steps:
       - env:
           VALUE: ${{ needs.mac.outputs.value }}
