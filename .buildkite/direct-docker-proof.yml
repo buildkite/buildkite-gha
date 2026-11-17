@@ -25,8 +25,8 @@ steps:
         -o "$$proof_root/buildkite-gha" ./cmd/buildkite-gha
       "$$proof_root/buildkite-gha" --version
       sha256sum "$$proof_root/buildkite-gha"
-      python3 scripts/direct-docker-proof.py "$$proof_root/workflows"
-      sha256sum scripts/direct-docker-proof.py "$$proof_root/workflows/"*.yml
+      python3 scripts/direct-docker-proof.py "$$proof_root/.github/workflows"
+      sha256sum scripts/direct-docker-proof.py "$$proof_root/.github/workflows/"*.yml
       python3 - "$$proof_root/event.json" <<'PY'
       import json, os, pathlib, sys
       event = json.loads(pathlib.Path("testdata/smoke/events/push.json").read_text())
@@ -34,7 +34,9 @@ steps:
       event["payload"] = {"inputs": {}, "ref": os.environ["BUILDKITE_BRANCH"]}
       pathlib.Path(sys.argv[1]).write_text(json.dumps(event))
       PY
-      "$${proof_root}/buildkite-gha" upload \
-        --event-path "$$proof_root/event.json" \
-        --runner-queue ubuntu-latest=hosted \
-        "$$proof_root/workflows/direct-docker.yml" "$$proof_root/workflows/direct-docker-paths.yml"
+      for workflow in "$$proof_root/.github/workflows/"*.yml; do
+        "$$proof_root/buildkite-gha" upload \
+          --event-path "$$proof_root/event.json" \
+          --runner-queue ubuntu-latest=hosted \
+          "$$workflow"
+      done
