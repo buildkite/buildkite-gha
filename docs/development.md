@@ -54,22 +54,19 @@ mise run release:check
 Deploy the Agent API error-report endpoint and verify a controlled live report
 before releasing this client.
 Reports use `POST /v3/jobs/:job_id/github-actions/error-reports` with the same-job
-token and the `github_actions_compatibility` permission. The request is the
-SDK-prepared Bugsnag notify-v4 JSON, with `apiKey` omitted: exactly one event,
-a notifier object, and at most 512 KiB of UTF-8 JSON. The backend supplies the
-ingestion key; no key is embedded in release binaries or read from `BUGSNAG_API_KEY`.
-HTTP `202` means queued, not delivered to Bugsnag. Rejections and outages are
-silent, with no retry, disk spool, redirect, or direct-Bugsnag fallback.
+token and the `github_actions_compatibility` permission. The SDK-prepared JSON
+contains exactly one event with `payloadVersion: "4"`, a notifier object, and
+at most 512 KiB of UTF-8 JSON. The Buildkite backend queues accepted reports
+and returns HTTP `202`.
 
 Preparation and SDK sanitization run on the caller to retain its stack. Network
 delivery is asynchronous, with at most 16 pending reports; saturation drops new
 reports. Each report's 1.5-second deadline starts at submission, before preparation
 or network scheduling. Shutdown drains pending reports together within their
-original deadlines, not a new timeout. Completion telemetry has a separate budget.
+original deadlines. Completion telemetry has a separate budget.
 
-Local runs without a job endpoint, ID, and token send nothing. Runtime
-configuration, the opt-out, and report contents are documented in
-[Bugsnag error reports](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/cli#disable-telemetry-bugsnag-error-reports).
+Runtime configuration, the opt-out, and report contents are documented in the
+[telemetry reference](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/cli#disable-telemetry).
 
 ## Source telemetry contract
 
