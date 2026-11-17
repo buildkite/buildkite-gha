@@ -130,7 +130,7 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options, grap
 			if step.Kind != "uses" {
 				continue
 			}
-			if !options.ResolveActions && !strings.HasPrefix(step.Uses, "./") {
+			if !options.ResolveActions && !strings.HasPrefix(step.Uses, "./") && !strings.HasPrefix(step.Uses, "docker://") {
 				evidence.ActionResolutionComplete = false
 				continue
 			}
@@ -454,9 +454,15 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, cont
 		}
 		return n, nil
 	}
-	m, err := metadata.Load(root, loadPath)
-	if err != nil {
-		return nil, err
+	var m metadata.Metadata
+	if lock.Source == "docker" {
+		m.Runs.Using = "docker"
+		m.Runs.Image = "docker://" + lock.DockerImage
+	} else {
+		m, err = metadata.Load(root, loadPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if lock.Source == "github" {
 		m.SourceRoot = root
@@ -514,6 +520,13 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, cont
 }
 
 func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing *RemoteWorkflowSource, containingActionRef string) (string, plan.ActionLock, string, string, error) {
+	if strings.HasPrefix(strings.ToLower(raw), "docker://") {
+		image, ok := metadata.DockerImageReference(raw)
+		if !ok {
+			return "", plan.ActionLock{}, "", "", fmt.Errorf("invalid docker:// action image reference")
+		}
+		return raw, plan.ActionLock{Source: "docker", DockerImage: image}, "", "", nil
+	}
 	if after, ok := strings.CutPrefix(raw, "./"); ok {
 		p := after
 		if p == "." || p != "" && (path.Clean(p) != p || strings.Contains(p, "\\") || strings.HasPrefix(p, "/")) {

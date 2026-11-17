@@ -237,6 +237,9 @@ func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSe
 
 	var m metadata.Metadata
 	switch entry.lock.Source {
+	case "docker":
+		// Image-only actions have no source tree. Their image and normalized
+		// program are bound by the validated job plan.
 	case "workspace":
 		m, err = r.verifyWorkspace(entry.lock)
 	case "github":

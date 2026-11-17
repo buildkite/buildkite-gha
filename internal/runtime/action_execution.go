@@ -22,6 +22,7 @@ import (
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/containerpolicy"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
@@ -1786,8 +1787,8 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 	requiredNode := map[int]bool{}
 	for _, lock := range actions.job.Actions {
 		// A native adapter replaces the admitted action's execution entirely,
-		// so its source tree is never mounted or classified for the container.
-		if usesNativeAdapter(lock) {
+		// and an image-only action has no source tree to mount.
+		if usesNativeAdapter(lock) || lock.Source == "docker" {
 			continue
 		}
 		entry := actions.locks[lock.ID]
@@ -2252,6 +2253,13 @@ func (r *jobRun) runActionStep(jobCtx, ctx context.Context, processor *commandOu
 		if err != nil {
 			return result, err
 		}
+		entrypoint := action.Runs.Entrypoint
+		if actionLock.Source == "docker" {
+			// Direct action inputs are already evaluated in the caller's with
+			// context. Split data, never re-evaluate it as action metadata.
+			dockerArgs = containerpolicy.ArgumentList(inputs["args"])
+			entrypoint = inputs["entrypoint"]
+		}
 		dockerEnv, err := executionprogram.EvaluateBindings(actionProgram.Env, executionprogram.EvaluationContext{Expression: actionEval})
 		if err != nil {
 			return result, err
@@ -2265,7 +2273,7 @@ func (r *jobRun) runActionStep(jobCtx, ctx context.Context, processor *commandOu
 		if image != "" && image != actionLock.DockerImage {
 			return result, fmt.Errorf("docker action %q metadata image %q does not match planned image %q", stepUses(step), image, actionLock.DockerImage)
 		}
-		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Image: image, Entrypoint: action.Runs.Entrypoint, Args: dockerArgs, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
+		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Image: image, Entrypoint: entrypoint, Args: dockerArgs, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
 		return result, err
 	}
 	return result, errUnsupportedFeature("action_ref", "", "action %q uses unsupported runtime %q", stepUses(step), actionRuntime)

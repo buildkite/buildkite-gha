@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
-	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -850,16 +849,7 @@ func supported(path string, job workflow.Job) error {
 		return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, 0, 0, job.ID, "", "", 0, jobError(path, job, "runs-on must resolve statically"))
 	}
 	ids := make(map[string]struct{}, len(job.Steps))
-	for i, step := range job.Steps {
-		if step.Kind == "uses" && strings.HasPrefix(strings.ToLower(step.Uses), "docker://") {
-			return &ProcessingFinding{
-				Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
-				Blocker: "action_ref", BlockerDetail: step.Uses,
-				Path: path, Line: step.Span.Start.Line, Column: step.Span.Start.Column,
-				Job: job.ID, Action: step.Uses, Step: i + 1,
-				Err: locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, actionsource.UnsupportedContainerActionReason),
-			}
-		}
+	for _, step := range job.Steps {
 		if step.ID != "" {
 			id := strings.ToLower(step.ID)
 			if _, exists := ids[id]; exists {

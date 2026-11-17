@@ -10,6 +10,17 @@ import (
 	"testing"
 )
 
+func TestParseEmptyDockerEntrypointDoesNotHideOtherErrors(t *testing.T) {
+	for _, step := range []string{
+		`{uses: 'docker://alpine:3.20', with: {entrypoint: '', args: []}}`,
+		`{parallel: [{uses: 'docker://alpine:3.20', with: {entrypoint: '', args: []}}]}`,
+	} {
+		if _, err := Parse("direct.yml", []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: ["+step+"]\n")); err == nil {
+			t.Errorf("accepted invalid step: %s", step)
+		}
+	}
+}
+
 func TestParseCacheMode(t *testing.T) {
 	for _, mode := range []string{"read", "write", "write-only", "none"} {
 		t.Run(mode, func(t *testing.T) {

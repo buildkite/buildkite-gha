@@ -38,8 +38,6 @@ const (
 	defaultCodeload = "https://codeload.github.com"
 	manifestName    = "manifest-v1.json"
 	mutableRefTTL   = time.Hour
-	// UnsupportedContainerActionReason explains the supported alternative to docker:// actions.
-	UnsupportedContainerActionReason = "docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step"
 )
 
 var (
@@ -121,7 +119,7 @@ func Parse(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("invalid action reference")
 	}
 	if strings.HasPrefix(strings.ToLower(raw), "docker://") {
-		return Reference{}, errors.New(UnsupportedContainerActionReason)
+		return Reference{}, fmt.Errorf("Docker images are not repository action sources")
 	}
 	if strings.ContainsAny(raw, "\\?#") || strings.Contains(raw, "${{") {
 		return Reference{}, fmt.Errorf("invalid action reference")
