@@ -136,8 +136,9 @@ establish these obligations:
   strings unchanged. Do not normalize suffixes or translate raw arguments.
 - Keep image PATH unless workflow/job/step/action env or `GITHUB_ENV` explicitly
   sets it. Never add `GITHUB_PATH` prepends to Docker actions; shell and JavaScript
-  processes still receive them. Track the explicit source, including empty
-  values, rather than inferring it from the effective PATH string.
+  processes still receive them, including after a later `GITHUB_ENV` PATH write.
+  Track the explicit source, including empty values, rather than inferring it
+  from the effective PATH string.
 - Translate PATH as one environment value, not as separate components. A
   workspace prefix at its start translates; a non-leading component does not.
 

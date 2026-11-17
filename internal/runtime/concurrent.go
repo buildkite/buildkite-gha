@@ -263,7 +263,12 @@ func (jobResult *JobResult) commitEnvironment(result Result) {
 		}
 	}
 	mergeEnvironmentInto(env, effects)
+	if result.pathBaseSet {
+		// GITHUB_ENV replaces the base, not the job's accumulated GITHUB_PATH entries.
+		applyPaths(env, jobResult.pathAdditions)
+	}
 	applyPaths(env, result.Paths)
+	jobResult.pathAdditions = append(jobResult.pathAdditions, result.Paths...)
 }
 
 func cloneExpressionContext(in expression.Context) expression.Context {
