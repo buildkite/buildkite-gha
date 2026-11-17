@@ -119,7 +119,7 @@ func Parse(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("invalid action reference")
 	}
 	if strings.HasPrefix(strings.ToLower(raw), "docker://") {
-		return Reference{}, fmt.Errorf("Docker images are not repository action sources")
+		return Reference{}, fmt.Errorf("container images are not repository action sources")
 	}
 	if strings.ContainsAny(raw, "\\?#") || strings.Contains(raw, "${{") {
 		return Reference{}, fmt.Errorf("invalid action reference")

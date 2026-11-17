@@ -1773,7 +1773,7 @@ func validateSelfRepositoryIdentity(uses string, lock ActionLock, containing *Re
 func validateTopLevelIdentity(uses string, lock ActionLock) error {
 	if image, ok := metadata.DockerImageReference(uses); ok {
 		if lock.Source != "docker" || lock.DockerImage != image {
-			return fmt.Errorf("Docker action reference does not match lock image")
+			return fmt.Errorf("action reference does not match Docker image lock")
 		}
 		return nil
 	}
