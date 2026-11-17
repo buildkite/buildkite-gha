@@ -89,7 +89,6 @@ class ReleaseTest(unittest.TestCase):
             "RELEASE_PIPELINE": "example/releases",
             "RELEASE_APP_ID": "123", "RELEASE_APP_INSTALLATION_ID": "456",
             "RELEASE_APP_PRIVATE_KEY_SECRET": "test-app-key",
-            "RELEASE_BUGSNAG_API_KEY_SECRET": "test-ingestion-key",
             "RELEASE_SLACK_CHANNEL": "example#releases",
             "BUILDKITE_BRANCH": "main", "BUILDKITE_COMMIT": self.commit,
             "BUILDKITE_PULL_REQUEST": "false", "BUILDKITE_AGENT_ENDPOINT": "https://agent.test/v3",
@@ -102,7 +101,6 @@ class ReleaseTest(unittest.TestCase):
         self.provider_calls = 0
         self.advance_main = False
         self.api_failure = None
-        self.bugsnag_key = "bugsnag-test"
         self.fail_publish = False
         self.releases = {"v0.9.8": {"tag_name": "v0.9.8", "draft": False, "prerelease": False}}
         self.writes = []
@@ -120,7 +118,7 @@ class ReleaseTest(unittest.TestCase):
             if args[1] == "annotate":
                 return ""
             self.assertEqual(args[1:3], ("secret", "get"))
-            return {"test-app-key": self.private_key, "test-ingestion-key": self.bugsnag_key}[args[3]]
+            return {"test-app-key": self.private_key}[args[3]]
         return self.real_output(args, **kwargs)
 
     def http(self, req, **kwargs):
@@ -215,7 +213,7 @@ class ReleaseTest(unittest.TestCase):
         if args[0] != "goreleaser":
             return self.real_run(args, **kwargs)
         self.assertEqual(args, ["goreleaser", "release", "--clean"])
-        self.assertEqual(kwargs["env"]["BUGSNAG_API_KEY"], "bugsnag-test")
+        self.assertNotIn("BUGSNAG_API_KEY", kwargs["env"])
         self.assertEqual(kwargs["env"]["GITHUB_TOKEN"], "github-test")
         if self.fail_publish:
             raise subprocess.CalledProcessError(1, args)
@@ -360,7 +358,7 @@ class ReleaseTest(unittest.TestCase):
 
     def test_missing_deployment_configuration_never_publishes(self):
         for name in ("RELEASE_PIPELINE", "RELEASE_APP_ID", "RELEASE_APP_INSTALLATION_ID",
-                     "RELEASE_APP_PRIVATE_KEY_SECRET", "RELEASE_BUGSNAG_API_KEY_SECRET",
+                     "RELEASE_APP_PRIVATE_KEY_SECRET",
                      "RELEASE_SLACK_CHANNEL", "RELEASE_MODEL"):
             with self.subTest(name=name), patch.dict(self.env, {name: ""}):
                 with self.assertRaisesRegex(RuntimeError, f"{name} is required"):
@@ -376,12 +374,6 @@ class ReleaseTest(unittest.TestCase):
         del self.releases["v0.10.0"]
         self.api_failure = 403
         with self.assertRaisesRegex(RuntimeError, "HTTP 403: Resource not accessible by integration"):
-            self.release()
-        self.assertEqual(self.writes, [])
-
-    def test_missing_bugsnag_key_does_not_tag(self):
-        self.bugsnag_key = ""
-        with self.assertRaisesRegex(RuntimeError, "empty"):
             self.release()
         self.assertEqual(self.writes, [])
 

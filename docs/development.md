@@ -49,33 +49,26 @@ mise run smoke:local
 mise run release:check
 ```
 
-## Configure Bugsnag
+## Error-report delivery
 
-GoReleaser embeds `BUGSNAG_API_KEY` when it is present in the build environment.
-Leave it unset for local builds without a key. The release pipeline runs
-`scripts/release-pipeline`, which validates the checked-out main commit before
-retrieving the ingestion key from the Buildkite cluster secret
-named by `RELEASE_BUGSNAG_API_KEY_SECRET`. It supplies `BUGSNAG_API_KEY` to GoReleaser and fails
-before creating a tag if secret retrieval fails or the key is empty.
+Deploy the Agent API error-report endpoint and verify a controlled live report
+before releasing this client.
+Reports use `POST /v3/jobs/:job_id/github-actions/error-reports` with the same-job
+token and the `github_actions_compatibility` permission. The request is the
+SDK-prepared Bugsnag notify-v4 JSON, with `apiKey` omitted: exactly one event,
+a notifier object, and at most 512 KiB of UTF-8 JSON. The backend supplies the
+ingestion key; no key is embedded in release binaries or read from `BUGSNAG_API_KEY`.
+HTTP `202` means queued, not delivered to Bugsnag. Rejections and outages are
+silent, with no retry, disk spool, redirect, or direct-Bugsnag fallback.
 
-Create the secret in the release agent's cluster. See
-[release pipeline configuration](#configure-the-release-pipeline)
-for its access policy. Other jobs admitted by that policy can also request it.
-The script reads credentials without shell tracing. GoReleaser's
-generated configuration, binaries, and Go build metadata can contain the key;
-do not treat them as secret storage.
+Preparation and SDK sanitization run on the caller to retain its stack. Network
+delivery is asynchronous, with at most 16 pending reports; saturation drops new
+reports. Each report's 1.5-second deadline starts at submission, before preparation
+or network scheduling. Shutdown drains pending reports together within their
+original deadlines, not a new timeout. Completion telemetry has a separate budget.
 
-For a direct Go build, supply the same linker variable:
-
-```sh
-go build -trimpath \
-  -ldflags "-X github.com/buildkite/buildkite-gha/internal/telemetry.BugsnagAPIKey=${BUGSNAG_API_KEY}" \
-  -o buildkite-gha ./cmd/buildkite-gha
-```
-
-An embedded key is extractable by anyone who downloads the client. Use only a
-Bugsnag project ingestion key, never an account-management credential. Runtime
-configuration and report contents are documented in
+Local runs without a job endpoint, ID, and token send nothing. Runtime
+configuration, the opt-out, and report contents are documented in
 [Bugsnag error reports](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/cli#disable-telemetry-bugsnag-error-reports).
 
 ## Source telemetry contract
@@ -704,9 +697,9 @@ cover the executable bytes. New releases do not publish archives; historical
 releases remain unchanged.
 
 All four targets use `-trimpath` and the commit timestamp, not the build time.
-The linker flags embed the version and optional Bugsnag ingestion key, but no
-build timestamp. Reproducing a published binary requires the same source commit,
-release version, pinned toolchain, and embedded key. `mise run release:check`
+The linker flags embed the version, but no ingestion key or build timestamp.
+Reproducing a published binary requires the same source commit, release version,
+pinned toolchain, `-trimpath`, and commit timestamp. `mise run release:check`
 builds two snapshots with the same inputs and requires identical SHA-256 hashes
 for all four raw executables. It does not compare against published releases.
 
@@ -754,7 +747,6 @@ pipeline's bootstrap job with these variables:
 | `RELEASE_MODEL` | Model identifier available through the Anthropic provider |
 | `RELEASE_APP_ID`, `RELEASE_APP_INSTALLATION_ID` | GitHub App and repository installation identifiers |
 | `RELEASE_APP_PRIVATE_KEY_SECRET` | Buildkite Secret name holding the App private key |
-| `RELEASE_BUGSNAG_API_KEY_SECRET` | Buildkite Secret name holding the ingestion key |
 | `RELEASE_SLACK_CHANNEL` | Destination supported by the configured Buildkite Slack integration |
 
 In the main CI bootstrap, set `RELEASE_PIPELINE_SLUG` to the release pipeline slug to

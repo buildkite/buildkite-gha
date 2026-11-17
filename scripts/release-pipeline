@@ -234,7 +234,7 @@ def main():
     args = parser.parse_args()
     os.chdir(Path(__file__).resolve().parent.parent)
     for name in ("RELEASE_PIPELINE", "RELEASE_APP_ID", "RELEASE_APP_INSTALLATION_ID", "RELEASE_APP_PRIVATE_KEY_SECRET",
-                 "RELEASE_BUGSNAG_API_KEY_SECRET", "RELEASE_SLACK_CHANNEL", "RELEASE_MODEL"):
+                 "RELEASE_SLACK_CHANNEL", "RELEASE_MODEL"):
         require(os.environ.get(name), f"{name} is required")
     pipeline = f"{os.environ.get('BUILDKITE_ORGANIZATION_SLUG')}/{os.environ.get('BUILDKITE_PIPELINE_SLUG')}"
     require(pipeline == os.environ["RELEASE_PIPELINE"], "requires the release pipeline")
@@ -279,9 +279,7 @@ def release(commit, token, dry_run):
     if dry_run:
         print("Dry run: no tag, release, or PR comments created.")
         return
-    # Retrieve all required credentials before the first irreversible operation.
     env = dict(os.environ, GITHUB_TOKEN=token,
-               BUGSNAG_API_KEY=secret(os.environ["RELEASE_BUGSNAG_API_KEY_SECRET"]),
                GORELEASER_CURRENT_TAG=tag, GORELEASER_PREVIOUS_TAG=previous)
     github("git/refs", token, {"ref": f"refs/tags/{tag}", "sha": commit})
     github("releases", token, {"tag_name": tag, "name": tag,

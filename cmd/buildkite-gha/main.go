@@ -5,13 +5,16 @@ import (
 	"runtime/debug"
 
 	"github.com/buildkite/buildkite-gha/internal/cli"
+	"github.com/buildkite/buildkite-gha/internal/telemetry"
 )
 
 var version = "dev"
 var revision string
 
 func main() {
-	os.Exit(cli.Run(os.Args[1:], os.Stdout, os.Stderr, resolvedVersion()))
+	code := cli.Run(os.Args[1:], os.Stdout, os.Stderr, resolvedVersion())
+	telemetry.DrainErrorReports()
+	os.Exit(code)
 }
 
 func resolvedVersion() string {
