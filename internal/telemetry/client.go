@@ -174,12 +174,13 @@ type Config struct {
 }
 
 type Client struct {
-	eventsURL     string
-	jobToken      string
-	clientVersion string
-	userAgent     string
-	client        *http.Client
-	timeout       time.Duration
+	eventsURL       string
+	errorReportsURL string
+	jobToken        string
+	clientVersion   string
+	userAgent       string
+	client          *http.Client
+	timeout         time.Duration
 }
 
 func New(config Config) (*Client, error) {
@@ -196,8 +197,11 @@ func New(config Config) (*Client, error) {
 	if err != nil || !validAgentURL(u) {
 		return nil, fmt.Errorf("safe telemetry Agent endpoint using HTTPS or loopback HTTP is required")
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + config.JobID + "/posthog/events"
+	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + config.JobID
 	u.RawPath = ""
+	errorReportsURL := *u
+	errorReportsURL.Path += "/github-actions/error-reports"
+	u.Path += "/posthog/events"
 
 	client := config.Client
 	if client == nil {
@@ -212,12 +216,13 @@ func New(config Config) (*Client, error) {
 	}
 	clientVersion := boundedClientVersion(config.ClientVersion)
 	return &Client{
-		eventsURL:     u.String(),
-		jobToken:      config.JobToken,
-		clientVersion: clientVersion,
-		userAgent:     useragent.FromVersion(config.ClientVersion),
-		client:        &bounded,
-		timeout:       timeout,
+		eventsURL:       u.String(),
+		errorReportsURL: errorReportsURL.String(),
+		jobToken:        config.JobToken,
+		clientVersion:   clientVersion,
+		userAgent:       useragent.FromVersion(config.ClientVersion),
+		client:          &bounded,
+		timeout:         timeout,
 	}, nil
 }
 
@@ -289,7 +294,11 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.eventsURL, bytes.NewReader(body))
+	return c.postJSON(requestCtx, c.eventsURL, body)
+}
+
+func (c *Client) postJSON(ctx context.Context, destination string, body []byte) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, destination, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create telemetry request: %v", err)
 	}

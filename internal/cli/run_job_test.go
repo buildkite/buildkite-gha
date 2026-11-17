@@ -1057,13 +1057,16 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 			}
 			planPath, planDigest := writeCLIJobPlan(t, job)
 			setCLIJobIdentity(t, job, planDigest)
-			t.Setenv("BUGSNAG_API_KEY", strings.Repeat("a", 32))
 			t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
-			t.Setenv("BUILDKITE_AGENT_ENDPOINT", "")
+			t.Setenv("BUILDKITE_AGENT_ENDPOINT", "https://agent.example/v3")
+			t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
 			originalTransport := http.DefaultTransport
 			t.Cleanup(func() { http.DefaultTransport = originalTransport })
 			reports := 0
 			http.DefaultTransport = bugsnagTestTransport(func(request *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(request.URL.Path, "/posthog/events") {
+					return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+				}
 				reports++
 				if request.Context().Err() != nil {
 					t.Fatal("error report inherited cancelled context")
@@ -1077,7 +1080,7 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 					t.Fatal(err)
 				}
-				if request.URL.Host != "notify.bugsnag.com" || len(payload.Events) != 1 || payload.Events[0].Context != "run_job:result_publication" {
+				if request.URL.Host != "agent.example" || !strings.HasSuffix(request.URL.Path, "/github-actions/error-reports") || len(payload.Events) != 1 || payload.Events[0].Context != "run_job:result_publication" {
 					t.Fatal("publication error was not attributed correctly")
 				}
 				stack := payload.Events[0].Exceptions[0].Stacktrace
@@ -1085,7 +1088,7 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 					t.Fatalf("report lost its CLI boundary: %#v", stack)
 				}
 				// A reporting outage must not replace the job's own error.
-				return nil, errors.New("Bugsnag unavailable")
+				return nil, errors.New("error reporting unavailable")
 			})
 			runner := &cliCaptureRunner{}
 			if test.failPublication {
@@ -1138,7 +1141,8 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 			if test.jobTimeout > 0 && publishedCLIManifest(t, runner, job, planDigest).Result != "cancelled" {
 				t.Fatal("job timeout did not publish its cancelled conclusion")
 			}
-			if reports != test.wantReports || strings.Contains(stderr.String(), "Bugsnag unavailable") {
+			telemetry.DrainErrorReports()
+			if reports != test.wantReports || strings.Contains(stderr.String(), "error reporting unavailable") {
 				t.Fatalf("reports = %d, want %d; stderr = %s", reports, test.wantReports, stderr.String())
 			}
 		})
@@ -1640,6 +1644,10 @@ func captureCommandTelemetry(t *testing.T) <-chan telemetry.Properties {
 	t.Helper()
 	events := make(chan telemetry.Properties, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/github-actions/error-reports") {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		var received struct {
 			Properties telemetry.Properties `json:"properties"`
 		}
@@ -1653,6 +1661,7 @@ func captureCommandTelemetry(t *testing.T) <-chan telemetry.Properties {
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
 	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+	t.Cleanup(telemetry.DrainErrorReports)
 	return events
 }
 

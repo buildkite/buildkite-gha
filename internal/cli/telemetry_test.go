@@ -149,6 +149,10 @@ func TestPluginPathFilterTelemetry(t *testing.T) {
 					w.WriteHeader(http.StatusNotFound)
 					return
 				}
+				if strings.HasSuffix(r.URL.Path, "/github-actions/error-reports") {
+					w.WriteHeader(http.StatusAccepted)
+					return
+				}
 				if r.URL.Path != "/v3/jobs/"+cliTestJobID+"/posthog/events" || r.Header.Get("Authorization") != "Token telemetry-token" {
 					t.Errorf("unexpected request %s", r.URL.Path)
 				}
@@ -177,6 +181,7 @@ func TestPluginPathFilterTelemetry(t *testing.T) {
 			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != wantCode {
 				t.Fatalf("code=%d stderr=%s", code, stderr.String())
 			}
+			telemetry.DrainErrorReports()
 			// A successful error-step upload is command success, never path success.
 			var pipeline struct {
 				Steps []struct {
