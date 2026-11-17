@@ -25,6 +25,7 @@ func TestInvocationEnvironmentProcessOverlayOrder(t *testing.T) {
 }
 
 func TestInvocationEnvironmentDockerPATHPrecedence(t *testing.T) {
+	jobPATH := "/job/bin"
 	tests := []struct {
 		name             string
 		runner           jobRun
@@ -36,7 +37,6 @@ func TestInvocationEnvironmentDockerPATHPrecedence(t *testing.T) {
 	}{
 		{
 			name:             "action PATH replaces implicit job PATH",
-			runner:           jobRun{implicitJobPATH: "/usr/bin"},
 			jobEnv:           map[string]string{"PATH": "/usr/bin"},
 			actionEnv:        map[string]string{"PATH": "/action/bin"},
 			wantPATH:         "/action/bin",
@@ -44,7 +44,7 @@ func TestInvocationEnvironmentDockerPATHPrecedence(t *testing.T) {
 		},
 		{
 			name:             "explicit job PATH wins over action PATH",
-			runner:           jobRun{explicitJobPATH: true, implicitJobPATH: "/usr/bin"},
+			runner:           jobRun{environmentPATH: &jobPATH},
 			jobEnv:           map[string]string{"PATH": "/job/bin"},
 			actionEnv:        map[string]string{"PATH": "/action/bin"},
 			wantPATH:         "/job/bin",
@@ -52,7 +52,6 @@ func TestInvocationEnvironmentDockerPATHPrecedence(t *testing.T) {
 		},
 		{
 			name:             "step PATH wins over action PATH",
-			runner:           jobRun{implicitJobPATH: "/usr/bin"},
 			jobEnv:           map[string]string{"PATH": "/usr/bin"},
 			stepEnv:          map[string]string{"PATH": "/step/bin"},
 			actionEnv:        map[string]string{"PATH": "/action/bin"},
@@ -61,10 +60,8 @@ func TestInvocationEnvironmentDockerPATHPrecedence(t *testing.T) {
 		},
 		{
 			name:             "implicit PATH everywhere keeps image PATH authority",
-			runner:           jobRun{implicitJobPATH: "/usr/bin"},
 			jobEnv:           map[string]string{"PATH": "/usr/bin"},
 			actionEnv:        map[string]string{"OTHER": "value"},
-			wantPATH:         "/usr/bin",
 			wantExplicitPATH: false,
 		},
 	}
@@ -80,7 +77,7 @@ func TestInvocationEnvironmentDockerPATHPrecedence(t *testing.T) {
 }
 
 func TestInvocationEnvironmentDockerOverlaysActionAndInputs(t *testing.T) {
-	runner := jobRun{implicitJobPATH: "/usr/bin"}
+	var runner jobRun
 	environment := runner.invocationEnvironment(
 		map[string]string{"PATH": "/usr/bin", "SHARED": "job"},
 		map[string]string{"STEP_ONLY": "step"},
@@ -90,7 +87,6 @@ func TestInvocationEnvironmentDockerOverlaysActionAndInputs(t *testing.T) {
 		map[string]string{"my input": "value"},
 	)
 	want := map[string]string{
-		"PATH":           "/usr/bin",
 		"SHARED":         "job", // action env fills only unset names
 		"STEP_ONLY":      "step",
 		"ACTION_ONLY":    "action",

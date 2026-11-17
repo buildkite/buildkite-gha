@@ -235,7 +235,7 @@ func cancelledStepExecution(jobCtx, runCtx context.Context, step executionprogra
 func commitStepExecution(execution stepExecution, processor *commandOutputProcessor, jobResult *JobResult, eval *expression.Context) error {
 	id := strings.ToLower(execution.id)
 	eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
-	commitResultEnvironment(jobResult.Env, execution.result)
+	jobResult.commitEnvironment(execution.result)
 	eval.Env = jobResult.Env
 	maps.Copy(jobResult.State, execution.result.State)
 	appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, execution.result.Summary, execution.result.summaryTruncated)
@@ -247,7 +247,12 @@ func commitStepExecution(execution stepExecution, processor *commandOutputProces
 	return nil
 }
 
-func commitResultEnvironment(env map[string]string, result Result) {
+func (jobResult *JobResult) commitEnvironment(result Result) {
+	env := jobResult.Env
+	if result.pathBaseSet {
+		path := result.pathBase
+		jobResult.environmentPATH = &path
+	}
 	effects := result.Env
 	if len(result.Paths) > 0 {
 		effects = mergeStringMaps(effects)

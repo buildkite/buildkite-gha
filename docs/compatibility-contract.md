@@ -121,6 +121,30 @@ nonempty args replaced CMD, and a nonempty entrypoint override cleared CMD.
 Empty entrypoint values retained the image entrypoint. This is native hosted
 Linux evidence, not complete quote/backslash, platform, or credential parity.
 
+The [environment follow-up](https://github.com/sj26-testier/gha-e2e-onboarding-r-5083e9027d7b/actions/runs/43995028870/attempts/1)
+and [PATH/job-container follow-up](https://github.com/sj26-testier/gha-e2e-onboarding-r-5083e9027d7b/actions/runs/44010396780/attempts/1)
+used the same runner version and hosted Linux image. Their immutable fixtures
+([environment](https://github.com/sj26-testier/gha-e2e-onboarding-r-5083e9027d7b/blob/1535cf7fe46243d6b10a0f60f6f9577c65fff1a8/.github/workflows/native-environment.yml),
+[PATH/job container](https://github.com/sj26-testier/gha-e2e-onboarding-r-5083e9027d7b/blob/a9c6ab30002d848d429c7dbb04c04632d15171ae/.github/workflows/native-path-branches.yml))
+establish these obligations:
+
+- Force `HOME=/github/home`, sharing its owned directory across Docker actions
+  and the parent job container. Preserve image `USER`; non-root HOME writes
+  and cross-job persistence were not established by the native probes.
+- Translate every environment value, including `INPUT_*`, by literal exact
+  or slash-prefix replacement for mounted paths. Leave embedded and near-prefix
+  strings unchanged. Do not normalize suffixes or translate raw arguments.
+- Keep image PATH unless workflow/job/step/action env or `GITHUB_ENV` explicitly
+  sets it. Never add `GITHUB_PATH` prepends to Docker actions; shell and JavaScript
+  processes still receive them. Track the explicit source, including empty
+  values, rather than inferring it from the effective PATH string.
+- Translate PATH as one environment value, not as separate components. A
+  workspace prefix at its start translates; a non-leading component does not.
+
+These runs also cover 0–4 backslashes before double quotes and consecutive
+double quotes. They do not establish every environment collision, non-root
+permission, cancellation, platform, or backend branch.
+
 Keep Linux-only admission and runtime checks. Missing Docker or an inaccessible
 daemon must fail setup before workflow steps run. Reuse owned workspace and
 file-command mounts, environment translation, job/service networking, and cleanup.

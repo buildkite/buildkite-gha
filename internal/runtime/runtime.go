@@ -273,7 +273,6 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandOutputProcesso
 	if action.runnerTemp == "" {
 		action.runnerTemp = r.runnerTemp
 	}
-	action.explicitPATH = action.explicitPATH || r.explicitJobPATH
 	if action.Workspace == "" || action.runnerTemp == "" {
 		return result, errors.New("docker workspace and runner temp are required")
 	}
@@ -424,6 +423,10 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandOutputProcesso
 			return result, err
 		}
 	}
+	home := filepath.Join(action.runnerTemp, "_github_home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return result, fmt.Errorf("create Docker action home: %w", err)
+	}
 	cacheEnv, cacheErr := r.cacheActionEnvironment(ctx, processor)
 	if cacheErr != nil && ctx.Err() != nil {
 		return result, ctx.Err()
@@ -442,6 +445,7 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandOutputProcesso
 	if action.Workspace != "" {
 		args = append(args, "--mount", "type=bind,source="+action.Workspace+",target=/github/workspace", "--mount", "type=bind,source="+action.runnerTemp+",target=/github/runner_temp", "--workdir", "/github/workspace")
 	}
+	args = append(args, "--mount", "type=bind,source="+home+",target=/github/home")
 	eventPath := r.runtimeEnv["GITHUB_EVENT_PATH"]
 	if eventPath != "" {
 		eventDir := filepath.Dir(eventPath)
@@ -450,34 +454,36 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandOutputProcesso
 		}
 		args = append(args, "--mount", "type=bind,source="+eventDir+",target="+containerEventDirectory+",readonly", "--env", "GITHUB_EVENT_PATH="+containerEventPath)
 	}
-	var siblingPaths *jobContainerBackend
+	// Translate whole values by exact or slash-prefix replacement, including
+	// PATH. Specific mounts precede runner temp; do not clean the suffix.
+	paths := []containerMount{
+		{host: action.Workspace, target: "/github/workspace"},
+		{host: files.dir, target: "/github/file_commands"},
+		{host: home, target: "/github/home"},
+		{host: action.runnerTemp, target: "/github/runner_temp"},
+	}
 	if r.jobContainer != nil {
-		siblingPaths = &jobContainerBackend{mounts: []containerMount{
-			{host: action.Workspace, target: "/github/workspace"},
-			{host: action.runnerTemp, target: "/github/runner_temp"},
-			{host: jobContainerWorkspace, target: "/github/workspace"},
-			{host: jobContainerTemp, target: "/github/runner_temp"},
-		}}
+		paths = append(paths,
+			containerMount{host: jobContainerWorkspace, target: "/github/workspace"},
+			containerMount{host: jobContainerTemp + "/_github_home", target: "/github/home"},
+			containerMount{host: jobContainerTemp, target: "/github/runner_temp"},
+		)
 	}
 	if eventPath != "" {
-		if siblingPaths == nil {
-			siblingPaths = &jobContainerBackend{}
-		}
-		siblingPaths.mounts = append(siblingPaths.mounts, containerMount{host: filepath.Dir(eventPath), target: containerEventDirectory})
+		paths = append([]containerMount{{host: filepath.Dir(eventPath), target: containerEventDirectory}}, paths...)
 	}
 	for _, name := range sortedKeys(action.Env) {
 		if name == "GITHUB_EVENT_PATH" && eventPath != "" {
 			continue
 		}
-		if isCacheServiceEnvironment(name) || isIDTokenEnvironment(name) || name == "RUNNER_TOOL_CACHE" || (name == "PATH" && !action.explicitPATH) || name == "GITHUB_WORKSPACE" || name == "RUNNER_TEMP" {
+		if isCacheServiceEnvironment(name) || isIDTokenEnvironment(name) || name == "RUNNER_TOOL_CACHE" || (name == "PATH" && !action.explicitPATH) || name == "GITHUB_WORKSPACE" || name == "RUNNER_TEMP" || name == "HOME" {
 			continue
 		}
 		value := action.Env[name]
-		if siblingPaths != nil {
-			if name == "PATH" {
-				value = siblingPaths.translatePATH(value)
-			} else {
-				value = siblingPaths.containerPath(value)
+		for _, mapping := range paths {
+			if value == mapping.host || strings.HasPrefix(value, mapping.host+"/") {
+				value = mapping.target + strings.TrimPrefix(value, mapping.host)
+				break
 			}
 		}
 		args = append(args, "--env", name+"="+value)
@@ -486,6 +492,7 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandOutputProcesso
 		args = append(args, "--env", "GITHUB_WORKSPACE=/github/workspace")
 	}
 	args = append(args,
+		"--env", "HOME=/github/home",
 		"--env", "RUNNER_TEMP=/github/runner_temp",
 		"--env", "GITHUB_OUTPUT=/github/file_commands/output",
 		"--env", "GITHUB_ENV=/github/file_commands/env",

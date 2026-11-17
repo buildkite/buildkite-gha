@@ -1056,6 +1056,7 @@ func TestRunJobContainerOptionsAndVolumesExactArguments(t *testing.T) {
 			"--mount", call.Args[12],
 			"--mount", "type=bind,source=" + runtimeExecutable + ",target=" + jobContainerRuntime + ",readonly",
 			"--workdir", jobContainerWorkspace, "--entrypoint", "sh",
+			"--mount", strings.TrimSuffix(call.Args[12], ",target="+jobContainerTemp) + "/_github_home,target=/github/home",
 			"--privileged", "--label", "description=two words", "--mount", "type=tmpfs,dst=/scratch", "--volume", "option-cache:/option",
 			"--env", "A=first", "--env", "Z=last", "--publish", "8080",
 			"--volume", "cache:/cache:ro", "--volume", "anonymous-volume:/anonymous", "--volume", w + ":/host-workspace:ro",
