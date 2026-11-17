@@ -1,0 +1,40 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":pipeline: Direct Docker proof importer"
+    key: "direct-docker-importer"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.10.17"
+    command: |
+      set -euo pipefail
+      scripts/verify-source-checkout "$${BUILDKITE_COMMIT}"
+      commit="$${DIRECT_DOCKER_RUNTIME_COMMIT:-$${BUILDKITE_COMMIT}}"
+      [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
+      proof_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-direct-docker.XXXXXXXX")"
+      trap 'rm -rf -- "$$proof_root"' EXIT
+      mkdir -p "$$proof_root/source"
+      git fetch --no-tags origin "$$commit"
+      git archive "$$commit" | tar -x -C "$$proof_root/source"
+      CGO_ENABLED=0 mise exec -- go -C "$$proof_root/source" build -trimpath -buildvcs=false \
+        -ldflags "-X main.version=0.0.0-direct-docker.$$commit -X main.revision=$$commit" \
+        -o "$$proof_root/buildkite-gha" ./cmd/buildkite-gha
+      "$$proof_root/buildkite-gha" --version
+      sha256sum "$$proof_root/buildkite-gha"
+      python3 scripts/direct-docker-proof.py "$$proof_root/workflows"
+      sha256sum scripts/direct-docker-proof.py "$$proof_root/workflows/"*.yml
+      python3 - "$$proof_root/event.json" <<'PY'
+      import json, os, pathlib, sys
+      event = json.loads(pathlib.Path("testdata/smoke/events/push.json").read_text())
+      event.update(event="workflow_dispatch", sha=os.environ["BUILDKITE_COMMIT"], ref="refs/heads/" + os.environ["BUILDKITE_BRANCH"])
+      event["payload"] = {"inputs": {}, "ref": os.environ["BUILDKITE_BRANCH"]}
+      pathlib.Path(sys.argv[1]).write_text(json.dumps(event))
+      PY
+      "$${proof_root}/buildkite-gha" upload \
+        --event-path "$$proof_root/event.json" \
+        --runner-queue ubuntu-latest=hosted \
+        "$$proof_root/workflows/direct-docker.yml" "$$proof_root/workflows/direct-docker-paths.yml"
