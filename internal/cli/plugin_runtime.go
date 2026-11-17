@@ -28,6 +28,7 @@ const (
 	pluginDevLinuxARM64RuntimeEnvironment = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_ARM64_RUNTIME"
 	pluginDevWindowsRuntimeEnvironment    = "BUILDKITE_GHA_PLUGIN_DEV_WINDOWS_RUNTIME"
 	pluginReleaseEnvironment              = "BUILDKITE_GHA_PLUGIN_RELEASE"
+	pluginMultiplatformRunEnvironment     = "BUILDKITE_GHA_PLUGIN_MULTIPLATFORM_RUN"
 	pluginReleaseMetadataLimit            = 4 << 20
 )
 

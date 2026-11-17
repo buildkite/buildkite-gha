@@ -520,6 +520,39 @@ Inspect their logs and result artifacts as well as the inventory assertion;
 the failure control must reach its workflow command and exit 37. The CLI maps
 that tolerated failure to agent exit 78; setup failures are not proof.
 
+Before releasing a plugin with expanded platform support, use consumer mode
+`plugin-platforms`, `PINNED_PROOF_PLUGIN_REF=<exact-plugin-commit>`, and
+`PINNED_PROOF_VERSION=<released-runtime-version>`. Set `PINNED_PROOF_LINUX_QUEUE`,
+`PINNED_PROOF_ARM_QUEUE`, `PINNED_PROOF_MAC_QUEUE`, and
+`PINNED_PROOF_WINDOWS_QUEUE` to existing native queues. The harness fetches that
+plugin's proof code and schedules its consumers with the current repository's
+immutable workflow and event identity. `PINNED_PROOF_PLAN_SOURCE` selects
+`producer`, `inline`, or `env` event delivery. `PINNED_PROOF_NAMESPACE=1` selects
+the Ubuntu 24.04 native Namespace image on the supplied Linux queue and checks
+native tools and Docker image loading.
+
+This consumer-stage proof changes delivery, not saved plans. It does not replace
+the later unchanged-emitter and released-consumer gates, nor prove cross-worker
+cache reuse or scheduler retries. Inspect `platform-runtime-plans.json`, runtime
+result artifacts, provider checks, and actual workflow output on every platform.
+
+Use `PINNED_CONSUMER_MODE=candidate-platforms`,
+`PINNED_CONSUMER_PLUGIN_REF=<candidate-plugin-sha>`,
+`PINNED_CONSUMER_EXPECT_PINNED=1`, and `PINNED_CONSUMER_HOST_SELECTION=1` to
+build four candidate executables and schedule the importer's original pipeline
+bytes. This supplies a full custom binary map with real artifact-backed URLs;
+it does not publish a release. Use the `plugin-platforms` mode with
+`PINNED_PROOF_SELECTOR=version` or `latest` for released-runtime acquisition.
+
+For the metadata-present, capability-absent fallback, repeat `candidate-platforms`
+with `PINNED_CONSUMER_PLUGIN_REF=v0.15.1`, `PINNED_CONSUMER_EXPECT_PINNED=0`, and
+`PINNED_CONSUMER_HOST_SELECTION=0`. That control uses importer-local fixture
+release metadata, which cannot resolve an exact version on a different worker.
+The importer inventory must contain zero executable artifacts for direct
+delivery and four for fallback. `PINNED_PROOF_CACHE=1` adds opt-in same-worker
+cold/warm request counts to `plugin-platforms`; it does not prove cross-worker
+cache reuse or scheduler retries.
+
 Use `COMPATIBILITY_PROOF=scheduling` to probe output-derived matrix concurrency
 and parallel limits. Check job start and finish times: the group consumers must
 not overlap, the parallel consumers must run at most two at a time, and each

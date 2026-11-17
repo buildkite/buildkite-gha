@@ -96,14 +96,18 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
-	runtimeDigest, err := executableDigest()
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: verify runtime executable: %v\n", err)
-		return 1
-	}
-	if expected := job.RuntimeDistributionDigest(); runtimeDigest != expected {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: runtime distribution digest %q does not match plan digest %q\n", runtimeDigest, expected)
-		return 1
+	// Legacy plans bind executable bytes. New launchers verify acquisition;
+	// schema and capabilities, not compiler version, define compatibility.
+	if expected := job.RuntimeDistributionDigest(); expected != "" {
+		runtimeDigest, err := executableDigest()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: verify runtime executable: %v\n", err)
+			return 1
+		}
+		if runtimeDigest != expected {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: runtime distribution digest %q does not match plan digest %q\n", runtimeDigest, expected)
+			return 1
+		}
 	}
 	if err := verifyBuildkiteTarget(job); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
@@ -501,6 +505,29 @@ func callGuardsHaveNeedSources(guards []plan.CallGuard) bool {
 }
 
 func hydrateEventPayload(ctx context.Context, agent transport.Agent, job *plan.Job, producer string) error {
+	if job.Event.PayloadSource == "buildkite-webhook" {
+		webhook, err := agent.GetMetadataBounded(ctx, "buildkite:webhook", maxWebhookMetadataBytes+1)
+		if err != nil {
+			return fmt.Errorf("read buildkite:webhook: %w", err)
+		}
+		if len(webhook) > maxWebhookMetadataBytes {
+			return fmt.Errorf("buildkite:webhook exceeds %d bytes", maxWebhookMetadataBytes)
+		}
+		payload, err := parseWebhookPayload(webhook)
+		if err != nil {
+			return err
+		}
+		canonical, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		payload, err = plan.DecodeEventPayload(canonical, job.Event.PayloadDigest)
+		if err != nil {
+			return err
+		}
+		job.Event.Payload = &payload
+		return nil
+	}
 	if !job.Event.PayloadArtifact {
 		return nil
 	}

@@ -755,8 +755,15 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		Program:              &workflowProgram,
 		Actions:              actions.locks,
 	}
+	if b.options.UnboundRuntime {
+		job.Runtime = nil
+	}
 	job.Event.PayloadFile = b.options.EventFile
 	job.Event.PayloadArtifact = actions.requiresEventPayload || job.Event.PayloadFile
+	if job.Event.PayloadArtifact && b.options.EventPayloadSource != "" {
+		job.Event.PayloadArtifact = false
+		job.Event.PayloadSource = b.options.EventPayloadSource
+	}
 	job.RequiresMise = &actions.requiresMise
 	return job
 }

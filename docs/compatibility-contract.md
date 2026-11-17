@@ -74,6 +74,26 @@ qualifications in the user reference until their prerequisites are established.
 The following obligations explain boundaries that a refactor or compatibility
 extension could accidentally remove. They are not a second feature inventory.
 
+### Host-selected runtime delivery
+
+A capable plugin importer resolves `latest` once and emits the exact release
+selector on every static execution job. Each worker selects its own platform's
+executable. A custom binary map stays intact; it never falls back to official
+releases. Runner labels, queues, images and dependencies still select execution
+hosts independently of executable acquisition.
+
+New host-selected plans omit `runtime`. Plan schema, execution program and
+capabilities define compatibility; compiler provenance is not a runtime version
+equality gate. Launchers verify plan bytes and downloaded executable digests.
+Runtimes still enforce `runtime.distribution_digest` on legacy plans.
+
+Webhook-backed plans use `event.payload_source: buildkite-webhook`. The runtime
+parses the build's webhook metadata, canonicalizes JSON and verifies
+`payload_digest` before exposing the event. Explicit event snapshots retain
+artifact delivery; build-environment fallback and continuations retain their
+existing semantics. Namespace setup comes from the worker's `NSC_INSTANCE_ID`,
+not runner routing. Hosted tool-cache setup is explicit user intent.
+
 ### Offline runner validation
 
 Standalone validation must accept `windows-latest` and `windows-2022` without
@@ -101,12 +121,17 @@ reviewer-policy parity.
 
 ### Pinned runtime delivery
 
-Plugin imports may use plugin run mode only when all runnable jobs
-are static Linux amd64, runner-user setup is enabled, and no job needs custom
-cache-volume ownership or agent-tag setup. Make this decision before acquiring
-counterpart bytes or publishing jobs. Deferred and mixed-platform imports,
-custom URLs, local distributions, and importers without release metadata retain
-their existing artifact delivery.
+Plugin imports may use plugin run mode when all runnable jobs are static,
+runner-user setup is enabled, and no job needs custom cache-volume ownership or
+agent-tag setup. Linux arm64, Darwin arm64, Windows amd64, and mixed-platform
+imports also require `BUILDKITE_GHA_PLUGIN_MULTIPLATFORM_RUN=1` from the invoking
+plugin hook. Without it, retain the Linux-amd64-only boundary: release metadata
+alone does not prove consumer support. Windows remains an execution target,
+not an importer host.
+
+Make this whole-import decision before acquiring counterpart bytes or publishing
+jobs. Deferred imports, custom URLs, local distributions, and importers without
+release metadata retain their existing artifact delivery.
 
 Resolve runtime URLs and SHA-256 digests from the plugin's release metadata
 handoff, not another catalogue. Verify same-host metadata against the running
@@ -116,7 +141,8 @@ commit references. Fall back to bare `github-actions` when the reference is
 unversioned or cannot be determined. A fresh checkout uses repository HEAD;
 agents may reuse cached checkouts. The selected plugin must support run mode; a moving
 reference does not guarantee identical plugin code across workers or retries.
-Emit the runtime URL and digest, plan digest, and producer job UUID. Do not
+Select each job's runtime URL and digest for its platform, and emit its plan
+digest and producer job UUID. Do not
 upload executable artifacts for this path. Retries must keep the runtime pins
 and never resolve CLI releases at execution.
 Keep plan, event, target, source, and executable verification unchanged.

@@ -284,7 +284,7 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		if expectedRuntimeDigest == "" && instance.Platform == PlatformLinuxAMD64 {
 			expectedRuntimeDigest = compilerDistributionDigest
 		}
-		if job.Runtime == nil || job.Runtime.DistributionDigest != expectedRuntimeDigest {
+		if (!options.UnboundRuntime && (job.Runtime == nil || job.Runtime.DistributionDigest != expectedRuntimeDigest)) || (options.UnboundRuntime && job.Runtime != nil) {
 			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("plan %d runtime distribution does not match job platform %s", i, instance.Platform))
 		}
 		planPath, err := buildkitepipeline.PlanPath(artifact.Digest)
@@ -495,7 +495,8 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 	if err != nil {
 		return bundle, processingFinding(StagePipeline, CodePipelineGeneration, "compatibility", err)
 	}
-	if len(ir.Continuations) != 0 {
+	if len(ir.Continuations) != 0 || options.UnboundRuntime {
+		// The upload owns continuation launchers and host-side selectors.
 		bundle.GeneratedWorkflow = generatedWorkflow
 		bundle.Processing.PipelineGenerated = true
 		return bundle, nil

@@ -119,8 +119,17 @@ func ValidateCacheVolume(cache CacheVolume) error {
 	return nil
 }
 
+// RuntimeSelection is shared unchanged by all execution hosts in an import.
+// Each host selects its own executable; this does not select a runner.
+type RuntimeSelection struct {
+	Version         string
+	Binary          map[string]string
+	HostedToolCache *bool
+}
+
 // Pipeline is the validated input required to emit generated compatibility jobs.
 type Pipeline struct {
+	RuntimeSelection *RuntimeSelection
 	CompilerStep     string
 	ArtifactProducer string
 	// RuntimePlugin is the invoking plugin's reference, independent of CLI pins.
@@ -673,7 +682,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" {
 				return fmt.Errorf("job %q requires an HTTPS runtime URL without credentials or a fragment", job.Key)
 			}
-			if pipeline.Deferred || pipeline.DisableRunnerUser || !uuidPattern.MatchString(artifactProducer) || platform != "linux/amd64" || job.Stage != nil || job.Cache != nil || len(job.Agents) != 0 {
+			if pipeline.Deferred || pipeline.DisableRunnerUser || !uuidPattern.MatchString(artifactProducer) || job.Stage != nil || job.Cache != nil || len(job.Agents) != 0 {
 				return fmt.Errorf("job %q cannot use the pinned runtime plugin", job.Key)
 			}
 		}
@@ -798,7 +807,30 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if platform == "windows/amd64" {
 			command = windowsBootstrapCommand(command)
 		}
-		if job.RuntimeURL != "" {
+		switch {
+		case pipeline.RuntimeSelection != nil:
+			configuration := map[string]any{
+				"run": map[string]any{"plan": map[string]string{"digest": job.PlanDigest, "producer": artifactProducer}},
+			}
+			selection := pipeline.RuntimeSelection
+			if selection.Binary != nil {
+				configuration["binary"] = selection.Binary
+			} else {
+				configuration["version"] = selection.Version
+			}
+			if selection.HostedToolCache != nil {
+				configuration["hosted-tool-cache"] = *selection.HostedToolCache
+			}
+			encoded, err := json.Marshal(configuration)
+			if err != nil {
+				return err
+			}
+			reference := pipeline.RuntimePlugin
+			if reference == "" {
+				reference = "github-actions"
+			}
+			_, _ = fmt.Fprintf(out, "%splugins:\n%s  - %s: %s\n", attributeIndent, attributeIndent, yamlScalar(reference), encoded)
+		case job.RuntimeURL != "":
 			reference := pipeline.RuntimePlugin
 			if reference == "" {
 				reference = "github-actions"
@@ -807,7 +839,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			_, _ = fmt.Fprintf(out, "%s        plan:\n%s          digest: %s\n%s          producer: %s\n", attributeIndent, attributeIndent, yamlScalar(job.PlanDigest), attributeIndent, yamlScalar(artifactProducer))
 			_, _ = fmt.Fprintf(out, "%s        runtime:\n%s          platform: %s\n%s          url: %s\n%s          sha256: %s\n", attributeIndent, attributeIndent, yamlScalar(platform), attributeIndent, yamlScalar(job.RuntimeURL), attributeIndent, yamlScalar(strings.TrimPrefix(distributionDigest, "sha256:")))
 			_, _ = fmt.Fprintf(out, "%s        hosted-tool-cache: %t\n", attributeIndent, hostedToolCache)
-		} else {
+		default:
 			_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
 		}
 		if workflow.Aggregate {

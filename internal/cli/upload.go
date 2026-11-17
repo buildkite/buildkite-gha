@@ -369,6 +369,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	requiredPlatforms := make(map[compiler.Platform]bool, 2)
 	_, releaseProvided := os.LookupEnv(pluginReleaseEnvironment)
 	pinnedRuntime := releaseProvided && uploadArguments.experimentalRunnerUser && importerJobID != ""
+	selectRuntime := uploadArguments.runtimeSelection != nil && uploadArguments.experimentalRunnerUser && importerJobID != ""
 	preparationAdmissionFailures := make([]error, len(workflows))
 	for i, request := range requests {
 		if request == nil || processingReportHasErrors(processingReports[i]) {
@@ -376,6 +377,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		platforms, deferred, pinned, admissionErr := requiredRuntimePlatforms(ctx, *request)
 		pinnedRuntime = pinnedRuntime && pinned
+		selectRuntime = selectRuntime && pinned
 		preparationAdmissionFailures[i] = admissionErr
 		for platform := range platforms {
 			requiredPlatforms[platform] = true
@@ -386,6 +388,17 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			}
 		}
 	}
+	if selectRuntime {
+		// Planning still uses valid distribution placeholders; they are neither
+		// bound into the new plans nor acquired or uploaded as executables.
+		distributions := make(map[compiler.Platform]runtimeDistribution, len(requiredPlatforms))
+		for platform := range requiredPlatforms {
+			distributions[platform] = runtimeDistribution{digest: distributionDigest}
+		}
+		return finishUpload(ctx, uploadArguments, stdout, stderr, agent, workflows, requests, effectiveEvent, executablePath, importerStep, importerJobID, processingReports, out, distributions, preparationAdmissionFailures)
+	}
+	// Deferred workflows and custom cache ownership keep their existing launcher.
+	uploadArguments.runtimeSelection = nil
 	if uploadArguments.pluginAcquisition != nil {
 		acquisition := uploadArguments.pluginAcquisition
 		// Local and custom binaries retain their existing byte acquisition and
@@ -488,6 +501,10 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		request := *requests[i]
 		request.ImporterStep = bundleCompilerStep
 		request.RuntimeDistributions = runtimeDigests
+		request.UnboundRuntime = uploadArguments.runtimeSelection != nil
+		if request.UnboundRuntime && effectiveEvent.Origin == effectiveEventFromWebhook {
+			request.EventPayloadSource = "buildkite-webhook"
+		}
 		compileWorkflow := func(vars compiler.VariableSources) (hostedCompilation, error) {
 			request.Vars = vars
 			return compileHostedRequest(ctx, request)
@@ -626,7 +643,15 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		for j := range generatedWorkflows[i].Jobs {
 			job := &generatedWorkflows[i].Jobs[j]
 			if job.Failure == nil && job.SkipReason == "" {
-				job.RuntimeURL = runtimeDistributions[compiler.PlatformLinuxAMD64].url
+				platform, err := compiler.ParsePlatform(job.Platform)
+				if err != nil {
+					_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+					return 1
+				}
+				job.RuntimeURL = runtimeDistributions[platform].url
+				if uploadArguments.runtimeSelection != nil {
+					job.DistributionDigest = runtimeDistributions[platform].digest
+				}
 			}
 		}
 	}
@@ -634,6 +659,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		CompilerStep:      importerStep,
 		ArtifactProducer:  importerJobID,
 		RuntimePlugin:     pluginRuntimeReference(),
+		RuntimeSelection:  uploadArguments.runtimeSelection,
 		EventProvider:     effectiveEvent.Event.Provider,
 		DisableRunnerUser: !uploadArguments.experimentalRunnerUser,
 		Workflows:         generatedWorkflows,
@@ -684,7 +710,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	}
 	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformLinuxARM64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		runtimeDistribution, ok := runtimeDistributions[platform]
-		if !ok || runtimeDistribution.url != "" {
+		if !ok || runtimeDistribution.url != "" || uploadArguments.runtimeSelection != nil {
 			continue
 		}
 		path, pathErr := buildkitepipeline.DistributionPath(runtimeDistribution.digest)
@@ -947,7 +973,7 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 // requiredRuntimePlatforms compiles the request once before any runtime
 // distribution is acquired, with the importer's own digest standing in for
 // every platform, to learn which platforms the planned jobs need, whether the
-// workflow defers jobs to a later stage, whether it can use the pinned Linux
+// workflow defers jobs to a later stage, whether it can use the pinned runtime
 // launcher, and whether hosted admission rejects it. These plans are discarded.
 func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest) (map[compiler.Platform]bool, bool, bool, error) {
 	request.RuntimeDistributions = map[compiler.Platform]string{
@@ -961,10 +987,10 @@ func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest)
 	options.ResolveActions = true
 	options.ActionSource = request.RepositorySource
 	bundle, _ := compiler.CompileBundlePlansContext(ctx, request.WorkflowPath, request.WorkflowSource, request.EventSource, request.Version, request.DistributionDigest, options)
-	return runtimePlatformsForBundle(bundle)
+	return runtimePlatformsForBundle(bundle, os.Getenv(pluginMultiplatformRunEnvironment) == "1", os.Getenv("BUILDKITE_GHA_PLUGIN_RUNTIME_SELECTION") == "1")
 }
 
-func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bool, bool, bool, error) {
+func runtimePlatformsForBundle(bundle compiler.Bundle, multiplatformRun, hostSelection bool) (map[compiler.Platform]bool, bool, bool, error) {
 	platforms := make(map[compiler.Platform]bool, 2)
 	deferred := len(bundle.IR.Continuations) != 0
 	if err := validateUnprivilegedBundle(bundle); err != nil {
@@ -976,7 +1002,9 @@ func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bo
 			continue
 		}
 		platforms[job.Platform] = true
-		pinned = pinned && job.Platform == compiler.PlatformLinuxAMD64 && job.Cache == nil && len(job.Agents) == 0
+		// Older plugins provide release metadata but only implement Linux amd64
+		// run mode. Keep their whole-import fallback unless the hook opts in.
+		pinned = pinned && (multiplatformRun || hostSelection || job.Platform == compiler.PlatformLinuxAMD64) && job.Cache == nil && (hostSelection || len(job.Agents) == 0)
 	}
 	return platforms, deferred, pinned, nil
 }
@@ -1161,6 +1189,7 @@ type parsedUploadArgs struct {
 	experimentalRunnerUser   bool
 	privateReusableWorkflows bool
 	pluginAcquisition        *pluginRuntimeAcquisition
+	runtimeSelection         *buildkitepipeline.RuntimeSelection
 	importerPlatform         compiler.Platform
 	telemetry                *commandTelemetryDetails
 }

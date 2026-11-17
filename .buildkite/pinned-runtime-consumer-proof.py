@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Schedule unmodified imports against published releases, then check artifacts."""
 
+import glob
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
+
+PLATFORMS = {"linux/amd64": "linux_x86_64", "linux/arm64": "linux_arm64",
+             "darwin/arm64": "darwin_arm64", "windows/amd64": "windows_x86_64.exe"}
 
 
 def run(*args, **kwargs):
@@ -31,6 +37,32 @@ def configuration():
 
 def load():
     assert os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "Set GITHUB_EVENT_NAME=workflow_dispatch on the proof build"
+    if os.environ["PINNED_CONSUMER_MODE"] == "host-environment":
+        steps = []
+        for label, agents in [("native-linux", {"queue": os.environ["PINNED_PROOF_LINUX_QUEUE"], "nsc-gha-image": "ubuntu-24.04"}),
+                              ("native-mac", {"queue": os.environ["PINNED_PROOF_MAC_QUEUE"]}),
+                              ("linux-control", {"queue": "hosted"})]:
+            steps.append({"label": label, "agents": agents,
+                          "command": "python3 .buildkite/pinned-runtime-consumer-proof.py host-environment"})
+        run("buildkite-agent", "pipeline", "upload", "--no-interpolation", input=json.dumps({"steps": steps}))
+        return
+    if os.environ["PINNED_CONSUMER_MODE"] == "candidate-platforms":
+        run("buildkite-agent", "pipeline", "upload", "--no-interpolation", input=json.dumps({"steps": [
+            {"key": "runtime-candidate-build", "label": "Build candidate runtime assets",
+             "plugins": [{"mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2": {"version": "2026.10.17"}}],
+             "command": "mise exec -- python3 .buildkite/pinned-runtime-consumer-proof.py publish-candidate",
+             "timeout_in_minutes": 20},
+            {"key": "runtime-consumer-importer", "label": "Import unchanged mixed-platform jobs",
+             "depends_on": "runtime-candidate-build",
+             "command": "python3 .buildkite/pinned-runtime-consumer-proof.py import-candidate",
+             "timeout_in_minutes": 20, "retry": {"automatic": False}}]}))
+        return
+    if os.environ["PINNED_CONSUMER_MODE"] == "plugin-platforms":
+        run("buildkite-agent", "pipeline", "upload", "--no-interpolation", input=json.dumps({"steps": [{
+            "key": "runtime-consumer-importer", "label": "Native pinned plugin consumers",
+            "command": "python3 .buildkite/pinned-runtime-consumer-proof.py plugin-platforms",
+            "timeout_in_minutes": 20, "retry": {"automatic": False}}]}))
+        return
     mode, config = configuration()
     importer = {"key": "runtime-consumer-importer", "label": f"Runtime consumer: {mode}",
                 "timeout_in_minutes": 15, "retry": {"automatic": False}}
@@ -44,6 +76,134 @@ def load():
     verify = {"label": "Check importer runtime artifact inventory", "depends_on": "runtime-consumer-importer",
               "command": "python3 .buildkite/pinned-runtime-consumer-proof.py inventory"}
     run("buildkite-agent", "pipeline", "upload", "--no-interpolation", input=json.dumps({"steps": [importer, verify]}))
+
+
+def publish_candidate():
+    directory = Path(".pinned-runtime-candidate")
+    directory.mkdir()
+    release = {"tag_name": "v0.0.0-proof", "assets": []}
+    for platform, suffix in PLATFORMS.items():
+        goos, goarch = platform.split("/")
+        path = directory / ("buildkite-gha_" + suffix)
+        run("go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-X main.version=0.0.0-proof",
+            "-o", str(path), "./cmd/buildkite-gha", env=dict(os.environ, GOOS=goos, GOARCH=goarch, CGO_ENABLED="0"))
+        run("buildkite-agent", "artifact", "upload", str(path))
+        url = run("buildkite-agent", "artifact", "search", str(path), "--step", os.environ["BUILDKITE_JOB_ID"],
+                  "--format", "%u", stdout=subprocess.PIPE).stdout.strip()
+        assert url.startswith("https://") and "\n" not in url
+        release["assets"].append({"name": path.name, "browser_download_url": url,
+                                  "digest": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()})
+    metadata = directory / "release.json"
+    metadata.write_text(json.dumps(release))
+    run("buildkite-agent", "artifact", "upload", str(metadata))
+
+
+def import_candidate():
+    ref = os.environ["PINNED_CONSUMER_PLUGIN_REF"]
+    assert re.fullmatch(r"[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+", ref)
+    pinned = os.environ["PINNED_CONSUMER_EXPECT_PINNED"] == "1"
+    source = Path(__file__).resolve()
+    real_agent = shutil.which("buildkite-agent")
+    with tempfile.TemporaryDirectory(prefix="candidate-platform-import-") as tmp:
+        root = Path(tmp)
+        run(real_agent, "artifact", "download", ".pinned-runtime-candidate/release.json", tmp,
+            "--step", "runtime-candidate-build")
+        release = json.loads((root / ".pinned-runtime-candidate/release.json").read_text())
+        cached = root / "cache/releases/tags/v0.0.0-proof.json"
+        cached.parent.mkdir(parents=True)
+        cached.write_text(json.dumps(release))
+        wrapper = root / "bin/buildkite-agent"
+        wrapper.parent.mkdir()
+        wrapper.write_text(f'#!/bin/sh\nexec python3 "{source}" capture "$@"\n')
+        wrapper.chmod(0o755)
+        custom_binaries = os.environ.get("PINNED_CONSUMER_HOST_SELECTION") == "1"
+        binary_map = {platform: next(a["browser_download_url"] + "#" + a["digest"].replace(":", "=", 1)
+                                    for a in release["assets"] if a["name"] == "buildkite-gha_" + suffix)
+                      for platform, suffix in PLATFORMS.items()}
+        config = {"version": "v0.0.0-proof", "workflow": ".github/workflows/pinned-runtime-platforms.yml",
+                  "runners": [{"runs-on": label, "queue": os.environ["PINNED_PROOF_" + key + "_QUEUE"]}
+                              for label, key in [("ubuntu-latest", "LINUX"), ("ubuntu-24.04-arm", "ARM"),
+                                                 ("macos-14", "MAC"), ("windows-2022", "WINDOWS")]]}
+        if custom_binaries:
+            config.pop("version")
+            config["binary"] = binary_map
+            config["hosted-tool-cache"] = False  # Explicit intent, preserved on every worker.
+        plugin = "github.com/buildkite-plugins/github-actions-buildkite-plugin#" + ref
+        pipeline = root / "pipeline.yml"
+        env = dict(os.environ, PATH=f"{wrapper.parent}:{os.environ['PATH']}", PROOF_REAL_AGENT=real_agent,
+                   PROOF_PIPELINE_FILE=str(pipeline), BUILDKITE_GHA_CACHE_DIR=str(root / "cache"),
+                   BUILDKITE_PLUGINS=json.dumps([{plugin: config}]), BUILDKITE_PLUGIN_VALIDATION="true",
+                   BUILDKITE_CLEAN_CHECKOUT="false", BUILDKITE_GHA_TELEMETRY_DISABLED="true")
+        run(real_agent, "bootstrap", "--skip-checkout", "--plugins-path", str(root / "plugins"),
+            "--sockets-path", str(root / "sockets"), "--bin-path", str(wrapper.parent),
+            "--plugin-validation", "--phases", "plugin,command", env=env)
+        parsed = json.loads(run(real_agent, "pipeline", "upload", "--dry-run", "--no-interpolation",
+                                "--format", "json", str(pipeline), stdout=subprocess.PIPE).stdout)
+        steps = [step for group in parsed["steps"] for step in group.get("steps", [group])]
+        assert len(steps) == 8
+        assets = {a["name"]: a for a in release["assets"]}
+        for step in steps:
+            assert step.get("env", {}).get("BUILDKITE_GHA_PLAN_DIGEST"), "expected executable job"
+            if pinned:
+                assert not step.get("command") and len(step["plugins"]) == 1
+                selected = step["plugins"][0][plugin]
+                invocation = selected["run"]
+                host_selection = "version" in selected or "binary" in selected
+                if host_selection:
+                    assert set(invocation) == {"plan"}
+                    if custom_binaries:
+                        assert selected["binary"] == binary_map and "version" not in selected
+                        assert selected["hosted-tool-cache"] is False
+                    else:
+                        assert selected["version"] == config["version"] and "binary" not in selected
+                        assert "hosted-tool-cache" not in selected
+                else:
+                    asset = assets["buildkite-gha_" + PLATFORMS[invocation["runtime"]["platform"]]]
+                    assert "sha256:" + invocation["runtime"]["sha256"] == asset["digest"]
+                    assert invocation["runtime"]["url"] == asset["browser_download_url"]
+                assert invocation["plan"]["producer"] == os.environ["BUILDKITE_JOB_ID"]
+                if host_selection:
+                    plan_path = ".buildkite-gha/plans/" + invocation["plan"]["digest"][7:] + ".json"
+                    run(real_agent, "artifact", "download", plan_path, tmp, "--step", os.environ["BUILDKITE_JOB_ID"])
+                    plan_bytes = (root / plan_path).read_bytes()
+                    assert "sha256:" + hashlib.sha256(plan_bytes).hexdigest() == invocation["plan"]["digest"]
+                    assert "runtime" not in json.loads(plan_bytes)
+                    if not custom_binaries:
+                        raise ValueError("validated version selector, but the candidate release exists only in the importer cache; set PINNED_CONSUMER_HOST_SELECTION=1 to schedule candidate binaries, or use plugin-platforms for a published release")
+            else:
+                assert step.get("command") and not step.get("plugins"), "legacy plugin received run mode"
+        paths = run(real_agent, "artifact", "search", "*", "--step", os.environ["BUILDKITE_JOB_ID"],
+                    "--format", "%p\\n", stdout=subprocess.PIPE).stdout.splitlines()
+        assert len([p for p in paths if "/distributions/" in p]) == (0 if pinned else 4), paths
+        receipt = Path("candidate-platform-inventory.json")
+        receipt.write_text(json.dumps({"plugin": plugin, "pinned": pinned, "artifacts": sorted(paths)}, indent=2))
+        run(real_agent, "artifact", "upload", str(receipt))
+        # Submit the original bytes. No command, target, environment, or plugin changes.
+        run(real_agent, "pipeline", "upload", "--no-interpolation", str(pipeline))
+        print(f"Scheduled eight unchanged emitted jobs; pinned={pinned}; plugin={ref}")
+        print("LIMIT: candidate uses a full custom binary map" if custom_binaries else
+              "LIMIT: candidate binaries use fixture release metadata; runtime downloads and scheduled jobs are real")
+
+
+def capture():
+    if sys.argv[2:4] == ["pipeline", "upload"]:
+        Path(os.environ["PROOF_PIPELINE_FILE"]).write_text(sys.stdin.read())
+    else:
+        os.execv(os.environ["PROOF_REAL_AGENT"], [os.environ["PROOF_REAL_AGENT"], *sys.argv[2:]])
+
+
+def plugin_platforms():
+    # Use this pipeline's native platform queues before the CLI emits the new
+    # contract. The plugin proof preserves plans but adapts their delivery.
+    ref = os.environ["PINNED_PROOF_PLUGIN_REF"]
+    assert re.fullmatch(r"[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+", ref)
+    with tempfile.TemporaryDirectory(prefix="pinned-plugin-proof-") as tmp:
+        run("git", "clone", "--filter=blob:none", "--no-checkout",
+            "https://github.com/buildkite-plugins/github-actions-buildkite-plugin.git", tmp)
+        run("git", "fetch", "--depth=1", "origin", ref, cwd=tmp)
+        run("git", "checkout", "--detach", "FETCH_HEAD", cwd=tmp)
+        env = dict(os.environ, PINNED_PROOF_REPOSITORY="buildkite/buildkite-gha")
+        run("python3", str(Path(tmp) / ".buildkite/pinned-runtime-proof.py"), "platforms", env=env)
 
 
 def local():
@@ -72,5 +232,14 @@ def inventory():
     print(f"PASS: {os.environ['PINNED_CONSUMER_MODE']} runtime distributions={len(distributions)}")
 
 
+def host_environment():
+    # Report names and marker presence only, never credential values or file contents.
+    print(json.dumps({"environment_names": sorted(k for k in os.environ if k.startswith(("NSC_", "NAMESPACE_"))),
+                      "markers": [str(p) for pattern in ["/etc/*namespace*", "/var/run/*namespace*", "/var/run/*nsc*", "/opt/*namespace*"]
+                                  for p in glob.glob(pattern)],
+                      "tools": {k: shutil.which(k) for k in ["nsc", "spacectl"]}}, indent=2))
+
+
 if __name__ == "__main__":
-    {"load": load, "local": local, "inventory": inventory}[sys.argv[1]]()
+    {"host-environment": host_environment, "load": load, "local": local, "inventory": inventory, "plugin-platforms": plugin_platforms,
+     "publish-candidate": publish_candidate, "import-candidate": import_candidate, "capture": capture}[sys.argv[1]]()

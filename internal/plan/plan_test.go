@@ -1150,8 +1150,22 @@ func TestRuntimeDistributionRoundTripAndSchema(t *testing.T) {
 	}
 
 	job.Runtime = nil
-	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "runtime distribution digest is required") {
-		t.Fatalf("Validate() missing runtime error = %v", err)
+	job.Compiler.Version = "rails"
+	job.Event.PayloadSource = "buildkite-webhook"
+	job.Event.PayloadFile = true
+	if err := job.Validate(); err != nil {
+		t.Fatalf("Validate() launcher-selected runtime: %v", err)
+	}
+	unbound, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(unbound, &document); err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(document); err != nil {
+		t.Fatalf("schema rejected launcher-selected runtime: %v", err)
 	}
 	job.Runtime = &Runtime{DistributionDigest: "invalid"}
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "runtime distribution digest is required") {

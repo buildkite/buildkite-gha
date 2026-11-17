@@ -339,6 +339,25 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "runtime distribution digest") {
 		t.Fatalf("Run() code = %d, stderr = %q, want runtime digest mismatch", code, stderr.String())
 	}
+	job.Runtime = nil
+	job.Compiler.Version = "rails"
+	encoded, err = plan.Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", transport.Digest(encoded))
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"run-job", "--plan", planPath, "--result", resultPath}, &stdout, &stderr, "unrelated-launch-release", &cliCaptureRunner{}); code != 0 {
+		t.Fatalf("launcher-selected Run() code=%d: %s", code, &stderr)
+	}
+	result, err = os.ReadFile(resultPath)
+	if err != nil || !bytes.Contains(result, []byte(`"cli-ok"`)) {
+		t.Fatalf("launcher-selected result=%s: %v", result, err)
+	}
 }
 
 func TestRunJobHydratesNeedsAndPublishesAuthoritativeResult(t *testing.T) {
@@ -1492,6 +1511,40 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 	result, err := os.ReadFile(resultPath)
 	if err != nil || !bytes.Contains(result, []byte(`"conclusion": "success"`)) {
 		t.Fatalf("result = %q, error = %v", result, err)
+	}
+}
+
+func TestHydrateWebhookPayloadCanonicalizesAndVerifiesWithoutArtifacts(t *testing.T) {
+	// Literal expected bytes cover sorted nested keys, large integer precision,
+	// and Go's HTML/line-separator escaping independently of the encoder.
+	canonical := []byte(`{"a":{"id":9007199254740993},"text":"\u003c\u0026\u2028\u2029","z":2}`)
+	for _, test := range []struct {
+		name, webhook string
+		valid         bool
+	}{
+		{"canonical", string(canonical), true},
+		{"reordered", " {\"z\":2,\"text\":\"<&\u2028\u2029\",\"a\":{\"id\":9007199254740993}}\n", true},
+		{"changed", `{"a":{"id":9007199254740992},"text":"\u003c\u0026\u2028\u2029","z":2}`, false},
+		{"duplicate", `{"a":1,"a":2}`, false},
+		{"trailing", string(canonical) + `{}`, false},
+		{"null", `null`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := cliRunJobPlan()
+			job.Event.PayloadSource = "buildkite-webhook"
+			job.Event.PayloadDigest = transport.Digest(canonical)
+			runner := &cliCaptureRunner{webhook: []byte(test.webhook)}
+			err := hydrateEventPayload(t.Context(), transport.Agent{Runner: runner}, &job, "")
+			if (err == nil) != test.valid {
+				t.Fatalf("hydrate webhook: %v, valid=%t", err, test.valid)
+			}
+			if test.valid && (*job.Event.Payload)["a"].(map[string]any)["id"] != json.Number("9007199254740993") {
+				t.Fatalf("webhook lost integer precision: %#v", job.Event.Payload)
+			}
+			if len(runner.commands) != 1 || !slices.Equal(runner.commands[0].args, []string{"meta-data", "get", "buildkite:webhook"}) {
+				t.Fatalf("expected only webhook metadata read: %#v", runner.commands)
+			}
+		})
 	}
 }
 
