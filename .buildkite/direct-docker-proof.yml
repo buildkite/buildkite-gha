@@ -2,8 +2,9 @@ agents:
   queue: "hosted"
 
 steps:
-  - label: ":pipeline: Direct Docker proof importer"
+  - label: ":pipeline: Direct Docker proof importer %n/%t"
     key: "direct-docker-importer"
+    parallelism: 2
     timeout_in_minutes: 15
     retry:
       automatic: false
@@ -34,9 +35,9 @@ steps:
       event["payload"] = {"inputs": {}, "ref": os.environ["BUILDKITE_BRANCH"]}
       pathlib.Path(sys.argv[1]).write_text(json.dumps(event))
       PY
-      for workflow in "$$proof_root/.github/workflows/"*.yml; do
-        "$$proof_root/buildkite-gha" upload \
-          --event-path "$$proof_root/event.json" \
-          --runner-queue ubuntu-latest=hosted \
-          "$$workflow"
-      done
+      workflows=(direct-docker direct-docker-paths)
+      workflow="$${workflows[$$BUILDKITE_PARALLEL_JOB]}"
+      "$$proof_root/buildkite-gha" upload \
+        --event-path "$$proof_root/event.json" \
+        --runner-queue ubuntu-latest=hosted \
+        "$$proof_root/.github/workflows/$$workflow.yml"
