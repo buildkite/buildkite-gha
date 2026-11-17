@@ -9,16 +9,15 @@ steps:
       automatic: false
     artifact_paths:
       - error-report-proof.json
-    plugins:
-      - setup-go#v0.1.1:
-          mise-version: "2026.10.17"
-      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-          version: "2026.10.17"
     command: |
       set -euo pipefail
       mkdir -p .amp/in/orb-backup
-      version=dev+error-report-pre-release-d5bef279
+      version=v0.135.0
       binary=.amp/in/orb-backup/buildkite-gha
-      CGO_ENABLED=0 mise exec -- go build -trimpath -ldflags "-X main.version=$$version" -o "$$binary" ./cmd/buildkite-gha
-      digest="$$(sha256sum "$$binary" | cut -d' ' -f1)"
+      # Exact GitHub release asset digest, not a locally rebuilt executable.
+      digest=6d02417367748491d73f566a4ccbcadc51d99aac15cf888359235e8c03c4c1d1
+      curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+        "https://github.com/buildkite/buildkite-gha/releases/download/$$version/buildkite-gha_linux_x86_64" --output "$$binary"
+      printf '%s  %s\n' "$$digest" "$$binary" | sha256sum --check -
+      chmod +x "$$binary"
       python3 .buildkite/error-report-proof.py --binary "$$binary" --sha256 "$$digest" --version "$$version" | tee error-report-proof.json
