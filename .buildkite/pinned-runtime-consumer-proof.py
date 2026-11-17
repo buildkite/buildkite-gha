@@ -46,8 +46,8 @@ def load():
                           "command": "python3 .buildkite/pinned-runtime-consumer-proof.py host-environment"})
         run("buildkite-agent", "pipeline", "upload", "--no-interpolation", input=json.dumps({"steps": steps}))
         return
-    if os.environ["PINNED_CONSUMER_MODE"] == "candidate-platforms":
-        run("buildkite-agent", "pipeline", "upload", "--no-interpolation", input=json.dumps({"steps": [
+    if os.environ["PINNED_CONSUMER_MODE"] in ("candidate-platforms", "released-platforms"):
+        steps = [
             {"key": "runtime-candidate-build", "label": "Build candidate runtime assets",
              "plugins": [{"mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2": {"version": "2026.10.17"}}],
              "command": "mise exec -- python3 .buildkite/pinned-runtime-consumer-proof.py publish-candidate",
@@ -55,7 +55,11 @@ def load():
             {"key": "runtime-consumer-importer", "label": "Import unchanged mixed-platform jobs",
              "depends_on": "runtime-candidate-build",
              "command": "python3 .buildkite/pinned-runtime-consumer-proof.py import-candidate",
-             "timeout_in_minutes": 20, "retry": {"automatic": False}}]}))
+             "timeout_in_minutes": 20, "retry": {"automatic": False}}]
+        if os.environ["PINNED_CONSUMER_MODE"] == "released-platforms":
+            steps = steps[1:]
+            steps[0].pop("depends_on")
+        run("buildkite-agent", "pipeline", "upload", "--no-interpolation", input=json.dumps({"steps": steps}))
         return
     if os.environ["PINNED_CONSUMER_MODE"] == "plugin-platforms":
         run("buildkite-agent", "pipeline", "upload", "--no-interpolation", input=json.dumps({"steps": [{
@@ -100,18 +104,27 @@ def publish_candidate():
 
 def import_candidate():
     ref = os.environ["PINNED_CONSUMER_PLUGIN_REF"]
-    assert re.fullmatch(r"[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+", ref)
+    assert re.fullmatch(r"[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+|latest", ref)
+    published = os.environ["PINNED_CONSUMER_MODE"] == "released-platforms"
+    version = os.environ["PINNED_CONSUMER_VERSION"] if published else "v0.0.0-proof"
+    assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-proof)?", version)
     pinned = os.environ["PINNED_CONSUMER_EXPECT_PINNED"] == "1"
     source = Path(__file__).resolve()
     real_agent = shutil.which("buildkite-agent")
     with tempfile.TemporaryDirectory(prefix="candidate-platform-import-") as tmp:
         root = Path(tmp)
-        run(real_agent, "artifact", "download", ".pinned-runtime-candidate/release.json", tmp,
-            "--step", "runtime-candidate-build")
-        release = json.loads((root / ".pinned-runtime-candidate/release.json").read_text())
-        cached = root / "cache/releases/tags/v0.0.0-proof.json"
-        cached.parent.mkdir(parents=True)
-        cached.write_text(json.dumps(release))
+        if published:
+            release = json.loads(run("curl", "--fail", "--silent", "--show-error",
+                                     f"https://api.github.com/repos/buildkite/buildkite-gha/releases/tags/{version}",
+                                     stdout=subprocess.PIPE).stdout)
+            assert release["tag_name"] == version and not release["draft"] and not release["prerelease"]
+        else:
+            run(real_agent, "artifact", "download", ".pinned-runtime-candidate/release.json", tmp,
+                "--step", "runtime-candidate-build")
+            release = json.loads((root / ".pinned-runtime-candidate/release.json").read_text())
+            cached = root / "cache/releases/tags/v0.0.0-proof.json"
+            cached.parent.mkdir(parents=True)
+            cached.write_text(json.dumps(release))
         wrapper = root / "bin/buildkite-agent"
         wrapper.parent.mkdir()
         wrapper.write_text(f'#!/bin/sh\nexec python3 "{source}" capture "$@"\n')
@@ -120,7 +133,7 @@ def import_candidate():
         binary_map = {platform: next(a["browser_download_url"] + "#" + a["digest"].replace(":", "=", 1)
                                     for a in release["assets"] if a["name"] == "buildkite-gha_" + suffix)
                       for platform, suffix in PLATFORMS.items()}
-        config = {"version": "v0.0.0-proof", "workflow": ".github/workflows/pinned-runtime-platforms.yml",
+        config = {"version": version, "workflow": ".github/workflows/pinned-runtime-platforms.yml",
                   "runners": [{"runs-on": label, "queue": os.environ["PINNED_PROOF_" + key + "_QUEUE"]}
                               for label, key in [("ubuntu-latest", "LINUX"), ("ubuntu-24.04-arm", "ARM"),
                                                  ("macos-14", "MAC"), ("windows-2022", "WINDOWS")]]}
@@ -168,8 +181,8 @@ def import_candidate():
                     plan_bytes = (root / plan_path).read_bytes()
                     assert "sha256:" + hashlib.sha256(plan_bytes).hexdigest() == invocation["plan"]["digest"]
                     assert "runtime" not in json.loads(plan_bytes)
-                    if not custom_binaries:
-                        raise ValueError("validated version selector, but the candidate release exists only in the importer cache; set PINNED_CONSUMER_HOST_SELECTION=1 to schedule candidate binaries, or use plugin-platforms for a published release")
+                    if not custom_binaries and not published:
+                        raise ValueError("validated version selector, but the candidate release exists only in the importer cache; set PINNED_CONSUMER_HOST_SELECTION=1 to schedule candidate binaries, or use released-platforms for a published release")
             else:
                 assert step.get("command") and not step.get("plugins"), "legacy plugin received run mode"
         paths = run(real_agent, "artifact", "search", "*", "--step", os.environ["BUILDKITE_JOB_ID"],
@@ -181,7 +194,8 @@ def import_candidate():
         # Submit the original bytes. No command, target, environment, or plugin changes.
         run(real_agent, "pipeline", "upload", "--no-interpolation", str(pipeline))
         print(f"Scheduled eight unchanged emitted jobs; pinned={pinned}; plugin={ref}")
-        print("LIMIT: candidate uses a full custom binary map" if custom_binaries else
+        print(f"Published runtime: {version}" if published else
+              "LIMIT: candidate uses a full custom binary map" if custom_binaries else
               "LIMIT: candidate binaries use fixture release metadata; runtime downloads and scheduled jobs are real")
 
 

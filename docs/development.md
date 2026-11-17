@@ -541,8 +541,16 @@ Use `PINNED_CONSUMER_MODE=candidate-platforms`,
 `PINNED_CONSUMER_EXPECT_PINNED=1`, and `PINNED_CONSUMER_HOST_SELECTION=1` to
 build four candidate executables and schedule the importer's original pipeline
 bytes. This supplies a full custom binary map with real artifact-backed URLs;
-it does not publish a release. Use the `plugin-platforms` mode with
-`PINNED_PROOF_SELECTOR=version` or `latest` for released-runtime acquisition.
+it does not publish a release.
+
+After publication, use `PINNED_CONSUMER_MODE=released-platforms`,
+`PINNED_CONSUMER_VERSION=<published-tag>`, and
+`PINNED_CONSUMER_PLUGIN_REF=<published-plugin-tag>` with the same native queues
+and `PINNED_CONSUMER_EXPECT_PINNED=1`. Leave `PINNED_CONSUMER_HOST_SELECTION`
+unset to test exact-version acquisition from a fresh importer cache. This mode
+uses published assets and schedules the original emitted pipeline bytes without
+building candidates or seeding release metadata. The plugin ref may also be
+`latest`; emitted jobs must preserve it.
 
 For the metadata-present, capability-absent fallback, repeat `candidate-platforms`
 with `PINNED_CONSUMER_PLUGIN_REF=v0.15.1`, `PINNED_CONSUMER_EXPECT_PINNED=0`, and
