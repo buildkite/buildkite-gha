@@ -869,10 +869,10 @@ func TestCompileBundleCarriesResolvedMiseRequirementIntoPipeline(t *testing.T) {
 	}
 	decisions := map[string]bool{}
 	for _, artifact := range bundle.Plans {
-		if artifact.Job.RequiresMise == nil {
+		if artifact.Job.RequiresNode == nil {
 			t.Fatalf("job %q lacks requires_mise", artifact.Job.Target.StepKey)
 		}
-		decisions[artifact.Job.Workflow.LogicalJobID] = *artifact.Job.RequiresMise
+		decisions[artifact.Job.Workflow.LogicalJobID] = *artifact.Job.RequiresNode
 	}
 	if decisions["native"] || !decisions["javascript"] {
 		t.Fatalf("requires_mise decisions = %#v", decisions)
@@ -888,12 +888,12 @@ func TestCompileBundleCarriesResolvedMiseRequirementIntoPipeline(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, step := range document.Steps {
-		wantMise := strings.Contains(step.Key, "javascript")
-		if hasCache := step.Cache != nil; hasCache != wantMise {
-			t.Fatalf("step %q managed cache = %t, want %t", step.Key, hasCache, wantMise)
+		wantNode := strings.Contains(step.Key, "javascript")
+		if hasCache := step.Cache != nil; hasCache != wantNode {
+			t.Fatalf("step %q managed cache = %t, want %t", step.Key, hasCache, wantNode)
 		}
-		if hasEnv := step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != ""; hasEnv != wantMise {
-			t.Fatalf("step %q managed mise env = %t, want %t", step.Key, hasEnv, wantMise)
+		if hasEnv := step.Env["BUILDKITE_GHA_NODE_CACHE_DIR"] != ""; hasEnv != wantNode {
+			t.Fatalf("step %q managed mise env = %t, want %t", step.Key, hasEnv, wantNode)
 		}
 	}
 }

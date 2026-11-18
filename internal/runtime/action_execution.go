@@ -249,13 +249,6 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		defer func() { runJobErr = errors.Join(runJobErr, r.idTokenService.Close(runCtx)) }()
 		defer cancelService()
 	}
-	if r.Mise == "" && r.ResolveMise != nil {
-		r.Mise, err = r.ResolveMise(runCtx)
-		if err != nil {
-			return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, err)
-		}
-	}
-
 	secrets, err := r.resolveSecrets(runCtx, processor, job.RequiredSecrets)
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, err)
@@ -1850,7 +1843,7 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 		}
 		if explicit == "" {
 			var err error
-			explicit, err = r.resolveMiseNodePath(ctx, major)
+			explicit, err = r.discoverNode(ctx, major, "")
 			if err != nil {
 				return nil, err
 			}

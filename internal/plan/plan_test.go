@@ -1048,30 +1048,30 @@ func TestReachableActionLocksRequireProgramsExceptNativeAdapters(t *testing.T) {
 	}
 }
 
-func TestRequiresMiseRoundTripAndSchema(t *testing.T) {
-	requiresMise := false
+func TestRequiresNodeRoundTripAndSchema(t *testing.T) {
+	requiresNode := false
 	job := validJob()
 	setTestSteps(&job, []testStep{{ID: "native", Kind: "uses", Uses: "actions/checkout@v4", Action: &ActionSelector{Lock: "a-0000000000000001"}}})
 	job.Actions = []ActionLock{{
 		ID: "a-0000000000000001", Source: "github", Repository: "actions/checkout", RequestedRef: "v4",
 		Commit: integration.CheckoutV4Commit, SourceDigest: "sha256:" + strings.Repeat("b", 64),
 	}}
-	job.RequiresMise = &requiresMise
+	job.RequiresNode = &requiresNode
 	synchronizeExecutionProgram(&job)
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
 	}
 	decoded, err := Decode(encoded)
-	if err != nil || decoded.RequiresMise == nil || *decoded.RequiresMise {
-		t.Fatalf("Decode() requires_mise = %#v, error = %v", decoded.RequiresMise, err)
+	if err != nil || decoded.RequiresNode == nil || *decoded.RequiresNode {
+		t.Fatalf("Decode() requires_mise = %#v, error = %v", decoded.RequiresNode, err)
 	}
 	validateJobPlanSchema(t, encoded)
-	job.RequiresMise = nil
+	job.RequiresNode = nil
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "explicit requires_mise") {
 		t.Fatalf("Validate() missing requires_mise error = %v", err)
 	}
-	job.RequiresMise = &requiresMise
+	job.RequiresNode = &requiresNode
 	job.Program.Job.Steps[0].Invocation.Lock = ""
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "immutable selector") {
 		t.Fatalf("Validate() unresolved false error = %v", err)
@@ -1079,11 +1079,11 @@ func TestRequiresMiseRoundTripAndSchema(t *testing.T) {
 }
 
 func TestRuntimeDistributionRoundTripAndSchema(t *testing.T) {
-	requiresMise := false
+	requiresNode := false
 	job := validJob()
 	job.Compiler.Version = "dev"
 	job.Runtime = &Runtime{DistributionDigest: "sha256:" + strings.Repeat("c", 64)}
-	job.RequiresMise = &requiresMise
+	job.RequiresNode = &requiresNode
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -1336,8 +1336,8 @@ func TestRemoteCompositeLocalChildUsesWorkspaceIdentity(t *testing.T) {
 func TestActionSelectorsAndPathsRejectInvalidValues(t *testing.T) {
 	local := func() Job {
 		job := validJob()
-		requiresMise := true
-		job.RequiresMise = &requiresMise
+		requiresNode := true
+		job.RequiresNode = &requiresNode
 		setTestSteps(&job, []testStep{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}})
 		job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "actions/build", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
 		synchronizeExecutionProgram(&job)
@@ -1513,7 +1513,7 @@ func validJob() Job {
 		Event:                Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
 		Target:               Target{StepKey: "gha-test", Queue: "ubuntu-latest"},
 		RequiredCapabilities: []string{},
-		RequiresMise:         new(bool),
+		RequiresNode:         new(bool),
 	}
 	setTestSteps(&job, []testStep{{ID: "step-1", Kind: "run", Command: "true"}})
 	program := programFromTestJob(job)
@@ -1854,8 +1854,8 @@ func TestJobContainerPlanAcceptsGitHubOptionsAndVolumes(t *testing.T) {
 func TestPrerequisiteOutputProjectionContract(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("4", 64)
 	job := validJob()
-	requiresMise := true
-	job.RequiresMise = &requiresMise
+	requiresNode := true
+	job.RequiresNode = &requiresNode
 	job.Dependencies = []string{"gha-delegated-first", "gha-delegated-second"}
 	job.NeedSources = map[string][]NeedSource{
 		"delegated": {

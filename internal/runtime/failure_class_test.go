@@ -154,7 +154,7 @@ func TestUnexpectedFailureKeepsIndependentDefects(t *testing.T) {
 }
 
 func TestWorkflowSetupProcessTimeoutsAreNotUnexpected(t *testing.T) {
-	for _, operation := range []string{"Agent redaction", "mise lookup", "Node verification"} {
+	for _, operation := range []string{"Agent redaction", "Node verification"} {
 		for _, deadline := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/deadline=%t", operation, deadline), func(t *testing.T) {
 				root := canonicalTempDir(t)
@@ -179,8 +179,6 @@ func TestWorkflowSetupProcessTimeoutsAreNotUnexpected(t *testing.T) {
 				switch operation {
 				case "Agent redaction":
 					err = (AgentRedactor{Executable: executable}).AddRedaction(ctx, "private")
-				case "mise lookup":
-					_, _, err = (Runner{}).miseNodeInstallation(ctx, 24, executable)
 				case "Node verification":
 					digest := sha256.Sum256([]byte(script))
 					err = verifyManagedNodeExecutable(ctx, 24, executable, hex.EncodeToString(digest[:]))

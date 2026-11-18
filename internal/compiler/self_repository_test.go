@@ -93,7 +93,7 @@ func TestLivePytestSelfRepositoryAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(compiled.locks) != 2 || !compiled.requiresMise || !slices.Contains(compiled.capabilities, "network") || !compiled.requiresGitHubToken || len(compiled.requiredSecrets) != 0 {
+	if len(compiled.locks) != 2 || !compiled.requiresNode || !slices.Contains(compiled.capabilities, "network") || !compiled.requiresGitHubToken || len(compiled.requiredSecrets) != 0 {
 		t.Fatalf("pytest action graph = %#v", compiled)
 	}
 	// setup-uv defaults github-token to github.token. Source resolution must

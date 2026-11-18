@@ -3620,7 +3620,7 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	}
 }
 
-func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing.T) {
+func TestRunUploadJavaScriptActionRequiresNodeWithoutTransport(t *testing.T) {
 	requireImporterHost(t)
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
@@ -3675,15 +3675,15 @@ func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing
 		t.Fatalf("uploaded pipeline steps = %#v", pipeline.Steps)
 	}
 	command := pipeline.Steps[0].Steps[0].Command
-	if strings.Contains(command, ".buildkite-gha/tools/mise/") || strings.Contains(command, `export PATH="$bootstrap_dir:$PATH"`) || strings.Contains(command, "BUILDKITE_GHA_NODE") || strings.Contains(command, ".buildkite-gha/runtimes") {
+	if strings.Contains(command, ".buildkite-gha/tools/mise/") || strings.Contains(command, `export PATH="$bootstrap_dir:$PATH"`) || strings.Contains(command, "BUILDKITE_GHA_NODE24=") || strings.Contains(command, ".buildkite-gha/runtimes") {
 		t.Fatalf("generated pipeline still transports runtime tools:\n%s", command)
 	}
 	step := pipeline.Steps[0].Steps[0]
-	if step.Cache.Name != "buildkite-gha-linux-amd64" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != "/cache/bkcache/buildkite-gha/mise/linux-amd64" {
+	if step.Cache.Name != "buildkite-gha-linux-amd64" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != "/cache/bkcache/buildkite-gha/node/linux-amd64" {
 		t.Fatalf("generated action cache = %#v", step.Cache)
 	}
-	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != buildkitepipeline.MiseDataDir() {
-		t.Fatalf("generated mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
+	if step.Env["BUILDKITE_GHA_NODE_CACHE_DIR"] != buildkitepipeline.NodeCacheDir() {
+		t.Fatalf("generated mise data directory = %q", step.Env["BUILDKITE_GHA_NODE_CACHE_DIR"])
 	}
 }
 

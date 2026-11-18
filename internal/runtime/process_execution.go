@@ -317,8 +317,8 @@ func processEnv(overrides map[string]string) []string {
 // processEnvValues returns the environment a runtime-started process observes:
 // the inherited allowlist below merged with the given overrides.
 func processEnvValues(overrides map[string]string) map[string]string {
-	// This allowlist is also the mise trust boundary: ambient MISE_* values must
-	// never redirect compatibility runtime downloads or verification.
+	// Do not inherit runtime configuration such as NODE_OPTIONS into executor
+	// probes or workflow processes; workflows supply their own overrides.
 	values := make(map[string]string, 7+len(overrides))
 	inherited := []string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "JAVA_HOME"}
 	if runtime.GOOS == "windows" {

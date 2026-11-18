@@ -42,9 +42,9 @@ type Runner struct {
 	Node20                string
 	Node24                string
 	ManagedNodeRoot       string
-	Mise                  string
-	ResolveMise           func(context.Context) (string, error)
-	MiseDataDir           string
+	NodeCacheDir          string
+	nodeRoots             []string
+	nodeDownloadURL       string
 	ToolCache             string
 	Docker                string
 	DockerBuildLoad       bool // see enableDockerBuildLoad
@@ -66,7 +66,6 @@ type Runner struct {
 	OIDCToken             OIDCTokenProvider
 	RunIdentity           RunIdentity
 	Name                  string // Executing agent name; empty leaves runner.name unavailable.
-	nodeDigests           map[int]string
 }
 
 // RunIdentity identifies the Buildkite build that owns this job run. Empty

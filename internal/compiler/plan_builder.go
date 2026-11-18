@@ -45,7 +45,7 @@ type builtPlanActions struct {
 	requiresGitHubToken  bool
 	requiresEventPayload bool
 	reachableSecrets     []string
-	requiresMise         bool
+	requiresNode         bool
 	resolved             bool
 	hasInvocations       bool
 	programs             map[string]program.Action
@@ -473,7 +473,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 		actionRefs = append(actionRefs, step.Invocation.Uses.Source)
 		actionInputs = append(actionInputs, programBindingMap(step.Invocation.With))
 	}
-	built := builtPlanActions{requiresMise: len(actionRefs) != 0, resolved: b.options.ResolveActions, hasInvocations: len(actionRefs) != 0}
+	built := builtPlanActions{requiresNode: len(actionRefs) != 0, resolved: b.options.ResolveActions, hasInvocations: len(actionRefs) != 0}
 	if len(actionRefs) != 0 && !built.resolved {
 		built.resolved = true
 		for _, ref := range actionRefs {
@@ -500,7 +500,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 	if instance.RemoteWorkflow == nil {
 		built.workflowSource = compiled.workflowSource
 	}
-	built.requiresMise = compiled.requiresMise
+	built.requiresNode = compiled.requiresNode
 	built.requiredSecrets = compiled.requiredSecrets
 	built.programs = compiled.programs
 	built.inputsInspected = true
@@ -764,7 +764,7 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		job.Event.PayloadArtifact = false
 		job.Event.PayloadSource = b.options.EventPayloadSource
 	}
-	job.RequiresMise = &actions.requiresMise
+	job.RequiresNode = &actions.requiresNode
 	return job
 }
 

@@ -456,6 +456,22 @@ Source lookup and credential behavior must remain separate:
 - Accepting inert top-level action metadata `env` must not evaluate its contents,
   alter the process environment, or request credentials.
 
+JavaScript executor selection distinguishes runner-bundled executables from
+managed downloads. A runnable `externals/node<major>/bin/node` with the required
+major may use the image's patch release. Do not require its digest to match the
+fallback download pin, or treat arbitrary `PATH` and setup-action tool-cache
+binaries as bundled executors. Downloads must match the pinned executable digest
+before execution. Preserve `node20` declarations running on Node 24, explicit
+runtime overrides, lazy installation, and job-container mounts.
+
+The inspected GitHub runner [packages fixed Node releases](https://github.com/actions/runner/blob/7afce9edc81e4138ed1eaa673a3c10c811faa092/src/Misc/externals.sh#L5-L9)
+but [launches the selected externals executable](https://github.com/actions/runner/blob/7afce9edc81e4138ed1eaa673a3c10c811faa092/src/Runner.Worker/Handlers/NodeScriptActionHandler.cs#L127-L129)
+without a launch-time patch or digest check. Our direct-download fallback is
+runtime bootstrap, not a claim that GitHub downloads Node on each action launch.
+[Local tests](../internal/runtime/node_install_test.go) cover cold and offline
+warm jobs, corrupt cache repair, concurrent installs, bundled major selection,
+and cancellation. They do not establish image contents on every provider.
+
 Native checkout and artifact adapters replace upstream JavaScript. Their known
 commit profiles and unknown-commit fallback contracts are not equivalent to
 executing arbitrary upstream commits. Cache actions are different: they execute

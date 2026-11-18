@@ -2888,17 +2888,10 @@ func TestActionContainerMountsNativeAdapterDoesNotResolveMise(t *testing.T) {
 	}}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: digest}}
 	actions := testActionLockResolver(t, job, workspace, materializer)
-	miseCalls := 0
-	runner := newJobRun(Runner{ResolveMise: func(context.Context) (string, error) {
-		miseCalls++
-		return "", errors.New("unexpected mise resolution")
-	}})
+	runner := newJobRun(Runner{nodeRoots: []string{}, nodeDownloadURL: ":invalid-url"})
 	mounts, err := runner.actionContainerMounts(t.Context(), actions)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if miseCalls != 0 {
-		t.Fatalf("ResolveMise calls = %d, want 0", miseCalls)
 	}
 	for _, mount := range mounts {
 		if strings.Contains(mount.target, "node24") || strings.Contains(mount.target, "/nodes") {
@@ -2943,7 +2936,7 @@ esac
 		t.Fatal(err)
 	}
 
-	requiresMise := false
+	requiresNode := false
 	checkoutID, localID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
 	job := plan.Job{
 		Schema:   plan.Schema,
@@ -2964,7 +2957,7 @@ esac
 			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v4", Commit: actionintegration.CheckoutV4Commit, SourceDigest: remoteDigest},
 			{ID: localID, Source: "workspace", Path: ".github/actions/local", SourceDigest: digestTree(t, localFixture)},
 		},
-		RequiresMise: &requiresMise,
+		RequiresNode: &requiresNode,
 		Container:    &plan.Container{Image: "debian:bookworm-slim"},
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}

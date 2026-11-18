@@ -45,7 +45,7 @@ func TestCheckoutPreflightResolvesHostGit(t *testing.T) {
 		ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7",
 		Commit: actionintegration.CheckoutV7Commit, SourceDigest: "sha256:" + strings.Repeat("a", 64),
 	}}
-	*job.RequiresMise = false
+	*job.RequiresNode = false
 	var stdout, stderr bytes.Buffer
 	result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || !strings.Contains(stdout.String(), "git version ") {
@@ -118,7 +118,7 @@ esac
 	workflowDigest := sha256.Sum256(workflowSource)
 	headDigest := githubHash(sha + "\n")
 	checkoutID, localID := "a-0000000000000001", "a-0000000000000002"
-	requiresMise := false
+	requiresNode := false
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
@@ -142,7 +142,7 @@ esac
 			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: actionintegration.CheckoutV7Commit, SourceDigest: remoteDigest},
 			{ID: localID, Source: "workspace", Path: ".github/actions/local", SourceDigest: localDigest},
 		},
-		RequiresMise: &requiresMise,
+		RequiresNode: &requiresNode,
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
 	attachTestProgram(&job)
@@ -1612,7 +1612,7 @@ fi
 
 	workflowDigest := sha256.Sum256(workflowSource)
 	poisonID, checkoutID := "a-0000000000000001", "a-0000000000000002"
-	requiresMise := false
+	requiresNode := false
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
@@ -1643,7 +1643,7 @@ fi
 			{ID: poisonID, Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("b", 40), Path: "poison", SourceDigest: remoteDigest},
 			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: actionintegration.CheckoutV7Commit, SourceDigest: remoteDigest},
 		},
-		RequiresMise: &requiresMise,
+		RequiresNode: &requiresNode,
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: remoteDigest}}
 	var logs bytes.Buffer
@@ -1748,7 +1748,7 @@ esac
 			workflowSource := []byte("name: legacy checkout\n")
 			workflowDigest := sha256.Sum256(workflowSource)
 			checkoutID := "a-0000000000000001"
-			requiresMise := false
+			requiresNode := false
 			job := plan.Job{
 				Schema: plan.Schema,
 				Compiler: plan.Compiler{
@@ -1769,7 +1769,7 @@ esac
 				Actions: []plan.ActionLock{
 					{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: test.commit, Commit: test.commit, SourceDigest: remoteDigest},
 				},
-				RequiresMise: &requiresMise,
+				RequiresNode: &requiresNode,
 			}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
 			var logs bytes.Buffer

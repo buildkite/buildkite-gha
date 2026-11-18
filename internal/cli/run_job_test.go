@@ -103,39 +103,13 @@ func TestRunJobLogsHashFilesFailureEvenWhenTolerated(t *testing.T) {
 	}
 }
 
-func TestRunJobPublishesFailureWhenExplicitRuntimeMiseIsInvalid(t *testing.T) {
-	job := cliRunJobPlan()
-	job.Schema = plan.Schema
-	requiresMise := true
-	job.RequiresMise = &requiresMise
-	job.Actions = []plan.ActionLock{{
-		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
-		SourceDigest: "sha256:" + strings.Repeat("a", 64),
-	}}
-	job.Program.Job.Steps = []executionprogram.Step{cliActionStep("local", "./actions/build", "a-0000000000000001")}
-	planPath, planDigest := writeCLIJobPlan(t, job)
-	setCLIJobIdentity(t, job, planDigest)
-	t.Setenv("BUILDKITE_GHA_MISE", filepath.Join(t.TempDir(), "missing-mise"))
-	runner := &cliCaptureRunner{}
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "prepare action runtime: resolve runtime mise executable") {
-		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "+++ :warning: Prepare GitHub Actions job failed\n~~~ :package: Publish GitHub Actions result\n") {
-		t.Fatalf("stdout = %q, want visible runner setup failure before collapsed publication", stdout.String())
-	}
-	if manifest := publishedCLIManifest(t, runner, job, planDigest); manifest.Result != "failure" {
-		t.Fatalf("published result = %q, want failure", manifest.Result)
-	}
-}
-
 func TestRunJobMiseRequirementUsesCompilerDecisionAndFailsClosed(t *testing.T) {
 	no := false
 	yes := true
-	actionJob := func(requiresMise *bool) plan.Job {
+	actionJob := func(requiresNode *bool) plan.Job {
 		job := plan.Job{
 			Actions:      []plan.ActionLock{{ID: "a-0000000000000001"}},
-			RequiresMise: requiresMise,
+			RequiresNode: requiresNode,
 		}
 		job.Program = &executionprogram.Program{Version: executionprogram.Version, Job: executionprogram.Job{Steps: []executionprogram.Step{cliActionStep("", "", "a-0000000000000001")}}}
 		return job
@@ -155,14 +129,14 @@ func TestRunJobMiseRequirementUsesCompilerDecisionAndFailsClosed(t *testing.T) {
 		{name: "missing action decision resolves mise", job: actionJob(nil), want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := test.job.NeedsMise(); got != test.want {
-				t.Fatalf("NeedsMise() = %t, want %t", got, test.want)
+			if got := test.job.NeedsNode(); got != test.want {
+				t.Fatalf("NeedsNode() = %t, want %t", got, test.want)
 			}
 		})
 	}
 }
 
-func TestRunJobCallGuardSkipsActionJobBeforePreparingRuntimeMise(t *testing.T) {
+func TestRunJobCallGuardSkipsActionJobBeforePreparingNode(t *testing.T) {
 	job := cliRunJobPlan()
 	job.Schema = plan.Schema
 	job.Condition = "always()"
@@ -174,14 +148,15 @@ func TestRunJobCallGuardSkipsActionJobBeforePreparingRuntimeMise(t *testing.T) {
 	job.Program.Job.Steps = []executionprogram.Step{cliActionStep("local", "./actions/build", "a-0000000000000001")}
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
-	t.Setenv("BUILDKITE_GHA_MISE", filepath.Join(t.TempDir(), "missing-mise"))
+	cache := filepath.Join(t.TempDir(), "unused-node-cache")
+	t.Setenv("BUILDKITE_GHA_NODE_CACHE_DIR", cache)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if strings.Contains(stderr.String(), "prepare action runtime") {
-		t.Fatalf("skipped job prepared action runtime: %q", stderr.String())
+	if _, err := os.Stat(cache); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("skipped job prepared a Node cache: %v", err)
 	}
 	if manifest := publishedCLIManifest(t, runner, job, planDigest); manifest.Result != "skipped" {
 		t.Fatalf("published result = %q, want skipped", manifest.Result)
@@ -240,7 +215,7 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(workflowSource)
-	requiresMise := false
+	requiresNode := false
 	job := plan.Job{
 		Schema: plan.Schema, Compiler: plan.Compiler{Version: "rails-test-producer", DistributionDigest: "sha256:" + strings.Repeat("9", 64)},
 		Runtime:      &plan.Runtime{DistributionDigest: cliTestRuntimeDigest()},
@@ -248,7 +223,7 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 		Event:        plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
 		Target:       plan.Target{StepKey: "gha-cli", Queue: "ubuntu-latest"},
 		Outputs:      map[string]string{"result": "${{ steps.produce.outputs.result }}"},
-		RequiresMise: &requiresMise,
+		RequiresNode: &requiresNode,
 	}
 	job.Program = &executionprogram.Program{Version: executionprogram.Version, Job: executionprogram.Job{Steps: []executionprogram.Step{cliRunStep("produce", `echo "result=cli-ok" >> "$GITHUB_OUTPUT"`)}}}
 	attachCLIExecutionProgram(&job)
@@ -877,8 +852,8 @@ func TestRunJobPublishesEveryTerminalResultAfterCancellation(t *testing.T) {
 				job.Schema = plan.Schema
 				job.ContinueOnError = true
 				job.Runtime = &plan.Runtime{DistributionDigest: cliTestRuntimeDigest()}
-				requiresMise := false
-				job.RequiresMise = &requiresMise
+				requiresNode := false
+				job.RequiresNode = &requiresNode
 			}
 			planPath, planDigest := writeCLIJobPlan(t, job)
 			setCLIJobIdentity(t, job, planDigest)
@@ -1030,7 +1005,7 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 		wantError       string
 		jobTimeout      float64
 		stepTimeout     float64
-		miseProbe       bool
+		secretProbe     bool
 		cancel          bool
 		failPublication bool
 		wantReports     int
@@ -1040,12 +1015,12 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 		{name: "invalid job output expression", command: "true", output: "${{ fromJSON('invalid') }}", wantError: "job output"},
 		{name: "workflow job timeout", command: "sleep 30", jobTimeout: 0.001, wantError: "context deadline exceeded"},
 		{name: "workflow step timeout", command: "sleep 30", stepTimeout: 0.001, wantError: "context deadline exceeded"},
-		{name: "workflow timeout during mise probe", command: "true", jobTimeout: 0.003, miseProbe: true, wantError: "context deadline exceeded"},
+		{name: "workflow timeout during secret probe", command: "true", jobTimeout: 0.003, secretProbe: true, wantError: "context deadline exceeded"},
 		{name: "publication failure", command: "true", failPublication: true, wantReports: 1},
 		{name: "publication failure after cancellation", command: "true", cancel: true, failPublication: true, wantReports: 1},
 		{name: "cancellation without publication failure", command: "true", cancel: true},
-		{name: "cancellation during mise probe", command: "true", cancel: true, miseProbe: true},
-		{name: "publication failure after cancelled mise probe", command: "true", cancel: true, miseProbe: true, failPublication: true, wantReports: 1},
+		{name: "cancellation during secret probe", command: "true", cancel: true, secretProbe: true},
+		{name: "publication failure after cancelled secret probe", command: "true", cancel: true, secretProbe: true, failPublication: true, wantReports: 1},
 		{name: "publication failure after process failure", command: "exit 7", failPublication: true, wantReports: 1},
 		{name: "publication failure after validation failure", command: `printf 'invalid\n' >> "$GITHUB_OUTPUT"`, wantError: "invalid file command", failPublication: true, wantReports: 1},
 	} {
@@ -1055,21 +1030,16 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 			job.TimeoutMinutes = test.jobTimeout
 			job.Program.Job.Steps[0].TimeoutMinutes.Literal = test.stepTimeout
 			var probeMarker string
-			if test.miseProbe {
-				requiresMise := true
-				job.RequiresMise = &requiresMise
-				job.Actions = []plan.ActionLock{{
-					ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
-					SourceDigest: "sha256:" + strings.Repeat("a", 64),
-				}}
-				job.Program.Job.Steps = []executionprogram.Step{cliActionStep("local", "./actions/build", "a-0000000000000001")}
+			if test.secretProbe {
+				job.RequiredCapabilities = []string{"secrets"}
+				job.RequiredSecrets = []string{"BLOCKED"}
 				root := canonicalTempDir(t)
 				probeMarker = filepath.Join(root, "started")
-				mise := filepath.Join(root, "mise")
-				if err := os.WriteFile(mise, fmt.Appendf(nil, "#!/bin/sh\nprintf ready > %q\nexec /bin/sleep 30\n", probeMarker), 0o700); err != nil {
+				agent := filepath.Join(root, "buildkite-agent")
+				if err := os.WriteFile(agent, fmt.Appendf(nil, "#!/bin/sh\nprintf ready > %q\nexec /bin/sleep 30\n", probeMarker), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				t.Setenv("BUILDKITE_GHA_MISE", mise)
+				t.Setenv("BUILDKITE_GHA_AGENT", agent)
 			}
 			if test.output != "" {
 				job.Outputs = map[string]string{"result": test.output}
@@ -1118,7 +1088,7 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 			if test.cancel {
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
-				if test.miseProbe {
+				if test.secretProbe {
 					go func() {
 						ticker := time.NewTicker(time.Millisecond)
 						defer ticker.Stop()
@@ -1152,9 +1122,9 @@ func TestRunJobBugsnagReportsPublicationButNotWorkflowFailures(t *testing.T) {
 			if test.wantError != "" && !strings.Contains(stderr.String(), test.wantError) {
 				t.Fatalf("wrong failure: %s", stderr.String())
 			}
-			if test.miseProbe {
+			if test.secretProbe {
 				if _, err := os.Stat(probeMarker); err != nil {
-					t.Fatalf("mise probe did not start before the deadline: %v", err)
+					t.Fatalf("secret probe did not start before the deadline: %v", err)
 				}
 			}
 			if test.jobTimeout > 0 && publishedCLIManifest(t, runner, job, planDigest).Result != "cancelled" {
@@ -1473,7 +1443,7 @@ func TestRepositoryProviderGitCredentialsUseServerEnvironment(t *testing.T) {
 func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 	clearCLIJobIdentity(t)
 	workspace := t.TempDir()
-	requiresMise := false
+	requiresNode := false
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
@@ -1489,7 +1459,7 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 		Event:                plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
 		Target:               plan.Target{StepKey: "gha-missing", Queue: "gha-runtime"},
 		RequiredCapabilities: []string{},
-		RequiresMise:         &requiresMise,
+		RequiresNode:         &requiresNode,
 	}
 	job.Program = &executionprogram.Program{Version: executionprogram.Version, Job: executionprogram.Job{Steps: []executionprogram.Step{cliRunStep("step-1", "true")}}}
 	attachCLIExecutionProgram(&job)
@@ -1580,7 +1550,7 @@ func TestHydrateEventPayloadDownloadsFromExactImporterJob(t *testing.T) {
 }
 
 func cliRunJobPlan() plan.Job {
-	requiresMise := false
+	requiresNode := false
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
@@ -1596,7 +1566,7 @@ func cliRunJobPlan() plan.Job {
 		Event:                plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
 		Target:               plan.Target{StepKey: "gha-cli", Queue: "gha-runtime"},
 		RequiredCapabilities: []string{},
-		RequiresMise:         &requiresMise,
+		RequiresNode:         &requiresNode,
 	}
 	job.Program = &executionprogram.Program{Version: executionprogram.Version, Job: executionprogram.Job{Steps: []executionprogram.Step{cliRunStep("step-1", "true")}}}
 	return job

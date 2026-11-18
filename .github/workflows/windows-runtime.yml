@@ -80,4 +80,11 @@ jobs:
       - name: Verify bootstrap integrity and exit codes
         run: go test ./internal/buildkite -run '^(TestEmitWindowsBootstrap|TestWindowsBootstrapExecution)$' -v -count=1
       - name: Verify Windows distribution and managed tools
-        run: go test ./internal/cli -run '^(TestWindowsRuntimeDistributionValidatesPEAndNeedsNoUnixExecuteBit|TestExtractRuntimeMiseWindowsZip)$' -v -count=1
+        run: go test ./internal/cli -run '^TestWindowsRuntimeDistributionValidatesPEAndNeedsNoUnixExecuteBit$' -v -count=1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+      - name: Exercise cold and offline action executor bootstrap
+        run: |
+          $env:BUILDKITE_GHA_TEST_PINNED_NODE24 = (Get-Command node).Source
+          go test ./internal/runtime -run '^(TestNodeRuntimeColdAndWarmJob|TestNodeReleaseArchives|TestNodeDownloadRejectsUnverifiedExecutable|TestNodeDownloadCancellation)$' -v -count=1

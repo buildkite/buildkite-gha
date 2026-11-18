@@ -558,7 +558,7 @@ func GeneratePlannedWorkflow(bundle Bundle, options Options) (buildkitepipeline.
 			PlanDigest:         artifact.Digest,
 			EventPayload:       job.Event.PayloadArtifact,
 			Dependencies:       append([]string(nil), instance.Needs...),
-			RequiresMise:       job.NeedsMise(),
+			RequiresNode:       job.NeedsNode(),
 			Cache:              instance.Cache,
 			SoftFail:           job.ContinueOnError,
 		}

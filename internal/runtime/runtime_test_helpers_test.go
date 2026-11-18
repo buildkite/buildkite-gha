@@ -49,14 +49,14 @@ func runtimePlan(t *testing.T, workspace, workflowPath string, steps []runtimeTe
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(source)
-	requiresMise := true
+	requiresNode := true
 	job := plan.Job{
 		Schema: plan.Schema, Compiler: plan.Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
 		Runtime:      &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
 		Workflow:     plan.Workflow{Path: workflowPath, Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "fixture"},
 		Event:        plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
 		Target:       plan.Target{StepKey: "gha-fixture", Queue: "ubuntu-latest"},
-		RequiresMise: &requiresMise,
+		RequiresNode: &requiresNode,
 	}
 	attachTestProgram(&job)
 	job.Program.Job.Steps = normalizeRuntimeTestSteps(steps)

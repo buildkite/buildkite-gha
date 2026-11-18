@@ -73,7 +73,7 @@ type actionLockBuilder struct {
 	active                map[string]bool
 	caps                  map[string]bool
 	materialized          []source.Materialized
-	requiresMise          bool
+	requiresNode          bool
 	executablePathBytes   int
 	// cacheSubstitutions records actions/cache references whose resolved
 	// commit was replaced by an audited release.
@@ -96,7 +96,7 @@ type actionGraph struct {
 	roots              []*actionNode
 	locks              []plan.ActionLock
 	capabilities       []string
-	requiresMise       bool
+	requiresNode       bool
 	programs           map[string]program.Action
 	planningPrograms   map[string]program.Action
 	cacheSubstitutions []CacheSubstitution
@@ -109,7 +109,7 @@ type actionCompilation struct {
 	capabilities         []string
 	requiredSecrets      []string
 	githubTokenActions   []string
-	requiresMise         bool
+	requiresNode         bool
 	requiresGitHubToken  bool
 	requiresEventPayload bool
 	programs             map[string]program.Action
@@ -305,7 +305,7 @@ func buildActionGraph(ctx context.Context, workspace string, actionSource Action
 	}
 	return actionGraph{
 		workflowSource: b.workflowSource, roots: roots, locks: locks,
-		capabilities: caps, requiresMise: b.requiresMise,
+		capabilities: caps, requiresNode: b.requiresNode,
 		programs: programs, planningPrograms: planningPrograms,
 		cacheSubstitutions: b.cacheSubstitutions,
 	}, nil
@@ -350,7 +350,7 @@ func (graph actionGraph) analyzeInvocations(options program.ActionAuthorityOptio
 		capabilities:         graph.capabilities,
 		requiredSecrets:      secretNames,
 		githubTokenActions:   githubTokenActions,
-		requiresMise:         graph.requiresMise,
+		requiresNode:         graph.requiresNode,
 		requiresGitHubToken:  requiresGitHubToken,
 		requiresEventPayload: requiresEventPayload,
 		programs:             graph.programs,
@@ -482,7 +482,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, cont
 		if err := validateCompileSite(m.Runs.PostIf, expression.ProfileActionLifecycle, expression.ResultBoolean); err != nil {
 			return nil, fmt.Errorf("post-if: %w", err)
 		}
-		b.requiresMise = true
+		b.requiresNode = true
 	}
 	for _, capability := range runtime.RequiredCapabilities() {
 		b.caps[capability] = true
