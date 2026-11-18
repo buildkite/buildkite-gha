@@ -166,6 +166,45 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 
+	t.Run("cancellation warning stays in reports, not annotations", func(t *testing.T) {
+		for _, triggers := range []string{"push", "[push, repository_dispatch]"} {
+			t.Run(triggers, func(t *testing.T) {
+				workflowPath := filepath.Join(t.TempDir(), "concurrency.yml")
+				workflow := []byte("on: " + triggers + "\nconcurrency:\n  group: ci\n  cancel-in-progress: true\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+				if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				runner := &cliCaptureRunner{}
+				var stdout, stderr bytes.Buffer
+				if code := run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+					t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+				}
+				var report compatibility.ProcessingReport
+				if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+					t.Fatal(err)
+				}
+				if !slices.ContainsFunc(report.Diagnostics, func(diagnostic compatibility.Diagnostic) bool {
+					return diagnostic.Code == "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT"
+				}) {
+					t.Fatalf("report lost cancellation warning: %#v", report.Diagnostics)
+				}
+				if triggers == "push" {
+					if len(runner.commands) != 0 {
+						t.Fatalf("unexpected annotation: %#v", runner.commands)
+					}
+				} else {
+					if len(runner.commands) != 1 || runner.commands[0].args[8] != "warning" {
+						t.Fatalf("commands = %#v, want one trigger warning annotation", runner.commands)
+					}
+					body := string(runner.commands[0].stdin)
+					if !strings.Contains(body, "repository_dispatch") || strings.Contains(body, "cancel-in-progress") {
+						t.Fatalf("annotation = %q, want only trigger warning", body)
+					}
+				}
+			})
+		}
+	})
+
 	t.Run("error", func(t *testing.T) {
 		workflowPath := filepath.Join(t.TempDir(), "unsupported.yml")
 		if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: windows-2019\n    steps: [{run: true}]\n"), 0o600); err != nil {
@@ -207,7 +246,7 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 
 	t.Run("warning publication failure is non-fatal", func(t *testing.T) {
 		workflowPath := filepath.Join(t.TempDir(), "warning.yml")
-		workflow := []byte("on: push\nconcurrency:\n  group: ci\n  cancel-in-progress: true\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+		workflow := []byte("on: [push, repository_dispatch]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 		if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
 			t.Fatal(err)
 		}
