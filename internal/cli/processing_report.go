@@ -443,7 +443,7 @@ func processingAnnotationWithin(ctx context.Context, report compatibility.Proces
 	style = "warning"
 	diagnostics := make([]compatibility.Diagnostic, 0, len(report.Diagnostics))
 	for _, diagnostic := range report.Diagnostics {
-		if diagnostic.Code == "W_ACTION_RUNTIME_UNKNOWN" {
+		if diagnostic.Code == "W_ACTION_RUNTIME_UNKNOWN" || diagnostic.Code == "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_BEST_EFFORT" {
 			continue
 		}
 		if diagnostic.Level != "warning" && diagnostic.Level != "error" {
