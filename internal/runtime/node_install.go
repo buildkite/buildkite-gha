@@ -190,7 +190,9 @@ func extractNode(archive, member, destination, digest string) error {
 		if written != size || hex.EncodeToString(hash.Sum(nil)) != digest {
 			return errors.New("node executable checksum mismatch")
 		}
-		return nil
+		// Job containers can use a different UID from the host runner. Their
+		// read-only bind mount must still allow that user to execute Node.
+		return os.Chmod(destination, 0o555)
 	}
 	if strings.HasSuffix(archive, ".zip") {
 		reader, err := zip.OpenReader(archive)

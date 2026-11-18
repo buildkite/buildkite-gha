@@ -161,8 +161,19 @@ func TestNodeRuntimeColdAndWarmJob(t *testing.T) {
 	if requests.Load() != 1 {
 		t.Fatalf("cold downloads = %d, want one", requests.Load())
 	}
-	// A corrupt warm cache must be repaired without invoking its content.
 	cached := filepath.Join(runner.NodeCacheDir, strings.TrimSuffix(strings.TrimSuffix(name, ".tar.gz"), ".zip"), filepath.Base(member))
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(cached)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A read-only bind mount retains these permissions when the image's
+		// non-root USER differs from the host runner's UID.
+		if info.Mode().Perm()&0o055 != 0o055 {
+			t.Fatalf("downloaded Node must be readable/executable by container users: %v", info.Mode())
+		}
+	}
+	// A corrupt warm cache must be repaired without invoking its content.
 	if err := os.Remove(cached); err != nil {
 		t.Fatal(err)
 	}
