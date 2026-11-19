@@ -622,6 +622,7 @@ func TestRunJobRejectedWorkflowTokenGuidanceAndTelemetry(t *testing.T) {
 }
 
 func TestRunJobAnnotatesWorkflowPermissionDenial(t *testing.T) {
+	const providersURL = "https://buildkite.com/organizations/acme/repository-providers"
 	for _, failAnnotation := range []bool{false, true} {
 		t.Run(fmt.Sprintf("annotation failure %t", failAnnotation), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -631,6 +632,7 @@ func TestRunJobAnnotatesWorkflowPermissionDenial(t *testing.T) {
 			defer server.Close()
 			job := cliRunJobPlan()
 			job.Workflow.Path = ".github/workflows/ci.yml"
+			job.Event.ServerURL = "https://ghe.example.com"
 			job.Event.Repository = "acme/widgets"
 			job.RequiredCapabilities = []string{"provider-token-write"}
 			job.GitHubToken = &plan.GitHubToken{Workflow: "ci.yml", Permissions: map[string]string{"contents": "read", "issues": "write"}}
@@ -644,6 +646,7 @@ func TestRunJobAnnotatesWorkflowPermissionDenial(t *testing.T) {
 			t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-secret")
 			t.Setenv("BUILDKITE_GHA_AGENT", truePath)
 			t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "1")
+			t.Setenv("BUILDKITE_ORGANIZATION_SLUG", "acme")
 			runner := &cliCaptureRunner{failAnnotation: failAnnotation}
 			var stdout, stderr bytes.Buffer
 			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -659,7 +662,7 @@ func TestRunJobAnnotatesWorkflowPermissionDenial(t *testing.T) {
 				t.Fatalf("annotations = %#v", annotations)
 			}
 			for _, output := range []string{stderr.String(), string(annotations[0].stdin)} {
-				for _, want := range []string{"App registration", "only if the App already requests", "Workflow requested contents:read, issues:write for acme/widgets"} {
+				for _, want := range []string{"Workflow requested a token for acme/widgets with contents:read, issues:write permissions but GitHub Enterprise Server declined.", "Make sure your GitHub Enterprise Server App has the required permissions:", providersURL, "installed into `acme` with access to the `widgets` repository", "all permissions approved"} {
 					if !strings.Contains(output, want) {
 						t.Errorf("output %q lacks %q", output, want)
 					}

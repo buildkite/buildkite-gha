@@ -334,15 +334,15 @@ func TestAgentGitHubTokensWorkflowDenialCodes(t *testing.T) {
 		name, body, want string
 		status           int
 	}{
-		{"permissions", `{"code":"permissions_unavailable","message":"secret-provider-text"}`, "App registration", 400},
+		{"permissions", `{"code":"permissions_unavailable","message":"secret-provider-text"}`, "App has the required permissions", 400},
 		{"repository", `{"code":"repository_unavailable","message":"secret-provider-text"}`, "repository exists", 400},
-		{"connection", `{"code":"code_access_connection_unavailable"}`, "Buildkite organization admin", 400},
+		{"connection", `{"code":"code_access_connection_unavailable"}`, "Add a GitHub repository provider with code access", 400},
 		{"pull request", `{"code":"pr_permission_ceiling"}`, "does not execute untrusted PR code", 400},
 		{"workflow policy", `{"code":"workflow_policy_exceeded"}`, "top-level permissions at this build's commit", 400},
 		{"invalid policy", `{"code":"workflow_policy_invalid"}`, "explicit permission map", 400},
 		{"provenance", `{"code":"workflow_provenance_invalid"}`, "validate this build's source and ancestry", 400},
 		{"merge queue", `{"code":"merge_queue_not_supported"}`, "not supported for merge-queue builds", 400},
-		{"pipeline disabled", `{"code":"pipeline_disabled"}`, "Ask a pipeline administrator", 404},
+		{"pipeline disabled", `{"code":"pipeline_disabled"}`, "if you are a pipeline admin, or ask one for help", 404},
 		{"disabled wrong status", `{"code":"pipeline_disabled"}`, "top-level permissions", 400},
 		{"permissions wrong status", `{"code":"permissions_unavailable"}`, "not enabled for this organization or pipeline", 404},
 		{"unknown code", `{"code":"secret-provider-text"}`, "top-level permissions", 400},
@@ -375,7 +375,7 @@ func TestAgentGitHubTokensWorkflowDenialCodes(t *testing.T) {
 				}
 			}
 			if test.name == "permissions" {
-				for _, want := range []string{"acme/widgets", "contents:read, issues:write", "GitHub installation admin", "only if the App already requests", "https://buildkite.com/acme/widgets/settings/repository"} {
+				for _, want := range []string{"Workflow requested a token for acme/widgets with contents:read, issues:write permissions but GitHub declined.", "https://buildkite.com/organizations/acme/repository-providers", "installed into `acme` with access to the `widgets` repository", "all permissions approved"} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("error %q lacks %q", err, want)
 					}
@@ -384,11 +384,51 @@ func TestAgentGitHubTokensWorkflowDenialCodes(t *testing.T) {
 					t.Fatal("inferred pending approval")
 				}
 			}
-			if test.name == "connection" && !strings.Contains(err.Error(), "https://buildkite.com/organizations/acme/repository-providers") {
-				t.Errorf("connection error lacks admin settings link: %v", err)
+			if test.name == "connection" || test.name == "repository" {
+				if !strings.Contains(err.Error(), "https://buildkite.com/organizations/acme/repository-providers") {
+					t.Errorf("error lacks Repository Providers link: %v", err)
+				}
+				if strings.Contains(err.Error(), "Pipeline repository settings:") {
+					t.Errorf("installation guidance links to unrelated pipeline settings: %v", err)
+				}
+			}
+			if test.name == "connection" && !strings.Contains(err.Error(), "ask a Buildkite organization admin for help") {
+				t.Errorf("connection error lacks organization admin guidance: %v", err)
+			}
+			if test.name == "pipeline disabled" && !strings.Contains(err.Error(), "https://buildkite.com/acme/widgets/settings/repository") {
+				t.Errorf("disabled error lacks pipeline settings link: %v", err)
 			}
 			if test.name == "pull request" && (!strings.Contains(err.Error(), "triggered or rebuilt") || !strings.Contains(err.Error(), "will not change this restriction")) {
 				t.Errorf("PR error lacks ancestor scope and distinct remedy: %v", err)
+			}
+		})
+	}
+}
+
+func TestGitHubPermissionGuidanceOrganizationLink(t *testing.T) {
+	for _, slug := range []string{"buildkite-org", "", "../other-org"} {
+		t.Run(slug, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"code":"permissions_unavailable"}`)
+			}))
+			defer server.Close()
+			tokens, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{
+				Endpoint: server.URL, JobID: testCacheJobID, JobToken: "secret", OrganizationSlug: slug,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = tokens.WorkflowToken(t.Context(), "github-owner/widgets", "ci.yml", map[string]string{"contents": "read"})
+			if err == nil {
+				t.Fatal("WorkflowToken succeeded")
+			}
+			if slug == "buildkite-org" {
+				if !strings.Contains(err.Error(), "https://buildkite.com/organizations/buildkite-org/repository-providers") {
+					t.Fatalf("missing Buildkite organization link: %v", err)
+				}
+			} else if strings.Contains(err.Error(), "https://") || !strings.Contains(err.Error(), "Ask the App owner to check the registration") {
+				t.Fatalf("invalid organization must retain guidance without a link: %v", err)
 			}
 		})
 	}
