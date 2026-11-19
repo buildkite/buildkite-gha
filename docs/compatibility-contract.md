@@ -574,6 +574,14 @@ status and failure attribution. Local
 [OIDC tests](../internal/runtime/oidc_token_service_test.go) cover request
 tracking and publication parameters, not downstream cloud trust.
 
+Workflow token permission guidance links to Repository Providers using the validated
+Buildkite organization slug, not the GitHub repository owner. The runtime does not
+know which App registration applies and must not guess a host UUID. Missing or
+invalid slugs retain generic guidance without a link. Existing bounded status/code
+handling and message-only environment/variable lookup errors remain unchanged.
+The [runtime regressions](../internal/runtime/github_token_service_test.go) and
+[CLI regressions](../internal/cli/run_job_test.go) cover these diagnostics.
+
 Cache mode is client behavior, not server authorization. Clients that ignore
 `ACTIONS_CACHE_MODE` do not acquire its restrictions. A subprocess-only synthetic
 `GITHUB_SERVER_URL` helps selected setup-action cache clients use cache v2; it

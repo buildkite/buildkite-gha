@@ -238,10 +238,15 @@ func (c *AgentGitHubTokens) workflowDenialMessage(status int, code, repository s
 	} else if status != http.StatusBadRequest {
 		return ""
 	}
+	requested := make([]string, 0, len(permissions))
+	for name, level := range permissions {
+		requested = append(requested, name+":"+level)
+	}
+	sort.Strings(requested)
 	var cause string
 	switch code {
 	case "pipeline_disabled":
-		cause = `Workflow access tokens are disabled for this pipeline. Ask a pipeline administrator to enable "Allow workflow-authorized GitHub access tokens" in repository settings if this workflow should use them. This does not approve additional GitHub App permissions.`
+		cause = `Workflow access tokens are disabled for this pipeline. If this workflow should use them, enable "Allow workflow-authorized GitHub access tokens" in repository settings if you are a pipeline admin, or ask one for help. This does not approve additional GitHub App permissions.`
 	case "workflow_policy_exceeded":
 		cause = "The requested token exceeds the workflow's top-level permissions at this build's commit. " +
 			"Ask the workflow maintainer to remove unused requested permissions, or explicitly declare the permissions the workflow needs at the top level. " +
@@ -257,14 +262,24 @@ func (c *AgentGitHubTokens) workflowDenialMessage(status int, code, repository s
 		cause = "Workflow access tokens are not supported for merge-queue builds or their triggered or rebuilt descendants. " +
 			"Contact Buildkite support about supported merge-queue workflows. Changing App permissions will not remove this restriction."
 	case "permissions_unavailable":
-		cause = "GitHub rejected token permissions while preparing this job. Compare the App registration with the installation's granted permissions. " +
-			"A GitHub installation admin can approve permissions only if the App already requests them; otherwise the App owner must review the registration. " +
-			"This response does not identify an individual missing grant or an approval waiting for review."
+		github := "GitHub"
+		if c.serverURL != "https://github.com" {
+			github = "GitHub Enterprise Server"
+		}
+		guidance := "Make sure your " + github + " App has the required permissions:"
+		if c.repositoryProviders != "" {
+			guidance += "\n" + c.repositoryProviders
+		} else {
+			guidance += "\nAsk the App owner to check the registration."
+		}
+		owner, repo, _ := strings.Cut(repository, "/")
+		return fmt.Sprintf("Workflow requested a token for %s with %s permissions but %s declined.\n\n%s\n\nand that it has been installed into `%s` with access to the `%s` repository, and with all permissions approved.",
+			repository, strings.Join(requested, ", "), github, guidance, owner, repo)
 	case "repository_unavailable":
 		cause = "GitHub could not grant access to this repository. Ask a GitHub installation admin to check that the repository exists and is selected for the App installation."
 	case "code_access_connection_unavailable":
 		cause = "No active GitHub repository provider with code access matches this pipeline. Buildkite (Limited Access) cannot issue workflow tokens. " +
-			"Ask a Buildkite organization admin to review Repository Providers, including account matching and suspension. " +
+			"Add a GitHub repository provider with code access in Repository Providers, or ask a Buildkite organization admin for help. Check account matching and suspension for existing providers. " +
 			"If a new installation is needed, a GitHub installation admin must review its permissions and selected repositories."
 	case "pr_permission_ceiling":
 		cause = "This build is a pull-request build, or was triggered or rebuilt from one. Buildkite limits its workflow token to contents:read. " +
@@ -274,16 +289,11 @@ func (c *AgentGitHubTokens) workflowDenialMessage(status int, code, repository s
 	default:
 		return ""
 	}
-	requested := make([]string, 0, len(permissions))
-	for name, level := range permissions {
-		requested = append(requested, name+":"+level)
-	}
-	sort.Strings(requested)
 	message := cause + "\nWorkflow requested " + strings.Join(requested, ", ") + " for " + repository + "."
 	switch {
 	case code == "pr_permission_ceiling" || code == "workflow_policy_exceeded" || code == "workflow_policy_invalid" || code == "workflow_provenance_invalid" || code == "merge_queue_not_supported":
 		message += "\nWorkflow compatibility: https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/compatibility"
-	case code == "code_access_connection_unavailable" && c.repositoryProviders != "":
+	case (code == "code_access_connection_unavailable" || code == "repository_unavailable") && c.repositoryProviders != "":
 		message += "\nRepository Providers: " + c.repositoryProviders
 	case c.repositorySettings != "":
 		message += "\nPipeline repository settings: " + c.repositorySettings
