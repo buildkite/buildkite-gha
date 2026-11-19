@@ -434,8 +434,17 @@ rationale, security invariants, and remaining design work.
 
 Every normal Buildkite build runs repository checks, Test Engine-split Go tests, native macOS tests, the starter workflow compatibility report, and the shell, public-action, and [composite hashFiles](../.github/workflows/composite-hash-files.yml) smoke workflows against the build's exact CLI source. The public-action proof executes pinned checkout, Node, Go, Python, and Java setup actions. The composite hashFiles importer supplies a dispatch snapshot pinned to the build commit, so the manual workflow also executes in Buildkite CI. Test Engine records the Linux test results; the repository checks retain the race-enabled suite. GitHub Actions differential oracles run only when manually dispatched.
 
-Workflow commands and managed Node's mise install and lookup commands share
-runtime process-tree supervision. On Windows, the runtime assigns each suspended
+The [Node bootstrap tests](../internal/runtime/node_install_test.go) run a real
+JavaScript pre/main/post lifecycle with no configured or bundled Node, download
+an archive from a local HTTP fixture, repair a corrupt executor cache, and
+reuse it offline in a fresh job. They also cover bundled major-version selection,
+explicit overrides, download cancellation, and archive integrity. This is local
+self-hosted bootstrap coverage, not evidence from a deployed self-hosted fleet.
+The fallback executor fixture is separately pinned in mise, so development
+Node upgrades do not change the download-integrity test. Windows CI supplies it
+through `BUILDKITE_GHA_TEST_PINNED_NODE24`. Action execution does not use mise.
+
+Workflow commands share runtime process-tree supervision. On Windows, the runtime assigns each suspended
 process to a kill-on-close Job Object before resuming it. Cancellation terminates
 the object; parent exit closes it before output draining completes. Tool output
 is captured without interpreting workflow commands. Keep new installer processes

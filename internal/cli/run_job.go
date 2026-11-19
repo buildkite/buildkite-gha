@@ -236,7 +236,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		Stdout:          stdout,
 		Stderr:          stderr,
 		Name:            os.Getenv("BUILDKITE_AGENT_NAME"),
-		MiseDataDir:     prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
+		NodeCacheDir:    os.Getenv("BUILDKITE_GHA_NODE_CACHE_DIR"),
 		ToolCache:       runnerToolCache,
 		Docker:          os.Getenv("BUILDKITE_GHA_DOCKER"),
 		DockerBuildLoad: options.dockerBuildLoad,
@@ -266,26 +266,6 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: resolve runtime executable: %v\n", err)
 		return 1
-	}
-	var privateRuntime string
-	if job.NeedsMise() {
-		runner.ResolveMise = func(ctx context.Context) (string, error) {
-			var err error
-			privateRuntime, err = os.MkdirTemp("", "buildkite-gha-runtime-")
-			if err != nil {
-				return "", fmt.Errorf("prepare action runtime: create private action runtime: %w", err)
-			}
-			mise, err := resolveRuntimeMiseVersion(ctx, os.Getenv("BUILDKITE_GHA_MISE"), runner.MiseDataDir, privateRuntime, stderr, clientVersion)
-			if err != nil {
-				return "", fmt.Errorf("prepare action runtime: %w", err)
-			}
-			return mise, nil
-		}
-		defer func() {
-			if privateRuntime != "" {
-				_ = os.RemoveAll(privateRuntime)
-			}
-		}()
 	}
 	var runErr error
 	var terminalNeeds []transport.TerminalNeedResult

@@ -150,8 +150,8 @@
       "workflow": "testdata/smoke/.github/workflows/rust.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "compile-pass",
-      "evidence": "Validation, compilation, and hosted admission cover the dtolnay/rust-toolchain composite action.",
-      "note": "Run the rust compatibility proof for end-to-end hosted cargo build and test evidence.",
+      "evidence": "Validation, compilation, and hosted admission cover the dtolnay/rust-toolchain composite action and the Swatinem/rust-cache JavaScript action.",
+      "note": "Run the rust compatibility proof for end-to-end hosted cargo build, test, and Rust cache save and restore evidence.",
       "action_preflight": "hosted"
     },
     {

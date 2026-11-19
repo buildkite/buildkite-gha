@@ -25,7 +25,7 @@ func TestPinnedRuntimePreservesSchedulingAndRetryPolicy(t *testing.T) {
 		DistributionDigest: testDigest("runtime"),
 		ApprovalGates:      []ApprovalGate{{Key: "approval", Environment: "production"}},
 		Jobs: []Job{
-			{Key: "build", Label: "Build", Platform: "linux/amd64", PlanDigest: testDigest("build"), RequiresMise: true},
+			{Key: "build", Label: "Build", Platform: "linux/amd64", PlanDigest: testDigest("build"), RequiresNode: true},
 			{Key: "arm", Label: "ARM", Platform: "linux/arm64", PlanDigest: testDigest("arm"), Dependencies: []string{"build"}},
 			{Key: "mac", Label: "Mac", Platform: "darwin/arm64", PlanDigest: testDigest("mac"), Dependencies: []string{"arm"}},
 			{Key: "deploy", Label: "Deploy", Platform: "windows/amd64", PlanDigest: testDigest("deploy"), Dependencies: []string{"mac"}, ApprovalGate: "approval", SoftFail: true, Concurrency: 1, ConcurrencyGroup: "deploy"},
@@ -145,7 +145,7 @@ func TestEmitGolden(t *testing.T) {
 		strings.Contains(string(first), `.buildkite-gha/bootstrap/`) ||
 		strings.Contains(string(first), "go run") ||
 		strings.Contains(string(first), "cache:") ||
-		strings.Contains(string(first), "BUILDKITE_GHA_MISE_DATA_DIR") {
+		strings.Contains(string(first), "BUILDKITE_GHA_NODE_CACHE_DIR") {
 		t.Fatalf("generated jobs are not self-contained:\n%s", first)
 	}
 	if strings.Count(string(first), `--step 'gha-importer'`) != 6 {
@@ -158,7 +158,7 @@ func TestEmitGolden(t *testing.T) {
 
 func TestEmitWindowsBootstrap(t *testing.T) {
 	digest := testDigest("windows distribution")
-	output, err := Emit(Pipeline{CompilerStep: "compile", ArtifactProducer: "plan-producer", DistributionProducer: "runtime-producer", DistributionDigest: digest, Jobs: []Job{{Key: "windows", Label: "Windows", Queue: "windows", Platform: "windows/amd64", PlanDigest: testDigest("windows plan"), RequiresMise: true}}})
+	output, err := Emit(Pipeline{CompilerStep: "compile", ArtifactProducer: "plan-producer", DistributionProducer: "runtime-producer", DistributionDigest: digest, Jobs: []Job{{Key: "windows", Label: "Windows", Queue: "windows", Platform: "windows/amd64", PlanDigest: testDigest("windows plan"), RequiresNode: true}}})
 	if err != nil {
 		t.Fatalf("Emit() error = %v", err)
 	}
@@ -192,7 +192,7 @@ func TestEmitWindowsBootstrap(t *testing.T) {
 			t.Errorf("Windows bootstrap lacks %q:\n%s", want, command)
 		}
 	}
-	for _, forbidden := range []string{"set -euo pipefail", "chmod 0500", "BUILDKITE_GHA_MISE_DATA_DIR", "cache:"} {
+	for _, forbidden := range []string{"set -euo pipefail", "chmod 0500", "BUILDKITE_GHA_NODE_CACHE_DIR", "cache:"} {
 		if strings.Contains(command, forbidden) || strings.Contains(string(output), forbidden) {
 			t.Errorf("Windows bootstrap contains %q:\n%s", forbidden, command)
 		}
@@ -1240,7 +1240,7 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 	pipeline := Pipeline{
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
-		Jobs:               []Job{{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan"), RequiresMise: true}},
+		Jobs:               []Job{{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan"), RequiresNode: true}},
 	}
 	output, err := Emit(pipeline)
 	if err != nil {
@@ -1267,10 +1267,10 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 		t.Fatalf("generated action job still transports mise:\n%s", command)
 	}
 	step := document.Steps[0]
-	if step.Cache.Name != runtimeCacheName+"-linux-amd64" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != platformMiseCachePath("linux/amd64") {
+	if step.Cache.Name != runtimeCacheName+"-linux-amd64" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != platformNodeCachePath("linux/amd64") {
 		t.Fatalf("mise cache volume = %#v", step.Cache)
 	}
-	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() || step.Env["BUILDKITE_GHA_PLAN_DIGEST"] != testDigest("plan") {
+	if step.Env["BUILDKITE_GHA_NODE_CACHE_DIR"] != NodeCacheDir() || step.Env["BUILDKITE_GHA_PLAN_DIGEST"] != testDigest("plan") {
 		t.Fatalf("mise job environment = %#v", step.Env)
 	}
 }
@@ -1280,7 +1280,7 @@ func TestEmitMergesConfiguredAndManagedCacheVolume(t *testing.T) {
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
 		Jobs: []Job{{
-			Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan"), RequiresMise: true,
+			Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan"), RequiresNode: true,
 			Cache: &CacheVolume{Paths: []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"}, Name: "dependencies", Size: "40g"},
 		}},
 	})
@@ -1304,7 +1304,7 @@ func TestEmitMergesConfiguredAndManagedCacheVolume(t *testing.T) {
 		t.Fatalf("steps = %#v", document.Steps)
 	}
 	step := document.Steps[0]
-	wantPaths := []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper", platformMiseCachePath("linux/amd64")}
+	wantPaths := []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper", platformNodeCachePath("linux/amd64")}
 	if !slices.Equal(step.Cache.Paths, wantPaths) || step.Cache.Name != "dependencies" || step.Cache.Size != "40g" {
 		t.Fatalf("merged cache = %#v, want paths %#v with configured name and size", step.Cache, wantPaths)
 	}
@@ -1314,7 +1314,7 @@ func TestEmitMergesConfiguredAndManagedCacheVolume(t *testing.T) {
 			t.Fatalf("runner-home cache path %q is not made writable by runner:\n%s", path, step.Command)
 		}
 	}
-	if !strings.Contains(step.Command, "readlink -f -- '"+platformMiseCachePath("linux/amd64")+"'") || !strings.Contains(step.Command, `stat -c '%d' -- "$cache_target"`) || !strings.Contains(step.Command, `mountpoint -q -- "$cache_target"`) || !strings.Contains(step.Command, `chown -R runner:"$runner_group" "$cache_target"`) {
+	if !strings.Contains(step.Command, "readlink -f -- '"+platformNodeCachePath("linux/amd64")+"'") || !strings.Contains(step.Command, `stat -c '%d' -- "$cache_target"`) || !strings.Contains(step.Command, `mountpoint -q -- "$cache_target"`) || !strings.Contains(step.Command, `chown -R runner:"$runner_group" "$cache_target"`) {
 		t.Fatalf("cache ownership is not constrained to the Buildkite volume:\n%s", step.Command)
 	}
 }
@@ -1342,7 +1342,7 @@ func TestEmitConfiguredCacheUsesBuildkiteDefaultsWithoutMise(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantPaths := []string{"/home/runner/.cache", platformCacheValidationPath("linux/amd64")}
-	if len(document.Steps) != 1 || !slices.Equal(document.Steps[0].Cache.Paths, wantPaths) || document.Steps[0].Cache.Name != "" || document.Steps[0].Cache.Size != "" || strings.Contains(string(output), "BUILDKITE_GHA_MISE_DATA_DIR") {
+	if len(document.Steps) != 1 || !slices.Equal(document.Steps[0].Cache.Paths, wantPaths) || document.Steps[0].Cache.Name != "" || document.Steps[0].Cache.Size != "" || strings.Contains(string(output), "BUILDKITE_GHA_NODE_CACHE_DIR") {
 		t.Fatalf("configured cache did not preserve Buildkite defaults:\n%s", output)
 	}
 	command := strings.ReplaceAll(document.Steps[0].Command, `'"'"'`, `'`)
@@ -1361,7 +1361,7 @@ func TestEmitDarwinActionRuntimeUsesNativePlatformCache(t *testing.T) {
 			Platform:           "darwin/arm64",
 			DistributionDigest: testDigest("darwin distribution"),
 			PlanDigest:         testDigest("darwin plan"),
-			RequiresMise:       true,
+			RequiresNode:       true,
 		}},
 	})
 	if err != nil {
@@ -1385,10 +1385,10 @@ func TestEmitDarwinActionRuntimeUsesNativePlatformCache(t *testing.T) {
 		t.Fatalf("steps = %#v", document.Steps)
 	}
 	step := document.Steps[0]
-	if step.Image != "" || step.Cache.Name != "buildkite-gha-darwin-arm64" || !slices.Equal(step.Cache.Paths, []string{"/tmp/bkcache/buildkite-gha/mise/darwin-arm64"}) {
+	if step.Image != "" || step.Cache.Name != "buildkite-gha-darwin-arm64" || !slices.Equal(step.Cache.Paths, []string{"/tmp/bkcache/buildkite-gha/node/darwin-arm64"}) {
 		t.Fatalf("Darwin runtime placement = %#v", step)
 	}
-	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir("darwin/arm64") || step.Env["BUILDKITE_GHA_PLAN_DIGEST"] != testDigest("darwin plan") {
+	if step.Env["BUILDKITE_GHA_NODE_CACHE_DIR"] != NodeCacheDir("darwin/arm64") || step.Env["BUILDKITE_GHA_PLAN_DIGEST"] != testDigest("darwin plan") {
 		t.Fatalf("Darwin job environment = %#v", step.Env)
 	}
 	if !strings.Contains(step.Command, `shasum -a 256 "$distribution"`) || !strings.Contains(step.Command, "--hosted-tool-cache") || strings.Contains(step.Command, HostedToolCachePath) {
@@ -1464,15 +1464,15 @@ func TestEmitHostnameRepairOnlyForNativeLinux(t *testing.T) {
 	}
 }
 
-func TestMiseDataDirUsesManagedRuntimeVersion(t *testing.T) {
-	if got := MiseDataDir(); got != "/cache/bkcache/buildkite-gha/mise/linux-amd64/"+MinimumMiseVersion {
-		t.Fatalf("MiseDataDir() = %q", got)
+func TestNodeCacheDirUsesManagedRuntimeVersion(t *testing.T) {
+	if got := NodeCacheDir(); got != "/cache/bkcache/buildkite-gha/node/linux-amd64" {
+		t.Fatalf("NodeCacheDir() = %q", got)
 	}
-	if got := MiseDataDir("linux/arm64"); got != "/cache/bkcache/buildkite-gha/mise/linux-arm64/"+MinimumMiseVersion {
-		t.Fatalf("MiseDataDir(linux/arm64) = %q", got)
+	if got := NodeCacheDir("linux/arm64"); got != "/cache/bkcache/buildkite-gha/node/linux-arm64" {
+		t.Fatalf("NodeCacheDir(linux/arm64) = %q", got)
 	}
-	if got := MiseDataDir("darwin/arm64"); got != "/tmp/bkcache/buildkite-gha/mise/darwin-arm64/"+MinimumMiseVersion {
-		t.Fatalf("MiseDataDir(darwin/arm64) = %q", got)
+	if got := NodeCacheDir("darwin/arm64"); got != "/tmp/bkcache/buildkite-gha/node/darwin-arm64" {
+		t.Fatalf("NodeCacheDir(darwin/arm64) = %q", got)
 	}
 }
 
@@ -1486,7 +1486,7 @@ func TestEmitLinuxARM64RuntimeUsesNativePlatformCache(t *testing.T) {
 			Platform:           "linux/arm64",
 			DistributionDigest: testDigest("linux arm64 distribution"),
 			PlanDigest:         testDigest("linux arm64 plan"),
-			RequiresMise:       true,
+			RequiresNode:       true,
 		}},
 	})
 	if err != nil {
@@ -1502,7 +1502,7 @@ func TestEmitLinuxARM64RuntimeUsesNativePlatformCache(t *testing.T) {
 	if err := yaml.Unmarshal(output, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Steps) != 1 || document.Steps[0].Cache.Name != "buildkite-gha-linux-arm64" || document.Steps[0].Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir("linux/arm64") {
+	if len(document.Steps) != 1 || document.Steps[0].Cache.Name != "buildkite-gha-linux-arm64" || document.Steps[0].Env["BUILDKITE_GHA_NODE_CACHE_DIR"] != NodeCacheDir("linux/arm64") {
 		t.Fatalf("Linux ARM64 runtime placement = %#v", document.Steps)
 	}
 	if !strings.Contains(document.Steps[0].Command, "buildkite-gha-runner-bootstrap") || strings.Contains(document.Steps[0].Command, "linux-amd64") {
@@ -1515,7 +1515,7 @@ func TestEmitMiseCacheOnlyForActionJobs(t *testing.T) {
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
 		Jobs: []Job{
-			{Key: "javascript", Label: "JavaScript", Queue: "hosted", PlanDigest: testDigest("javascript-plan"), RequiresMise: true},
+			{Key: "javascript", Label: "JavaScript", Queue: "hosted", PlanDigest: testDigest("javascript-plan"), RequiresNode: true},
 			{Key: "native", Label: "Native action", Queue: "hosted", PlanDigest: testDigest("native-plan")},
 			{Key: "shell", Label: "Shell", Queue: "hosted", PlanDigest: testDigest("shell-plan")},
 		},
@@ -1535,10 +1535,10 @@ func TestEmitMiseCacheOnlyForActionJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, step := range document.Steps {
-		if step.Key == "javascript" && (step.Cache == nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() || strings.Contains(step.Command, "/tools/mise/")) {
+		if step.Key == "javascript" && (step.Cache == nil || step.Env["BUILDKITE_GHA_NODE_CACHE_DIR"] != NodeCacheDir() || strings.Contains(step.Command, "/tools/mise/")) {
 			t.Fatalf("JavaScript job lacks runtime mise cache configuration: %#v", step)
 		}
-		if (step.Key == "native" || step.Key == "shell") && (step.Cache != nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "" || strings.Contains(step.Command, "/tools/mise/")) {
+		if (step.Key == "native" || step.Key == "shell") && (step.Cache != nil || step.Env["BUILDKITE_GHA_NODE_CACHE_DIR"] != "" || strings.Contains(step.Command, "/tools/mise/")) {
 			t.Fatalf("no-mise job gained managed mise: %#v", step)
 		}
 	}

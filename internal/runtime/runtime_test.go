@@ -25,6 +25,13 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
+type timeoutSecretResolver struct{}
+
+func (timeoutSecretResolver) ResolveSecret(ctx context.Context, _ string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
 type testSecretResolver map[string]string
 
 func (s testSecretResolver) ResolveSecret(_ context.Context, name string) (string, error) {
@@ -1728,10 +1735,9 @@ func TestJobTimeoutDuringSetupIsCancelled(t *testing.T) {
 	job.ContinueOnError = true
 	job.TimeoutMinutes = 0.001
 	attachTestProgram(&job)
-	runner := Runner{ResolveMise: func(ctx context.Context) (string, error) {
-		<-ctx.Done()
-		return "", ctx.Err()
-	}}
+	job.RequiredCapabilities = append(job.RequiredCapabilities, "secrets")
+	job.RequiredSecrets = []string{"BLOCKED"}
+	runner := Runner{Secrets: timeoutSecretResolver{}, Redactor: &testRedactor{}}
 
 	result, err := runner.runTestJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
@@ -3094,7 +3100,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Schema != plan.Schema || len(plans[0].Actions) != 2 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
+	if len(plans) != 1 || plans[0].Schema != plan.Schema || len(plans[0].Actions) != 2 || plans[0].RequiresNode == nil || !*plans[0].RequiresNode {
 		t.Fatalf("portable setup plans = %#v", plans)
 	}
 	if got := plans[0].ExecutionJob().Steps[0].Invocation.With[0].Value.Source; got != "24" {

@@ -8,7 +8,7 @@ import "strings"
 const experimentalRunnerHome = "/home/runner"
 const experimentalRunnerTemp = "/tmp/buildkite-gha-runner"
 
-func experimentalRunnerUserBootstrap(platform string, requiresMise, hostedToolCache bool, cache *CacheVolume) []string {
+func experimentalRunnerUserBootstrap(platform string, requiresNode, hostedToolCache bool, cache *CacheVolume) []string {
 	commands := []string{
 		`bootstrap_dir="$1"`,
 		`distribution="$2"`,
@@ -33,18 +33,17 @@ func experimentalRunnerUserBootstrap(platform string, requiresMise, hostedToolCa
 	}
 	if cache != nil {
 		cacheAnchor := platformCacheValidationPath(platform)
-		if requiresMise {
-			cacheAnchor = platformMiseCachePath(platform)
+		if requiresNode {
+			cacheAnchor = platformNodeCachePath(platform)
 		}
 		commands = append(commands, experimentalRunnerCacheOwnershipCommands("/cache/bkcache", cacheAnchor, cache.Paths)...)
 	}
-	if requiresMise {
+	if requiresNode {
 		commands = append(commands,
-			`test -n "${BUILDKITE_GHA_MISE_DATA_DIR:-}" || { echo 'buildkite-gha: runner user bootstrap requires BUILDKITE_GHA_MISE_DATA_DIR' >&2; exit 1; }`,
-			`mise_runtime_dir="$(dirname "$BUILDKITE_GHA_MISE_DATA_DIR")/runtime/`+MinimumMiseVersion+`"`,
-			`install -d -o runner -g "$runner_group" -m 0755 "$BUILDKITE_GHA_MISE_DATA_DIR" "$mise_runtime_dir"`,
-			`chown -R runner:"$runner_group" "$BUILDKITE_GHA_MISE_DATA_DIR" "$mise_runtime_dir"`,
-			`chmod -R u+rwX "$BUILDKITE_GHA_MISE_DATA_DIR" "$mise_runtime_dir"`,
+			`test -n "${BUILDKITE_GHA_NODE_CACHE_DIR:-}" || { echo 'buildkite-gha: runner user bootstrap requires BUILDKITE_GHA_NODE_CACHE_DIR' >&2; exit 1; }`,
+			`install -d -o runner -g "$runner_group" -m 0755 "$BUILDKITE_GHA_NODE_CACHE_DIR"`,
+			`chown -R runner:"$runner_group" "$BUILDKITE_GHA_NODE_CACHE_DIR"`,
+			`chmod -R u+rwX "$BUILDKITE_GHA_NODE_CACHE_DIR"`,
 		)
 	}
 	if hostedToolCache {

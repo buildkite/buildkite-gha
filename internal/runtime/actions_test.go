@@ -593,7 +593,7 @@ runs:
 	workflowDigest := sha256.Sum256([]byte(workflowSource))
 	commit := strings.Repeat("a", 40)
 	remoteID, localID := "a-0000000000000001", "a-0000000000000002"
-	requiresMise := false
+	requiresNode := false
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
@@ -619,7 +619,7 @@ runs:
 			},
 			{ID: localID, Source: "workspace", Path: "actions/local", SourceDigest: localDigest},
 		},
-		RequiresMise: &requiresMise,
+		RequiresNode: &requiresNode,
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
 	attachTestProgram(&job)

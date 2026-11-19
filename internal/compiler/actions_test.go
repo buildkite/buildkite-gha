@@ -33,7 +33,7 @@ func compileActionLocks(ctx context.Context, workspace string, actionSource Acti
 	if err != nil {
 		return nil, nil, nil, true, err
 	}
-	return compiled.selectors, compiled.locks, compiled.capabilities, compiled.requiresMise, nil
+	return compiled.selectors, compiled.locks, compiled.capabilities, compiled.requiresNode, nil
 }
 
 type fakeActionSource struct {
@@ -454,7 +454,7 @@ func TestActionResolutionMessageTreatsNestedWorkspaceChildrenAsLocal(t *testing.
 	}
 }
 
-func TestCompileActionLocksRequiresMiseOnlyForJavaScriptReachableGraphs(t *testing.T) {
+func TestCompileActionLocksRequiresNodeOnlyForJavaScriptReachableGraphs(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "docker", "runs:\n  using: docker\n  image: Dockerfile\n")
 	writeAction(t, workspace, "native-docker-composite", "runs:\n  using: composite\n  steps:\n    - run: echo native\n      shell: sh\n    - uses: actions/checkout@v4\n    - uses: ./docker\n")
@@ -3987,7 +3987,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Schema != plan.Schema || len(plans[0].Actions) != 3 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
+	if len(plans) != 1 || plans[0].Schema != plan.Schema || len(plans[0].Actions) != 3 || plans[0].RequiresNode == nil || !*plans[0].RequiresNode {
 		t.Fatalf("public action plan = %#v", plans)
 	}
 	wantCommits := map[string]string{

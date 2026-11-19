@@ -16,7 +16,7 @@ func TestEmitRunnerUserIsDefaultForLinuxOnly(t *testing.T) {
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
 		Jobs: []Job{
-			{Key: "linux", Label: "Linux", Queue: "hosted", Platform: "linux/amd64", RuntimeImage: image, PlanDigest: testDigest("linux plan"), RequiresMise: true},
+			{Key: "linux", Label: "Linux", Queue: "hosted", Platform: "linux/amd64", RuntimeImage: image, PlanDigest: testDigest("linux plan"), RequiresNode: true},
 			{Key: "darwin", Label: "Darwin", Queue: "macos", Platform: "darwin/arm64", PlanDigest: testDigest("darwin plan")},
 		},
 	}
@@ -55,8 +55,8 @@ func TestEmitRunnerUserIsDefaultForLinuxOnly(t *testing.T) {
 		`chown root:"$runner_group" "$distribution" "$plan"`,
 		`chmod 0550 "$distribution"`,
 		`chmod 0440 "$plan"`,
-		`mise_runtime_dir="$(dirname "$BUILDKITE_GHA_MISE_DATA_DIR")/runtime/` + MinimumMiseVersion + `"`,
-		`chown -R runner:"$runner_group" "$BUILDKITE_GHA_MISE_DATA_DIR" "$mise_runtime_dir"`,
+		`install -d -o runner -g "$runner_group" -m 0755 "$BUILDKITE_GHA_NODE_CACHE_DIR"`,
+		`chown -R runner:"$runner_group" "$BUILDKITE_GHA_NODE_CACHE_DIR"`,
 		"chown -R runner:\"$runner_group\" '/opt/hostedtoolcache'",
 		"sudo -n --preserve-env --user runner -- env HOME='/home/runner' TMPDIR='/tmp/buildkite-gha-runner'",
 		`BUILDKITE_GHA_PLAN_DIGEST='` + testDigest("linux plan") + `' "$distribution" run-job --plan "$plan"`,

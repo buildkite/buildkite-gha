@@ -421,16 +421,17 @@ type Job struct {
 	DefaultWorkingDirectory string            `json:"-"`
 	Outputs                 map[string]string `json:"-"`
 	Actions                 []ActionLock      `json:"actions,omitempty"`
-	// RequiresMise is the compiler's explicit action-runtime decision.
-	RequiresMise       *bool                       `json:"requires_mise,omitempty"`
+	// RequiresNode is the compiler's explicit action-runtime decision.
+	// Keep the legacy wire name so existing plans remain compatible.
+	RequiresNode       *bool                       `json:"requires_mise,omitempty"`
 	Container          *Container                  `json:"-"`
 	Services           map[string]ServiceContainer `json:"-"`
 	ServiceOrder       []string                    `json:"-"`
 	ServicesExpression string                      `json:"-"`
 }
 
-// NeedsMise reports whether a generated job needs the managed action runtime.
-func (job Job) NeedsMise() bool {
+// NeedsNode reports whether a generated job needs the managed action runtime.
+func (job Job) NeedsNode() bool {
 	usesActions := len(job.Actions) != 0
 	if executionJob := job.ExecutionJob(); executionJob != nil {
 		for _, step := range executionJob.Steps {
@@ -440,7 +441,7 @@ func (job Job) NeedsMise() bool {
 	if !usesActions {
 		return false
 	}
-	return job.RequiresMise == nil || *job.RequiresMise
+	return job.RequiresNode == nil || *job.RequiresNode
 }
 
 // RuntimeDistributionDigest returns the executable digest bound to this plan.
@@ -676,13 +677,13 @@ func (job Job) Validate() error {
 		return fmt.Errorf("normalized execution program: %w", err)
 	}
 	executionJob := job.ExecutionJob()
-	if job.RequiresMise == nil {
+	if job.RequiresNode == nil {
 		return fmt.Errorf("job plan requires an explicit requires_mise decision")
 	}
 	if job.Runtime != nil && !digestPattern.MatchString(job.Runtime.DistributionDigest) {
 		return fmt.Errorf("job plan runtime distribution digest is required when runtime is present")
 	}
-	if job.RequiresMise != nil && !*job.RequiresMise {
+	if job.RequiresNode != nil && !*job.RequiresNode {
 		for _, step := range executionJob.Steps {
 			if step.Invocation != nil && step.Invocation.Lock == "" {
 				return fmt.Errorf("job plan requires_mise may be false only when every action has an immutable selector")

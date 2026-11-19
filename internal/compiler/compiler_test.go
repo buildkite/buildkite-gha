@@ -4874,7 +4874,7 @@ func TestCompilePlansAcceptsSupportedJavaScriptLocalActions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compileUntrustedPlans() error = %v, want %s support", err, runtime)
 			}
-			if len(plans) != 1 || !plans[0].NeedsMise() {
+			if len(plans) != 1 || !plans[0].NeedsNode() {
 				t.Fatalf("compileUntrustedPlans() plans = %#v, want one %s job requiring mise", plans, runtime)
 			}
 		})

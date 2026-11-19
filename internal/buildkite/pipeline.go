@@ -41,10 +41,6 @@ const HostedToolCachePath = "/opt/hostedtoolcache"
 // DarwinHostedToolCachePath is the fixed prefix used by prebuilt macOS tools.
 const DarwinHostedToolCachePath = "/Users/runner/hostedtoolcache"
 
-// MinimumMiseVersion is the oldest supported mise release and the exact
-// release installed when no compatible runtime executable is available.
-const MinimumMiseVersion = "2026.10.17"
-
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var runtimeImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
@@ -217,14 +213,14 @@ func DistributionPath(digest string) (string, error) {
 	return distributionDirectory + "/" + strings.TrimPrefix(digest, "sha256:") + "/buildkite-gha", nil
 }
 
-// MiseDataDir returns the platform-isolated managed cache path for the required
-// mise version. Cache contents are an accelerator, never an authority.
-func MiseDataDir(platforms ...string) string {
+// NodeCacheDir returns the platform-isolated action executor cache path.
+// Downloaded executables are verified before use.
+func NodeCacheDir(platforms ...string) string {
 	platform := "linux/amd64"
 	if len(platforms) != 0 {
 		platform = platforms[0]
 	}
-	return platformMiseCachePath(platform) + "/" + MinimumMiseVersion
+	return platformNodeCachePath(platform)
 }
 
 // Job describes one expanded workflow job after queue policy has been applied.
@@ -253,7 +249,7 @@ type Job struct {
 	EventPayload     bool
 	Dependencies     []string
 	ApprovalGate     string
-	RequiresMise     bool
+	RequiresNode     bool
 	Cache            *CacheVolume
 	SoftFail         bool
 	ConcurrencyGroup string
@@ -769,7 +765,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 				`if command -v sha256sum >/dev/null 2>&1; then actual_plan_digest="$(sha256sum "$plan" | awk '{print "sha256:" $1}')"; elif command -v shasum >/dev/null 2>&1; then actual_plan_digest="$(shasum -a 256 "$plan" | awk '{print "sha256:" $1}')"; else echo 'buildkite-gha: no SHA-256 tool available' >&2; exit 1; fi`,
 				"test \"$actual_plan_digest\" = "+shellQuote(job.PlanDigest),
 			)
-			commands = append(commands, experimentalRunnerUserBootstrap(platform, job.RequiresMise, hostedToolCache, job.Cache)...)
+			commands = append(commands, experimentalRunnerUserBootstrap(platform, job.RequiresNode, hostedToolCache, job.Cache)...)
 			runJob = "BUILDKITE_GHA_PLAN_DIGEST=" + shellQuote(job.PlanDigest) + ` "$distribution" run-job --plan "$plan"`
 			if job.EventPayload {
 				runJob += " --artifact-producer " + shellQuote(artifactProducer)
@@ -855,7 +851,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			// approval, so gated jobs cannot be retried.
 			_, _ = fmt.Fprintf(out, "%sretry:\n%s  manual:\n%s    allowed: false\n", attributeIndent, attributeIndent, attributeIndent)
 		}
-		cache := mergedCacheVolume(job.Cache, job.RequiresMise && platform != "windows/amd64", platform, experimentalRunnerUser)
+		cache := mergedCacheVolume(job.Cache, job.RequiresNode && platform != "windows/amd64", platform, experimentalRunnerUser)
 		if cache != nil {
 			_, _ = fmt.Fprintf(out, "%scache:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  paths:\n", attributeIndent)
@@ -874,8 +870,8 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		_, _ = fmt.Fprintf(out, "%senv:\n", attributeIndent)
 		_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_PLAN_DIGEST: %s\n", attributeIndent, yamlScalar(job.PlanDigest))
-		if job.RequiresMise && platform != "windows/amd64" {
-			_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir(platform)))
+		if job.RequiresNode && platform != "windows/amd64" {
+			_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_NODE_CACHE_DIR: %s\n", attributeIndent, yamlScalar(NodeCacheDir(platform)))
 		}
 		if job.Concurrency != 0 {
 			emitConcurrency(out, attributeIndent, job.Concurrency, job.ConcurrencyGroup, job.CancelInProgress)
@@ -1053,20 +1049,20 @@ func platformCacheKey(platform string) string {
 	return strings.ReplaceAll(platform, "/", "-")
 }
 
-func platformMiseCachePath(platform string) string {
+func platformNodeCachePath(platform string) string {
 	root := runtimeCacheRoot
 	if platform == "darwin/arm64" {
 		root = darwinRuntimeCacheRoot
 	}
-	return root + "/mise/" + platformCacheKey(platform)
+	return root + "/node/" + platformCacheKey(platform)
 }
 
 func platformCacheValidationPath(platform string) string {
 	return runtimeCacheRoot + "/validation/" + platformCacheKey(platform)
 }
 
-func mergedCacheVolume(configured *CacheVolume, requiresMise bool, platform string, runnerUser bool) *CacheVolume {
-	if configured == nil && !requiresMise {
+func mergedCacheVolume(configured *CacheVolume, requiresNode bool, platform string, runnerUser bool) *CacheVolume {
+	if configured == nil && !requiresNode {
 		return nil
 	}
 	cache := &CacheVolume{}
@@ -1075,11 +1071,11 @@ func mergedCacheVolume(configured *CacheVolume, requiresMise bool, platform stri
 		cache.Name = configured.Name
 		cache.Size = configured.Size
 	}
-	if requiresMise {
-		misePath := platformMiseCachePath(platform)
-		found := slices.Contains(cache.Paths, misePath)
+	if requiresNode {
+		nodePath := platformNodeCachePath(platform)
+		found := slices.Contains(cache.Paths, nodePath)
 		if !found {
-			cache.Paths = append(cache.Paths, misePath)
+			cache.Paths = append(cache.Paths, nodePath)
 		}
 		if cache.Name == "" {
 			cache.Name = runtimeCacheName + "-" + platformCacheKey(platform)
@@ -1283,7 +1279,7 @@ func validateJob(compilerStep string, job Job) error {
 		if _, err := StagePath(job.Stage.ArtifactDigest); err != nil {
 			return fmt.Errorf("job %q: %w", job.Key, err)
 		}
-		if job.PlanDigest != "" || job.EventPayload || job.ApprovalGate != "" || job.RequiresMise || job.Cache != nil || job.Concurrency != 0 || job.ConcurrencyGroup != "" || len(job.ConcurrencyGates) != 0 || job.SoftFail {
+		if job.PlanDigest != "" || job.EventPayload || job.ApprovalGate != "" || job.RequiresNode || job.Cache != nil || job.Concurrency != 0 || job.ConcurrencyGroup != "" || len(job.ConcurrencyGates) != 0 || job.SoftFail {
 			return fmt.Errorf("job %q stage step cannot include workflow job configuration", job.Key)
 		}
 		if len(job.Dependencies) == 0 {
@@ -1293,7 +1289,7 @@ func validateJob(compilerStep string, job Job) error {
 		if _, err := PlanPath(job.PlanDigest); err != nil {
 			return fmt.Errorf("job %q: %w", job.Key, err)
 		}
-	case job.PlanDigest != "" || job.Queue != "" || job.Platform != "" || job.DistributionDigest != "" || job.RuntimeURL != "" || job.RuntimeImage != "" || len(job.Agents) != 0 || job.ToolCache != nil || job.EventPayload || job.ApprovalGate != "" || job.RequiresMise || job.Cache != nil || job.Concurrency != 0 || job.ConcurrencyGroup != "" || len(job.ConcurrencyGates) != 0:
+	case job.PlanDigest != "" || job.Queue != "" || job.Platform != "" || job.DistributionDigest != "" || job.RuntimeURL != "" || job.RuntimeImage != "" || len(job.Agents) != 0 || job.ToolCache != nil || job.EventPayload || job.ApprovalGate != "" || job.RequiresNode || job.Cache != nil || job.Concurrency != 0 || job.ConcurrencyGroup != "" || len(job.ConcurrencyGates) != 0:
 		return fmt.Errorf("job %q preparation result cannot include runnable job configuration", job.Key)
 	}
 	if job.Concurrency < 0 {
