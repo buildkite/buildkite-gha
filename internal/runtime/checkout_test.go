@@ -86,14 +86,14 @@ func TestAnonymousCheckoutAdapterPopulatesVerifiedWorkspace(t *testing.T) {
 	git := filepath.Join(t.TempDir(), "git")
 	script := `#!/bin/sh
 set -eu
+if [ "${1:-}" = config ]; then exit 1; fi
 test "$GIT_CONFIG_NOSYSTEM" = 1
-test "$GIT_CONFIG_GLOBAL" = /dev/null
+case "$GIT_CONFIG_GLOBAL" in */checkout-auth.config) test -f "$GIT_CONFIG_GLOBAL" ;; *) exit 21 ;; esac
 test "$GIT_TERMINAL_PROMPT" = 0
 test "$GIT_LFS_SKIP_SMUDGE" = 1
 test -z "$GIT_ASKPASS"
 test -z "${GH_TOKEN:-}"
-case "$HOME" in */.no-home) test ! -e "$HOME" ;; *) exit 21 ;; esac
-case "$*" in *credential.helper=*http.extraheader=*core.hooksPath=/dev/null*) ;; *) exit 20 ;; esac
+case "$*" in *core.hooksPath=/dev/null*) ;; *) exit 20 ;; esac
 printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
 operation=
 for argument in "$@"; do
@@ -468,7 +468,7 @@ func TestCheckoutSubmoduleInputMode(t *testing.T) {
 
 func TestCheckoutLFSFiltersPinExecutable(t *testing.T) {
 	gitLFS := "/opt/pinned lfs/git-lfs'quoted"
-	filterArgs := strings.Join(checkoutGitLFSFilterArgs(checkoutGitBaseArgs(), gitLFS), "\n")
+	filterArgs := strings.Join(checkoutGitLFSFilterArgs(checkoutGitBaseArgs(true), gitLFS), "\n")
 	if !strings.Contains(filterArgs, "core.hooksPath=/dev/null") || !strings.Contains(filterArgs, `'/opt/pinned lfs/git-lfs'\''quoted' filter-process`) || strings.Contains(filterArgs, "filter.lfs.process=git-lfs") {
 		t.Fatalf("checkout LFS filter arguments = %q", filterArgs)
 	}
@@ -526,7 +526,7 @@ func TestCheckoutSubmoduleNativeCommandSequenceAndFlags(t *testing.T) {
 				t.Fatal(err)
 			}
 			runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
-			if err := runner.runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "7", true, false, host); err != nil {
+			if err := runner.runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(true), "7", true, false, host); err != nil {
 				t.Fatal(err)
 			}
 			contents, err := os.ReadFile(logPath)
@@ -567,7 +567,7 @@ exit 0
 			if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			err := (Runner{Stdout: io.Discard, Stderr: io.Discard}).runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "0", false, false, "github.com")
+			err := (Runner{Stdout: io.Discard, Stderr: io.Discard}).runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(true), "0", false, false, "github.com")
 			if err == nil || !strings.Contains(err.Error(), "invalid state") {
 				t.Fatalf("status prefix %q error = %v", prefix, err)
 			}
@@ -593,7 +593,7 @@ func TestCheckoutSubmodulesUsesNativePorcelain(t *testing.T) {
 			workspace := filepath.Join(t.TempDir(), "parent")
 			runTestGit(t, "", "clone", filepath.Join(root, "parent.git"), workspace)
 			runTestGit(t, workspace, "checkout", "--detach", parentOID)
-			base := append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always")
+			base := append(checkoutGitBaseArgs(true), "-c", "protocol.file.allow=always")
 			runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
 			depth := "0"
 			if test.depthOne {
@@ -664,7 +664,7 @@ func TestSubmoduleResolvedCredentialsWithoutCapabilityDoNotInvokeHelper(t *testi
 		t.Fatal(err)
 	}
 	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "secret"}, Stdout: io.Discard, Stderr: io.Discard}
-	if err := runner.runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "0", false, false, "github.com"); err != nil {
+	if err := runner.runCheckoutSubmodules(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(true), "0", false, false, "github.com"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -705,7 +705,7 @@ echo job-secret
 	}
 	var logs bytes.Buffer
 	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "job-secret"}, Stdout: &logs, Stderr: &logs}
-	if err := runner.runRepositoryProviderCheckoutGit(t.Context(), newCommandOutputProcessor(&logs, &logs), workspace, map[string]string{}, git, checkoutGitBaseArgs(), []string{"submodule", "update"}, "github.com"); err != nil {
+	if err := runner.runRepositoryProviderCheckoutGit(t.Context(), newCommandOutputProcessor(&logs, &logs), workspace, map[string]string{}, git, checkoutGitBaseArgs(true), []string{"submodule", "update"}, "github.com"); err != nil {
 		t.Fatal(err)
 	}
 	input, err := os.ReadFile(inputLog)
@@ -1005,7 +1005,7 @@ exec ` + shellTestQuote(realGit) + ` "$@"
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.runCheckoutSubmodules(ctx, newCommandOutputProcessor(io.Discard, io.Discard), workspace, wrapper, map[string]string{}, append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always"), "1", false, false, "github.com")
+		done <- runner.runCheckoutSubmodules(ctx, newCommandOutputProcessor(io.Discard, io.Discard), workspace, wrapper, map[string]string{}, append(checkoutGitBaseArgs(true), "-c", "protocol.file.allow=always"), "1", false, false, "github.com")
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -1053,7 +1053,7 @@ exit 0
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.runCheckoutSubmodules(ctx, newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "0", true, false, "github.com")
+		done <- runner.runCheckoutSubmodules(ctx, newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(true), "0", true, false, "github.com")
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -1416,7 +1416,7 @@ printf 'username=token\npassword=secret\n'
 	if err := os.WriteFile(agent, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	args := repositoryProviderCheckoutCredentialArgs(checkoutGitBaseArgs(), agent, "github.com")
+	args := repositoryProviderCheckoutCredentialArgs(checkoutGitBaseArgs(true), agent, "github.com")
 	fill := func(host, path string) error {
 		cmd := exec.Command("git", append(args, "credential", "fill")...)
 		cmd.Env = processEnv(map[string]string{"GIT_TERMINAL_PROMPT": "0"})
@@ -1626,7 +1626,8 @@ fi
 			Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64), Repository: "buildkite/buildkite-gha", Ref: "refs/heads/main", SHA: sha,
 		},
 		Target:               plan.Target{StepKey: "gha-checkout", Queue: "trusted"},
-		RequiredCapabilities: []string{"network", "provider-token-read"},
+		RequiredCapabilities: []string{"network", "provider-token-read", "provider-token-write"},
+		GitHubToken:          &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": "read"}, CheckoutOnly: true},
 		Env: map[string]string{
 			"LOOKUP_AGENT":   lookupAgent,
 			"LOOKUP_GIT":     lookupGit,
@@ -1648,7 +1649,7 @@ fi
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: remoteDigest}}
 	var logs bytes.Buffer
 	credentials := &AgentRepositoryCredentials{JobID: testCacheJobID, JobToken: "job-secret"}
-	result, err := (Runner{Node24: node, RepositoryCredentials: credentials, Actions: materializer, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node, RuntimeExecutable: buildLiveContainerRuntime(t), RepositoryCredentials: credentials, WorkflowToken: &testWorkflowTokenProvider{token: repositoryToken}, Redactor: &testRedactor{}, Actions: materializer, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -1664,8 +1665,8 @@ fi
 	if target, err := filepath.EvalSymlinks(lookupGitLFS); err != nil || target != poisonGitLFS {
 		t.Fatalf("pre-hook Git LFS replacement = %q, %v; want %q", target, err, poisonGitLFS)
 	}
-	if _, err := os.Stat(trustedAgentMarker); err != nil {
-		t.Fatalf("trusted Agent credential helper did not run: %v", err)
+	if _, err := os.Stat(trustedAgentMarker); !os.IsNotExist(err) {
+		t.Fatalf("workflow Git invoked the broad Agent credential helper: %v", err)
 	}
 	for name, marker := range map[string]string{"Git selected through poisoned PATH": poisonGitMarker, "Git LFS selected through poisoned PATH": poisonGitLFSMarker, "Agent helper selected through poisoned PATH": poisonAgentMarker} {
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {

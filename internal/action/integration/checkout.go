@@ -85,7 +85,7 @@ var checkoutInputRules = map[string]checkoutInputRule{
 	"ssh-key":                   {func(value, _ string) bool { return value == "" }},
 	"ssh-known-hosts":           {func(value, _ string) bool { return value == "" }},
 	"ssh-strict":                {func(value, _ string) bool { return actionTrue(value) }},
-	"persist-credentials":       {func(value, _ string) bool { return actionFalse(value) }},
+	"persist-credentials":       {func(value, _ string) bool { return actionBoolean(value) }},
 	"set-safe-directory":        {func(value, _ string) bool { return actionTrue(value) }},
 	"allow-unsafe-pr-checkout":  {func(value, _ string) bool { return actionFalse(value) }},
 	"fetch-tags":                {func(value, _ string) bool { return actionBoolean(value) }},

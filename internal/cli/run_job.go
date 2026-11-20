@@ -179,7 +179,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 	}
 	var workflowTokens gharuntime.WorkflowTokenProvider
-	if job.HasCapability("provider-token-write") {
+	if job.HasCapability("provider-token-write") && (!job.GitHubToken.CheckoutOnly || repositoryProviderGitCredentialsEnabled(os.Getenv)) {
 		githubTokens, tokenErr := gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
 			Endpoint:         os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
 			JobID:            os.Getenv("BUILDKITE_JOB_ID"),

@@ -103,7 +103,7 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		"ssh key":              {"ssh-key": "key"},
 		"GHES":                 {"github-server-url": "https://github.example"},
 		"unknown":              {"future-input": "value"},
-		"persist credentials":  {"persist-credentials": "true"},
+		"persist credentials":  {"persist-credentials": "yes"},
 		"case-colliding names": {"Repository": repository, "repository": repository},
 		"uppercase SHA":        {"ref": strings.Repeat("B", 40)},
 		"tag ref":              {"ref": "refs/tags/v1"},
@@ -238,7 +238,7 @@ func TestValidateCheckoutInputsUsesBoundedFallbackContract(t *testing.T) {
 		"token":               {"token": ""},
 		"foreign repository":  {"repository": "other/repository"},
 		"unsafe path":         {"path": "../outside"},
-		"persist credentials": {"persist-credentials": "true"},
+		"persist credentials": {"persist-credentials": "yes"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := ValidateCheckoutInputs(unknown, inputs, repository, "https://github.com"); err == nil || !strings.Contains(err.Error(), "unsupported") {

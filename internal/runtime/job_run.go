@@ -39,6 +39,8 @@ type jobRun struct {
 	artifactRegistry *artifactRegistry
 	node16Warnings   *node16DeprecationWarnings
 	idTokenService   *idTokenService
+	gitCredentials   *gitCredentialService
+	checkoutAuth     string
 }
 
 // RunJob executes the plan's ordered steps and always drains registered post actions.

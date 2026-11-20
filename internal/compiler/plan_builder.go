@@ -36,19 +36,20 @@ type planBuilder struct {
 }
 
 type builtPlanActions struct {
-	workflowSource       *RemoteWorkflowSource
-	locks                []plan.ActionLock
-	capabilities         []string
-	authorization        PlanAuthorization
-	requiredSecrets      []string
-	inputsInspected      bool
-	requiresGitHubToken  bool
-	requiresEventPayload bool
-	reachableSecrets     []string
-	requiresMise         bool
-	resolved             bool
-	hasInvocations       bool
-	programs             map[string]program.Action
+	workflowSource        *RemoteWorkflowSource
+	locks                 []plan.ActionLock
+	capabilities          []string
+	authorization         PlanAuthorization
+	requiredSecrets       []string
+	inputsInspected       bool
+	requiresGitHubToken   bool
+	requiresCheckoutToken bool
+	requiresEventPayload  bool
+	reachableSecrets      []string
+	requiresMise          bool
+	resolved              bool
+	hasInvocations        bool
+	programs              map[string]program.Action
 }
 
 func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options, graphs *actionGraphCache) ([]PlanArtifact, []JobEvaluation, error) {
@@ -628,6 +629,7 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 		if stepReachable {
 			built.capabilities = append(built.capabilities, "provider-token-read")
 			built.authorization.ProviderTokenReadCapabilitySources = append(built.authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
+			built.requiresCheckoutToken = b.ir.Event.Provider == "github"
 		}
 	case actionintegration.AdapterUploadArtifactBuildkite:
 		if err := actionintegration.ValidateUploadArtifactInputs(lock.Commit, inputs); err != nil {
@@ -685,7 +687,9 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 	actions.requiresEventPayload = actions.requiresEventPayload || referencesEventPayload
 	referencesGitHubTokenSecret := len(tokenAliases) != 0
 	tokenAliases = slices.DeleteFunc(tokenAliases, func(name string) bool { return name == "GITHUB_TOKEN" })
-	if !referencesGitHubTokenSecret && !referencesGitHubToken && !actions.requiresGitHubToken {
+	checkoutOnly := !referencesGitHubTokenSecret && !referencesGitHubToken && !actions.requiresGitHubToken
+	contents := b.ir.Workflow.WorkflowTokenPermissions["contents"]
+	if checkoutOnly && (!actions.requiresCheckoutToken || contents != "read" && contents != "write") {
 		return secrets, mappings, nil, nil
 	}
 	policyWorkflow := b.ir.Workflow.WorkflowTokenPolicyFilename
@@ -705,7 +709,7 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 	actions.authorization.ProviderTokenWriteCapabilitySources = []string{"effective-permissions"}
 	actions.authorization.WorkflowTokenPolicyFilename = b.ir.Workflow.WorkflowTokenPolicyFilename
 	actions.authorization.GitHubTokenSecretReference = referencesGitHubTokenSecret
-	return secrets, mappings, &plan.GitHubToken{Workflow: policyWorkflow, Permissions: cloneMap(b.ir.Workflow.WorkflowTokenPermissions), Aliases: tokenAliases}, nil
+	return secrets, mappings, &plan.GitHubToken{Workflow: policyWorkflow, Permissions: cloneMap(b.ir.Workflow.WorkflowTokenPermissions), Aliases: tokenAliases, CheckoutOnly: checkoutOnly}, nil
 }
 
 func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.Program, runtimeDistributionDigest string, actions builtPlanActions, needSources map[string][]plan.NeedSource, needOutputs map[string][]plan.NeedOutput, deferredInputs map[string]plan.DeferredInput, callGuards []plan.CallGuard, secrets []string, secretMappings map[string]string, githubToken *plan.GitHubToken) plan.Job {
