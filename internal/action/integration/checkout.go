@@ -131,6 +131,13 @@ func CheckoutSupportsOutputs(commit string) bool {
 	return contract.refOutput && contract.commitOutput
 }
 
+// CheckoutSupportsCredentialPersistence reports whether the selected contract
+// declares persist-credentials, which was added after v1.
+func CheckoutSupportsCredentialPersistence(commit string) bool {
+	contract, _ := checkoutContractForCommit(commit)
+	return contract.declaresInput("persist-credentials")
+}
+
 // CheckoutDefaultsToFullHistory reports whether the selected exact or fallback
 // contract fetches full history when fetch-depth is omitted.
 func CheckoutDefaultsToFullHistory(commit string) bool {

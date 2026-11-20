@@ -140,6 +140,9 @@ func (r Runner) runCheckoutWithAuthentication(ctx context.Context, processor *co
 		env["GIT_CONFIG_GLOBAL"] = authentication
 	}
 	if credentials != nil {
+		if r.RepositoryCredentials != nil {
+			maps.Copy(env, r.RepositoryCredentials.proxyEnvironment)
+		}
 		env["RUNNER_TEMP"] = filepath.Dir(authentication)
 		base = append(base,
 			"-c", "credential.https://"+credentialHost+".useHttpPath=true",
@@ -230,7 +233,7 @@ func (r Runner) runCheckoutWithAuthentication(ctx context.Context, processor *co
 	if err != nil || !gitutil.ValidObjectID(headSHA) || gitutil.ValidObjectID(checkoutTarget) && headSHA != checkoutTarget {
 		return result, fmt.Errorf("%s did not produce the requested detached revision", adapter)
 	}
-	if credentials != nil && (checkoutInput(inputs, "persist-credentials") == "" || checkoutInputTrue(checkoutInput(inputs, "persist-credentials"))) && commit != actionintegration.CheckoutV1Commit {
+	if credentials != nil && actionintegration.CheckoutSupportsCredentialPersistence(commit) && (checkoutInput(inputs, "persist-credentials") == "" || checkoutInputTrue(checkoutInput(inputs, "persist-credentials"))) {
 		credentials.checkouts = append(credentials.checkouts, checkoutDirectory)
 		for key, value := range map[string]string{
 			"credential.https://" + credentialHost + ".helper":      credentials.helper(),

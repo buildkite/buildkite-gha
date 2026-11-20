@@ -134,6 +134,9 @@ func (s *gitCredentialService) Close(ctx context.Context) error {
 	defer cancel()
 	var errs []error
 	for _, directory := range s.checkouts {
+		if _, err := os.Stat(filepath.Join(directory, ".git")); os.IsNotExist(err) {
+			continue
+		}
 		for key, value := range map[string]string{
 			"credential.https://" + s.host + ".helper":      s.helper(),
 			"credential.https://" + s.host + ".useHttpPath": "true",

@@ -5,6 +5,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cgi"
 	"net/http/httptest"
@@ -23,6 +24,7 @@ import (
 // Exercise Git's HTTP transport and the real CLI helper, not a fake Git that
 // can accidentally accept a fetch without requesting credentials.
 func TestCheckoutEphemeralCredentials(t *testing.T) {
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	git, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
@@ -30,21 +32,29 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 	executable := buildLiveContainerRuntime(t)
 	node24 := requireNode24(t)
 	for _, test := range []struct {
-		name, permission, persistence string
-		external                      bool
+		name, permission, persistence, commit string
+		external, proxy                       bool
 	}{
 		{name: "default read", permission: "read"},
 		{name: "explicit write", permission: "write", persistence: "true"},
 		{name: "checkout only", permission: "read", persistence: "false"},
 		{name: "no contents", permission: "none"},
 		{name: "configured credentials", permission: "none", external: true},
+		{name: "proxy transport", permission: "read", proxy: true},
+		{name: "legacy v1.0.0", permission: "read", commit: "af513c7a016048ae468971c52ed77d9562c7c819"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, temp, workspace := t.TempDir(), t.TempDir(), t.TempDir()
+			root, workspace := t.TempDir(), t.TempDir()
+			temp, err := os.MkdirTemp("", "gha-") //nolint:usetesting // t.TempDir paths exceed macOS Unix socket limits.
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(temp) })
+			transport := map[string]string{}
 			gitRun := func(directory string, args ...string) (string, error) {
 				cmd := exec.CommandContext(t.Context(), git, args...)
 				cmd.Dir = directory
-				cmd.Env = processEnv(map[string]string{"HOME": root, "RUNNER_TEMP": temp, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1"})
+				cmd.Env = processEnv(mergeStringMaps(transport, map[string]string{"HOME": root, "RUNNER_TEMP": temp, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1"}))
 				output, err := cmd.CombinedOutput()
 				return string(output), err
 			}
@@ -107,6 +117,30 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 			var output bytes.Buffer
 			runner := Runner{Git: git, RuntimeExecutable: executable, WorkflowToken: provider, Redactor: &testRedactor{}}
 			job := plan.Job{Event: plan.Event{Provider: "github", Repository: "acme/widgets", SHA: sha, Ref: "refs/heads/main", ServerURL: server.URL}}
+			if test.proxy {
+				// Only the proxy can route the certificate's DNS name to this
+				// private test server. Dropping HTTPS_PROXY must break checkout.
+				proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					upstream, err := net.Dial("tcp", server.Listener.Addr().String())
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadGateway)
+						return
+					}
+					defer func() { _ = upstream.Close() }()
+					client, _, err := w.(http.Hijacker).Hijack()
+					if err != nil {
+						return
+					}
+					defer func() { _ = client.Close() }()
+					_, _ = fmt.Fprint(client, "HTTP/1.1 200 Connection Established\r\n\r\n")
+					go func() { _, _ = io.Copy(upstream, client) }()
+					_, _ = io.Copy(client, upstream)
+				}))
+				defer proxy.Close()
+				transport["HTTPS_PROXY"], transport["NO_PROXY"] = proxy.URL, ""
+				runner.RepositoryCredentials = &AgentRepositoryCredentials{proxyEnvironment: transport}
+				job.Event.ServerURL = "https://" + server.Certificate().DNSNames[0]
+			}
 			job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": test.permission}, CheckoutOnly: true}
 			processor := newCommandOutputProcessor(&output, &output)
 			service, err := startGitCredentialService(t.Context(), temp, runner, job, processor)
@@ -118,7 +152,11 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 			if test.persistence != "" {
 				inputs["persist-credentials"] = test.persistence
 			}
-			_, err = runner.runCheckoutWithAuthentication(t.Context(), processor, workspace, job, actionintegration.CheckoutV7Commit, inputs, authentication, service)
+			commit := test.commit
+			if commit == "" {
+				commit = actionintegration.CheckoutV7Commit
+			}
+			_, err = runner.runCheckoutWithAuthentication(t.Context(), processor, workspace, job, commit, inputs, authentication, service)
 			if test.permission == "none" && !test.external {
 				if err == nil || provider.calls != 0 {
 					t.Fatalf("checkout without contents permission: error=%v, issued=%d", err, provider.calls)
@@ -136,7 +174,7 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 				t.Fatal("checkout wrote the bearer token to Git config or logs")
 			}
 			_, fetchErr := gitRun(workspace, "fetch", "origin", "main")
-			if test.persistence == "false" {
+			if test.persistence == "false" || test.commit != "" {
 				if fetchErr == nil {
 					t.Fatal("persist-credentials:false authenticated a later fetch")
 				}
@@ -190,9 +228,10 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 				actionRoot := t.TempDir()
 				writeFixtureFile(t, actionRoot, "action.yml", "runs:\n  using: node24\n  main: main.js\n  post: post.js\n")
 				writeFixtureFile(t, actionRoot, "main.js", "")
-				writeFixtureFile(t, actionRoot, "post.js", "require('child_process').execFileSync('git', ['fetch', 'origin', 'main'], {stdio: 'inherit'}); console.log('post-fetch-ok');\n")
+				writeFixtureFile(t, actionRoot, "post.js", "require('child_process').execFileSync('git', ['fetch', 'origin', 'main'], {stdio: 'inherit'}); if (process.env.REMOVE_CHECKOUT) require('fs').rmSync(process.env.REMOVE_CHECKOUT === 'metadata' ? '.git' : process.cwd(), {recursive: true, force: true}); console.log('post-fetch-ok');\n")
 				digest := digestTree(t, actionRoot)
-				for _, fail := range []bool{false, true} {
+				for _, mode := range []string{"success", "failure", "metadata", "directory"} {
+					fail := mode == "failure"
 					jobWorkspace := t.TempDir()
 					command := "test -z \"${BUILDKITE_AGENT_ACCESS_TOKEN:-}\"; git fetch origin main"
 					if !test.external {
@@ -201,11 +240,16 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 					if fail {
 						command += "; exit 1"
 					}
+					remove := ""
+					if mode == "metadata" || mode == "directory" {
+						remove = mode
+					}
 					fullJob := runtimePlan(t, seed, ".github/workflows/test.yml", []runtimeTestStep{
 						{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &plan.ActionSelector{Lock: "a-0000000000000001"}},
-						{ID: "post", Kind: "uses", Uses: "acme/action@v1", Action: &plan.ActionSelector{Lock: "a-0000000000000002"}},
+						{ID: "post", Kind: "uses", Uses: "acme/action@v1", Action: &plan.ActionSelector{Lock: "a-0000000000000002"}, Env: map[string]string{"REMOVE_CHECKOUT": remove}},
 						{ID: "git", Kind: "run", Shell: "sh", Command: command},
 					})
+					fullJob.Env = map[string]string{"GIT_CONFIG_NOSYSTEM": "1"}
 					job.Event.Name = fullJob.Event.Name
 					job.Event.PayloadDigest = fullJob.Event.PayloadDigest
 					fullJob.Event = job.Event
@@ -239,6 +283,12 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 					if result.Conclusion != want || (!fail && err != nil) || !strings.Contains(logs.String(), "post-fetch-ok") {
 						t.Fatalf("job lifecycle: result=%s, error=%v\n%s", result.Conclusion, err, &logs)
 					}
+					if mode == "metadata" || mode == "directory" {
+						if _, err := os.Stat(filepath.Join(jobWorkspace, ".git")); !os.IsNotExist(err) {
+							t.Fatalf("post action did not remove Git metadata: %v", err)
+						}
+						continue
+					}
 					if config := mustGit(jobWorkspace, "config", "--local", "--list"); strings.Contains(config, GitCredentialHelperCommand) {
 						t.Fatal("job cleanup left credential helper configured")
 					}
@@ -252,7 +302,11 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 }
 
 func TestGitCredentialHelperRepositoryBoundary(t *testing.T) {
-	temp := t.TempDir()
+	temp, err := os.MkdirTemp("", "gha-") //nolint:usetesting // t.TempDir paths exceed macOS Unix socket limits.
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(temp) })
 	provider := &testWorkflowTokenProvider{token: "scoped-test-token"}
 	processor := newCommandOutputProcessor(&bytes.Buffer{}, &bytes.Buffer{})
 	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "acme/widgets"}, GitHubToken: &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": "read"}}}
