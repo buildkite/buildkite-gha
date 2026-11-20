@@ -41,6 +41,12 @@ type ActionSourceTokenProvider interface {
 	ActionSourceToken(context.Context, string) (string, error)
 }
 
+// RepositorySourceTokenProvider requests exact-repository source access under
+// the current job's server-side policy, independently of workflow permissions.
+type RepositorySourceTokenProvider interface {
+	RepositorySourceToken(context.Context, string, string) (string, error)
+}
+
 // AgentGitHubTokenConfig carries the current Buildkite job's Agent connection,
 // authentication material, and immutable Buildkite pipeline slugs. This client
 // does not add them to Git or action subprocess environments.
@@ -60,6 +66,7 @@ type AgentGitHubTokenConfig struct {
 // job-bound Agent API endpoint.
 type AgentGitHubTokens struct {
 	actionSourceURL     string
+	repositorySourceURL string
 	workflowURL         string
 	repositorySettings  string
 	repositoryProviders string
@@ -86,6 +93,7 @@ func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, er
 	}
 	return &AgentGitHubTokens{
 		actionSourceURL:     agent.URL("github_action_source_access_token"),
+		repositorySourceURL: agent.URL("github_source_access_token"),
 		workflowURL:         agent.URL("github_workflow_access_token"),
 		repositorySettings:  pipelineRepositorySettingsURL(config.OrganizationSlug, config.PipelineSlug),
 		repositoryProviders: repositoryProviders,
@@ -154,6 +162,19 @@ func (c *AgentGitHubTokens) ActionSourceToken(ctx context.Context, repository st
 	return c.mint(ctx, c.actionSourceURL, "https://github.com", repository, "", nil, "action source")
 }
 
+func (c *AgentGitHubTokens) RepositorySourceToken(ctx context.Context, serverURL, repository string) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("GitHub repository source token provider is not configured")
+	}
+	if err := plan.ValidateGitHubServerURL(serverURL); err != nil {
+		return "", err
+	}
+	if serverURL == "" || serverURL == "https://github.com" {
+		return "", fmt.Errorf("repository source tokens require a GitHub Enterprise Server origin")
+	}
+	return c.mint(ctx, c.repositorySourceURL, serverURL, repository, "", nil, "repository source")
+}
+
 func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, serverURL, repository, workflow string, permissions map[string]string, purpose string) (token string, err error) {
 	if c == nil {
 		return "", fmt.Errorf("GitHub %s token provider is not configured", purpose)
@@ -184,9 +205,14 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, serverURL, reposi
 		return "", fmt.Errorf("request GitHub %s token: %w", purpose, err)
 	}
 	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
+	if response.StatusCode < 200 || response.StatusCode >= 300 || purpose == "repository source" && response.StatusCode != http.StatusOK {
 		payload, readErr := io.ReadAll(io.LimitReader(response.Body, githubTokenResponseLimit))
 		statusErr := githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"), purpose, c.repositorySettings, c.buildURL)
+		if purpose == "repository source" {
+			// Do not echo provider messages or distinguish missing repositories
+			// from policy denials. An old server's 404 is not anonymous authority.
+			statusErr = credentialStatusError(response.StatusCode, "GitHub repository source access is unavailable to this job (HTTP %d)", response.StatusCode)
+		}
 		if purpose == "workflow" && readErr == nil && len(payload) < githubTokenResponseLimit {
 			var denied struct {
 				Code string `json:"code"`

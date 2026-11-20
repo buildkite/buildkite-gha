@@ -203,6 +203,195 @@ func TestGHESDenialsDoNotFallBackToGitHubCredentialsOrGit(t *testing.T) {
 	}
 }
 
+func TestGHESRepositoryCredentialsPreserveSourceBoundaries(t *testing.T) {
+	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
+	var foreignRequests atomic.Int32
+	foreign := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { foreignRequests.Add(1) }))
+	defer foreign.Close()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) < 7 || parts[1] != "api" || parts[4] != "acme" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		repository := parts[5]
+		if r.Header.Get("Cookie") != "" {
+			t.Error("source received cookies")
+		}
+		if repository != "anonymous" && r.Header.Get("Authorization") == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if token := r.Header.Get("Authorization"); token != "" && token != "Bearer source-"+repository {
+			t.Error("source received another repository's credential")
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		switch parts[6] {
+		case "git":
+			_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, testSHA)
+		case "tarball":
+			if repository == "foreign" {
+				http.Redirect(w, r, foreign.URL+"/archive", http.StatusFound)
+				return
+			}
+			http.Redirect(w, r, "/api/v3/repos/acme/"+repository+"/archive", http.StatusFound)
+		case "archive":
+			_, _ = w.Write(archive)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	denied := errors.New("source policy denied")
+	var revoked atomic.Bool
+	var provisions atomic.Int32
+	option := WithRepositorySourceTokenProvider(server.URL, true, func(_ context.Context, ref Reference) (string, error) {
+		provisions.Add(1)
+		if ref.ServerURL != server.URL || ref.Owner != "acme" || ref.Repository == "anonymous" {
+			t.Error("credential requested outside selected authenticated source")
+		}
+		if revoked.Load() || ref.Repository == "denied" {
+			return "", denied
+		}
+		return "source-" + ref.Repository, nil
+	})
+	resolver, err := NewResolver(server.Client(), option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	store, err := NewStore(root, server.Client(), option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, repository := range []string{"anonymous", "private", "other"} {
+		ref, _ := Parse("acme/" + repository + "@main")
+		ref.ServerURL = server.URL
+		resolved, err := resolver.Resolve(t.Context(), ref)
+		if err != nil || resolved.Commit != testSHA {
+			t.Fatalf("resolve %s: %v", repository, err)
+		}
+		materialized, err := store.Materialize(t.Context(), resolved)
+		if err != nil {
+			t.Fatalf("materialize %s: %v", repository, err)
+		}
+		resolved.SourceDigest = materialized.SourceDigest
+		materialized.Release()
+		resolved.SourceDigest = "sha256:" + strings.Repeat("0", 64)
+		if _, err := store.Materialize(t.Context(), resolved); err == nil {
+			t.Fatal("accepted mismatched immutable digest")
+		}
+	}
+	ref, _ := Parse("acme/private@" + testSHA)
+	ref.ServerURL = server.URL
+	resolved := Resolved{Reference: ref, Commit: testSHA}
+	revoked.Store(true)
+	if _, err := store.Materialize(t.Context(), resolved); !errors.Is(err, denied) {
+		t.Fatalf("cached private source bypassed current policy: %v", err)
+	}
+	unauthenticated, err := NewStore(root, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unauthenticated.Materialize(t.Context(), resolved); err == nil {
+		t.Fatal("cached private source readable without a credential provider")
+	}
+	revoked.Store(false)
+	for _, repository := range []string{"denied", "foreign"} {
+		ref, _ := Parse("acme/" + repository + "@" + testSHA)
+		ref.ServerURL = server.URL
+		if _, err := store.Materialize(t.Context(), Resolved{Reference: ref, Commit: testSHA}); err == nil {
+			t.Fatalf("accepted denied source %s", repository)
+		}
+	}
+	before := provisions.Load()
+	// A different origin must not invoke the selected origin's credential provider.
+	ref.ServerURL = foreign.URL
+	if _, err := store.Materialize(t.Context(), Resolved{Reference: ref, Commit: testSHA}); err == nil {
+		t.Fatal("accepted invalid archive at other origin")
+	}
+	if provisions.Load() != before || foreignRequests.Load() != 1 {
+		t.Fatal("cross-origin redirect or credential request escaped its boundary")
+	}
+}
+
+func TestGHESAnonymousRefsDoNotRequireSourceAuthorization(t *testing.T) {
+	for _, endpoint := range []string{"git/ref/heads/main", "commits/main"} {
+		for _, reusable := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reusable=%t", endpoint, reusable), func(t *testing.T) {
+				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("Authorization") != "" {
+						t.Error("anonymous source received credentials")
+					}
+					if r.URL.Path != "/api/v3/repos/acme/action/"+endpoint {
+						http.NotFound(w, r)
+						return
+					}
+					_, _ = fmt.Fprintf(w, `{"sha":%q,"object":{"type":"commit","sha":%q}}`, testSHA, testSHA)
+				}))
+				defer server.Close()
+				resolver, err := NewResolver(server.Client(), WithRepositorySourceTokenProvider(server.URL, false, func(context.Context, Reference) (string, error) {
+					t.Error("anonymous ref requested a source token")
+					return "", errors.New("source access disabled")
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				ref, _ := Parse("acme/action@main")
+				ref.ServerURL, ref.RepositoryRoot = server.URL, reusable
+				resolved, err := resolver.Resolve(t.Context(), ref)
+				if err != nil || resolved.Commit != testSHA {
+					t.Fatalf("anonymous ref resolution: commit=%s error=%v", resolved.Commit, err)
+				}
+			})
+		}
+	}
+}
+
+func TestGHESPrivateReusableAuthenticationRequiresOptIn(t *testing.T) {
+	for _, private := range []bool{false, true} {
+		for _, optIn := range []bool{false, true} {
+			t.Run(fmt.Sprintf("private=%t/optIn=%t", private, optIn), func(t *testing.T) {
+				archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
+				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("Authorization") == "" {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					if r.URL.Path == "/api/v3/repos/acme/reusable" {
+						visibility := "public"
+						if private {
+							visibility = "private"
+						}
+						_, _ = fmt.Fprintf(w, `{"private":%t,"visibility":%q}`, private, visibility)
+						return
+					}
+					_, _ = w.Write(archive)
+				}))
+				defer server.Close()
+				store, err := NewStore(t.TempDir(), server.Client(), WithRepositorySourceTokenProvider(server.URL, optIn, func(context.Context, Reference) (string, error) { return "source-token", nil }))
+				if err != nil {
+					t.Fatal(err)
+				}
+				ref, _ := Parse("acme/reusable@" + testSHA)
+				ref.ServerURL, ref.RepositoryRoot = server.URL, true
+				material, err := store.Materialize(t.Context(), Resolved{Reference: ref, Commit: testSHA})
+				switch {
+				case private && !optIn:
+					if err == nil || !strings.Contains(err.Error(), "opt-in") {
+						t.Fatalf("private reusable opt-in: %v", err)
+					}
+				case err != nil:
+					t.Fatal(err)
+				default:
+					material.Release()
+				}
+			})
+		}
+	}
+}
+
 func TestResolverTagPeelingAndHeaders(t *testing.T) {
 	var calls []string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -72,12 +72,13 @@ func hostedError(kind hostedFailureKind, err error) error {
 }
 
 type actionSourceAuthentication struct {
-	provider   gharuntime.ActionSourceTokenProvider
-	redactor   gharuntime.Redactor
-	warnings   io.Writer
-	once       sync.Once
-	credential string
-	err        error
+	provider     gharuntime.ActionSourceTokenProvider
+	repositories gharuntime.RepositorySourceTokenProvider
+	redactor     gharuntime.Redactor
+	warnings     io.Writer
+	once         sync.Once
+	credential   string
+	err          error
 }
 
 type repositorySourceSwitch struct {
@@ -98,7 +99,7 @@ func (s *repositorySourceSwitch) set(source compiler.RepositorySource) {
 	s.mu.Unlock()
 }
 
-func importerJobActionSourceAuthentication(warnings io.Writer, clientVersion string) *actionSourceAuthentication {
+func jobActionSourceAuthentication(warnings io.Writer, clientVersion string) *actionSourceAuthentication {
 	authentication := &actionSourceAuthentication{
 		redactor: gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 		warnings: warnings,
@@ -113,7 +114,35 @@ func importerJobActionSourceAuthentication(warnings io.Writer, clientVersion str
 		return authentication
 	}
 	authentication.provider = provider
+	authentication.repositories = provider
 	return authentication
+}
+
+func (a *actionSourceAuthentication) repositoryOption(serverURL string, privateReusableWorkflows bool) actionsource.Option {
+	var redactor gharuntime.Redactor
+	var redactorErr error
+	if a != nil {
+		redactor, redactorErr = gharuntime.ResolveAgentRedactorBeforeWorkflow(a.redactor)
+	}
+	return actionsource.WithRepositorySourceTokenProvider(serverURL, privateReusableWorkflows, func(ctx context.Context, ref actionsource.Reference) (string, error) {
+		if a == nil || a.repositories == nil {
+			return "", fmt.Errorf("job-bound repository source authentication is unavailable")
+		}
+		if redactorErr != nil || redactor == nil {
+			return "", fmt.Errorf("repository source credential redactor is unavailable")
+		}
+		token, err := a.repositories.RepositorySourceToken(ctx, ref.ServerURL, ref.Owner+"/"+ref.Repository)
+		if err != nil {
+			return "", err
+		}
+		if err := redactor.AddRedaction(ctx, token); err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return "", fmt.Errorf("could not register repository source credential redaction")
+		}
+		return token, nil
+	})
 }
 
 func (a *actionSourceAuthentication) option(repository string) actionsource.Option {

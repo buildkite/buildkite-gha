@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -385,11 +386,13 @@ func TestActionLockResolverDownloadsExactCommitDirectlyFromCodeload(t *testing.T
 	}
 }
 
-func TestGHESPublicReusableAndNestedActionsCompileAndRun(t *testing.T) {
-	const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	files := map[string]string{
-		".github/workflows/reuse.yml": "on: workflow_call\njobs:\n  call:\n    uses: ./.github/workflows/nested.yml\n",
-		".github/workflows/nested.yml": `on: workflow_call
+func TestGHESReusableAndNestedActionsCompileAndRun(t *testing.T) {
+	for _, authenticated := range []bool{false, true} {
+		t.Run(fmt.Sprintf("authenticated=%t", authenticated), func(t *testing.T) {
+			const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			files := map[string]string{
+				".github/workflows/reuse.yml": "on: workflow_call\njobs:\n  call:\n    uses: ./.github/workflows/nested.yml\n",
+				".github/workflows/nested.yml": `on: workflow_call
 jobs:
   execute:
     runs-on: ubuntu-latest
@@ -399,7 +402,7 @@ jobs:
       - id: parent
         uses: o/r/parent@v1
 `,
-		"parent/action.yml": `name: Parent
+				"parent/action.yml": `name: Parent
 outputs:
   marker:
     value: ${{ steps.child.outputs.marker }}
@@ -407,8 +410,8 @@ runs:
   using: composite
   steps:
     - id: child
-      uses: o/r/child@` + commit + "\n",
-		"child/action.yml": `name: Child
+      uses: o/public/child@` + commit + "\n",
+				"child/action.yml": `name: Child
 outputs:
   marker:
     value: ${{ steps.write.outputs.marker }}
@@ -419,84 +422,159 @@ runs:
       shell: bash
       run: echo 'marker=enterprise-source' >> "$GITHUB_OUTPUT"
 `,
-	}
-	var archive bytes.Buffer
-	gz := gzip.NewWriter(&archive)
-	tw := tar.NewWriter(gz)
-	for name, body := range files {
-		if err := tw.WriteHeader(&tar.Header{Name: "root/" + name, Mode: 0o644, Size: int64(len(body))}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := tw.Write([]byte(body)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := gz.Close(); err != nil {
-		t.Fatal(err)
-	}
-	var archives int
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
-			t.Error("GHES received credentials")
-		}
-		switch r.URL.Path {
-		case "/api/v3/repos/o/r/git/ref/tags/v1":
-			_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, commit)
-		case "/api/v3/repos/o/r/tarball/" + commit:
-			archives++
-			_, _ = w.Write(archive.Bytes())
-		default:
-			t.Errorf("unexpected GHES request: %s", r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	resolver, err := source.NewResolver(server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := source.NewStore(t.TempDir(), server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	repositorySource := compiler.MemoizeRepositorySource(compiler.PublicActionSource{Resolver: resolver, Store: store})
-	workspace := t.TempDir()
-	workflowPath := ".github/workflows/caller.yml"
-	workflow := "on: push\njobs:\n  reuse:\n    uses: o/r/.github/workflows/reuse.yml@v1\n"
-	writeFixtureFile(t, workspace, workflowPath, workflow)
-	event := []byte(fmt.Sprintf(`{"provider":"github","server_url":%q,"event":"push","repository":{"owner":"caller","name":"project","default_branch":"main"},"ref":"refs/heads/main","sha":%q,"actor":"test"}`, server.URL, commit))
-	bundle, err := compiler.CompileBundlePlansContext(t.Context(), filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("1", 64), compiler.Options{
-		EventTrust:     compiler.EventUntrusted,
-		Runners:        compiler.RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
-		ResolveActions: true, ActionSource: repositorySource, RepositorySource: repositorySource,
-	})
-	if err != nil || len(bundle.Plans) != 1 {
-		t.Fatalf("compile: %v; plans=%d", err, len(bundle.Plans))
-	}
-	job := bundle.Plans[0].Job
-	if len(job.Actions) != 2 {
-		t.Fatalf("action locks = %#v", job.Actions)
-	}
-	for _, lock := range job.Actions {
-		if lock.ServerURL != server.URL || lock.Commit != commit || lock.SourceDigest == "" {
-			t.Fatalf("lost immutable source identity: %#v", lock)
-		}
-	}
-	// Runtime starts with a cold cache, as it does on another hosted agent.
-	runtimeStore, err := source.NewStore(t.TempDir(), server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var logs bytes.Buffer
-	result, err := (Runner{Actions: runtimeStore, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
-	if err != nil || result.Conclusion != "success" || result.Outputs["marker"] != "enterprise-source" {
-		t.Fatalf("run: %v; result=%#v\n%s", err, result, logs.String())
-	}
-	if archives != 2 {
-		t.Fatalf("archive downloads = %d, want compile and cold runtime", archives)
+			}
+			var archive bytes.Buffer
+			gz := gzip.NewWriter(&archive)
+			tw := tar.NewWriter(gz)
+			for name, body := range files {
+				if err := tw.WriteHeader(&tar.Header{Name: "root/" + name, Mode: 0o644, Size: int64(len(body))}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := tw.Write([]byte(body)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := gz.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var archives int
+			phase := "importer"
+			denyPublic := false
+			requests := map[string]int{}
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if authenticated && r.Header.Get("Authorization") == "" {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				wantToken := ""
+				if authenticated {
+					repository := "r"
+					if strings.HasPrefix(r.URL.Path, "/api/v3/repos/o/public/") {
+						repository = "public"
+					}
+					wantToken = "Bearer source-" + phase + "-" + repository
+				}
+				if r.Header.Get("Authorization") != wantToken || r.Header.Get("Cookie") != "" {
+					t.Error("GHES received wrong job credentials")
+				}
+				switch r.URL.Path {
+				case "/api/v3/repos/o/r/git/ref/tags/v1":
+					_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, commit)
+				case "/api/v3/repos/o/r/tarball/" + commit, "/api/v3/repos/o/public/tarball/" + commit:
+					archives++
+					_, _ = w.Write(archive.Bytes())
+				default:
+					t.Errorf("unexpected GHES request: %s", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests[phase]++
+				if requests[phase] > 10 {
+					w.WriteHeader(http.StatusTooManyRequests)
+					return
+				}
+				if !authenticated {
+					t.Error("anonymous source requested credentials")
+				}
+				if r.URL.Path != "/jobs/"+testCacheJobID+"/github_source_access_token" || r.Header.Get("Authorization") != "Token job-"+phase {
+					t.Error("source service received wrong job authentication")
+				}
+				var request map[string]string
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request) != 1 || request["repo_url"] != server.URL+"/o/r" && request["repo_url"] != server.URL+"/o/public" {
+					t.Error("source service received wrong repository or caller-supplied authority")
+				}
+				repository := strings.TrimPrefix(request["repo_url"], server.URL+"/o/")
+				if denyPublic && repository == "public" {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				_, _ = fmt.Fprintf(w, `{"token":%q}`, "source-"+phase+"-"+repository)
+			}))
+			defer tokens.Close()
+			option := func(jobToken string) source.Option {
+				provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: tokens.URL, JobID: testCacheJobID, JobToken: jobToken})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return source.WithRepositorySourceTokenProvider(server.URL, true, func(ctx context.Context, ref source.Reference) (string, error) {
+					return provider.RepositorySourceToken(ctx, ref.ServerURL, ref.Owner+"/"+ref.Repository)
+				})
+			}
+			resolver, err := source.NewResolver(server.Client(), option("job-importer"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := source.NewStore(t.TempDir(), server.Client(), option("job-importer"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			repositorySource := compiler.MemoizeRepositorySource(compiler.PublicActionSource{Resolver: resolver, Store: store})
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/caller.yml"
+			workflow := "on: push\njobs:\n  reuse:\n    uses: o/r/.github/workflows/reuse.yml@v1\n"
+			writeFixtureFile(t, workspace, workflowPath, workflow)
+			event := []byte(fmt.Sprintf(`{"provider":"github","server_url":%q,"event":"push","repository":{"owner":"o","name":"project","default_branch":"main"},"ref":"refs/heads/main","sha":%q,"actor":"test"}`, server.URL, commit))
+			bundle, err := compiler.CompileBundlePlansContext(t.Context(), filepath.Join(workspace, workflowPath), []byte(workflow), event, "test", "sha256:"+strings.Repeat("1", 64), compiler.Options{
+				EventTrust:     compiler.EventUntrusted,
+				Runners:        compiler.RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+				ResolveActions: true, ActionSource: repositorySource, RepositorySource: repositorySource,
+			})
+			if err != nil || len(bundle.Plans) != 1 {
+				t.Fatalf("compile: %v; plans=%d", err, len(bundle.Plans))
+			}
+			job := bundle.Plans[0].Job
+			if len(job.Actions) != 2 {
+				t.Fatalf("action locks = %#v", job.Actions)
+			}
+			for _, lock := range job.Actions {
+				if lock.ServerURL != server.URL || lock.Commit != commit || lock.SourceDigest == "" {
+					t.Fatalf("lost immutable source identity: %#v", lock)
+				}
+			}
+			// Runtime starts with a cold cache, as it does on another hosted agent.
+			phase = "runtime"
+			runtimeStore, err := source.NewStore(t.TempDir(), server.Client(), option("job-runtime"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			result, err := (Runner{Actions: runtimeStore, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+			if err != nil || result.Conclusion != "success" || result.Outputs["marker"] != "enterprise-source" {
+				t.Fatalf("run: %v; result=%#v\n%s", err, result, logs.String())
+			}
+			if archives != 4 {
+				t.Fatalf("archive downloads = %d, want two repositories at compile and cold runtime", archives)
+			}
+			t.Logf("source-token requests: importer=%d consuming-job=%d", requests["importer"], requests["runtime"])
+			encoded, err := json.Marshal(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, credential := range []string{"source-importer", "source-runtime", "job-importer", "job-runtime"} {
+				if bytes.Contains(encoded, []byte(credential)) || strings.Contains(logs.String(), credential) {
+					t.Fatal("source credential escaped into plan or execution logs")
+				}
+			}
+			if authenticated {
+				denyPublic = true
+				deniedStore, err := source.NewStore(t.TempDir(), server.Client(), option("job-runtime"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, err := (Runner{Actions: deniedStore, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+				if err == nil && result.Conclusion == "success" {
+					t.Fatal("nested source borrowed its parent's authority")
+				}
+				if !strings.Contains(fmt.Sprint(err)+logs.String(), "repository source access is unavailable to this job") {
+					t.Fatalf("nested source failed for an unrelated reason: %v", err)
+				}
+			}
+		})
 	}
 }
 

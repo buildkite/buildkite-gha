@@ -1,4 +1,4 @@
 // Package source resolves, verifies, and caches immutable GitHub repository
-// source trees for public actions and for public or approved private reusable
-// workflows.
+// source trees. GHES authentication uses a separately authorized repository
+// credential provider; private reusable workflows require explicit opt-in.
 package source

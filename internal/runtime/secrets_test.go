@@ -189,7 +189,7 @@ func TestResolveAgentRedactorBeforeWorkflowPinsPointerWithoutMutatingCaller(t *t
 	t.Setenv("PATH", lookupDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	configured := &AgentRedactor{}
-	resolved, err := resolveAgentRedactorBeforeWorkflow(configured)
+	resolved, err := ResolveAgentRedactorBeforeWorkflow(configured)
 	if err != nil {
 		t.Fatal(err)
 	}
