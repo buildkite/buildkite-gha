@@ -48,6 +48,15 @@ conservative without granting credentials to known-unreachable paths:
 - Workflow-authored `toJSON(github)` and direct `github.token` access retain
   distinct provenance from action-authored access.
 
+A reachable native GitHub checkout also authorizes the workflow's contents
+permission for Git, without requiring a textual token reference. Plans mark
+checkout-only token authority so runtime issuance stays lazy: an HTTPS Git
+credential lookup requests the token, rather than populating expression
+contexts before checkout. Ordinary token references retain their existing
+issuance and masking path. Checkout does not widen the server's workflow
+permission or event policy; see the
+[credential contract](compatibility-contract.md#credentials-and-cache-tools).
+
 ## Design
 
 The architecture separates source parsing, expression policy, normalized

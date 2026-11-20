@@ -482,3 +482,25 @@ func livePrerequisiteUnavailable(t *testing.T, format string, args ...any) {
 	}
 	t.Skip(message)
 }
+
+func buildLiveContainerRuntime(t *testing.T) string {
+	t.Helper()
+	if explicit := os.Getenv("BUILDKITE_GHA_TEST_RUNTIME"); explicit != "" {
+		if err := validateDockerMountFile(explicit); err != nil {
+			t.Fatalf("BUILDKITE_GHA_TEST_RUNTIME is not a mount-safe executable: %v", err)
+		}
+		return explicit
+	}
+	root := filepath.Dir(fixturePath(t))
+	binary := filepath.Join(t.TempDir(), "buildkite-gha")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	command := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", binary, "./cmd/buildkite-gha")
+	command.Dir = root
+	command.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build static test runtime: %v: %s", err, output)
+	}
+	return binary
+}

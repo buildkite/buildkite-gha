@@ -367,6 +367,9 @@ type GitHubToken struct {
 	Workflow    string            `json:"workflow"`
 	Permissions map[string]string `json:"permissions"`
 	Aliases     []string          `json:"aliases,omitempty"`
+	// CheckoutOnly defers issuance to Git credential lookup instead of
+	// resolving a token into the expression context during job setup.
+	CheckoutOnly bool `json:"checkout_only,omitempty"`
 }
 
 // OIDCConfiguration applies additional Buildkite claims to every OIDC token

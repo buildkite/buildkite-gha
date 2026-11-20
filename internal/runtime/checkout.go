@@ -75,9 +75,13 @@ func validCheckoutRepository(repository string) bool {
 }
 
 func (r Runner) runCheckout(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, commit string, inputs map[string]string) (Result, error) {
+	return r.runCheckoutWithAuthentication(ctx, processor, workspace, job, commit, inputs, "", nil)
+}
+
+func (r Runner) runCheckoutWithAuthentication(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, commit string, inputs map[string]string, authentication string, credentials *gitCredentialService) (Result, error) {
 	result := newResult()
 	const adapter = "checkout adapter"
-	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil
+	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil && credentials == nil
 	url, credentialHost, validProvider := checkoutRepositoryURL(job.Event.Provider, job.Event.Repository, job.Event.ServerURL)
 	if !validProvider || !gitutil.ValidObjectID(job.Event.SHA) {
 		return result, fmt.Errorf("%s requires a valid GitHub or Origin event repository and exact SHA; other event sources are unsupported", adapter)
@@ -130,7 +134,21 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandOutputProcess
 		// containing the executable pinned before workflow action hooks.
 		env["PATH"] = strings.Join([]string{filepath.Dir(git), "/usr/bin", "/bin"}, string(os.PathListSeparator))
 	}
-	base := checkoutGitBaseArgs()
+	base := checkoutGitBaseArgs(authentication == "")
+	if authentication != "" {
+		delete(env, "HOME")
+		env["GIT_CONFIG_GLOBAL"] = authentication
+	}
+	if credentials != nil {
+		if r.RepositoryCredentials != nil {
+			maps.Copy(env, r.RepositoryCredentials.proxyEnvironment)
+		}
+		env["RUNNER_TEMP"] = filepath.Dir(authentication)
+		base = append(base,
+			"-c", "credential.https://"+credentialHost+".useHttpPath=true",
+			"-c", "credential.https://"+credentialHost+".helper="+credentials.helper(),
+		)
+	}
 	runWithBase := func(runEnv map[string]string, commandBase []string, withCredentials bool, args ...string) error {
 		if withCredentials {
 			if err := r.runRepositoryProviderCheckoutGit(ctx, processor, checkoutDirectory, runEnv, git, commandBase, args, credentialHost); err != nil {
@@ -215,6 +233,18 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandOutputProcess
 	if err != nil || !gitutil.ValidObjectID(headSHA) || gitutil.ValidObjectID(checkoutTarget) && headSHA != checkoutTarget {
 		return result, fmt.Errorf("%s did not produce the requested detached revision", adapter)
 	}
+	if credentials != nil && actionintegration.CheckoutSupportsCredentialPersistence(commit) && (checkoutInput(inputs, "persist-credentials") == "" || checkoutInputTrue(checkoutInput(inputs, "persist-credentials"))) {
+		credentials.checkouts = append(credentials.checkouts, checkoutDirectory)
+		for key, value := range map[string]string{
+			"credential.https://" + credentialHost + ".helper":      credentials.helper(),
+			"credential.https://" + credentialHost + ".useHttpPath": "true",
+		} {
+			if err := run(env, false, "config", "--local", "--add", key, value); err != nil {
+				return result, err
+			}
+		}
+		_, _ = fmt.Fprintln(processor.stderr, "Checkout credentials remain available through a temporary Buildkite Git credential helper until job cleanup. Buildkite-issued GitHub tokens are not stored in Git configuration. Access follows the authorized workflow permissions.")
+	}
 	setCheckoutOutputs(result.Outputs, commit, checkoutRefOutput(inputs, job.Event.Ref), headSHA)
 	return result, nil
 }
@@ -279,15 +309,18 @@ func validateCheckoutRefProvenance(sourceInputs []program.Binding, evaluatedInpu
 	return nil
 }
 
-func checkoutGitBaseArgs() []string {
-	return []string{
-		"--literal-pathspecs",
-		"-c", "credential.helper=", "-c", "http.extraheader=", "-c", "core.hooksPath=/dev/null",
+func checkoutGitBaseArgs(resetAuthentication bool) []string {
+	args := []string{"--literal-pathspecs"}
+	if resetAuthentication {
+		args = append(args, "-c", "credential.helper=", "-c", "http.extraheader=")
+	}
+	return append(args,
+		"-c", "core.hooksPath=/dev/null",
 		"-c", "http.followRedirects=false",
 		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
 		"-c", "protocol.version=2",
 		"-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true", "-c", "core.commitGraph=false", "-c", "fetch.writeCommitGraph=false",
-	}
+	)
 }
 
 func checkoutGitLFSFilterArgs(base []string, gitLFS string) []string {

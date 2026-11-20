@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
@@ -22,6 +23,9 @@ func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRun
 	}
 	if args[0] == gharuntime.ContainerProcessHelperCommand {
 		return gharuntime.RunContainerProcessHelper(args[1:])
+	}
+	if args[0] == gharuntime.GitCredentialHelperCommand {
+		return gharuntime.RunGitCredentialHelper(args[1:], os.Stdin, stdout, stderr)
 	}
 	ctx, finishStats := sourceAPIStatsContext(context.Background(), args, stderr)
 	defer finishStats()

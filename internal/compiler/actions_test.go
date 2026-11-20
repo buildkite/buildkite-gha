@@ -2033,7 +2033,7 @@ func TestCheckoutServerURLExpressionAndSourceHost(t *testing.T) {
 					t.Fatalf("compile = %#v, %v", bundle.Plans, err)
 				}
 				job := bundle.Plans[0].Job
-				if job.Event.ServerURL != server || len(job.Actions) != 1 || job.Actions[0].ServerURL != server || job.HasCapability("provider-token-read") != native || job.GitHubToken != nil {
+				if job.Event.ServerURL != server || len(job.Actions) != 1 || job.Actions[0].ServerURL != server || job.HasCapability("provider-token-read") != native || (job.GitHubToken != nil) != native {
 					t.Fatalf("checkout identity or authority = %#v", job)
 				}
 				if got := job.Program.Job.Steps[0].Invocation.With[0].Value.Source; got != input {
@@ -2059,7 +2059,7 @@ jobs:
     steps:
       - uses: actions/checkout@`+actionintegration.CheckoutV7Commit+`
         with:
-          persist-credentials: true
+          persist-credentials: unsupported
 `)
 	compile := func(enabled bool) (Bundle, error) {
 		t.Helper()
@@ -2809,7 +2809,7 @@ func TestCheckoutPostHogRefExpression(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(plans) != 1 || plans[0].GitHubToken != nil || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network", "provider-token-read"}) {
+			if len(plans) != 1 || plans[0].GitHubToken == nil || !plans[0].GitHubToken.CheckoutOnly || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network", "provider-token-read", "provider-token-write"}) {
 				t.Fatalf("checkout authority = %#v", plans)
 			}
 			if got := programBindingMap(plans[0].Program.Job.Steps[0].Invocation.With)["ref"]; got != test.wantRef {
@@ -2845,6 +2845,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 
 	accepted := []string{
 		"",
+		"        with:\n          persist-credentials: true\n",
 		"        with:\n          repository: buildkite/buildkite-gha\n          ref: 1111111111111111111111111111111111111111\n          fetch-depth: '1'\n          persist-credentials: false\n          clean: true\n          set-safe-directory: true\n",
 		"        with:\n          fetch-depth: '0'\n",
 		"        with:\n          fetch-depth: '100'\n",
@@ -2860,7 +2861,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatalf("checkout with %q: %v", with, err)
 		}
-		if len(plans) != 1 || plans[0].GitHubToken != nil || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network", "provider-token-read"}) {
+		if len(plans) != 1 || plans[0].GitHubToken == nil || !plans[0].GitHubToken.CheckoutOnly || !reflect.DeepEqual(plans[0].GitHubToken.Permissions, map[string]string{"contents": "read"}) || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network", "provider-token-read", "provider-token-write"}) {
 			t.Fatalf("checkout plans = %#v", plans)
 		}
 	}
@@ -2873,7 +2874,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		"submodules":  "          submodules: yes\n",
 		"path":        "          path: nested/.git/path\n",
 		"fetch-depth": "          fetch-depth: '-1'\n",
-		"credentials": "          persist-credentials: true\n",
+		"credentials": "          persist-credentials: yes\n",
 	}
 	for name, input := range rejected {
 		t.Run(name, func(t *testing.T) {
@@ -2966,7 +2967,7 @@ func TestCheckoutCapabilityRequiresVerifiedRootAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bundle.Plans) != 1 || !reflect.DeepEqual(bundle.Plans[0].Job.RequiredCapabilities, []string{"network", "provider-token-read"}) ||
+	if len(bundle.Plans) != 1 || !reflect.DeepEqual(bundle.Plans[0].Job.RequiredCapabilities, []string{"network", "provider-token-read", "provider-token-write"}) ||
 		!reflect.DeepEqual(bundle.Plans[0].Authorization.ProviderTokenReadCapabilitySources, []string{"checkout-adapter"}) {
 		t.Fatalf("checkout plan = %#v", bundle.Plans)
 	}
@@ -3359,33 +3360,46 @@ func TestCompileBundleUnknownDownloadArtifactWarningIsDeduplicated(t *testing.T)
 	}
 }
 
-func TestNativeCheckoutIgnoresUpstreamTokenDefaultForOrigin(t *testing.T) {
+func TestNativeCheckoutUsesWorkflowPermissionAuthority(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n")
-	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
-		t.Fatal(err)
-	}
 	writeAction(t, remote, "", "name: checkout\ninputs:\n  token:\n    default: ${{ github.token }}\nruns:\n  using: node24\n  main: index.js\n")
-	event := bytes.Replace(pushEvent(t), []byte(`"provider": "github"`), []byte(`"provider": "cursor-origin"`), 1)
-	bundle, err := CompileBundleWithOptions(workflowPath, workflow, event, "0.0.0-test", testDistributionDigest, "importer", Options{
-		EventTrust: EventUntrusted,
-		Runners: RunnerPolicy{
-			Labels:          map[string]string{"ubuntu-latest": "hosted"},
-			UntrustedQueues: []string{"hosted"},
-		},
-		ResolveActions: true,
-		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Event.Provider != "cursor-origin" || bundle.Plans[0].Job.GitHubToken != nil ||
-		!reflect.DeepEqual(bundle.Plans[0].Job.RequiredCapabilities, []string{"network", "provider-token-read"}) {
-		t.Fatalf("Origin checkout plan = %#v", bundle.Plans)
+	for _, test := range []struct{ name, provider, permissions, contents string }{
+		{name: "Origin ignores upstream token default", provider: "cursor-origin"},
+		{name: "GitHub default read", provider: "github", contents: "read"},
+		{name: "GitHub explicit write", provider: "github", permissions: "permissions: {contents: write}\n", contents: "write"},
+		{name: "GitHub no contents", provider: "github", permissions: "permissions: {contents: none}\n"},
+		{name: "GitHub unspecified contents", provider: "github", permissions: "permissions: {issues: write}\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflow := []byte("on: push\n" + test.permissions + "jobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n")
+			if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			event := bytes.Replace(pushEvent(t), []byte(`"provider": "github"`), []byte(`"provider": "`+test.provider+`"`), 1)
+			bundle, err := CompileBundleWithOptions(workflowPath, workflow, event, "0.0.0-test", testDistributionDigest, "importer", Options{
+				EventTrust: EventUntrusted,
+				Runners: RunnerPolicy{
+					Labels:          map[string]string{"ubuntu-latest": "hosted"},
+					UntrustedQueues: []string{"hosted"},
+				},
+				ResolveActions: true,
+				ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+			})
+			if err != nil || len(bundle.Plans) != 1 {
+				t.Fatalf("checkout plans = %#v, %v", bundle.Plans, err)
+			}
+			job := bundle.Plans[0].Job
+			if job.Event.Provider != test.provider || !job.HasCapability("provider-token-read") || (job.GitHubToken != nil) != (test.contents != "") {
+				t.Fatalf("checkout authority = %#v", job)
+			}
+			if job.GitHubToken != nil && (!job.GitHubToken.CheckoutOnly || job.GitHubToken.Permissions["contents"] != test.contents) {
+				t.Fatalf("checkout token = %#v", job.GitHubToken)
+			}
+		})
 	}
 }
 
