@@ -10,7 +10,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/containerpolicy"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -62,7 +61,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if err != nil {
 		return nil, err
 	}
-	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, acceptedEmptyTypesDiagnostics(&document), cacheDiagnostics)
+	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, acceptedEmptyTypesDiagnostics(&document), acceptedEmptyDockerEntrypointsDiagnostics(parsed), cacheDiagnostics)
 	if err := filterActionlintDiagnostics(path, errs, expectedDiagnostics); err != nil {
 		return nil, err
 	}
@@ -320,6 +319,26 @@ func acceptedEmptyTypesDiagnostics(document *yaml.Node) []expectedActionlintDiag
 			diagnostics = append(diagnostics, expectedActionlintDiagnostic{
 				Position: nodePosition(types), Prefix: `"types" section should not be empty`,
 			})
+		}
+	}
+	return diagnostics
+}
+
+// Native direct actions accept an empty entrypoint as no override. The pinned
+// frontend rejects it, but retains the empty value and its exact position.
+func acceptedEmptyDockerEntrypointsDiagnostics(parsed *actionlint.Workflow) []expectedActionlintDiagnostic {
+	var diagnostics []expectedActionlintDiagnostic
+	if parsed == nil {
+		return nil
+	}
+	for _, job := range parsed.Jobs {
+		for _, step := range job.Steps {
+			action, ok := step.Exec.(*actionlint.ExecAction)
+			if ok && action.Uses != nil && strings.HasPrefix(action.Uses.Value, "docker://") && action.Entrypoint != nil && action.Entrypoint.Value == "" {
+				diagnostics = append(diagnostics, expectedActionlintDiagnostic{
+					Position: pointSpan(action.Entrypoint.Pos).Start, Prefix: "string should not be empty",
+				})
+			}
 		}
 	}
 	return diagnostics
@@ -894,12 +913,8 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			}
 			owned.Span = spanFrom(step.Pos, exec.Run.Value)
 		case *actionlint.ExecAction:
-			if exec.Entrypoint != nil || exec.Args != nil {
-				reason := "action entrypoint and args overrides are unsupported in the supported runtime subset"
-				if strings.HasPrefix(strings.ToLower(exec.Uses.Value), "docker://") {
-					reason = actionsource.UnsupportedContainerActionReason
-				}
-				return Job{}, locatedError(path, step.Pos, in.ID.Value, reason)
+			if (exec.Entrypoint != nil || exec.Args != nil) && !strings.HasPrefix(exec.Uses.Value, "docker://") {
+				return Job{}, locatedError(path, step.Pos, in.ID.Value, "action entrypoint and args overrides are unsupported in the supported runtime subset")
 			}
 			if strings.Contains(exec.Uses.Value, "${{") {
 				return Job{}, locatedError(path, exec.Uses.Pos, in.ID.Value, usesExpressionReason)
@@ -910,6 +925,17 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 				owned.With = make(map[string]string, len(exec.Inputs))
 				for name, input := range exec.Inputs {
 					owned.With[name] = input.Value.Value
+				}
+			}
+			if exec.Entrypoint != nil || exec.Args != nil {
+				if owned.With == nil {
+					owned.With = map[string]string{}
+				}
+				if exec.Entrypoint != nil {
+					owned.With["entrypoint"] = exec.Entrypoint.Value
+				}
+				if exec.Args != nil {
+					owned.With["args"] = exec.Args.Value
 				}
 			}
 			owned.Span = spanFrom(step.Pos, exec.Uses.Value)

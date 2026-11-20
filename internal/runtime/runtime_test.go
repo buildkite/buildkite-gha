@@ -340,6 +340,31 @@ echo after-soft`},
 	}
 }
 
+func TestRunJobPreservesPathAdditionsAfterEnvironmentPathWrite(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: PATH persistence\n")
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "add", Kind: "run", Command: `mkdir -p proof-bin
+printf '#!/bin/sh\nexit 0\n' > proof-bin/direct-tool
+chmod 755 proof-bin/direct-tool
+echo "$GITHUB_WORKSPACE/proof-bin" >> "$GITHUB_PATH"`},
+		{ID: "before", Kind: "run", Command: `test "$(command -v direct-tool)" = "$GITHUB_WORKSPACE/proof-bin/direct-tool"`},
+		{ID: "overwrite", Kind: "run", Command: `echo 'PATH=/usr/bin:/bin' >> "$GITHUB_ENV"
+echo /synthetic/new-bin >> "$GITHUB_PATH"`},
+		{ID: "after", Kind: "run", Command: `test "$PATH" = "/synthetic/new-bin:$GITHUB_WORKSPACE/proof-bin:/usr/bin:/bin"
+test "$(command -v direct-tool)" = "$GITHUB_WORKSPACE/proof-bin/direct-tool"
+echo PATH= >> "$GITHUB_ENV"`},
+		{ID: "empty-base", Kind: "run", Command: `test "$PATH" = "/synthetic/new-bin:$GITHUB_WORKSPACE/proof-bin"
+test "$(command -v direct-tool)" = "$GITHUB_WORKSPACE/proof-bin/direct-tool"`},
+	})
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() conclusion = %s, error = %v, logs:\n%s", result.Conclusion, err, logs.String())
+	}
+}
+
 func TestCompiledRunDefaultsEvaluateAtRuntime(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/defaults.yml"

@@ -94,6 +94,72 @@ artifact delivery; build-environment fallback and continuations retain their
 existing semantics. Namespace setup comes from the worker's `NSC_INSTANCE_ID`,
 not runner routing. Hosted tool-cache setup is explicit user intent.
 
+### Direct Docker image actions
+
+Direct `uses: docker://…` calls bind a literal public image reference in an
+image-only action lock, without a repository, source digest, or source mount.
+Keep repository-action verification unchanged. Lower direct calls to the existing
+Docker execution program, including calls inside composites and reusable workflows.
+Pull anonymously during job setup, deduplicate references, and execute inspected
+image IDs. Tags can change between jobs; digests bind image content.
+
+Evaluate `with` in its caller context once. Split direct `with.args` with
+`containerpolicy.ArgumentList`, not a shell or the metadata `runs.args` array
+rules. Use `with.entrypoint` as one executable. Preserve arbitrary inputs as
+`INPUT_*`, including empty values; omitted inputs stay absent. Image references
+alone grant no GitHub token authority.
+
+The November 17, 2026 [native Linux run](https://github.com/sj26-testier/gha-e2e-onboarding-r-5083e9027d7b/actions/runs/43991096197/attempts/1)
+executed [this immutable fixture](https://github.com/sj26-testier/gha-e2e-onboarding-r-5083e9027d7b/blob/ad91001fe7ad19fd304f25d82b6c3170c079da58/.github/workflows/native-docker.yml)
+on runner 2.338.2. All 27 direct-image steps succeeded; 21 instrumented invocations
+checked argument counts and hex bytes. Omitted, empty, and whitespace-only args
+produced no tokens; `""` produced one empty argument. Double quotes grouped words;
+single quotes and shell metacharacters remained literal. Unclosed double quotes
+grouped the remainder. Mixed-case input names worked, and input hyphens survived
+in environment names. Without overrides, image ENTRYPOINT/CMD defaults remained;
+nonempty args replaced CMD, and a nonempty entrypoint override cleared CMD.
+Empty entrypoint values retained the image entrypoint. This is native hosted
+Linux evidence, not complete quote/backslash, platform, or credential parity.
+
+The [environment follow-up](https://github.com/sj26-testier/gha-e2e-onboarding-r-5083e9027d7b/actions/runs/43995028870/attempts/1)
+and [PATH/job-container follow-up](https://github.com/sj26-testier/gha-e2e-onboarding-r-5083e9027d7b/actions/runs/44010396780/attempts/1)
+used the same runner version and hosted Linux image. Their immutable fixtures
+([environment](https://github.com/sj26-testier/gha-e2e-onboarding-r-5083e9027d7b/blob/1535cf7fe46243d6b10a0f60f6f9577c65fff1a8/.github/workflows/native-environment.yml),
+[PATH/job container](https://github.com/sj26-testier/gha-e2e-onboarding-r-5083e9027d7b/blob/a9c6ab30002d848d429c7dbb04c04632d15171ae/.github/workflows/native-path-branches.yml))
+establish these obligations:
+
+- Force `HOME=/github/home`, sharing its owned directory across Docker actions
+  and the parent job container. Preserve image `USER`; non-root HOME writes
+  and cross-job persistence were not established by the native probes.
+- Translate every environment value, including `INPUT_*`, by literal exact
+  or slash-prefix replacement for mounted paths. Leave embedded and near-prefix
+  strings unchanged. Do not normalize suffixes or translate raw arguments.
+- Keep image PATH unless workflow/job/step/action env or `GITHUB_ENV` explicitly
+  sets it. Never add `GITHUB_PATH` prepends to Docker actions; shell and JavaScript
+  processes still receive them, including after a later `GITHUB_ENV` PATH write.
+  Track the explicit source, including empty values, rather than inferring it
+  from the effective PATH string.
+- Translate PATH as one environment value, not as separate components. A
+  workspace prefix at its start translates; a non-leading component does not.
+
+These runs also cover 0–4 backslashes before double quotes and consecutive
+double quotes. They do not establish every environment collision, non-root
+permission, cancellation, platform, or backend branch.
+
+Keep Linux-only admission and runtime checks. Missing Docker or an inaccessible
+daemon must fail setup before workflow steps run. Reuse owned workspace and
+file-command mounts, environment translation, job/service networking, and cleanup.
+Do not borrow ambient Docker config, service credentials, or `GITHUB_TOKEN` for
+registry authentication. Keep private registries, Docker socket mounts, privileged
+mode, arbitrary action volumes/options, macOS, and Windows outside this boundary.
+
+[Compiled regressions](../internal/runtime/direct_docker_test.go) cover literal
+argv, single evaluation, nested calls, and setup failures. Their real-Docker cases
+cover host jobs and job-container siblings, service DNS, workspace and file-command
+effects, masking, cleanup, and image defaults. [Plan regressions](../internal/compiler/direct_docker_test.go)
+cover image-only serialization and identity/capability checks. These tests do not
+establish hosted Buildkite execution or released availability.
+
 ### Offline runner validation
 
 Standalone validation must accept `windows-latest` and `windows-2022` without

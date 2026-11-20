@@ -4,4 +4,9 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - uses: docker://alpine:3.20
+      - id: direct
+        uses: docker://alpine:3.20
+        with:
+          entrypoint: /bin/sh
+          args: -c "echo result=direct-image >> $GITHUB_OUTPUT"
+      - run: test '${{ steps.direct.outputs.result }}' = direct-image

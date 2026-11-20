@@ -107,7 +107,7 @@ type ActionLock struct {
 	RequestedRef string `json:"requested_ref,omitempty"`
 	Commit       string `json:"commit,omitempty"`
 	Path         string `json:"path,omitempty"`
-	SourceDigest string `json:"source_digest"`
+	SourceDigest string `json:"source_digest,omitempty"`
 	// Nil means provenance is absent; an empty list records no executable files.
 	ExecutablePaths []string                  `json:"executable_paths,omitzero"`
 	DockerImage     string                    `json:"docker_image,omitempty"`
@@ -1560,7 +1560,7 @@ func ValidateActionLockList(actions []ActionLock) (map[string]ActionLock, error)
 		if !actionLockIDPattern.MatchString(lock.ID) || i > 0 && actions[i-1].ID >= lock.ID {
 			return nil, fmt.Errorf("action locks must have valid, unique, sorted IDs")
 		}
-		if !digestPattern.MatchString(lock.SourceDigest) || len(lock.Children) > 1024 {
+		if lock.Source != "docker" && !digestPattern.MatchString(lock.SourceDigest) || len(lock.Children) > 1024 {
 			return nil, fmt.Errorf("action lock %q has invalid digest or too many children", lock.ID)
 		}
 		if len(lock.ExecutablePaths) > 50000 {
@@ -1691,6 +1691,9 @@ func validateActionLocks(job Job) error {
 		if !ok || !reachable[id] {
 			return fmt.Errorf("action program %q has no reachable immutable lock", id)
 		}
+		if lock.Source == "docker" && action.Runtime != "docker" {
+			return fmt.Errorf("action program %q must use its Docker image runtime", id)
+		}
 		if action.Runtime == "docker" {
 			image, _ := metadata.DockerImageReference(action.Image)
 			if image != lock.DockerImage {
@@ -1724,6 +1727,10 @@ func validateActionLocks(job Job) error {
 
 func validateLockIdentity(lock ActionLock) error {
 	switch lock.Source {
+	case "docker":
+		if !ValidContainerImageReference(lock.DockerImage) || lock.ServerURL != "" || lock.Repository != "" || lock.RequestedRef != "" || lock.Commit != "" || lock.Path != "" || lock.SourceDigest != "" || lock.ExecutablePaths != nil || len(lock.Children) != 0 {
+			return fmt.Errorf("invalid Docker image-only identity")
+		}
 	case "workspace":
 		if lock.ServerURL != "" || lock.Repository != "" || lock.RequestedRef != "" || lock.Commit != "" || lock.Path != "" && !cleanActionPath(lock.Path) {
 			return fmt.Errorf("invalid workspace identity")
@@ -1764,6 +1771,12 @@ func validateSelfRepositoryIdentity(uses string, lock ActionLock, containing *Re
 }
 
 func validateTopLevelIdentity(uses string, lock ActionLock) error {
+	if image, ok := metadata.DockerImageReference(uses); ok {
+		if lock.Source != "docker" || lock.DockerImage != image {
+			return fmt.Errorf("action reference does not match Docker image lock")
+		}
+		return nil
+	}
 	if after, ok := strings.CutPrefix(uses, "./"); ok {
 		path := after
 		if lock.Source != "workspace" || path != "" && !cleanActionPath(path) || lock.Path != path {
@@ -1779,6 +1792,9 @@ func validateTopLevelIdentity(uses string, lock ActionLock) error {
 }
 
 func validateChildIdentity(parent ActionLock, uses string, child ActionLock) error {
+	if strings.HasPrefix(uses, "docker://") {
+		return validateTopLevelIdentity(uses, child)
+	}
 	if after, ok := strings.CutPrefix(uses, "./"); ok {
 		path := after
 		if path != "" && !cleanActionPath(path) || child.Source != "workspace" || child.Path != path {

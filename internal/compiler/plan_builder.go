@@ -477,7 +477,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 	if len(actionRefs) != 0 && !built.resolved {
 		built.resolved = true
 		for _, ref := range actionRefs {
-			if !strings.HasPrefix(ref, "./") {
+			if !strings.HasPrefix(ref, "./") && !strings.HasPrefix(ref, "docker://") {
 				built.resolved = false
 				break
 			}

@@ -23,6 +23,8 @@ type JobResult struct {
 	errorsTruncated   bool
 	failureVisible    bool
 	requestedIDToken  bool
+	environmentPATH   *string // Explicit environment PATH, without GITHUB_PATH additions.
+	pathAdditions     []string
 }
 
 // FailureVisible reports whether the runtime expanded a section containing the failure.

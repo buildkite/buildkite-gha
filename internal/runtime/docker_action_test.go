@@ -199,7 +199,7 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(mounts) != 3 || !strings.HasSuffix(mounts[0], ",target=/github/file_commands") || mounts[1] != "type=bind,source="+resolvedWorkspace+",target=/github/workspace" || !strings.HasSuffix(mounts[2], ",target=/github/runner_temp") {
+	if len(mounts) != 4 || !strings.HasSuffix(mounts[0], ",target=/github/file_commands") || mounts[1] != "type=bind,source="+resolvedWorkspace+",target=/github/workspace" || !strings.HasSuffix(mounts[2], ",target=/github/runner_temp") || !strings.HasSuffix(mounts[3], "/_github_home,target=/github/home") {
 		t.Fatalf("fixed Docker mounts = %#v", mounts)
 	}
 	if workdir := argumentAfter(t, run, "--workdir"); workdir != "/github/workspace" {
@@ -221,7 +221,7 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 			}
 		}
 	}
-	for name, want := range map[string]string{"GITHUB_WORKSPACE=/github/workspace": "one fixed workspace", "RUNNER_TEMP=/github/runner_temp": "one translated runner temp"} {
+	for name, want := range map[string]string{"GITHUB_WORKSPACE=/github/workspace": "one fixed workspace", "RUNNER_TEMP=/github/runner_temp": "one translated runner temp", "HOME=/github/home": "one shared action home"} {
 		count := 0
 		for _, argument := range run {
 			if argument == name {

@@ -397,10 +397,10 @@ func TestValidateActionResolutionsAttributesMissingCalledWorkflowAction(t *testi
 	}
 }
 
-func TestActionResolutionMessageExplainsUnsupportedContainerAction(t *testing.T) {
-	reference := "docker://alpine:3.20"
-	_, err := source.Parse(reference)
-	want := `Action "docker://alpine:3.20" is unsupported: docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step`
+func TestActionResolutionMessageExplainsInvalidContainerImage(t *testing.T) {
+	reference := "docker://alpine@sha256:bad"
+	_, _, _, _, err := (&actionLockBuilder{}).describe(t.Context(), reference, nil, "")
+	want := `Action "docker://alpine@sha256:bad" is unsupported: invalid docker:// action image reference`
 	if got, detail, action := actionResolutionMessage(reference, err); got != want || detail != "" || action != reference {
 		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, empty detail, %q", got, detail, action, want, reference)
 	}

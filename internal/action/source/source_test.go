@@ -68,10 +68,10 @@ func TestParseDotPrefixedRepository(t *testing.T) {
 	}
 }
 
-func TestParseExplainsUnsupportedContainerActions(t *testing.T) {
+func TestParseRejectsImagesAsRepositorySources(t *testing.T) {
 	for _, reference := range []string{"docker://alpine:3.20", "docker://image@sha256:abc", "DOCKER://alpine:latest"} {
-		if _, err := Parse(reference); err == nil || err.Error() != UnsupportedContainerActionReason {
-			t.Errorf("Parse(%q) error = %v, want %q", reference, err, UnsupportedContainerActionReason)
+		if _, err := Parse(reference); err == nil || !strings.Contains(err.Error(), "not repository action sources") {
+			t.Errorf("Parse(%q) error = %v", reference, err)
 		}
 	}
 }

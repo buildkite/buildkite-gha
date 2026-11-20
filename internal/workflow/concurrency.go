@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/rhysd/actionlint"
 	"go.yaml.in/yaml/v4"
@@ -323,11 +322,6 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 			step.With[lower] = value
 		}
 	}
-	_, hasEntrypoint := step.With["entrypoint"]
-	_, hasArgs := step.With["args"]
-	if strings.HasPrefix(strings.ToLower(step.Uses), "docker://") && (hasEntrypoint || hasArgs) {
-		return Step{}, yamlNodeError(path, entries["with"], actionsource.UnsupportedContainerActionReason)
-	}
 	return step, nil
 }
 
@@ -353,9 +347,9 @@ func validateParallelStepSyntax(path string, step *yaml.Node) error {
 	if err != nil {
 		return yamlNodeError(path, step, fmt.Sprintf("validate parallel member: %v", err))
 	}
-	_, errs := actionlint.Parse(source)
-	if len(errs) != 0 {
-		return yamlNodeError(path, step, fmt.Sprintf("invalid parallel member: %s", errs[0].Message))
+	parsed, errs := actionlint.Parse(source)
+	if err := filterActionlintDiagnostics(path, errs, acceptedEmptyDockerEntrypointsDiagnostics(parsed)); err != nil {
+		return yamlNodeError(path, step, fmt.Sprintf("invalid parallel member: %v", err))
 	}
 	return nil
 }

@@ -22,6 +22,7 @@ import (
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/containerpolicy"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
@@ -432,6 +433,11 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	}
 	var containerMounts []containerMount
 	if containerSpec != nil {
+		home := filepath.Join(runnerTemp, "_github_home")
+		if err := os.MkdirAll(home, 0o755); err != nil {
+			return jobResult, fmt.Errorf("create job container home: %w", err)
+		}
+		containerMounts = append(containerMounts, containerMount{host: home, target: "/github/home"})
 		// Remote children of workspace composites are already present in the
 		// immutable lock graph even when the workspace action itself must remain
 		// lazy. Materialize every remote lock now because bind mounts cannot be
@@ -467,11 +473,11 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			}
 		}
 		if len(job.Actions) != 0 {
-			var mountErr error
-			containerMounts, mountErr = r.actionContainerMounts(runCtx, actions)
+			actionMounts, mountErr := r.actionContainerMounts(runCtx, actions)
 			if mountErr != nil {
 				return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, mountErr)
 			}
+			containerMounts = append(containerMounts, actionMounts...)
 		}
 		if eventPath != "" {
 			containerMounts = append(containerMounts, containerMount{host: filepath.Dir(eventPath), target: containerEventDirectory, readonly: true})
@@ -508,22 +514,22 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		runnerContext["tool_cache"] = r.jobContainer.containerPath(toolCache)
 	}
 	runtimeEnv := standardEnvironment(job, workspace, runnerTemp, toolCache, r.RunIdentity)
+	if r.jobContainer != nil {
+		runtimeEnv["HOME"] = "/github/home"
+	}
 	if eventPath != "" {
 		runtimeEnv["GITHUB_EVENT_PATH"] = eventPath
 	}
 	jobResult.Env = mergeStepEnvironment(runtimeEnv, jobEnv)
+	if path, ok := lookupEnvironment(jobEnv, "PATH"); ok {
+		jobResult.environmentPATH = &path
+	}
 	if r.jobContainer != nil && !explicitJobPATH {
 		jobResult.Env["PATH"] = r.jobContainer.imagePATH
 	}
 	if r.jobContainer == nil {
 		if path, ok := os.LookupEnv("PATH"); ok && environmentValue(jobResult.Env, "PATH") == "" {
 			mergeEnvironmentInto(jobResult.Env, map[string]string{"PATH": path})
-		}
-	}
-	if job.HasCapability("docker") {
-		r.explicitJobPATH = explicitJobPATH
-		if !explicitJobPATH {
-			r.implicitJobPATH = jobResult.Env["PATH"]
 		}
 	}
 	r.enableDockerBuildLoad(processor, jobResult.Env)
@@ -598,7 +604,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 			bindHashFilesContext(preCtx, &preEval)
 			wasUnsuccessful := preStatus.unsuccessful
 			preResult, preErr := r.prepareRemoteAction(runCtx, preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, posts, actions, prepared, &preStatus, true, nil, nil, nil)
-			commitResultEnvironment(jobResult.Env, preResult)
+			jobResult.commitEnvironment(preResult)
 			maps.Copy(jobResult.State, preResult.State)
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
 			eval.Env = jobResult.Env
@@ -746,6 +752,8 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 		}
 
 		jobEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
+		stepRunner := *r
+		stepRunner.environmentPATH = jobResult.environmentPATH
 		evalSnapshot := stepEval
 		if step.Background {
 			cancelStep()
@@ -756,7 +764,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 					defer cancelExecution()
 					executionEval := cloneExpressionContext(evalSnapshot)
 					bindHashFilesContext(stepCtx, &executionEval)
-					return r.executePlanStep(runCtx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, executionEval, posts, actions, prepared)
+					return stepRunner.executePlanStep(runCtx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, executionEval, posts, actions, prepared)
 				},
 				func(stepCtx context.Context) stepExecution {
 					return cancelledStepExecution(runCtx, stepCtx, step)
@@ -765,7 +773,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			continue
 		}
 		processor.logSection(displayName)
-		execution := r.executePlanStep(runCtx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, posts, actions, prepared)
+		execution := stepRunner.executePlanStep(runCtx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, posts, actions, prepared)
 		cancelStep()
 		if execution.outcome == "failure" {
 			processor.expandCurrentSection()
@@ -1645,18 +1653,20 @@ func ubuntuImageOS(osRelease []byte) string {
 
 // invocationEnvironment owns the environment overlay order for one step
 // invocation: job environment first, step environment second, with runtime
-// context names protected. It also captures whether the job or step pinned
-// PATH explicitly, which decides Docker action PATH precedence.
+// context names protected. environmentPATH retains the explicit PATH before
+// GITHUB_PATH additions; nil leaves Docker image PATH authoritative.
 type invocationEnvironment struct {
-	jobEnv       map[string]string
-	stepEnv      map[string]string
-	explicitPATH bool
+	jobEnv          map[string]string
+	stepEnv         map[string]string
+	environmentPATH *string
 }
 
 func (r *jobRun) invocationEnvironment(jobEnv, stepEnv map[string]string) invocationEnvironment {
-	_, stepPATH := lookupEnvironment(stepEnv, "PATH")
-	jobPATH := r.explicitJobPATH || environmentValue(jobEnv, "PATH") != r.implicitJobPATH
-	return invocationEnvironment{jobEnv: jobEnv, stepEnv: stepEnv, explicitPATH: jobPATH || stepPATH}
+	path := r.environmentPATH
+	if stepPATH, ok := lookupEnvironment(stepEnv, "PATH"); ok {
+		path = &stepPATH
+	}
+	return invocationEnvironment{jobEnv: jobEnv, stepEnv: stepEnv, environmentPATH: path}
 }
 
 // process is the environment for shell and JavaScript step processes.
@@ -1665,19 +1675,20 @@ func (e invocationEnvironment) process() map[string]string {
 }
 
 // docker overlays action-declared environment beneath the invocation
-// environment: action values fill only unset names, except that the action
-// may replace PATH when neither the job nor the step pinned one. It returns
-// the container environment and whether any layer set PATH explicitly, which
-// makes the Docker image PATH yield.
+// environment. PATH uses its explicit source, never the effective host PATH.
 func (e invocationEnvironment) docker(actionEnv, inputs map[string]string) (map[string]string, bool) {
 	env := mergeStepEnvironment(e.jobEnv, e.stepEnv, actionInputEnv(inputs))
+	deleteEnvironment(env, "PATH")
+	if e.environmentPATH != nil {
+		mergeEnvironmentInto(env, map[string]string{"PATH": *e.environmentPATH})
+	}
 	for name, value := range actionEnv {
-		if _, exists := env[name]; !exists || (name == "PATH" && !e.explicitPATH) {
+		if _, exists := env[name]; !exists {
 			env[name] = value
 		}
 	}
-	_, actionPATH := actionEnv["PATH"]
-	return env, e.explicitPATH || actionPATH
+	_, explicitPATH := lookupEnvironment(env, "PATH")
+	return env, explicitPATH
 }
 
 func mergeStepEnvironment(base map[string]string, overlays ...map[string]string) map[string]string {
@@ -1786,8 +1797,8 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 	requiredNode := map[int]bool{}
 	for _, lock := range actions.job.Actions {
 		// A native adapter replaces the admitted action's execution entirely,
-		// so its source tree is never mounted or classified for the container.
-		if usesNativeAdapter(lock) {
+		// and an image-only action has no source tree to mount.
+		if usesNativeAdapter(lock) || lock.Source == "docker" {
 			continue
 		}
 		entry := actions.locks[lock.ID]
@@ -2237,7 +2248,9 @@ func (r *jobRun) runActionStep(jobCtx, ctx context.Context, processor *commandOu
 		}
 		return result, nil
 	case metadata.RuntimeComposite:
-		return r.runCompositeAction(jobCtx, ctx, processor, workspace, job, resolved, inputs, invocationID, jobEnv, stepEnv, lifecycleEnvOverlay, actionEval, actionStatus, posts, actions, prepared, actionStack)
+		compositeRunner := *r
+		compositeRunner.environmentPATH = environment.environmentPATH
+		return compositeRunner.runCompositeAction(jobCtx, ctx, processor, workspace, job, resolved, inputs, invocationID, jobEnv, stepEnv, lifecycleEnvOverlay, actionEval, actionStatus, posts, actions, prepared, actionStack)
 	case metadata.RuntimeDocker:
 		if goruntime.GOOS == "darwin" {
 			return result, errUnsupportedf("docker action %q is unsupported on macOS runners", stepUses(step))
@@ -2252,6 +2265,13 @@ func (r *jobRun) runActionStep(jobCtx, ctx context.Context, processor *commandOu
 		if err != nil {
 			return result, err
 		}
+		entrypoint := action.Runs.Entrypoint
+		if actionLock.Source == "docker" {
+			// Direct action inputs are already evaluated in the caller's with
+			// context. Split data, never re-evaluate it as action metadata.
+			dockerArgs = containerpolicy.ArgumentList(inputs["args"])
+			entrypoint = inputs["entrypoint"]
+		}
 		dockerEnv, err := executionprogram.EvaluateBindings(actionProgram.Env, executionprogram.EvaluationContext{Expression: actionEval})
 		if err != nil {
 			return result, err
@@ -2265,7 +2285,7 @@ func (r *jobRun) runActionStep(jobCtx, ctx context.Context, processor *commandOu
 		if image != "" && image != actionLock.DockerImage {
 			return result, fmt.Errorf("docker action %q metadata image %q does not match planned image %q", stepUses(step), image, actionLock.DockerImage)
 		}
-		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Image: image, Entrypoint: action.Runs.Entrypoint, Args: dockerArgs, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
+		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Image: image, Entrypoint: entrypoint, Args: dockerArgs, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
 		return result, err
 	}
 	return result, errUnsupportedFeature("action_ref", "", "action %q uses unsupported runtime %q", stepUses(step), actionRuntime)
@@ -2384,7 +2404,12 @@ func (r *jobRun) runCompositeAction(jobCtx, ctx context.Context, processor *comm
 				child.Invocation.Lock = selector.Lock
 			}
 			if childErr == nil {
-				stepResult, childErr = r.runActionStep(jobCtx, ctx, processor, workspace, job, child, childInvocationID, childJobEnv, childEnv, childWith, eval, jobStatusValue(unsuccessful, cancelled), posts, actions, prepared, actionStack, lifecycleEnvOverlay)
+				childRunner := *r
+				if result.pathBaseSet {
+					path := result.pathBase
+					childRunner.environmentPATH = &path
+				}
+				stepResult, childErr = childRunner.runActionStep(jobCtx, ctx, processor, workspace, job, child, childInvocationID, childJobEnv, childEnv, childWith, eval, jobStatusValue(unsuccessful, cancelled), posts, actions, prepared, actionStack, lifecycleEnvOverlay)
 			}
 		case step.Run == nil || strings.TrimSpace(step.Run.Command.Source) == "":
 			childErr = fmt.Errorf("composite action step %d has no run command", i+1)

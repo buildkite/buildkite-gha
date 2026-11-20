@@ -31,8 +31,7 @@ type jobRun struct {
 	hardFailure     bool
 
 	runnerTemp       string
-	implicitJobPATH  string
-	explicitJobPATH  bool
+	environmentPATH  *string
 	jobContainer     *jobContainerBackend
 	jobDocker        *jobContainerBackend
 	prebuiltDocker   *prebuiltDockerBackend

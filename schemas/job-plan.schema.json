@@ -117,15 +117,16 @@
     "repository": {"type": "string", "maxLength": 140, "pattern": "^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?/[a-z0-9_.-]{1,100}$", "not": {"pattern": "/(?:\\.|\\.\\..*|.*\\.git)$"}},
     "actionLock": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "source", "source_digest"],
+      "required": ["id", "source"],
       "properties": {
-        "id": {"type": "string", "pattern": "^a-[0-9a-f]{16}$"}, "source": {"enum": ["workspace", "github"]},
+        "id": {"type": "string", "pattern": "^a-[0-9a-f]{16}$"}, "source": {"enum": ["workspace", "github", "docker"]},
         "server_url": {"$ref": "#/$defs/sourceServerURL"},
         "repository": {"$ref": "#/$defs/repository"}, "requested_ref": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\x00-\\x1f\\x7f]+$"},
         "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "path": {"$ref": "#/$defs/path"}, "source_digest": {"$ref": "#/$defs/digest"}, "executable_paths": {"type": "array", "maxItems": 50000, "uniqueItems": true, "items": {"$ref": "#/$defs/sourcePath"}}, "docker_image": {"$ref": "#/$defs/image"},
         "children": {"type": "object", "maxProperties": 1024, "propertyNames": {"minLength": 1, "maxLength": 2048, "pattern": "^[^\\x00-\\x1f\\x7f]+$"}, "additionalProperties": {"$ref": "#/$defs/selector"}}
       },
       "allOf": [
+        {"if": {"properties": {"source": {"const": "docker"}}, "required": ["source"]}, "then": {"required": ["docker_image"], "not": {"anyOf": [{"required": ["server_url"]}, {"required": ["repository"]}, {"required": ["requested_ref"]}, {"required": ["commit"]}, {"required": ["path"]}, {"required": ["source_digest"]}, {"required": ["executable_paths"]}, {"required": ["children"]}]}}, "else": {"required": ["source_digest"]}},
         {"if": {"properties": {"source": {"const": "workspace"}}, "required": ["source"]}, "then": {"not": {"anyOf": [{"required": ["server_url"]}, {"required": ["repository"]}, {"required": ["requested_ref"]}, {"required": ["commit"]}]}}},
         {"if": {"properties": {"source": {"const": "github"}}, "required": ["source"]}, "then": {"required": ["repository", "requested_ref", "commit"]}}
       ]

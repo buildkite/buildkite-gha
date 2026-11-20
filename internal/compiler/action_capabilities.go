@@ -14,10 +14,10 @@ import (
 func requiredCapabilities(repositoryRoot, workflowPath string, steps []workflow.Step) ([]string, error) {
 	capabilities := map[string]struct{}{}
 	for _, step := range steps {
-		if step.Kind != "uses" || !strings.HasPrefix(step.Uses, "./") {
+		if step.Kind != "uses" || !strings.HasPrefix(step.Uses, "./") && !strings.HasPrefix(step.Uses, "docker://") {
 			continue
 		}
-		if repositoryRoot == "" {
+		if repositoryRoot == "" && strings.HasPrefix(step.Uses, "./") {
 			return nil, fmt.Errorf("resolve local action %q: workflow path %q must identify a repository root", step.Uses, workflowPath)
 		}
 		if err := collectActionCapabilities(repositoryRoot, step.Uses, capabilities, nil); err != nil {
@@ -33,6 +33,12 @@ func requiredCapabilities(repositoryRoot, workflowPath string, steps []workflow.
 }
 
 func collectActionCapabilities(repositoryRoot, uses string, capabilities map[string]struct{}, stack []string) error {
+	if _, ok := metadata.DockerImageReference(uses); ok {
+		for _, capability := range metadata.RuntimeDocker.RequiredCapabilities() {
+			capabilities[capability] = struct{}{}
+		}
+		return nil
+	}
 	if !strings.HasPrefix(uses, "./") {
 		return fmt.Errorf("nested remote action %q is unsupported", uses)
 	}
