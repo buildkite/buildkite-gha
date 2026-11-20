@@ -316,6 +316,39 @@ func TestGHESRepositoryCredentialsPreserveSourceBoundaries(t *testing.T) {
 	}
 }
 
+func TestGHESAnonymousRefsDoNotRequireSourceAuthorization(t *testing.T) {
+	for _, endpoint := range []string{"git/ref/heads/main", "commits/main"} {
+		for _, reusable := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reusable=%t", endpoint, reusable), func(t *testing.T) {
+				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("Authorization") != "" {
+						t.Error("anonymous source received credentials")
+					}
+					if r.URL.Path != "/api/v3/repos/acme/action/"+endpoint {
+						http.NotFound(w, r)
+						return
+					}
+					_, _ = fmt.Fprintf(w, `{"sha":%q,"object":{"type":"commit","sha":%q}}`, testSHA, testSHA)
+				}))
+				defer server.Close()
+				resolver, err := NewResolver(server.Client(), WithRepositorySourceTokenProvider(server.URL, false, func(context.Context, Reference) (string, error) {
+					t.Error("anonymous ref requested a source token")
+					return "", errors.New("source access disabled")
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				ref, _ := Parse("acme/action@main")
+				ref.ServerURL, ref.RepositoryRoot = server.URL, reusable
+				resolved, err := resolver.Resolve(t.Context(), ref)
+				if err != nil || resolved.Commit != testSHA {
+					t.Fatalf("anonymous ref resolution: commit=%s error=%v", resolved.Commit, err)
+				}
+			})
+		}
+	}
+}
+
 func TestGHESPrivateReusableAuthenticationRequiresOptIn(t *testing.T) {
 	for _, private := range []bool{false, true} {
 		for _, optIn := range []bool{false, true} {

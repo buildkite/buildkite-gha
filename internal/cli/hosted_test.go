@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -538,6 +539,69 @@ func TestHostedGHESSourceAuthenticationRedactsAndPreservesReusableOptIn(t *testi
 			}
 			materialized.Release()
 		})
+	}
+}
+
+func TestGHESSourceRedactorIsPinnedBeforeLazyFetch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses shell executable fixtures")
+	}
+	trusted, writable := t.TempDir(), t.TempDir()
+	marker := filepath.Join(trusted, "redacted")
+	agentPath := filepath.Join(trusted, "buildkite-agent")
+	if err := os.WriteFile(agentPath, []byte("#!/bin/sh\nprintf registered > '"+marker+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lookup := t.TempDir()
+	lookupAgent := filepath.Join(lookup, "buildkite-agent")
+	if err := os.Symlink(agentPath, lookupAgent); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", writable+string(os.PathListSeparator)+lookup+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BUILDKITE_GHA_AGENT", "")
+	enterprise := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if _, err := os.Stat(marker); err != nil {
+			t.Error("source token used without the original redactor")
+		}
+		_, _ = io.WriteString(w, `{"object":{"type":"commit","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`)
+	}))
+	defer enterprise.Close()
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"token":"source-credential"}`)
+	}))
+	defer tokens.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", tokens.URL)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-only")
+	auth := jobActionSourceAuthentication(io.Discard, "test")
+	resolver, err := actionsource.NewResolver(enterprise.Client(), auth.repositoryOption(enterprise.URL, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model workflow code changing both PATH lookup and its original symlink
+	// after source configuration but before a lazy authenticated fetch.
+	shim := filepath.Join(writable, "buildkite-agent")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 42\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(lookupAgent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(shim, lookupAgent); err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := actionsource.Parse("acme/action@main")
+	ref.ServerURL = enterprise.URL
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("source fetch after PATH changes: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("original redactor was not called")
 	}
 }
 

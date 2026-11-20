@@ -156,7 +156,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			}
 			r.Cache = nil
 		} else {
-			resolved, err := resolveAgentRedactorBeforeWorkflow(r.Redactor)
+			resolved, err := ResolveAgentRedactorBeforeWorkflow(r.Redactor)
 			if err != nil {
 				if providerTokenRequired || oidcTokenRequired || secretsRequired || cacheRequired {
 					return JobResult{}, err

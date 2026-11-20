@@ -523,7 +523,17 @@ func (r *Resolver) resolveMutableUncached(ctx context.Context, ref Reference) (R
 			return resolveWithGit(ctx, r.cfg, ref)
 		}
 	}
-	resolved, err := r.resolveMutableViaAPI(ctx, ref)
+	resolved, err := r.resolveMutableViaAPI(ctx, ref, cfg)
+	var denied *NotPublicError
+	if errors.As(err, &denied) && cfg.repositoryTokenProvider != nil {
+		// A missing tag can still name an anonymous branch or commit. Finish
+		// anonymous resolution before requesting repository authorization.
+		cfg, err = cfg.authorizeRepository(ctx, r.client, ref)
+		if err != nil {
+			return Resolved{}, err
+		}
+		return r.resolveMutableViaAPI(ctx, ref, cfg)
+	}
 	if gitFallbackError(err) && r.gitRepositorySource(ref) {
 		return resolveWithGit(ctx, r.cfg, ref)
 	}
@@ -532,7 +542,7 @@ func (r *Resolver) resolveMutableUncached(ctx context.Context, ref Reference) (R
 
 // resolveMutableViaAPI resolves a tag, branch, or commit-ish through the
 // GitHub API, trying tag and branch refs before the commits endpoint.
-func (r *Resolver) resolveMutableViaAPI(ctx context.Context, ref Reference) (Resolved, error) {
+func (r *Resolver) resolveMutableViaAPI(ctx context.Context, ref Reference, cfg config) (Resolved, error) {
 	allNotFound := true
 	for _, kind := range []string{"tags", "heads"} {
 		var v struct {
@@ -541,9 +551,9 @@ func (r *Resolver) resolveMutableViaAPI(ctx context.Context, ref Reference) (Res
 				SHA  string `json:"sha"`
 			} `json:"object"`
 		}
-		err := r.get(ctx, ref, repoParts(ref, "git", "ref", kind, ref.Ref), &v)
+		err := r.get(ctx, ref, cfg, repoParts(ref, "git", "ref", kind, ref.Ref), &v)
 		if err == nil {
-			sha, err := r.peel(ctx, ref, v.Object.Type, v.Object.SHA)
+			sha, err := r.peel(ctx, ref, cfg, v.Object.Type, v.Object.SHA)
 			if err != nil {
 				return Resolved{}, err
 			}
@@ -555,17 +565,17 @@ func (r *Resolver) resolveMutableViaAPI(ctx context.Context, ref Reference) (Res
 		}
 		allNotFound = allNotFound && isGitHubNotFound(err)
 	}
-	resolved, err := r.resolveCommit(ctx, ref)
+	resolved, err := r.resolveCommit(ctx, ref, cfg)
 	if allNotFound {
 		err = markMissingRef(err)
 	}
 	return resolved, err
 }
-func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, error) {
+func (r *Resolver) resolveCommit(ctx context.Context, ref Reference, cfg config) (Resolved, error) {
 	var v struct {
 		SHA string `json:"sha"`
 	}
-	if err := r.get(ctx, ref, repoParts(ref, "commits", ref.Ref), &v); err != nil {
+	if err := r.get(ctx, ref, cfg, repoParts(ref, "commits", ref.Ref), &v); err != nil {
 		return Resolved{}, err
 	}
 	if !git.ValidObjectID(v.SHA) {
@@ -573,7 +583,7 @@ func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, 
 	}
 	return Resolved{Reference: ref, Commit: v.SHA}, nil
 }
-func (r *Resolver) peel(ctx context.Context, ref Reference, typ, sha string) (string, error) {
+func (r *Resolver) peel(ctx context.Context, ref Reference, cfg config, typ, sha string) (string, error) {
 	for range 5 {
 		if !git.ValidObjectID(sha) {
 			return "", fmt.Errorf("GitHub returned malformed object SHA")
@@ -590,7 +600,7 @@ func (r *Resolver) peel(ctx context.Context, ref Reference, typ, sha string) (st
 				SHA  string `json:"sha"`
 			} `json:"object"`
 		}
-		if err := r.get(ctx, ref, repoParts(ref, "git", "tags", sha), &v); err != nil {
+		if err := r.get(ctx, ref, cfg, repoParts(ref, "git", "tags", sha), &v); err != nil {
 			return "", err
 		}
 		typ, sha = v.Object.Type, v.Object.SHA
@@ -612,34 +622,21 @@ func apiURL(base *url.URL, parts ...string) *url.URL {
 	u.Path, u.RawPath = decoded.String(), escaped
 	return &u
 }
-func (r *Resolver) get(ctx context.Context, ref Reference, parts []string, out any) error {
-	cfg := r.cfg.forServer(ref.ServerURL)
-	request := func(cfg config) error {
-		authenticated := actionSourceToken(cfg, parts) != ""
-		budget := githubAPIBudgetKey{serverURL: ServerURL(ref.ServerURL), authenticated: authenticated}
-		if err := r.apiBudget.check(ctx, budget, cfg.now()); err != nil {
-			var rate *RateLimitError
-			if errors.As(err, &rate) {
-				recordGitHubAPISuppression(ctx, authenticated, parts)
-				recordSourceStat(ctx, "suppressed")
-			}
-			return err
-		}
-		err := githubAPIGet(ctx, r.client, cfg, parts, out)
+func (r *Resolver) get(ctx context.Context, ref Reference, cfg config, parts []string, out any) error {
+	authenticated := actionSourceToken(cfg, parts) != ""
+	budget := githubAPIBudgetKey{serverURL: ServerURL(ref.ServerURL), authenticated: authenticated}
+	if err := r.apiBudget.check(ctx, budget, cfg.now()); err != nil {
 		var rate *RateLimitError
 		if errors.As(err, &rate) {
-			r.apiBudget.record(budget, rate)
+			recordGitHubAPISuppression(ctx, authenticated, parts)
+			recordSourceStat(ctx, "suppressed")
 		}
 		return err
 	}
-	err := request(cfg)
-	var denied *NotPublicError
-	if errors.As(err, &denied) && cfg.repositoryTokenProvider != nil {
-		cfg, err = cfg.authorizeRepository(ctx, r.client, ref)
-		if err != nil {
-			return err
-		}
-		return request(cfg)
+	err := githubAPIGet(ctx, r.client, cfg, parts, out)
+	var rate *RateLimitError
+	if errors.As(err, &rate) {
+		r.apiBudget.record(budget, rate)
 	}
 	return err
 }

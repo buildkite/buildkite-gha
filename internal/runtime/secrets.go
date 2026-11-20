@@ -153,7 +153,9 @@ type AgentRedactor struct {
 	Executable string
 }
 
-func resolveAgentRedactorBeforeWorkflow(redactor Redactor) (Redactor, error) {
+// ResolveAgentRedactorBeforeWorkflow pins the redactor executable before any
+// workflow code can change PATH lookup or symlink targets.
+func ResolveAgentRedactorBeforeWorkflow(redactor Redactor) (Redactor, error) {
 	resolve := func(redactor AgentRedactor) (AgentRedactor, error) {
 		executable, err := resolveHostExecutableBeforeWorkflow(redactor.Executable, "buildkite-agent", "Buildkite Agent redactor")
 		if err != nil {

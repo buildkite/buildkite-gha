@@ -119,15 +119,23 @@ func jobActionSourceAuthentication(warnings io.Writer, clientVersion string) *ac
 }
 
 func (a *actionSourceAuthentication) repositoryOption(serverURL string, privateReusableWorkflows bool) actionsource.Option {
+	var redactor gharuntime.Redactor
+	var redactorErr error
+	if a != nil {
+		redactor, redactorErr = gharuntime.ResolveAgentRedactorBeforeWorkflow(a.redactor)
+	}
 	return actionsource.WithRepositorySourceTokenProvider(serverURL, privateReusableWorkflows, func(ctx context.Context, ref actionsource.Reference) (string, error) {
 		if a == nil || a.repositories == nil {
 			return "", fmt.Errorf("job-bound repository source authentication is unavailable")
+		}
+		if redactorErr != nil || redactor == nil {
+			return "", fmt.Errorf("repository source credential redactor is unavailable")
 		}
 		token, err := a.repositories.RepositorySourceToken(ctx, ref.ServerURL, ref.Owner+"/"+ref.Repository)
 		if err != nil {
 			return "", err
 		}
-		if err := a.redactor.AddRedaction(ctx, token); err != nil {
+		if err := redactor.AddRedaction(ctx, token); err != nil {
 			if ctx.Err() != nil {
 				return "", ctx.Err()
 			}
