@@ -320,6 +320,25 @@ backend support before this client.
 Local regression tests establish host preservation and fail-closed lookup
 behavior, not live GHES API availability or installation grants.
 
+Repository and organization variable resolution must distinguish personal and
+organization owners using the selected installation's account metadata. Skip
+the organization listing for a user-owned repository and return an empty
+organization scope without discarding repository variables. For an
+organization-owned repository, every upstream listing 404 must fail resolution,
+including the first organization page; only a successful empty listing means
+no shared organization variables. An upstream GitHub 404 is not the Agent API
+endpoint's backward-compatible unavailable/opt-out 404.
+
+Read-only REST observations on November 20, 2026 found GitHub.com returning
+repository-listing 200 with no variables and organization-listing 422 for a
+user-owned repository, versus 200 with no shared variables for an organization-owned
+repository. GHES 3.22.2 returned 200 with empty or shared organization variables
+with repository Variables access, 403 without that permission on a repository-visible
+token, and 422 when explicitly minting an ungranted permission. An organization-only
+token without repository visibility returned 404 on both repository variable
+listings. These observations do not establish an isolated repository-listing 200
+followed by organization-listing 404, or behavior on older GHES versions.
+
 Source references, action locks and reusable-workflow provenance carry their own
 optional canonical `server_url`. An omitted source origin means GitHub.com,
 never the event origin. Preserve it through pinning, nested self sources,
