@@ -376,19 +376,42 @@ separate GHES tree directories, mutable refs and API rate-limit budgets by origi
 Tree-cache maintenance must account for every origin without evicting leased trees.
 
 Source identity does not grant access. GitHub.com metadata tokens and reusable
-Git credentials must never authorize GHES sources. Authentication-required GHES
-repositories, including this lab's public repositories, remain unsupported;
-the hosted private-reusable opt-in guard stays in place. Never attach GHES
-workflow tokens to GitHub.com requests or infer a GitHub.com self source from a
-GHES event.
+Git credentials must never authorize GHES sources. After a GHES source request
+returns 401, 403 or 404, hosted importers and consuming jobs can request an
+exact-repository credential through the job-bound `github_source_access_token`
+endpoint. This requires backend support and its independent organization opt-in;
+anonymous sources do not require that endpoint. Denied or malformed credential
+responses fail closed. Private reusable workflows retain the separate
+`private-reusable-workflows` opt-in; public reusable sources that require login
+do not imply private reusable authorization.
+
+The backend authorizes repository access under the original caller's job policy,
+not membership in a server-verified source graph. The client consumes verified
+locks, downloads immutable commits and verifies tree digests; repository tokens
+cannot constrain reads to a path or commit. Nested sources do not acquire the
+containing source's authority. Source credentials are registered with the Agent
+redactor before use, remain outside plans and subprocess environments, and are
+not cached. Materializing an authenticated tree from disk requires a fresh
+authorization request. A compiler operation can reuse its already acquired tree
+lease; this does not promise revocation of delivered bytes or mint a token for
+every action reference. Keep these credentials separate from `github.token` and
+workflow permissions.
+Never attach GHES workflow tokens to GitHub.com requests or infer a GitHub.com
+self source from a GHES event.
+
+The initial backend contract is same-origin and same-owner, with existing
+managed-job eligibility, native private-sharing checks and no installation-grant
+pooling. Cross-owner public mirrors need a separate authorization contract;
+Connect fallback and cross-owner private sources are not enabled here.
 
 The [source regressions](../internal/action/source/source_test.go) cover host
 collisions, credential isolation, denied requests, redirects and cache eviction.
 The [runtime regression](../internal/runtime/actions_test.go) compiles remote
 and nested reusable workflows, then downloads and executes nested composite
 actions from a cold runtime cache using a local HTTPS GHES-shaped fixture.
-These tests establish the anonymous transport contract, not live authenticated
-GHES imports, webhook delivery or job-bound source-token authorization.
+Both anonymous and authenticated cases exercise the token-client wire contract
+against a simulated service. They do not establish live GHES imports, webhook
+delivery, deployed source-token policy or feature enablement.
 
 Native integration admission includes the source origin. A same-name GHES
 repository must not receive GitHub.com's native adapter or cache substitution.

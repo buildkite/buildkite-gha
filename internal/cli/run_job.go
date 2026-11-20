@@ -149,7 +149,11 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			return 1
 		}
 		defer func() { _ = os.RemoveAll(actionCache) }()
-		store, err := actionsource.NewStoreContext(ctx, actionCache, nil, actionsource.WithUserAgentVersion(clientVersion))
+		sourceOptions := []actionsource.Option{actionsource.WithUserAgentVersion(clientVersion)}
+		if job.Event.Provider == "github" && plan.EventServerURL(job.Event.Provider, job.Event.ServerURL) != "https://github.com" {
+			sourceOptions = append(sourceOptions, jobActionSourceAuthentication(stderr, clientVersion).repositoryOption(job.Event.ServerURL, false))
+		}
+		store, err := actionsource.NewStoreContext(ctx, actionCache, nil, sourceOptions...)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure action cache: %v\n", err)
 			return 1

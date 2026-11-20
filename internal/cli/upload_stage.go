@@ -372,7 +372,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 // with the environment source this job observes.
 func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]bool, runnerOutputs map[string]string) (hostedCompilation, compatibility.ProcessingReport, error) {
 	record := r.record
-	repositorySource, cleanupSource, err := hostedRepositorySource(r.ctx, r.clientVersion, r.eventSource, importerJobActionSourceAuthentication(r.stderr, r.clientVersion), record.PrivateReusableWorkflows)
+	repositorySource, cleanupSource, err := hostedRepositorySource(r.ctx, r.clientVersion, r.eventSource, jobActionSourceAuthentication(r.stderr, r.clientVersion), record.PrivateReusableWorkflows)
 	if err != nil {
 		return hostedCompilation{}, repositorySourceSetupReport(record.Workflow.Path, "repository source could not be configured", err), err
 	}

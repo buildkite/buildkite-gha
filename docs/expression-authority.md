@@ -298,8 +298,9 @@ The following boundaries are deliberate:
   rows.
 
 This architecture does not broaden expression syntax, allow dynamic secret
-access, make private actions available, or weaken immutable source
-verification.
+access, or weaken immutable source verification. Repository-source credentials
+are separate from expression and workflow-token authority; see the
+[source-access contract](compatibility-contract.md#github-server-identity).
 
 ### Composite tokens
 

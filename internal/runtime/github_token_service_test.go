@@ -141,6 +141,56 @@ func TestAgentGitHubTokensMintsActionSourceTokenWithRepositoryOnly(t *testing.T)
 	}
 }
 
+func TestAgentGitHubTokensRepositorySourceContract(t *testing.T) {
+	status, payload := http.StatusOK, `{"token":"ghs_source_only"}`
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/v3/jobs/"+testCacheJobID+"/github_source_access_token" || r.Method != http.MethodPost || r.Header.Get("Authorization") != "Token job-secret" {
+			t.Error("source request did not use its job-bound endpoint")
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != `{"repo_url":"https://github.example.com/acme/source"}` {
+			t.Errorf("source request = %s", body)
+		}
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, payload)
+	}))
+	defer server.Close()
+	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL + "/v3", JobID: testCacheJobID, JobToken: "job-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token, err := provider.RepositorySourceToken(t.Context(), "https://github.example.com", "acme/source"); err != nil || token != "ghs_source_only" {
+		t.Fatalf("source token: %v", err)
+	}
+	for _, origin := range []string{"", "https://github.com", "http://github.example.com", "https://github.example.com/path", "https://user@github.example.com"} {
+		if _, err := provider.RepositorySourceToken(t.Context(), origin, "acme/source"); err == nil {
+			t.Errorf("accepted origin %q", origin)
+		}
+	}
+	if requests != 1 {
+		t.Fatal("invalid origins reached the token endpoint")
+	}
+	for _, response := range []struct {
+		status int
+		body   string
+	}{
+		{200, `{"token":""}`}, {200, `{"token":"ghs_source_only","extra":true}`},
+		{200, `{"token":"ghs_source_only"} {}`}, {200, `{"token":"secret\nvalue"}`},
+		{201, `{"token":"ghs_source_only"}`}, {302, `{"token":"ghs_source_only"}`},
+		{400, `{"message":"secret-provider-detail","code":"source_access_denied"}`},
+		{401, `secret-provider-detail`}, {403, `secret-provider-detail`},
+		{404, `{"code":"source_access_disabled"}`}, {429, `secret-provider-detail`}, {503, `secret-provider-detail`},
+	} {
+		status, payload = response.status, response.body
+		token, err := provider.RepositorySourceToken(t.Context(), "https://github.example.com", "acme/source")
+		if err == nil || token != "" || strings.Contains(err.Error(), "secret-provider-detail") || strings.Contains(err.Error(), "ghs_source_only") {
+			t.Fatalf("response %d did not fail closed with sanitized error: %v", status, err)
+		}
+	}
+}
+
 func TestAgentGitHubTokensRejectsInvalidWorkflowBeforeNetwork(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))

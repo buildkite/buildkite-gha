@@ -127,21 +127,18 @@ func validateHostedRequest(ctx context.Context, request hostedCompileRequest) (c
 }
 
 // hostedRepositorySource builds the source through which an upload reads
-// remote reusable workflows and actions: the importer job's GitHub token for
-// the workflow's own repository when the event comes from GitHub, and the
-// agent's Git credentials for private reusable workflows when the plugin
-// enables them. The importer and every later stage build their source this
-// way, so a stage reads exactly what the importer could.
+// remote reusable workflows and actions. GitHub.com retains its public metadata
+// token and opt-in Git source. GHES uses repository-scoped job credentials;
+// private reusable workflows still require the plugin's separate opt-in.
+// Deferred stages use the same configuration under their own job policy.
 func hostedRepositorySource(ctx context.Context, clientVersion string, eventSource []byte, authentication *actionSourceAuthentication, privateReusableWorkflows bool) (compiler.RepositorySource, func(), error) {
 	event, err := compiler.ParseEvent(eventSource)
 	if err != nil {
 		return nil, nil, err
 	}
 	publicGitHub := plan.EventServerURL(event.Provider, event.ServerURL) == "https://github.com"
-	if event.Provider == "github" && !publicGitHub && privateReusableWorkflows {
-		return nil, nil, fmt.Errorf("private reusable workflows are not yet supported for GitHub Enterprise Server imports")
-	}
-	privateOptions, err := privateRepositorySourceOptions(privateReusableWorkflows)
+	enterpriseGitHub := event.Provider == "github" && !publicGitHub
+	privateOptions, err := privateRepositorySourceOptions(privateReusableWorkflows && !enterpriseGitHub)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -150,6 +147,10 @@ func hostedRepositorySource(ctx context.Context, clientVersion string, eventSour
 		if option := authentication.option(event.Repository.Owner + "/" + event.Repository.Name); option != nil {
 			sourceOptions = append(sourceOptions, option)
 		}
+	} else if enterpriseGitHub {
+		option := authentication.repositoryOption(event.ServerURL, privateReusableWorkflows)
+		sourceOptions = append(sourceOptions, option)
+		privateOptions = append(privateOptions, option)
 	}
 	return newHostedActionSource(ctx, "", clientVersion, sourceOptions, privateOptions)
 }

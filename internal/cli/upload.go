@@ -242,7 +242,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		return 1
 	}
 	out.sourceLinks = sourceLinksForEvent(effectiveEvent.Event)
-	authenticatedSource, cleanupSource, sourceErr := hostedRepositorySource(ctx, uploadArguments.clientVersion, effectiveEvent.Source, importerJobActionSourceAuthentication(stderr, uploadArguments.clientVersion), uploadArguments.privateReusableWorkflows)
+	authenticatedSource, cleanupSource, sourceErr := hostedRepositorySource(ctx, uploadArguments.clientVersion, effectiveEvent.Source, jobActionSourceAuthentication(stderr, uploadArguments.clientVersion), uploadArguments.privateReusableWorkflows)
 	if sourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {

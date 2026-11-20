@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -446,6 +448,99 @@ func TestValidateHostedProfileAdmitsImplicitReadOnlyWorkflowToken(t *testing.T) 
 	}
 }
 
+func TestHostedGHESSourceAuthenticationRedactsAndPreservesReusableOptIn(t *testing.T) {
+	const token = "source-credential"
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var archive bytes.Buffer
+	gz := gzip.NewWriter(&archive)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "root/action.yml", Mode: 0o644, Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	redactor := &cliRedactor{}
+	enterprise := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+token || !slices.Contains(redactor.values, token) {
+			t.Error("credential used before redaction or wrong credential used")
+		}
+		if r.URL.Path == "/api/v3/repos/acme/private" {
+			_, _ = io.WriteString(w, `{"private":true,"visibility":"private"}`)
+			return
+		}
+		_, _ = w.Write(archive.Bytes())
+	}))
+	defer enterprise.Close()
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = enterprise.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/jobs/"+cliTestJobID+"/github_source_access_token" || r.Header.Get("Authorization") != "Token job-only" {
+			t.Error("source did not use dedicated job endpoint")
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body) != 1 || body["repo_url"] != enterprise.URL+"/acme/private" {
+			t.Error("source request did not name exact source repository")
+		}
+		_, _ = io.WriteString(w, `{"token":"`+token+`"}`)
+	}))
+	defer agent.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", agent.URL)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-only")
+	event := []byte(`{"provider":"github","server_url":"` + enterprise.URL + `","event":"push","repository":{"owner":"acme","name":"caller","default_branch":"main"},"ref":"refs/heads/main","sha":"` + sha + `","actor":"test"}`)
+	for _, test := range []struct {
+		name                           string
+		reusable, optIn, redactFailure bool
+	}{
+		{name: "private action"},
+		{name: "private reusable disabled", reusable: true},
+		{name: "private reusable enabled", reusable: true, optIn: true},
+		{name: "redaction fails closed", redactFailure: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			redactor = &cliRedactor{}
+			if test.redactFailure {
+				redactor.err = errors.New("secret provider detail")
+			}
+			auth := jobActionSourceAuthentication(io.Discard, "test")
+			auth.redactor = redactor
+			source, cleanup, err := hostedRepositorySource(t.Context(), "test", event, auth, test.optIn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			ref, _ := actionsource.Parse("acme/private@" + sha)
+			ref.ServerURL, ref.RepositoryRoot = enterprise.URL, test.reusable
+			resolved, materialized, err := source.Fetch(t.Context(), ref)
+			if test.redactFailure || test.reusable && !test.optIn {
+				if err == nil {
+					t.Fatal("denied source succeeded")
+				}
+				if strings.Contains(err.Error(), token) || strings.Contains(err.Error(), "secret provider detail") {
+					t.Fatal("credential error leaked details")
+				}
+				return
+			}
+			if err != nil || resolved.Commit != sha || materialized.SourceDigest == "" {
+				t.Fatalf("authenticated fetch: %v", err)
+			}
+			materialized.Release()
+		})
+	}
+}
+
 func TestActionSourceAuthenticationUsesDedicatedTokenAndFallsBackAnonymously(t *testing.T) {
 	const token = "ghs_action_source"
 	provider := &cliActionSourceTokenProvider{token: token}
@@ -701,7 +796,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	t.Setenv("BUILDKITE_JOB_ID", "")
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "")
 	var warnings bytes.Buffer
-	authentication := importerJobActionSourceAuthentication(&warnings, "test-version")
+	authentication := jobActionSourceAuthentication(&warnings, "test-version")
 	token, err := authentication.token(t.Context(), "buildkite/buildkite-gha")
 	if err != nil || token != "" || authentication.provider != nil || !strings.Contains(warnings.String(), "authentication is unavailable") {
 		t.Fatalf("ambient GitHub token authentication = provider %v, token %q, error %v, warnings %q", authentication.provider != nil, token, err, warnings.String())
@@ -712,7 +807,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
-	if authentication := importerJobActionSourceAuthentication(io.Discard, "test-version"); authentication.provider == nil {
+	if authentication := jobActionSourceAuthentication(io.Discard, "test-version"); authentication.provider == nil {
 		t.Fatal("job-scoped Agent configuration did not configure action-source authentication")
 	}
 }

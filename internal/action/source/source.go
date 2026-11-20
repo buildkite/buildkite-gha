@@ -199,6 +199,10 @@ type config struct {
 	codeload                            *url.URL
 	finalHosts                          map[string]bool
 	credential                          *actionSourceCredential
+	repositoryTokenServer               string
+	repositoryTokenProvider             func(context.Context, Reference) (string, error)
+	repositoryToken                     string
+	privateReusableWorkflows            bool
 	git                                 string
 	gitTestArgs                         []string
 	gitTestRemoteBase                   string
@@ -221,6 +225,9 @@ func defaults() config {
 // forServer selects endpoints for a validated source origin. Existing token
 // providers and Git fallback authorize GitHub.com only, never another origin.
 func (c config) forServer(serverURL string) config {
+	if ServerURL(serverURL) != c.repositoryTokenServer {
+		c.repositoryTokenProvider = nil
+	}
 	if ServerURL(serverURL) != "https://github.com" {
 		c.api, _ = url.Parse(serverURL + "/api/v3")
 		c.finalHosts = map[string]bool{c.api.Host: true}
@@ -240,6 +247,52 @@ func WithUserAgentVersion(version string) Option {
 		c.userAgent = useragent.FromVersion(version)
 		return nil
 	}
+}
+
+// WithRepositorySourceTokenProvider enables exact-repository authenticated
+// fallback on one GHES origin. Anonymous sources remain anonymous. The provider
+// must authorize each request under the current job's policy; tokens are not
+// cached. Private reusable workflows require a separate opt-in.
+func WithRepositorySourceTokenProvider(serverURL string, privateReusableWorkflows bool, provider func(context.Context, Reference) (string, error)) Option {
+	return func(c *config) error {
+		if err := ValidateServerURL(serverURL); err != nil {
+			return err
+		}
+		if ServerURL(serverURL) == "https://github.com" || provider == nil {
+			return fmt.Errorf("repository source credentials require a GHES origin and provider")
+		}
+		c.repositoryTokenServer = serverURL
+		c.repositoryTokenProvider = provider
+		c.privateReusableWorkflows = privateReusableWorkflows
+		return nil
+	}
+}
+
+func (c config) authorizeRepository(ctx context.Context, client *http.Client, ref Reference) (config, error) {
+	if c.repositoryTokenProvider == nil {
+		return c, &NotPublicError{}
+	}
+	token, err := c.repositoryTokenProvider(ctx, ref)
+	if err != nil {
+		return c, err
+	}
+	if token == "" || strings.ContainsAny(token, "\r\n") {
+		return c, fmt.Errorf("repository source credential is invalid")
+	}
+	c.repositoryToken = token
+	if ref.RepositoryRoot && !c.privateReusableWorkflows {
+		var repository struct {
+			Private    *bool  `json:"private"`
+			Visibility string `json:"visibility"`
+		}
+		if err := githubAPIGet(ctx, client, c, repoParts(ref), &repository); err != nil {
+			return c, err
+		}
+		if repository.Private == nil || *repository.Private || repository.Visibility != "public" {
+			return c, fmt.Errorf("authenticated private reusable workflows require private-reusable-workflows opt-in")
+		}
+	}
+	return c, nil
 }
 
 // WithGitHubActionSourceTokenProvider authenticates mutable-ref API requests using a
@@ -561,20 +614,32 @@ func apiURL(base *url.URL, parts ...string) *url.URL {
 }
 func (r *Resolver) get(ctx context.Context, ref Reference, parts []string, out any) error {
 	cfg := r.cfg.forServer(ref.ServerURL)
-	authenticated := actionSourceToken(cfg, parts) != ""
-	budget := githubAPIBudgetKey{serverURL: ServerURL(ref.ServerURL), authenticated: authenticated}
-	if err := r.apiBudget.check(ctx, budget, cfg.now()); err != nil {
+	request := func(cfg config) error {
+		authenticated := actionSourceToken(cfg, parts) != ""
+		budget := githubAPIBudgetKey{serverURL: ServerURL(ref.ServerURL), authenticated: authenticated}
+		if err := r.apiBudget.check(ctx, budget, cfg.now()); err != nil {
+			var rate *RateLimitError
+			if errors.As(err, &rate) {
+				recordGitHubAPISuppression(ctx, authenticated, parts)
+				recordSourceStat(ctx, "suppressed")
+			}
+			return err
+		}
+		err := githubAPIGet(ctx, r.client, cfg, parts, out)
 		var rate *RateLimitError
 		if errors.As(err, &rate) {
-			recordGitHubAPISuppression(ctx, authenticated, parts)
-			recordSourceStat(ctx, "suppressed")
+			r.apiBudget.record(budget, rate)
 		}
 		return err
 	}
-	err := githubAPIGet(ctx, r.client, cfg, parts, out)
-	var rate *RateLimitError
-	if errors.As(err, &rate) {
-		r.apiBudget.record(budget, rate)
+	err := request(cfg)
+	var denied *NotPublicError
+	if errors.As(err, &denied) && cfg.repositoryTokenProvider != nil {
+		cfg, err = cfg.authorizeRepository(ctx, r.client, ref)
+		if err != nil {
+			return err
+		}
+		return request(cfg)
 	}
 	return err
 }
@@ -632,6 +697,9 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	return nil
 }
 func actionSourceToken(cfg config, parts []string) string {
+	if cfg.repositoryToken != "" {
+		return cfg.repositoryToken
+	}
 	if cfg.credential == nil {
 		return ""
 	}
@@ -1285,6 +1353,11 @@ func (s *Store) authorizeCachedRepository(ctx context.Context, ref Reference, m 
 	if !m.Authenticated {
 		return nil
 	}
+	cfg := s.cfg.forServer(ref.ServerURL)
+	if cfg.repositoryTokenProvider != nil {
+		_, err := cfg.authorizeRepository(ctx, s.client, ref)
+		return err
+	}
 	if !ref.RepositoryRoot || s.cfg.forServer(ref.ServerURL).git == "" {
 		return &NotPublicError{}
 	}
@@ -1317,6 +1390,14 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) (bo
 		return false, fmt.Errorf("archive URL denied")
 	}
 	err := s.downloadArchive(ctx, cfg, u, dst)
+	var denied *NotPublicError
+	if errors.As(err, &denied) && cfg.repositoryTokenProvider != nil {
+		cfg, err = cfg.authorizeRepository(ctx, s.client, r.Reference)
+		if err != nil {
+			return false, err
+		}
+		return true, s.downloadArchive(ctx, cfg, u, dst)
+	}
 	if !gitFallbackError(err) || !r.Reference.RepositoryRoot || cfg.git == "" {
 		return false, err
 	}
@@ -1377,6 +1458,9 @@ func (s *Store) downloadArchive(ctx context.Context, cfg config, u *url.URL, dst
 	req.Header.Del("Authorization")
 	req.Header.Del("Cookie")
 	req.Header.Set("User-Agent", s.cfg.userAgent)
+	if cfg.repositoryToken != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.repositoryToken)
+	}
 	c := *s.client
 	c.Jar = nil
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -1389,12 +1473,22 @@ func (s *Store) downloadArchive(ctx context.Context, cfg config, u *url.URL, dst
 		req.Header.Del("Authorization")
 		req.Header.Del("Cookie")
 		req.Header.Set("User-Agent", s.cfg.userAgent)
+		if cfg.repositoryToken != "" && req.URL.Scheme == u.Scheme && req.URL.Host == u.Host {
+			req.Header.Set("Authorization", "Bearer "+cfg.repositoryToken)
+		}
 		return nil
 	}
-	observation := beginSourceRequest(ctx, "archive", false)
+	observation := beginSourceRequest(ctx, "archive", cfg.repositoryToken != "")
 	defer func() { observation.finish(err) }()
 	resp, e := c.Do(req)
 	if e != nil {
+		if cfg.repositoryToken != "" {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// Redirect URLs and transport errors are not trusted diagnostics.
+			return fmt.Errorf("authenticated repository archive request failed")
+		}
 		return fmt.Errorf("download archive: %w", e)
 	}
 	observation.response(resp)
