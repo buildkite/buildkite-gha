@@ -163,6 +163,10 @@ func TestPowerShellProvisioning(t *testing.T) {
 'GREETING=héllo 世界' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 'answer=42' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append`}
 			if mode == "composite" {
+				bash, err := exec.LookPath("bash")
+				if err != nil {
+					t.Fatal(err)
+				}
 				writeFixtureFile(t, workspace, ".github/actions/powershell/action.yml", `name: PowerShell
 outputs:
   answer:
@@ -175,8 +179,11 @@ runs:
       run: |
         'GREETING=héllo 世界' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         'answer=42' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+    - shell: `+strconv.Quote(strconv.Quote(bash)+" --noprofile --norc -e {0}")+`
+      run: |
+        pwsh -NoProfile -NonInteractive -Command 'exit 0'
 `)
-				first = runtimeTestStep{ID: "first", Kind: "uses", Uses: "./.github/actions/powershell"}
+				first = runtimeTestStep{ID: "first", Kind: "uses", Uses: "./.github/actions/powershell", Env: map[string]string{"PATH": t.TempDir()}}
 			}
 			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{first, {
 				ID: "verify", Kind: "run", Shell: "pwsh", Command: `
@@ -203,6 +210,9 @@ if ($LASTEXITCODE -ne 0) { throw 'PowerShell PATH not retained' }`,
 			}
 			if err != nil || result.Outputs["answer"] != "42" {
 				t.Fatalf("PowerShell result = %#v, error = %v", result, err)
+			}
+			if mode == "composite" && slices.Contains(filepath.SplitList(environmentValue(result.Env, "PATH")), first.Env["PATH"]) {
+				t.Fatal("composite-local PATH leaked into the job environment")
 			}
 		})
 	}

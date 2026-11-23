@@ -162,6 +162,7 @@ func (r *jobRun) runShellProcess(ctx context.Context, processor *commandOutputPr
 				directory := filepath.Dir(command)
 				env = mergeStepEnvironment(env)
 				applyPaths(env, []string{directory})
+				mergeEnvironmentInto(result.Env, map[string]string{"PATH": environmentValue(env, "PATH")})
 				result.Paths = append(result.Paths, directory)
 			}
 		}
