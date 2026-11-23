@@ -94,6 +94,30 @@ artifact delivery; build-environment fallback and continuations retain their
 existing semantics. Namespace setup comes from the worker's `NSC_INSTANCE_ID`,
 not runner routing. Hosted tool-cache setup is explicit user intent.
 
+### Missing host PowerShell
+
+Named host `pwsh` shells use an executable from the effective step PATH when
+available. Otherwise the CLI installs pinned PowerShell 7.6.9 from an official
+release archive, verifies its SHA-256 before extraction, and uses a job-private
+installation. Add its directory through the existing PATH-effect machinery so
+nested commands and later steps can use it without leaking a step-local PATH
+override. Keep installation within the step's timeout and remove it after job
+cleanup. Do not reuse a workflow-writable PowerShell installation across jobs.
+
+This applies to workflow and composite steps on supported host platforms,
+including the Windows default shell. It does not provision job containers,
+legacy `powershell`, custom executable paths, other tools, or OS libraries.
+An unavailable download or native dependency remains a failure, not permission
+to substitute Bash or Windows PowerShell.
+
+The [shell regressions](../internal/runtime/shell_execution_test.go) cover
+existing executables, missing workflow/composite shells, PATH propagation, and
+installation errors. The [installer regression](../internal/cli/runtime_powershell_test.go)
+checks supporting files, executable permission, and rejection before extraction
+when the archive digest differs. The [hosted smoke fixture](../.buildkite/fixtures/powershell.yml)
+checks Linux and Windows execution without a setup action; a local pass alone
+does not establish hosted image parity or native GitHub equivalence.
+
 ### Direct Docker image actions
 
 Direct `uses: docker://…` calls bind a literal public image reference in an

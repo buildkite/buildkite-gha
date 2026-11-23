@@ -157,7 +157,7 @@ func (r *jobRun) installAndVerifyMiseNode(ctx context.Context, major int, mise s
 func (r Runner) installMiseNode(ctx context.Context, mise, tool string) error {
 	cmd := exec.Command(mise, "--no-config", "install", tool)
 	cmd.Env = processEnv(r.miseEnv())
-	stdout, stderr, err := r.runCapturedCommand(ctx, cmd)
+	stdout, stderr, err := r.RunCapturedCommand(ctx, cmd)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -222,7 +222,7 @@ func (r Runner) miseNodeInstallation(ctx context.Context, major int, mise string
 	tool := nodeTool(major)
 	cmd := exec.Command(mise, "--no-config", "where", tool)
 	cmd.Env = processEnv(r.miseEnv())
-	out, stderr, err := r.runCapturedCommand(ctx, cmd)
+	out, stderr, err := r.RunCapturedCommand(ctx, cmd)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve cached %s installation: %w: %s", tool, MarkWorkflowProcessTimeout(ctx, err), strings.TrimSpace(stderr))
 	}

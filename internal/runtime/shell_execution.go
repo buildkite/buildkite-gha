@@ -156,8 +156,17 @@ func (r *jobRun) runShellProcess(ctx context.Context, processor *commandOutputPr
 	}
 	if r.jobContainer == nil {
 		command, err := resolveExecutableInPath(args[0], environmentValue(env, "PATH"))
+		if err != nil && args[0] == "pwsh" && r.ResolvePowerShell != nil {
+			command, err = r.ResolvePowerShell(ctx)
+			if err == nil {
+				directory := filepath.Dir(command)
+				env = mergeStepEnvironment(env)
+				applyPaths(env, []string{directory})
+				result.Paths = append(result.Paths, directory)
+			}
+		}
 		if err != nil {
-			return err
+			return fmt.Errorf("prepare shell %q: %w; check the shell installation, PATH, and executable permissions", args[0], err)
 		}
 		args[0] = command
 	}

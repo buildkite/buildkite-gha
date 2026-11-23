@@ -488,6 +488,15 @@ bk build create --pipeline buildkite/buildkite-gha \
 
 This suite covers shell jobs, concurrent steps, public and Docker actions, container runtime behavior, summaries, annotations, artifact upload, and artifact roundtrip. Use `COMPATIBILITY_PROOF=<target>` with `COMPATIBILITY_PROOF_COMMIT=<commit>` only when diagnosing one target. The available target names are in [`.buildkite/pipeline.yml`](../.buildkite/pipeline.yml).
 
+The `powershell` target runs the [PowerShell smoke fixture](../.buildkite/fixtures/powershell.yml)
+on automatically routed Linux and explicitly mapped Windows workers. It checks
+execution without a setup action, Unicode environment values, step outputs,
+terminating errors, tolerated failure outcomes, and nested `pwsh` commands.
+Set `POWERSHELL_WINDOWS_QUEUE` when the Windows queue is not `windows-medium`.
+Use a Linux image without PowerShell to exercise automatic installation; an
+image that already supplies it only checks execution. Missing tools in job
+containers remain the image author's responsibility.
+
 Use `COMPATIBILITY_PROOF=pinned-runtime` with
 `PINNED_RUNTIME_BASE_REVISION=<exact-baseline-commit>` to compare runtime delivery.
 The setup job publishes test executables; separate importer artifact inventories

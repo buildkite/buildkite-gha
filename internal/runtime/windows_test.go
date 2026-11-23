@@ -174,7 +174,7 @@ func TestWindowsProcessTree(t *testing.T) {
 				if captured {
 					cmd := exec.Command(executable, args...)
 					cmd.Env = processEnv(env)
-					stdout, stderr, err := (Runner{}).runCapturedCommand(ctx, cmd)
+					stdout, stderr, err := (Runner{}).RunCapturedCommand(ctx, cmd)
 					if mode == "parent-exit" && (stdout != "::error::literal tool output\r\n" || stderr != "tool diagnostic\r\n") {
 						err = fmt.Errorf("captured output changed: stdout=%q stderr=%q: %w", stdout, stderr, err)
 					}
