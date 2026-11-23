@@ -132,6 +132,8 @@ type Pipeline struct {
 	RuntimeSelection *RuntimeSelection
 	CompilerStep     string
 	ArtifactProducer string
+	// FailureQueue routes diagnostic commands to the importer, not to a workflow runner.
+	FailureQueue string
 	// RuntimePlugin is the invoking plugin's reference, independent of CLI pins.
 	RuntimePlugin string
 	// DistributionDigest and RuntimeImage retain the single-platform emitter
@@ -549,7 +551,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
 		}
-		emitFailureBody(out, "    ", artifactProducer, *failure, 1)
+		emitFailureBody(out, "    ", artifactProducer, pipeline.FailureQueue, *failure, 1)
 		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, workflow.GroupKey, "", "Workflow could not be run", failure.Summary)
 		if pipeline.CompilerStep != "" {
 			_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
@@ -632,7 +634,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 				if job.SoftFail {
 					exitStatus = ContinueOnErrorExitStatus
 				}
-				emitFailureBody(out, attributeIndent, artifactProducer, *job.Failure, exitStatus)
+				emitFailureBody(out, attributeIndent, artifactProducer, pipeline.FailureQueue, *job.Failure, exitStatus)
 				emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, checkLabel, "Job could not be run", job.Failure.Summary)
 				if job.SoftFail {
 					_, _ = fmt.Fprintf(out, "%ssoft_fail:\n%s  - exit_status: %d\n", attributeIndent, attributeIndent, ContinueOnErrorExitStatus)
@@ -972,7 +974,10 @@ func BootstrapHasDigest(command, digest string) bool {
 	return strings.Contains(command, shellQuote(digest))
 }
 
-func emitFailureBody(out *bytes.Buffer, indent, artifactProducer string, failure Failure, exitStatus int) {
+func emitFailureBody(out *bytes.Buffer, indent, artifactProducer, queue string, failure Failure, exitStatus int) {
+	if queue != "" {
+		_, _ = fmt.Fprintf(out, "%sagents:\n%s  queue: %s\n", indent, indent, yamlScalar(queue))
+	}
 	out.WriteString(indent + "plugins:\n")
 	out.WriteString(indent + "  - artifacts#v1.9.4:\n")
 	_, _ = fmt.Fprintf(out, "%s      step: %s\n", indent, yamlScalar(artifactProducer))

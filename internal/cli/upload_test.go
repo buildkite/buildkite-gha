@@ -1827,6 +1827,7 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_STEP_KEY", "mixed-failure-importer")
+	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", "importer-queue")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{
@@ -1852,11 +1853,13 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 			Label   string             `yaml:"label"`
 			Command string             `yaml:"command"`
 			Plugins failureStepPlugins `yaml:"plugins"`
+			Agents  map[string]string  `yaml:"agents"`
 			Steps   []struct {
 				Label   string             `yaml:"label"`
 				Key     string             `yaml:"key"`
 				Command string             `yaml:"command"`
 				Plugins failureStepPlugins `yaml:"plugins"`
+				Agents  map[string]string  `yaml:"agents"`
 			} `yaml:"steps"`
 		} `yaml:"steps"`
 	}
@@ -1873,6 +1876,9 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	if missing.Group != ":github: workflow · Missing action" || missing.Label != "" || missing.Command != "" || len(missing.Steps) != 1 || missing.Steps[0].Label != ":github: job · action" || !isGeneratedFailureCommand(missing.Steps[0].Command) {
 		t.Fatalf("expanded failed workflow = %#v", missing)
 	}
+	if workflowQueue, jobQueue := pipeline.Steps[0].Agents["queue"], missing.Steps[0].Agents["queue"]; workflowQueue != "importer-queue" || jobQueue != "importer-queue" {
+		t.Fatalf("failure step queues = %q, %q; want both on importer-queue", workflowQueue, jobQueue)
+	}
 	firstFailureMessage := failureLogText(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
 	if !strings.Contains(firstFailureMessage, `No Windows runner target is configured.`) || !strings.Contains(firstFailureMessage, "Ask a pipeline administrator to map windows-latest or windows-2022 to that queue") ||
 		!strings.Contains(firstFailureMessage, `Runner label "macos-15" has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.`) ||
@@ -1885,6 +1891,9 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	}
 	if pipeline.Steps[2].Group != ":github: workflow · Success" || len(pipeline.Steps[2].Steps) != 1 || pipeline.Steps[2].Steps[0].Key == "" || !strings.Contains(pipeline.Steps[2].Steps[0].Command, `run-job --plan "$plan"`) || !strings.Contains(pipeline.Steps[2].Steps[0].Command, "--user runner") {
 		t.Fatalf("successful workflow group = %#v", pipeline.Steps[2])
+	}
+	if queue := pipeline.Steps[2].Steps[0].Agents["queue"]; queue != "" {
+		t.Fatalf("successful workflow queue = %q, want unchanged default routing", queue)
 	}
 }
 
