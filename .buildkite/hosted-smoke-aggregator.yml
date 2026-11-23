@@ -11,6 +11,10 @@ steps:
         allow_failure: true
       - step: "gha-consumer-91934b28b00f"
         allow_failure: true
+      - step: "gha-powershell-dc1326f3e68b"
+        allow_failure: true
+      - step: "gha-powershell-9b911e7a7720"
+        allow_failure: true
       - step: "gha-concurrent"
         allow_failure: true
       - step: "gha-observe"
@@ -37,6 +41,8 @@ steps:
         allow_failure: true
       - step: "shell-upload-complete"
         allow_failure: true
+      - step: "powershell-complete"
+        allow_failure: true
       - step: "concurrent-steps-complete"
         allow_failure: true
       - step: "public-actions-complete"
@@ -62,6 +68,8 @@ steps:
         gha-producer \
         gha-consumer-5ebbc197d87b \
         gha-consumer-91934b28b00f \
+        gha-powershell-dc1326f3e68b \
+        gha-powershell-9b911e7a7720 \
         gha-concurrent \
         gha-observe \
         gha-public-actions \
@@ -75,6 +83,7 @@ steps:
         gha-artifact-consumer-5ebbc197d87b \
         gha-artifact-consumer-91934b28b00f \
         shell-upload-complete \
+        powershell-complete \
         concurrent-steps-complete \
         public-actions-complete \
         hosted-docker-complete \

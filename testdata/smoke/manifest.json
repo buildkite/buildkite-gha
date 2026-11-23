@@ -16,7 +16,7 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "PowerShell 7.4.13 on Linux passes TestPowerShellExecution and TestCompatibilityGapOtherShells.",
-      "note": "Execution requires pwsh on PATH; the local smoke gate only validates and compiles.",
+      "note": "The local smoke gate only validates and compiles; runtime shell tests require installed PowerShell.",
       "action_preflight": "none"
     },
     {

@@ -150,6 +150,74 @@ if ($env:JAVA_HOME -ne 'selected JDK') { throw 'Java selection lost' }
 	}
 }
 
+func TestPowerShellProvisioning(t *testing.T) {
+	pwsh, err := exec.LookPath("pwsh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"existing", "workflow", "composite", "unavailable"} {
+		t.Run(mode, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: managed PowerShell\n")
+			first := runtimeTestStep{ID: "first", Kind: "run", Shell: "pwsh", Command: `
+'GREETING=héllo 世界' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+'answer=42' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append`}
+			if mode == "composite" {
+				bash, err := exec.LookPath("bash")
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeFixtureFile(t, workspace, ".github/actions/powershell/action.yml", `name: PowerShell
+outputs:
+  answer:
+    value: ${{ steps.emit.outputs.answer }}
+runs:
+  using: composite
+  steps:
+    - id: emit
+      shell: pwsh
+      run: |
+        'GREETING=héllo 世界' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        'answer=42' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+    - shell: `+strconv.Quote(strconv.Quote(bash)+" --noprofile --norc -e {0}")+`
+      run: |
+        pwsh -NoProfile -NonInteractive -Command 'exit 0'
+`)
+				first = runtimeTestStep{ID: "first", Kind: "uses", Uses: "./.github/actions/powershell", Env: map[string]string{"PATH": t.TempDir()}}
+			}
+			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{first, {
+				ID: "verify", Kind: "run", Shell: "pwsh", Command: `
+if ($env:GREETING -ne 'héllo 世界') { throw 'environment lost' }
+& pwsh -NoProfile -NonInteractive -Command 'exit 0'
+if ($LASTEXITCODE -ne 0) { throw 'PowerShell PATH not retained' }`,
+			}})
+			job.Outputs = map[string]string{"answer": "${{ steps.first.outputs.answer }}"}
+			if mode != "existing" {
+				t.Setenv("PATH", t.TempDir())
+			}
+			runner := Runner{ResolvePowerShell: func(context.Context) (string, error) {
+				if mode == "existing" || mode == "unavailable" {
+					return "", errors.New("PowerShell download unavailable")
+				}
+				return pwsh, nil
+			}}
+			result, err := runner.runTestJob(t.Context(), job, workspace)
+			if mode == "unavailable" {
+				if err == nil || !strings.Contains(err.Error(), "PowerShell download unavailable") || !strings.Contains(err.Error(), "check the shell installation, PATH, and executable permissions") {
+					t.Fatalf("missing PowerShell diagnostic = %v", err)
+				}
+				return
+			}
+			if err != nil || result.Outputs["answer"] != "42" {
+				t.Fatalf("PowerShell result = %#v, error = %v", result, err)
+			}
+			if mode == "composite" && slices.Contains(filepath.SplitList(environmentValue(result.Env, "PATH")), first.Env["PATH"]) {
+				t.Fatal("composite-local PATH leaked into the job environment")
+			}
+		})
+	}
+}
+
 func TestAbsolutePowerShellScriptExtension(t *testing.T) {
 	for _, command := range []string{"/opt/powershell/pwsh", "/opt/powershell/PWSH", "/opt/powershell/powershell", "/opt/powershell/powershell.exe", `C:\Program Files\PowerShell\7\pwsh.exe`} {
 		if got := shellScriptExtension(command); got != ".ps1" {

@@ -44,6 +44,7 @@ type Runner struct {
 	ManagedNodeRoot       string
 	Mise                  string
 	ResolveMise           func(context.Context) (string, error)
+	ResolvePowerShell     func(context.Context) (string, error)
 	MiseDataDir           string
 	ToolCache             string
 	Docker                string

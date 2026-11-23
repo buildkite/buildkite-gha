@@ -329,8 +329,8 @@ func installRuntimeMiseFromRelease(ctx context.Context, root string, release run
 	}
 	defer func() { _ = os.RemoveAll(staging) }()
 	archive := filepath.Join(staging, "mise."+release.archiveFormat)
-	if err := downloadRuntimeMise(ctx, client, sourceURL, archive, archiveDigest, clientVersion); err != nil {
-		return "", err
+	if err := downloadRuntimeArchive(ctx, client, sourceURL, archive, archiveDigest, clientVersion); err != nil {
+		return "", fmt.Errorf("install mise: %w", err)
 	}
 	stagedExecutable := filepath.Join(staging, release.executable)
 	if err := extractRuntimeMiseRelease(archive, stagedExecutable, binaryDigest, release); err != nil {
@@ -367,38 +367,38 @@ func installRuntimeMiseFromRelease(ctx context.Context, root string, release run
 	return resolved, nil
 }
 
-func downloadRuntimeMise(ctx context.Context, client *http.Client, sourceURL, destination, expectedDigest, clientVersion string) error {
+func downloadRuntimeArchive(ctx context.Context, client *http.Client, sourceURL, destination, expectedDigest, clientVersion string) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
-		return fmt.Errorf("create mise download request: %w", err)
+		return fmt.Errorf("create runtime download request: %w", err)
 	}
 	request.Header.Set("User-Agent", useragent.FromVersion(clientVersion))
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("download mise: %w", err)
+		return fmt.Errorf("download runtime: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("download mise: unexpected HTTP status %s", response.Status)
+		return fmt.Errorf("download runtime: unexpected HTTP status %s", response.Status)
 	}
 	file, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return fmt.Errorf("create mise archive: %w", err)
+		return fmt.Errorf("create runtime archive: %w", err)
 	}
 	hash := sha256.New()
 	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, runtimeMiseArchiveLimit+1))
 	closeErr := file.Close()
 	if copyErr != nil {
-		return fmt.Errorf("download mise archive: %w", copyErr)
+		return fmt.Errorf("download runtime archive: %w", copyErr)
 	}
 	if closeErr != nil {
-		return fmt.Errorf("write mise archive: %w", closeErr)
+		return fmt.Errorf("write runtime archive: %w", closeErr)
 	}
 	if written > runtimeMiseArchiveLimit {
-		return fmt.Errorf("download mise archive: exceeds %d-byte limit", runtimeMiseArchiveLimit)
+		return fmt.Errorf("download runtime archive: exceeds %d-byte limit", runtimeMiseArchiveLimit)
 	}
 	if hex.EncodeToString(hash.Sum(nil)) != expectedDigest {
-		return fmt.Errorf("mise archive checksum verification failed")
+		return fmt.Errorf("runtime archive checksum verification failed")
 	}
 	return nil
 }

@@ -262,6 +262,9 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			RetryCount:  os.Getenv("BUILDKITE_RETRY_COUNT"),
 		},
 	}
+	resolvePowerShell, cleanupPowerShell := runtimePowerShellResolver(stderr, clientVersion)
+	runner.ResolvePowerShell = resolvePowerShell
+	defer cleanupPowerShell()
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: resolve runtime executable: %v\n", err)

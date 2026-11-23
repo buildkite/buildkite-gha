@@ -1,0 +1,12 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":white_check_mark: PowerShell smoke complete"
+    key: "powershell-complete"
+    depends_on:
+      - step: "gha-powershell-dc1326f3e68b"
+        allow_failure: true
+      - step: "gha-powershell-9b911e7a7720"
+        allow_failure: true
+    command: "echo 'Linux and Windows PowerShell smoke jobs settled before native continuation'"

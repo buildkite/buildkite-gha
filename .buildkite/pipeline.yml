@@ -16,7 +16,7 @@ steps:
           set -euo pipefail
           proof="$${COMPATIBILITY_PROOF:?COMPATIBILITY_PROOF is required}"
           case "$$proof" in
-            shell-upload|concurrent-steps|public-actions|hosted-docker|dockerfile-action|direct-docker|container-runtime|summary-annotation|workflow-annotations|skipped-workflow-annotation|hash-files|rust|upload-artifact|artifact-roundtrip|experimental-runner-user|scheduling|pinned-runtime|pinned-runtime-consumer) ;;
+            shell-upload|powershell|concurrent-steps|public-actions|hosted-docker|dockerfile-action|direct-docker|container-runtime|summary-annotation|workflow-annotations|skipped-workflow-annotation|hash-files|rust|upload-artifact|artifact-roundtrip|experimental-runner-user|scheduling|pinned-runtime|pinned-runtime-consumer) ;;
             *) echo "Unknown compatibility proof: $$proof" >&2; exit 2 ;;
           esac
           buildkite-agent pipeline upload ".buildkite/$$proof-proof.yml"
@@ -49,6 +49,7 @@ steps:
           test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
           test -z "$$(git status --porcelain --untracked-files=all)"
           buildkite-agent pipeline upload .buildkite/shell-upload-proof.yml
+          buildkite-agent pipeline upload .buildkite/powershell-proof.yml
           buildkite-agent pipeline upload .buildkite/concurrent-steps-proof.yml
           buildkite-agent pipeline upload .buildkite/public-actions-proof.yml
           buildkite-agent pipeline upload .buildkite/hosted-docker-proof.yml
