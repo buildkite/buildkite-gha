@@ -9,21 +9,34 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-func TestInstallPowerShellVerifiesArchiveBeforeExtraction(t *testing.T) {
+func TestInstallPowerShellVerifiesArchiveAndRestrictsEnvironment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fixture executable requires sh")
 	}
+	tarPath, err := exec.LookPath("tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	wrapper := "#!/bin/sh\ntest -z \"${BUILDKITE_AGENT_ACCESS_TOKEN+x}\" || exit 91\nexec " + strconv.Quote(tarPath) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "tar"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "must-not-leak")
 	var archive bytes.Buffer
 	gz := gzip.NewWriter(&archive)
 	tw := tar.NewWriter(gz)
 	for name, body := range map[string]string{
-		"pwsh":        "#!/bin/sh\ntest \"$(cat \"$(dirname \"$0\")/support.txt\")\" = supporting-runtime || exit 9\nprintf 'PowerShell " + runtimePowerShellVersion + "\\n'\n",
+		"pwsh":        "#!/bin/sh\ntest -z \"${BUILDKITE_AGENT_ACCESS_TOKEN+x}\" || exit 92\ntest \"$(cat \"$(dirname \"$0\")/support.txt\")\" = supporting-runtime || exit 9\nprintf 'PowerShell " + runtimePowerShellVersion + "\\n'\n",
 		"support.txt": "supporting-runtime",
 	} {
 		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body))}); err != nil {

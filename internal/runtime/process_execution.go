@@ -143,10 +143,14 @@ func (r Runner) runStreamingCommand(ctx context.Context, processor *commandOutpu
 }
 
 // RunCapturedCommand runs a tool under workflow process-tree supervision.
+// An unset environment uses the restricted runtime environment, not agent secrets.
 // Tool output is data, not workflow commands. Drain the streams outside
 // exec.Cmd.Wait so Windows can close the job on parent exit even when a
 // descendant still holds an output pipe open.
 func (r Runner) RunCapturedCommand(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
+	if cmd.Env == nil {
+		cmd.Env = processEnv(nil)
+	}
 	var output [2]strings.Builder
 	var copyErrs [2]error
 	err := r.runCommand(ctx, cmd, func(index int, reader io.Reader) {
