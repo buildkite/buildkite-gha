@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -45,6 +46,7 @@ type gitCredentialService struct {
 	authentication string
 	runner         Runner
 	processor      *commandOutputProcessor
+	checkoutsMu    sync.Mutex
 	checkouts      []string
 }
 

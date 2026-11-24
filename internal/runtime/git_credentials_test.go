@@ -272,7 +272,7 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 				writeFixtureFile(t, actionRoot, "main.js", "")
 				writeFixtureFile(t, actionRoot, "post.js", "require('child_process').execFileSync('git', ['fetch', 'origin', 'main'], {stdio: 'inherit'}); if (process.env.REMOVE_CHECKOUT) require('fs').rmSync(process.env.REMOVE_CHECKOUT === 'metadata' ? '.git' : process.cwd(), {recursive: true, force: true}); console.log('post-fetch-ok');\n")
 				digest := digestTree(t, actionRoot)
-				for _, mode := range []string{"success", "failure", "metadata", "directory"} {
+				for _, mode := range []string{"success", "failure", "metadata", "directory", "parallel"} {
 					fail := mode == "failure"
 					jobWorkspace := t.TempDir()
 					command := "test -z \"${BUILDKITE_AGENT_ACCESS_TOKEN:-}\"; git fetch origin main"
@@ -283,11 +283,25 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 					if mode == "metadata" || mode == "directory" {
 						remove = mode
 					}
-					fullJob := runtimePlan(t, seed, ".github/workflows/test.yml", []runtimeTestStep{
+					postEnv := map[string]string{"REMOVE_CHECKOUT": remove}
+					steps := []runtimeTestStep{
 						{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &plan.ActionSelector{Lock: "a-0000000000000001"}},
-						{ID: "post", Kind: "uses", Uses: "acme/action@v1", Action: &plan.ActionSelector{Lock: "a-0000000000000002"}, Env: map[string]string{"REMOVE_CHECKOUT": remove}},
+						{ID: "post", Kind: "uses", Uses: "acme/action@v1", Action: &plan.ActionSelector{Lock: "a-0000000000000002"}, Env: postEnv},
 						{ID: "git", Kind: "run", Shell: "sh", Command: command},
-					})
+					}
+					checkouts := []string{jobWorkspace}
+					if mode == "parallel" {
+						steps[0].With, steps[0].Background = map[string]string{"path": "first"}, true
+						steps[2].Command = "git -C first fetch origin main && git -C second fetch origin main"
+						steps = append([]runtimeTestStep{
+							steps[0],
+							{ID: "second", Kind: "uses", Uses: "actions/checkout@v7", With: map[string]string{"path": "second"}, Background: true, Action: &plan.ActionSelector{Lock: "a-0000000000000001"}},
+							{ID: "join", Kind: "wait", Targets: []string{"checkout", "second"}},
+						}, steps[1:]...)
+						checkouts = []string{filepath.Join(jobWorkspace, "first"), filepath.Join(jobWorkspace, "second")}
+						postEnv["GIT_DIR"], postEnv["GIT_WORK_TREE"] = filepath.Join(checkouts[0], ".git"), checkouts[0]
+					}
+					fullJob := runtimePlan(t, seed, ".github/workflows/test.yml", steps)
 					fullJob.Env = map[string]string{"GIT_CONFIG_NOSYSTEM": "1"}
 					job.Event.Name = fullJob.Event.Name
 					job.Event.PayloadDigest = fullJob.Event.PayloadDigest
@@ -323,11 +337,13 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 						}
 						continue
 					}
-					if config := mustGit(jobWorkspace, "config", "--local", "--list"); strings.Contains(config, GitCredentialHelperCommand) {
-						t.Fatal("job cleanup left credential helper configured")
-					}
-					if _, err := gitRun(jobWorkspace, "fetch", "origin", "main"); !test.external && err == nil {
-						t.Fatal("job cleanup left authenticated Git access")
+					for _, directory := range checkouts {
+						if config := mustGit(directory, "config", "--local", "--list"); strings.Contains(config, GitCredentialHelperCommand) {
+							t.Fatal("job cleanup left credential helper configured")
+						}
+						if _, err := gitRun(directory, "fetch", "origin", "main"); !test.external && err == nil {
+							t.Fatal("job cleanup left authenticated Git access")
+						}
 					}
 				}
 			}

@@ -238,13 +238,15 @@ func (r Runner) runCheckoutWithAuthentication(ctx context.Context, processor *co
 		return result, fmt.Errorf("%s did not produce the requested detached revision", adapter)
 	}
 	if credentials != nil && actionintegration.CheckoutSupportsCredentialPersistence(commit) && (checkoutInput(inputs, "persist-credentials") == "" || checkoutInputTrue(checkoutInput(inputs, "persist-credentials"))) {
+		credentials.checkoutsMu.Lock()
 		credentials.checkouts = append(credentials.checkouts, checkoutDirectory)
+		credentials.checkoutsMu.Unlock()
 		for _, setting := range credentials.settings() {
 			if err := run(env, false, "config", "--local", "--add", setting[0], setting[1]); err != nil {
 				return result, err
 			}
 		}
-		_, _ = fmt.Fprintln(processor.stderr, "Read-only checkout credentials remain available through a temporary Buildkite Git credential helper until job cleanup. Buildkite-issued tokens are not stored in Git configuration; managed write access is not provided.")
+		processor.writeLiteral(processor.stderr, "Read-only checkout credentials remain available through a temporary Buildkite Git credential helper until job cleanup. Buildkite-issued tokens are not stored in Git configuration; managed write access is not provided.")
 	}
 	setCheckoutOutputs(result.Outputs, commit, checkoutRefOutput(inputs, job.Event.Ref), headSHA)
 	return result, nil
