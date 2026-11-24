@@ -3367,7 +3367,7 @@ func TestNativeCheckoutUsesWorkflowPermissionAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeAction(t, remote, "", "name: checkout\ninputs:\n  token:\n    default: ${{ github.token }}\nruns:\n  using: node24\n  main: index.js\n")
-	for _, test := range []struct{ name, provider, permissions, contents, jobPermissions string }{
+	for _, test := range []struct{ name, provider, permissions, contents, jobPermissions, calleePermissions, nestedPermissions string }{
 		{name: "Origin ignores upstream token default", provider: "cursor-origin"},
 		{name: "GitHub default read", provider: "github", contents: "read"},
 		{name: "GitHub explicit write", provider: "github", permissions: "permissions: {contents: write}\n", contents: "write"},
@@ -3377,9 +3377,27 @@ func TestNativeCheckoutUsesWorkflowPermissionAuthority(t *testing.T) {
 		{name: "GitHub job denies contents", provider: "github", permissions: "permissions: {contents: write}\n", jobPermissions: "    permissions: {contents: none}\n"},
 		{name: "GitHub job omits contents", provider: "github", permissions: "permissions: {contents: read}\n", jobPermissions: "    permissions: {issues: read}\n"},
 		{name: "GitHub job grants read", provider: "github", permissions: "permissions: {}\n", jobPermissions: "    permissions: {contents: read}\n", contents: "read"},
+		{name: "reusable caller grants read", provider: "github", permissions: "permissions: {}\n", jobPermissions: "    permissions: {contents: read}\n", calleePermissions: "\n", contents: "read"},
+		{name: "reusable callee denies read", provider: "github", calleePermissions: "permissions: {}\n"},
+		{name: "reusable callee cannot grant read", provider: "github", permissions: "permissions: {}\n", calleePermissions: "permissions: {contents: read}\n"},
+		{name: "reusable caller explicitly denies read", provider: "github", permissions: "permissions: {contents: none}\n", calleePermissions: "permissions: {contents: read}\n"},
+		{name: "nested reusable caller grants read", provider: "github", permissions: "permissions: {}\n", jobPermissions: "    permissions: {contents: read}\n", calleePermissions: "\n", nestedPermissions: "\n", contents: "read"},
+		{name: "nested reusable cannot restore denied read", provider: "github", calleePermissions: "permissions: {}\n", nestedPermissions: "permissions: {contents: read}\n"},
+		{name: "nested reusable cannot restore explicit none", provider: "github", calleePermissions: "permissions: {contents: none}\n", nestedPermissions: "permissions: {contents: write}\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			workflow := []byte("on: push\n" + test.permissions + "jobs:\n  checkout:\n    runs-on: ubuntu-latest\n" + test.jobPermissions + "    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n")
+			checkoutJob := "    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+			rootJob := "    runs-on: ubuntu-latest\n" + test.jobPermissions + "    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+			if test.calleePermissions != "" {
+				rootJob = test.jobPermissions + "    uses: ./.github/workflows/callee.yml\n"
+				calleeJob := checkoutJob
+				if test.nestedPermissions != "" {
+					calleeJob = "    uses: ./.github/workflows/nested.yml\n"
+					writeWorkflow(t, workspace, "nested.yml", "on: workflow_call\n"+test.nestedPermissions+"jobs:\n  checkout:\n"+checkoutJob)
+				}
+				writeWorkflow(t, workspace, "callee.yml", "on: workflow_call\n"+test.calleePermissions+"jobs:\n  checkout:\n"+calleeJob)
+			}
+			workflow := []byte("on: push\n" + test.permissions + "jobs:\n  checkout:\n" + rootJob)
 			if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 				t.Fatal(err)
 			}

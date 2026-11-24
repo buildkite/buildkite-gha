@@ -49,7 +49,9 @@ conservative without granting credentials to known-unreachable paths:
   distinct provenance from action-authored access.
 
 A reachable native GitHub checkout retains `provider-token-read` only when
-effective job permissions allow contents read or write. It uses the existing
+effective job permissions allow contents read or write. Preserve that permission
+through reusable calls, bounded by each caller, separately from the root-only
+workflow-token issuance policy. It uses the existing
 read-only Agent checkout issuer, not workflow-token authority or expression
 contexts. Ordinary token references retain their existing issuance and masking
 path; see the

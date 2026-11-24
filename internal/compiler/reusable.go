@@ -33,17 +33,18 @@ var callOutputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 
 type sourcedJob struct {
 	workflow.Job
-	path                  string
-	digest                string
-	root                  string
-	remote                *RemoteWorkflowSource
-	inputs                reusableInputs
-	secretAuthority       secretAuthority
-	needBindings          map[string]needBinding
-	tokenPolicyNarrowed   bool
-	jobPermissionsIgnored bool
-	reusableCall          workflow.Position
-	blockerDetailUnsafe   bool
+	path                   string
+	digest                 string
+	root                   string
+	remote                 *RemoteWorkflowSource
+	inputs                 reusableInputs
+	secretAuthority        secretAuthority
+	needBindings           map[string]needBinding
+	tokenPolicyNarrowed    bool
+	jobPermissionsIgnored  bool
+	checkoutContentsAccess string
+	reusableCall           workflow.Position
+	blockerDetailUnsafe    bool
 	// matrixDetailUnsafe reports that the matrix or its scheduling values read
 	// inputs, so matrix errors can quote input values and must not be shown
 	// as detail.
@@ -186,7 +187,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: matrixContainsExpressions(job.Matrix) || runsOnReadsInputs(job), matrixDetailUnsafe: matrixReadsInputs(job), runsOnDetailUnsafe: runsOnReadsInputs(job)}
+			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: matrixContainsExpressions(job.Matrix) || runsOnReadsInputs(job), matrixDetailUnsafe: matrixReadsInputs(job), runsOnDetailUnsafe: runsOnReadsInputs(job), checkoutContentsAccess: job.Permissions.Scopes["contents"]}
 			workflowJobs[job.ID] = job
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
@@ -290,6 +291,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		job := jobs[id]
 		declaredJobPermissions := job.Permissions
 		job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, permissionCeiling, depth != 0)
+		// Checkout and nested calls retain effective permissions independently of
+		// the root-only workflow-token issuance policy below.
+		checkoutPermissions := job.Permissions
 		jobPermissionsIgnored := declaredJobPermissions != nil && repositoryPermissionsDiffer(resolver.rootPermissions, declaredJobPermissions)
 		jobTokenPolicyNarrowed := tokenPolicyNarrowed
 		if depth != 0 {
@@ -332,11 +336,12 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				Job: job, path: path, digest: digest, root: resolver.workspaceRoot, remote: cloneRemoteWorkflowSource(current.remote), inputs: cloneReusableInputs(inputs),
 				secretAuthority: cloneSecretAuthority(secrets), needBindings: needBindings,
 				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
-				blockerDetailUnsafe: blockerDetailUnsafe,
-				matrixDetailUnsafe:  matrixReadsInputs(job),
-				runsOnDetailUnsafe:  runsOnReadsInputs(job),
-				callGuards:          cloneSourcedCallGuards(callGuards),
-				concurrencyGates:    append([]WorkflowConcurrencyGate(nil), concurrencyGates...),
+				checkoutContentsAccess: checkoutPermissions.Scopes["contents"],
+				blockerDetailUnsafe:    blockerDetailUnsafe,
+				matrixDetailUnsafe:     matrixReadsInputs(job),
+				runsOnDetailUnsafe:     runsOnReadsInputs(job),
+				callGuards:             cloneSourcedCallGuards(callGuards),
+				concurrencyGates:       append([]WorkflowConcurrencyGate(nil), concurrencyGates...),
 			})
 			replacements[id] = needBinding{members: []string{job.ID}}
 			continue
@@ -484,7 +489,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				callLabel = labelPrefix + " / " + callLabel
 			}
 
-			calleePermissionCeiling := job.Permissions
+			calleePermissionCeiling := checkoutPermissions
 			if calleePermissionCeiling == nil {
 				calleePermissionCeiling = &workflow.Permissions{Scopes: map[string]string{}, Span: call.Span}
 			}

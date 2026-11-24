@@ -161,6 +161,7 @@ type JobInstance struct {
 	secretAuthority           secretAuthority
 	tokenPolicyNarrowed       bool
 	jobPermissionsIgnored     bool
+	checkoutContentsAccess    string
 	reusableCall              workflow.Position
 }
 

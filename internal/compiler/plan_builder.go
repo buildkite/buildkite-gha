@@ -625,7 +625,7 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 			span := instance.Steps[stepIndex].Span.Start
 			return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 		}
-		contents := instance.Permissions["contents"]
+		contents := instance.checkoutContentsAccess
 		if stepReachable && (b.ir.Event.Provider != "github" || contents == "read" || contents == "write") {
 			built.capabilities = append(built.capabilities, "provider-token-read")
 			built.authorization.ProviderTokenReadCapabilitySources = append(built.authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
