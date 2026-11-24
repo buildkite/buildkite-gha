@@ -429,6 +429,7 @@ func (r stageRun) deferredPipeline(bundle compiler.Bundle, stage stageResult, sh
 	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		Deferred:             true,
 		ArtifactProducer:     r.jobID,
+		UploaderQueue:        os.Getenv("BUILDKITE_AGENT_META_DATA_QUEUE"),
 		DistributionProducer: record.Importer,
 		ExistingSteps:        existing,
 		EventProvider:        record.Event.Provider,
@@ -514,6 +515,7 @@ func (r stageRun) uploadSkipped(fail func(string, ...any) int, result string, gr
 	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		Deferred:         true,
 		ArtifactProducer: r.jobID,
+		UploaderQueue:    os.Getenv("BUILDKITE_AGENT_META_DATA_QUEUE"),
 		ExistingSteps:    graphKeys,
 		EventProvider:    record.Event.Provider,
 		Workflows: []buildkitepipeline.Workflow{{

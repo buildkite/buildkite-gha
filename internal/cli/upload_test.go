@@ -886,6 +886,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	t.Chdir(repository)
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "checks-importer")
+	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", "importer-queue")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	workflowPaths := []string{
@@ -908,6 +909,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 			Skip      string `yaml:"skip"`
 			Command   string `yaml:"command"`
 			DependsOn string `yaml:"depends_on"`
+			Agents    struct{ Queue string }
 			Notify    []struct {
 				GitHubCheck struct {
 					Name string `yaml:"name"`
@@ -943,7 +945,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 			t.Fatalf("aggregate group %d = %#v, want %#v", i, group, want[i])
 		}
 		if group.Skip != "" {
-			if group.Group != "" || group.Label != want[i].group || group.Type != "command" || group.Command != "" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != want[i].checkName || len(group.Steps) != 0 {
+			if group.Group != "" || group.Label != want[i].group || group.Type != "command" || group.Command != "" || group.Agents.Queue != "importer-queue" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != want[i].checkName || len(group.Steps) != 0 {
 				t.Fatalf("aggregate skipped step %d = %#v", i, group)
 			}
 			continue
@@ -1816,7 +1818,7 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"a-invalid.yml": "name: Invalid\non: push\njobs:\n  first:\n    runs-on: windows-latest\n    steps: [{run: true}]\n  second:\n    runs-on: macos-15\n    steps: [{run: true}]\n",
-		"b-action.yml":  "name: Missing action\non: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./missing-action\n",
+		"b-action.yml":  "name: Missing action\non: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./missing-action\n  dependent:\n    needs: action\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		"c-success.yml": "name: Success\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 	})
 	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
@@ -1855,11 +1857,14 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 			Plugins failureStepPlugins `yaml:"plugins"`
 			Agents  map[string]string  `yaml:"agents"`
 			Steps   []struct {
-				Label   string             `yaml:"label"`
-				Key     string             `yaml:"key"`
-				Command string             `yaml:"command"`
-				Plugins failureStepPlugins `yaml:"plugins"`
-				Agents  map[string]string  `yaml:"agents"`
+				Label     string                  `yaml:"label"`
+				Key       string                  `yaml:"key"`
+				Command   string                  `yaml:"command"`
+				Plugins   failureStepPlugins      `yaml:"plugins"`
+				Agents    map[string]string       `yaml:"agents"`
+				Type      string                  `yaml:"type"`
+				Skip      string                  `yaml:"skip"`
+				DependsOn []struct{ Step string } `yaml:"depends_on"`
 			} `yaml:"steps"`
 		} `yaml:"steps"`
 	}
@@ -1873,8 +1878,11 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 		t.Fatalf("failed workflow step 0 = %#v", invalid)
 	}
 	missing := pipeline.Steps[1]
-	if missing.Group != ":github: workflow · Missing action" || missing.Label != "" || missing.Command != "" || len(missing.Steps) != 1 || missing.Steps[0].Label != ":github: job · action" || !isGeneratedFailureCommand(missing.Steps[0].Command) {
+	if missing.Group != ":github: workflow · Missing action" || missing.Label != "" || missing.Command != "" || len(missing.Steps) != 2 || missing.Steps[0].Label != ":github: job · action" || !isGeneratedFailureCommand(missing.Steps[0].Command) {
 		t.Fatalf("expanded failed workflow = %#v", missing)
+	}
+	if skipped := missing.Steps[1]; skipped.Label != ":github: job · dependent" || skipped.Type != "command" || skipped.Skip != "Not run because a prerequisite job could not be compiled" || skipped.Command != "" || skipped.Agents["queue"] != "importer-queue" || len(skipped.DependsOn) != 1 || skipped.DependsOn[0].Step != missing.Steps[0].Key {
+		t.Fatalf("skipped dependent = %#v", skipped)
 	}
 	if workflowQueue, jobQueue := pipeline.Steps[0].Agents["queue"], missing.Steps[0].Agents["queue"]; workflowQueue != "importer-queue" || jobQueue != "importer-queue" {
 		t.Fatalf("failure step queues = %q, %q; want both on importer-queue", workflowQueue, jobQueue)

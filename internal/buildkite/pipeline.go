@@ -132,8 +132,9 @@ type Pipeline struct {
 	RuntimeSelection *RuntimeSelection
 	CompilerStep     string
 	ArtifactProducer string
-	// FailureQueue routes diagnostic commands to the importer, not to a workflow runner.
-	FailureQueue string
+	// UploaderQueue routes diagnostics and skipped placeholders without relying
+	// on a cluster default. It does not select runners for workflow jobs.
+	UploaderQueue string
 	// RuntimePlugin is the invoking plugin's reference, independent of CLI pins.
 	RuntimePlugin string
 	// DistributionDigest and RuntimeImage retain the single-platform emitter
@@ -551,7 +552,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
 		}
-		emitFailureBody(out, "    ", artifactProducer, pipeline.FailureQueue, *failure, 1)
+		emitFailureBody(out, "    ", artifactProducer, pipeline.UploaderQueue, *failure, 1)
 		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, workflow.GroupKey, "", "Workflow could not be run", failure.Summary)
 		if pipeline.CompilerStep != "" {
 			_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
@@ -567,6 +568,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
 		out.WriteString("    type: command\n")
+		emitQueue(out, "    ", pipeline.UploaderQueue)
 		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, workflow.GroupKey, "", "", "")
 		if pipeline.CompilerStep != "" {
 			_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
@@ -634,7 +636,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 				if job.SoftFail {
 					exitStatus = ContinueOnErrorExitStatus
 				}
-				emitFailureBody(out, attributeIndent, artifactProducer, pipeline.FailureQueue, *job.Failure, exitStatus)
+				emitFailureBody(out, attributeIndent, artifactProducer, pipeline.UploaderQueue, *job.Failure, exitStatus)
 				emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, checkLabel, "Job could not be run", job.Failure.Summary)
 				if job.SoftFail {
 					_, _ = fmt.Fprintf(out, "%ssoft_fail:\n%s  - exit_status: %d\n", attributeIndent, attributeIndent, ContinueOnErrorExitStatus)
@@ -642,6 +644,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			} else {
 				_, _ = fmt.Fprintf(out, "%sskip: %s\n", attributeIndent, yamlScalar(job.SkipReason))
 				out.WriteString(attributeIndent + "type: command\n")
+				emitQueue(out, attributeIndent, pipeline.UploaderQueue)
 				if job.SkipDigest != "" {
 					_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar("exit 1 # skipped by stage "+shellQuote(job.SkipDigest)))
 				}
@@ -974,10 +977,14 @@ func BootstrapHasDigest(command, digest string) bool {
 	return strings.Contains(command, shellQuote(digest))
 }
 
-func emitFailureBody(out *bytes.Buffer, indent, artifactProducer, queue string, failure Failure, exitStatus int) {
+func emitQueue(out *bytes.Buffer, indent, queue string) {
 	if queue != "" {
 		_, _ = fmt.Fprintf(out, "%sagents:\n%s  queue: %s\n", indent, indent, yamlScalar(queue))
 	}
+}
+
+func emitFailureBody(out *bytes.Buffer, indent, artifactProducer, queue string, failure Failure, exitStatus int) {
+	emitQueue(out, indent, queue)
 	out.WriteString(indent + "plugins:\n")
 	out.WriteString(indent + "  - artifacts#v1.9.4:\n")
 	_, _ = fmt.Fprintf(out, "%s      step: %s\n", indent, yamlScalar(artifactProducer))

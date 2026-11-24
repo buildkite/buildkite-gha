@@ -658,7 +658,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	aggregatePipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:      importerStep,
 		ArtifactProducer:  importerJobID,
-		FailureQueue:      os.Getenv("BUILDKITE_AGENT_META_DATA_QUEUE"),
+		UploaderQueue:     os.Getenv("BUILDKITE_AGENT_META_DATA_QUEUE"),
 		RuntimePlugin:     pluginRuntimeReference(),
 		RuntimeSelection:  uploadArguments.runtimeSelection,
 		EventProvider:     effectiveEvent.Event.Provider,

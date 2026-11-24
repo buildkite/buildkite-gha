@@ -74,6 +74,13 @@ qualifications in the user reference until their prerequisites are established.
 The following obligations explain boundaries that a refactor or compatibility
 extension could accidentally remove. They are not a second feature inventory.
 
+### Generated placeholder routing
+
+Buildkite validates queue routing for skipped command steps at upload, even
+though it does not run them. Give diagnostic commands and skipped job or
+workflow placeholders the uploading agent's queue when known, without changing
+runner selection for runnable workflow jobs.
+
 ### Host-selected runtime delivery
 
 A capable plugin importer resolves `latest` once and emits the exact release

@@ -1254,6 +1254,7 @@ func TestAdvanceRequiresRecordedDeferredSources(t *testing.T) {
 // way a skipped static job would.
 func TestContinueSkipsDeferredJobsWhenProducerFails(t *testing.T) {
 	initial := runContinueInitialUpload(t)
+	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", "stage-queue")
 	prefix := strings.TrimSuffix(initial.artifact.rootProducer().Key, "plan")
 	runner := initial.continueRunner(initial.producerManifest(t, "failure", ""))
 	code, stdout, stderr := runContinue(t, runner, initial.digest)
@@ -1268,7 +1269,7 @@ func TestContinueSkipsDeferredJobsWhenProducerFails(t *testing.T) {
 		t.Fatalf("skipped steps = %#v", steps)
 	}
 	for _, step := range steps {
-		if !strings.Contains(step.Skip, `matrix producer job "plan" finished with result failure`) || len(step.DependsOn) != 1 || step.DependsOn[0].Step != prefix+"plan" {
+		if !strings.Contains(step.Skip, `matrix producer job "plan" finished with result failure`) || step.Agents.Queue != "stage-queue" || len(step.DependsOn) != 1 || step.DependsOn[0].Step != prefix+"plan" {
 			t.Fatalf("skipped step = %#v", step)
 		}
 	}
@@ -1505,6 +1506,7 @@ func TestContinueJoinedClosures(t *testing.T) {
 		t.Fatalf("continuations = %d, want one owner", len(initials))
 	}
 	initial := initials[0]
+	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", "stage-queue")
 	prefix := strings.TrimSuffix(initial.artifact.rootProducer().Key, "plan")
 	producer := initial.artifact.producer("test")
 	if producer.Key == prefix+"plan_other" || !strings.HasPrefix(producer.Key, prefix+"plan_other-") {
@@ -1545,6 +1547,9 @@ func TestContinueJoinedClosures(t *testing.T) {
 				seen[step.Key] = true
 				if step.Skip != "" {
 					skipped = append(skipped, strings.TrimPrefix(step.Key, prefix))
+					if step.Agents.Queue != "stage-queue" {
+						t.Fatalf("skipped step %s queue = %q, want stage-queue", step.Key, step.Agents.Queue)
+					}
 					if step.Command != "exit 1 # skipped by stage '"+initial.digest+"'" {
 						t.Fatalf("skip is not bound to owner artifact: %q", step.Command)
 					}
