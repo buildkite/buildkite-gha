@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
@@ -32,14 +31,18 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 	executable := buildLiveContainerRuntime(t)
 	node24 := requireNode24(t)
 	for _, test := range []struct {
-		name, permission, persistence, commit string
-		external, proxy                       bool
+		name, permission, persistence, commit              string
+		external, proxy, store, submodules, siblingPrivate bool
 	}{
 		{name: "default read", permission: "read"},
-		{name: "explicit write", permission: "write", persistence: "true"},
+		{name: "write declaration remains read only", permission: "write", persistence: "true"},
 		{name: "checkout only", permission: "read", persistence: "false"},
 		{name: "no contents", permission: "none"},
 		{name: "configured credentials", permission: "none", external: true},
+		{name: "configured credentials with managed access", permission: "read", external: true},
+		{name: "store cannot retain managed token", permission: "read", store: true},
+		{name: "private sibling submodule", permission: "read", submodules: true},
+		{name: "private sibling later fetch", permission: "read", siblingPrivate: true},
 		{name: "proxy transport", permission: "read", proxy: true},
 		{name: "legacy v1.0.0", permission: "read", commit: "af513c7a016048ae468971c52ed77d9562c7c819"},
 	} {
@@ -75,24 +78,37 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 			mustGit(seed, "add", ".")
 			mustGit(seed, "-c", "user.name=Example", "-c", "user.email=example@example.com", "commit", "-m", "initial")
 			sha := mustGit(seed, "rev-parse", "HEAD")
+			if test.submodules || test.siblingPrivate {
+				sibling := filepath.Join(root, "acme", "library.git")
+				mustGit(root, "init", "--bare", sibling)
+				mustGit(seed, "push", sibling, "HEAD:refs/heads/main")
+			}
+			if test.submodules {
+				writeFixtureFile(t, seed, ".gitmodules", "[submodule \"library\"]\npath = library\nurl = ../library.git\n")
+				mustGit(seed, "add", ".gitmodules")
+				mustGit(seed, "update-index", "--add", "--cacheinfo", "160000,"+sha+",library")
+				mustGit(seed, "-c", "user.name=Example", "-c", "user.email=example@example.com", "commit", "-m", "add submodule")
+				sha = mustGit(seed, "rev-parse", "HEAD")
+			}
 			mustGit(seed, "push", remote, "HEAD:refs/heads/main")
 
 			token := "read-token"
-			if test.permission == "write" {
-				token = "write-token"
-			}
 			if test.external {
 				token = "external-token"
 			}
 			backend := &cgi.Handler{Path: git, Args: []string{"http-backend"}, Env: []string{"GIT_PROJECT_ROOT=" + root, "GIT_HTTP_EXPORT_ALL=1"}}
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 				_, password, ok := request.BasicAuth()
-				if !ok || password != token {
+				wantToken := token
+				if test.siblingPrivate && strings.HasPrefix(request.URL.Path, "/acme/library.git/") {
+					wantToken = "external-token"
+				}
+				if !ok || password != wantToken {
 					w.Header().Set("WWW-Authenticate", `Basic realm="Git"`)
 					w.WriteHeader(http.StatusUnauthorized)
 					return
 				}
-				if strings.Contains(request.URL.String(), "git-receive-pack") && password != "write-token" {
+				if strings.Contains(request.URL.String(), "git-receive-pack") && password != "external-token" {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
@@ -107,15 +123,28 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 			if test.external {
 				mustGit(root, "config", "--global", "credential.helper", "!f() { printf 'username=external\\npassword=external-token\\n'; }; f")
 			}
+			if test.siblingPrivate {
+				mustGit(root, "config", "--global", "credential.useHttpPath", "true")
+				mustGit(root, "config", "--global", "credential.helper", "!f() { request=$(cat); case \"$request\" in *path=acme/library.git*) printf 'username=external\\npassword=external-token\\n' ;; esac; }; f")
+			}
+			store := filepath.Join(root, "stored-credentials")
+			if test.store {
+				mustGit(root, "config", "--global", "credential.helper", "store --file="+store)
+			}
+			agent := filepath.Join(root, "buildkite-agent")
+			marker := filepath.Join(root, "agent-lookups")
+			writeFixtureFile(t, root, "buildkite-agent", "#!/bin/sh\nset -eu\ntest \"$BUILDKITE_AGENT_ACCESS_TOKEN\" = agent-secret\ntest \"$1 $2\" = 'git-credentials-helper get'\ncat >/dev/null\necho lookup >> "+shellTestQuote(marker)+"\nprintf 'username=provider-user\\npassword=read-token\\n\\n'\n")
+			if err := os.Chmod(agent, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			// The snapshot sees the administrator's HOME, not the workflow's.
 			t.Setenv("HOME", root)
 			authentication, err := snapshotCheckoutAuthentication(t.Context(), git, temp)
 			if err != nil {
 				t.Fatal(err)
 			}
-			provider := &testWorkflowTokenProvider{token: token}
 			var output bytes.Buffer
-			runner := Runner{Git: git, RuntimeExecutable: executable, WorkflowToken: provider, Redactor: &testRedactor{}}
+			runner := Runner{Git: git, RuntimeExecutable: executable, RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "agent-secret"}}
 			job := plan.Job{Event: plan.Event{Provider: "github", Repository: "acme/widgets", SHA: sha, Ref: "refs/heads/main", ServerURL: server.URL}}
 			if test.proxy {
 				// Only the proxy can route the certificate's DNS name to this
@@ -138,19 +167,25 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 				}))
 				defer proxy.Close()
 				transport["HTTPS_PROXY"], transport["NO_PROXY"] = proxy.URL, ""
-				runner.RepositoryCredentials = &AgentRepositoryCredentials{proxyEnvironment: transport}
+				runner.RepositoryCredentials.proxyEnvironment = transport
 				job.Event.ServerURL = "https://" + server.Certificate().DNSNames[0]
 			}
-			job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": test.permission}, CheckoutOnly: true}
 			processor := newCommandOutputProcessor(&output, &output)
-			service, err := startGitCredentialService(t.Context(), temp, runner, job, processor)
-			if err != nil {
-				t.Fatal(err)
+			var service *gitCredentialService
+			if test.permission != "none" {
+				job.RequiredCapabilities = []string{"network", "provider-token-read"}
+				service, err = startGitCredentialService(t.Context(), temp, runner, job, processor)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = service.Close(t.Context()) })
 			}
-			t.Cleanup(func() { _ = service.Close(t.Context()) })
 			inputs := map[string]string{}
 			if test.persistence != "" {
 				inputs["persist-credentials"] = test.persistence
+			}
+			if test.submodules {
+				inputs["submodules"] = "true"
 			}
 			commit := test.commit
 			if commit == "" {
@@ -158,8 +193,8 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 			}
 			_, err = runner.runCheckoutWithAuthentication(t.Context(), processor, workspace, job, commit, inputs, authentication, service)
 			if test.permission == "none" && !test.external {
-				if err == nil || provider.calls != 0 {
-					t.Fatalf("checkout without contents permission: error=%v, issued=%d", err, provider.calls)
+				if _, markerErr := os.Stat(marker); err == nil || !os.IsNotExist(markerErr) {
+					t.Fatalf("checkout without contents permission: error=%v, helper marker=%v", err, markerErr)
 				}
 				return
 			}
@@ -168,6 +203,11 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 			}
 			if got := mustGit(workspace, "rev-parse", "HEAD"); got != sha {
 				t.Fatalf("checked out %s, want %s", got, sha)
+			}
+			if test.submodules {
+				if _, err := os.Stat(filepath.Join(workspace, "library", ".github", "workflows", "test.yml")); err != nil {
+					t.Fatalf("private sibling submodule was not checked out: %v", err)
+				}
 			}
 			config := mustGit(workspace, "config", "--local", "--list")
 			if strings.Contains(config, token) || strings.Contains(output.String(), token) {
@@ -183,11 +223,14 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 			if fetchErr != nil {
 				t.Fatalf("later fetch: %v", fetchErr)
 			}
+			if test.siblingPrivate {
+				mustGit(workspace, "fetch", server.URL+"/acme/library.git", "main")
+			}
 			worktree := filepath.Join(root, "linked")
 			mustGit(workspace, "worktree", "add", "--detach", worktree, "HEAD")
 			mustGit(worktree, "fetch", "origin", "main")
 			_, pushErr := gitRun(worktree, "push", "origin", "HEAD:refs/tags/example")
-			if test.permission == "write" {
+			if test.external {
 				if pushErr != nil {
 					t.Fatalf("authorized tag push: %v", pushErr)
 				}
@@ -197,24 +240,23 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 			} else if pushErr == nil {
 				t.Fatal("read-only credential allowed a push")
 			}
-			if !test.external {
-				// Renewal must keep the immutable repository/workflow/permission
-				// binding, rather than taking broader authority from Git input.
-				service.mu.Lock()
-				service.issued = time.Now().Add(-46 * time.Minute)
-				service.mu.Unlock()
-				mustGit(workspace, "fetch", "origin", "main")
-				if provider.calls != 2 || provider.repository != "acme/widgets" || provider.workflow != "test.yml" || provider.permissions["contents"] != test.permission {
-					t.Fatalf("renewal authority: %#v", provider)
+			if test.external {
+				if _, err := os.Stat(marker); !os.IsNotExist(err) {
+					t.Fatal("configured helper did not take precedence")
 				}
-			} else if provider.calls != 0 {
-				t.Fatal("configured helper did not take precedence")
 			}
-			if err := service.Close(t.Context()); err != nil {
-				t.Fatal(err)
+			if test.store {
+				if _, err := os.Stat(store); !os.IsNotExist(err) {
+					t.Fatal("Git persisted a managed credential in the inherited store")
+				}
+			}
+			if service != nil {
+				if err := service.Close(t.Context()); err != nil {
+					t.Fatal(err)
+				}
 			}
 			config = mustGit(workspace, "config", "--local", "--list")
-			if strings.Contains(config, service.key) {
+			if service != nil && strings.Contains(config, service.key) {
 				t.Fatal("job cleanup left the temporary credential helper configured")
 			}
 			if !test.external {
@@ -234,9 +276,6 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 					fail := mode == "failure"
 					jobWorkspace := t.TempDir()
 					command := "test -z \"${BUILDKITE_AGENT_ACCESS_TOKEN:-}\"; git fetch origin main"
-					if !test.external {
-						command += "; git push origin HEAD:refs/tags/runtime-example"
-					}
 					if fail {
 						command += "; exit 1"
 					}
@@ -253,23 +292,18 @@ func TestCheckoutEphemeralCredentials(t *testing.T) {
 					job.Event.Name = fullJob.Event.Name
 					job.Event.PayloadDigest = fullJob.Event.PayloadDigest
 					fullJob.Event = job.Event
-					fullJob.GitHubToken = job.GitHubToken
-					fullJob.RequiredCapabilities = []string{"network", "provider-token-read", "provider-token-write"}
+					fullJob.RequiredCapabilities = []string{"network", "provider-token-read"}
 					*fullJob.RequiresMise = false
 					fullJob.Actions = []plan.ActionLock{
 						{ID: "a-0000000000000001", Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: actionintegration.CheckoutV7Commit, SourceDigest: digest},
 						{ID: "a-0000000000000002", Source: "github", Repository: "acme/action", RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: digest},
-					}
-					agent, err := exec.LookPath("true")
-					if err != nil {
-						t.Fatal(err)
 					}
 					jobRunner := runner
 					jobRunner.RepositoryCredentials = &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "agent-secret"}
 					if test.external {
 						fullJob.GitHubToken = nil
 						fullJob.RequiredCapabilities = []string{"network", "provider-token-read"}
-						jobRunner.RepositoryCredentials, jobRunner.WorkflowToken = nil, nil
+						jobRunner.RepositoryCredentials = nil
 					}
 					jobRunner.Node24 = node24
 					jobRunner.Actions = &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: actionRoot, ActionRoot: actionRoot, SourceDigest: digest}}
@@ -307,10 +341,22 @@ func TestGitCredentialHelperRepositoryBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(temp) })
-	provider := &testWorkflowTokenProvider{token: "scoped-test-token"}
+	const token = "scoped-test-token"
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := filepath.Join(temp, "agent")
+	marker := filepath.Join(temp, "lookups")
+	response := filepath.Join(temp, "response")
+	writeFixtureFile(t, temp, "response", "username=provider-user\npassword="+token+"\n\n")
+	writeFixtureFile(t, temp, "agent", "#!/bin/sh\nset -eu\ntest \"$BUILDKITE_AGENT_ACCESS_TOKEN\" = agent-secret\ncat >/dev/null\necho lookup >> "+shellTestQuote(marker)+"\ncat "+shellTestQuote(response)+"\n")
+	if err := os.Chmod(agent, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	processor := newCommandOutputProcessor(&bytes.Buffer{}, &bytes.Buffer{})
-	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "acme/widgets"}, GitHubToken: &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": "read"}}}
-	service, err := startGitCredentialService(t.Context(), temp, Runner{RuntimeExecutable: buildLiveContainerRuntime(t), WorkflowToken: provider, Redactor: &testRedactor{}}, job, processor)
+	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "acme/widgets"}}
+	service, err := startGitCredentialService(t.Context(), temp, Runner{Git: git, RuntimeExecutable: buildLiveContainerRuntime(t), RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "agent-secret"}}, job, processor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,17 +369,23 @@ func TestGitCredentialHelperRepositoryBoundary(t *testing.T) {
 		"protocol=https\nhost=github.com\npath=acme/widgets.git/extra\n\n",
 	} {
 		var output, stderr bytes.Buffer
-		if code := RunGitCredentialHelper([]string{service.key, "get"}, strings.NewReader(input), &output, &stderr); code != 0 || output.Len() != 0 || provider.calls != 0 {
-			t.Fatalf("out-of-scope credential %q: code=%d, output=%q, calls=%d", input, code, &output, provider.calls)
+		code := RunGitCredentialHelper([]string{service.key, "get"}, strings.NewReader(input), &output, &stderr)
+		if _, err := os.Stat(marker); code != 0 || output.Len() != 0 || !os.IsNotExist(err) {
+			t.Fatalf("out-of-scope credential %q: code=%d, output=%q, lookup=%v", input, code, &output, err)
 		}
 	}
 	var output, stderr bytes.Buffer
 	input := "protocol=https\nhost=github.com\npath=acme/widgets.git\n\n"
-	if code := RunGitCredentialHelper([]string{"wrong-key", "get"}, strings.NewReader(input), &output, &stderr); code == 0 || output.Len() != 0 || provider.calls != 0 {
-		t.Fatalf("unauthenticated broker request: code=%d, output=%q, calls=%d", code, &output, provider.calls)
+	if code := RunGitCredentialHelper([]string{"wrong-key", "get"}, strings.NewReader(input), &output, &stderr); code == 0 || output.Len() != 0 {
+		t.Fatalf("unauthenticated broker request: code=%d, output=%q", code, &output)
 	}
-	if code := RunGitCredentialHelper([]string{service.key, "get"}, strings.NewReader(input), &output, &stderr); code != 0 || !strings.Contains(output.String(), fmt.Sprintf("password=%s", provider.token)) || provider.calls != 1 {
-		t.Fatalf("scoped credential: code=%d, output=%q, calls=%d", code, &output, provider.calls)
+	if code := RunGitCredentialHelper([]string{service.key, "get"}, strings.NewReader(input), &output, &stderr); code != 0 || !strings.Contains(output.String(), "username=provider-user\npassword="+token) {
+		t.Fatalf("scoped credential: code=%d, output=%q, stderr=%s", code, &output, &stderr)
+	}
+	writeFixtureFile(t, temp, "response", "username=provider-user\npassword=rotated-"+token+"\n\n")
+	output.Reset()
+	if code := RunGitCredentialHelper([]string{service.key, "get"}, strings.NewReader(input), &output, &stderr); code != 0 || !strings.Contains(output.String(), "password=rotated-"+token) {
+		t.Fatalf("provider credential rotation was hidden by a local cache: code=%d, stderr=%s", code, &stderr)
 	}
 	t.Run("non-root container", func(t *testing.T) {
 		requireLinuxAMD64(t)
@@ -344,7 +396,7 @@ func TestGitCredentialHelperRepositoryBoundary(t *testing.T) {
 		cmd := exec.CommandContext(t.Context(), docker, "run", "--rm", "-i", "--user", "65534:65534", "-e", "RUNNER_TEMP=/credentials", "-v", temp+":/credentials", "alpine:3.20", "/credentials/"+gitCredentialExecutable(), GitCredentialHelperCommand, service.key, "get")
 		cmd.Stdin = strings.NewReader(input)
 		cmd.Stderr = io.Discard
-		if output, err := cmd.Output(); err != nil || !strings.Contains(string(output), "password="+provider.token) {
+		if output, err := cmd.Output(); err != nil || !strings.Contains(string(output), "password=rotated-"+token) {
 			t.Fatalf("non-root container helper: error=%v, output=%q", err, output)
 		}
 	})

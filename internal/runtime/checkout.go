@@ -134,7 +134,7 @@ func (r Runner) runCheckoutWithAuthentication(ctx context.Context, processor *co
 		// containing the executable pinned before workflow action hooks.
 		env["PATH"] = strings.Join([]string{filepath.Dir(git), "/usr/bin", "/bin"}, string(os.PathListSeparator))
 	}
-	base := checkoutGitBaseArgs(authentication == "")
+	base := checkoutGitBaseArgs(authentication == "" || credentialed)
 	if authentication != "" {
 		delete(env, "HOME")
 		env["GIT_CONFIG_GLOBAL"] = authentication
@@ -144,10 +144,9 @@ func (r Runner) runCheckoutWithAuthentication(ctx context.Context, processor *co
 			maps.Copy(env, r.RepositoryCredentials.proxyEnvironment)
 		}
 		env["RUNNER_TEMP"] = filepath.Dir(authentication)
-		base = append(base,
-			"-c", "credential.https://"+credentialHost+".useHttpPath=true",
-			"-c", "credential.https://"+credentialHost+".helper="+credentials.helper(),
-		)
+		for _, setting := range credentials.settings() {
+			base = append(base, "-c", setting[0]+"="+setting[1])
+		}
 	}
 	runWithBase := func(runEnv map[string]string, commandBase []string, withCredentials bool, args ...string) error {
 		if withCredentials {
@@ -221,10 +220,15 @@ func (r Runner) runCheckoutWithAuthentication(ctx context.Context, processor *co
 	mode := checkoutSubmoduleMode(inputs)
 	if mode != "" {
 		submoduleBase := base
-		if lfs {
-			submoduleBase = checkoutGitLFSFilterArgs(base, r.GitLFS)
+		if credentials != nil {
+			// Native submodule checkout retains the existing read-only issuer's
+			// repository scope. Never expose that Agent context to later steps.
+			submoduleBase = checkoutGitBaseArgs(true)
 		}
-		if err := r.runCheckoutSubmodules(ctx, processor, checkoutDirectory, git, env, submoduleBase, checkoutFetchDepth(inputs), mode == "recursive", credentialed, credentialHost); err != nil {
+		if lfs {
+			submoduleBase = checkoutGitLFSFilterArgs(submoduleBase, r.GitLFS)
+		}
+		if err := r.runCheckoutSubmodules(ctx, processor, checkoutDirectory, git, env, submoduleBase, checkoutFetchDepth(inputs), mode == "recursive", credentialed || credentials != nil, credentialHost); err != nil {
 			return result, fmt.Errorf("%s submodules: %w", adapter, err)
 		}
 	}
@@ -235,15 +239,12 @@ func (r Runner) runCheckoutWithAuthentication(ctx context.Context, processor *co
 	}
 	if credentials != nil && actionintegration.CheckoutSupportsCredentialPersistence(commit) && (checkoutInput(inputs, "persist-credentials") == "" || checkoutInputTrue(checkoutInput(inputs, "persist-credentials"))) {
 		credentials.checkouts = append(credentials.checkouts, checkoutDirectory)
-		for key, value := range map[string]string{
-			"credential.https://" + credentialHost + ".helper":      credentials.helper(),
-			"credential.https://" + credentialHost + ".useHttpPath": "true",
-		} {
-			if err := run(env, false, "config", "--local", "--add", key, value); err != nil {
+		for _, setting := range credentials.settings() {
+			if err := run(env, false, "config", "--local", "--add", setting[0], setting[1]); err != nil {
 				return result, err
 			}
 		}
-		_, _ = fmt.Fprintln(processor.stderr, "Checkout credentials remain available through a temporary Buildkite Git credential helper until job cleanup. Buildkite-issued GitHub tokens are not stored in Git configuration. Access follows the authorized workflow permissions.")
+		_, _ = fmt.Fprintln(processor.stderr, "Read-only checkout credentials remain available through a temporary Buildkite Git credential helper until job cleanup. Buildkite-issued tokens are not stored in Git configuration; managed write access is not provided.")
 	}
 	setCheckoutOutputs(result.Outputs, commit, checkoutRefOutput(inputs, job.Event.Ref), headSHA)
 	return result, nil

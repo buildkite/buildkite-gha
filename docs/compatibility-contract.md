@@ -627,17 +627,20 @@ An implementation convenience must not expand their recipients or lifetimes.
 The [security model](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/security)
 owns the user-facing boundaries.
 
-For managed GitHub checkout, use the server-validated workflow token rather
-than the Agent's fixed read-only checkout token. This requires workflow-token
-eligibility and pipeline opt-in even for read-only checkout; do not fall back
-to the broader endpoint on denial. Omitted modern checkout
+For managed GitHub checkout, reuse the Agent's fixed read-only checkout issuer,
+not the workflow-token API. Retain its existing repository authorization and
+agent eligibility. Effective job permissions must allow contents read or write;
+neither persistence nor a write declaration grants managed write access.
+Omitted modern checkout
 `persist-credentials` and explicit `true` retain a repository-local helper
 through later steps and post actions. Explicit `false` uses it only during
 checkout; legacy v1 does not retain it. Persistence changes availability, not
-permissions. A workflow token without contents read or write cannot authenticate
-private checkout. Preserve separately configured self-hosted authentication.
+permissions. Without contents access, private checkout needs separately
+configured authentication. Preserve that self-hosted authentication and the
+existing native submodule reads authorized by the Agent issuer.
 
-The runtime owns credential issuance and renewal through a per-job socket.
+The runtime delegates credential requests to the existing Agent helper through
+a per-job socket, without a second bearer cache.
 Workflow processes receive a narrow HTTPS credential-protocol client, not Agent
 credentials. Match the event host and repository before issuance. Never write
 Buildkite-issued GitHub tokens to Git config, remote URLs, or helper arguments.
@@ -651,7 +654,7 @@ and the runner-temp credential file used by
 [checkout v6](https://github.com/actions/checkout/blob/d23441a48e516b6c34aea4fa41551a30e30af803/src/git-auth-helper.ts).
 [Local HTTPS Git tests](../internal/runtime/git_credentials_test.go) cover later
 fetches, authorized and denied tag pushes, linked worktrees, opt-out, external
-credentials, renewal, cleanup, and host/repository restrictions. They do not
+credentials, repeated lookups, cleanup, and host/repository restrictions. They do not
 establish native GitHub execution or deployed backend availability.
 
 Workflow subprocesses default to `GIT_TERMINAL_PROMPT=0`, matching the

@@ -1506,14 +1506,16 @@ func TestRepositoryProviderCheckoutPinsGitAndAgentBeforeActionPreHooks(t *testin
 set -eu
 operation=
 for argument in "$@"; do
-  case "$argument" in init|remote|fetch|checkout) operation="$argument"; break ;; esac
+  case "$argument" in init|remote|fetch|checkout|config|credential) operation="$argument"; break ;; esac
 done
 case "$operation" in
+  config) case "$*" in *--get-regexp*) exit 1 ;; esac ;;
+  credential) exit 1 ;;
   init) mkdir -p .git ;;
   fetch)
     helper=
     for argument in "$@"; do
-      case "$argument" in credential.https://github.com.helper=!*) helper="${argument#credential.https://github.com.helper=!}" ;; esac
+      case "$argument" in credential.https://github.com/buildkite/buildkite-gha.git.helper=!*) helper="${argument#credential.https://github.com/buildkite/buildkite-gha.git.helper=!}" ;; esac
     done
     test -n "$helper"
     credentials="$(printf 'protocol=https\nhost=github.com\npath=buildkite/buildkite-gha.git\n\n' | sh -c "$helper get")"
@@ -1626,8 +1628,7 @@ fi
 			Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64), Repository: "buildkite/buildkite-gha", Ref: "refs/heads/main", SHA: sha,
 		},
 		Target:               plan.Target{StepKey: "gha-checkout", Queue: "trusted"},
-		RequiredCapabilities: []string{"network", "provider-token-read", "provider-token-write"},
-		GitHubToken:          &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": "read"}, CheckoutOnly: true},
+		RequiredCapabilities: []string{"network", "provider-token-read"},
 		Env: map[string]string{
 			"LOOKUP_AGENT":   lookupAgent,
 			"LOOKUP_GIT":     lookupGit,
@@ -1649,7 +1650,7 @@ fi
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: remoteDigest}}
 	var logs bytes.Buffer
 	credentials := &AgentRepositoryCredentials{JobID: testCacheJobID, JobToken: "job-secret"}
-	result, err := (Runner{Node24: node, RuntimeExecutable: buildLiveContainerRuntime(t), RepositoryCredentials: credentials, WorkflowToken: &testWorkflowTokenProvider{token: repositoryToken}, Redactor: &testRedactor{}, Actions: materializer, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node, RuntimeExecutable: buildLiveContainerRuntime(t), RepositoryCredentials: credentials, Actions: materializer, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -1665,8 +1666,8 @@ fi
 	if target, err := filepath.EvalSymlinks(lookupGitLFS); err != nil || target != poisonGitLFS {
 		t.Fatalf("pre-hook Git LFS replacement = %q, %v; want %q", target, err, poisonGitLFS)
 	}
-	if _, err := os.Stat(trustedAgentMarker); !os.IsNotExist(err) {
-		t.Fatalf("workflow Git invoked the broad Agent credential helper: %v", err)
+	if _, err := os.Stat(trustedAgentMarker); err != nil {
+		t.Fatalf("trusted Agent credential helper did not run: %v", err)
 	}
 	for name, marker := range map[string]string{"Git selected through poisoned PATH": poisonGitMarker, "Git LFS selected through poisoned PATH": poisonGitLFSMarker, "Agent helper selected through poisoned PATH": poisonAgentMarker} {
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {

@@ -17,7 +17,6 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -39,22 +38,19 @@ func gitCredentialExecutable() string {
 // connection credential grants only this job's repository-token lookup, never
 // the Agent API. GitHub tokens remain inside Git's credential protocol.
 type gitCredentialService struct {
-	server     *http.Server
-	key        string
-	host       string
-	repository string
-	token      *plan.GitHubToken
-	runner     Runner
-	processor  *commandOutputProcessor
-	mu         sync.Mutex
-	value      string
-	issued     time.Time
-	checkouts  []string
+	server         *http.Server
+	key            string
+	host           string
+	repository     string
+	authentication string
+	runner         Runner
+	processor      *commandOutputProcessor
+	checkouts      []string
 }
 
 func startGitCredentialService(ctx context.Context, temp string, runner Runner, job plan.Job, processor *commandOutputProcessor) (*gitCredentialService, error) {
 	_, host, _ := checkoutRepositoryURL(job.Event.Provider, job.Event.Repository, job.Event.ServerURL)
-	s := &gitCredentialService{key: rand.Text(), host: host, repository: job.Event.Repository, token: job.GitHubToken, runner: runner, processor: processor}
+	s := &gitCredentialService{key: rand.Text(), host: host, repository: job.Event.Repository, authentication: filepath.Join(temp, "checkout-auth.config"), runner: runner, processor: processor}
 	processor.addMask(s.key)
 	executable := runner.RuntimeExecutable
 	if executable == "" {
@@ -111,22 +107,54 @@ func (s *gitCredentialService) ServeHTTP(w http.ResponseWriter, request *http.Re
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if s.token == nil || s.token.Permissions["contents"] != "read" && s.token.Permissions["contents"] != "write" {
-		w.WriteHeader(http.StatusNoContent)
+	credential, err := s.credential(request.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.value == "" || time.Since(s.issued) >= 45*time.Minute {
-		token, err := s.runner.resolveWorkflowToken(request.Context(), s.processor, s.repository, s.token.Workflow, s.token.Permissions)
+	_, _ = io.WriteString(w, credential)
+}
+
+func (s *gitCredentialService) credential(ctx context.Context) (string, error) {
+	input := "protocol=https\nhost=" + s.host + "\npath=" + s.repository + ".git\n\n"
+	// Resolve private helpers separately so Git never sends a managed bearer
+	// to an inherited helper's store operation. Do not give them Agent credentials.
+	private := exec.CommandContext(ctx, s.runner.Git, "-c", "credential.useHttpPath=true", "credential", "fill")
+	private.Dir = filepath.Dir(s.authentication)
+	private.Env = processEnv(map[string]string{"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": s.authentication, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": ""})
+	private.Stdin = strings.NewReader(input)
+	var output boundedSecretBuffer
+	private.Stdout, private.Stderr = &output, io.Discard
+	if err := private.Run(); err != nil {
+		output = boundedSecretBuffer{}
+		env, err := s.runner.repositoryProviderCheckoutCredentialEnvironment(s.processor, nil, s.host)
 		if err != nil {
-			// Return the actionable server diagnostic, never provider response bodies.
-			http.Error(w, s.processor.scrubError(err).Error(), http.StatusForbidden)
-			return
+			return "", err
 		}
-		s.value, s.issued = token, time.Now()
+		command := exec.CommandContext(ctx, s.runner.RepositoryCredentials.Agent, "git-credentials-helper", "get")
+		command.Env, command.Stdin = processEnv(env), strings.NewReader(input)
+		command.Stdout, command.Stderr = &output, io.Discard
+		if err := command.Run(); err != nil {
+			return "", fmt.Errorf("checkout credential lookup through the Buildkite helper failed")
+		}
 	}
-	_, _ = fmt.Fprintf(w, "username=x-access-token\npassword=%s\n\n", s.value)
+	if output.exceeded {
+		return "", fmt.Errorf("checkout credential response exceeds %d bytes", maxSecretBytes)
+	}
+	username, password := "", ""
+	for line := range strings.SplitSeq(output.String(), "\n") {
+		if value, ok := strings.CutPrefix(line, "username="); ok {
+			username = value
+		}
+		if value, ok := strings.CutPrefix(line, "password="); ok {
+			password = value
+		}
+	}
+	if username == "" || password == "" || strings.ContainsAny(username+password, "\r\x00") {
+		return "", fmt.Errorf("checkout credential helper returned no usable credential")
+	}
+	s.processor.addMask(password)
+	return "username=" + username + "\npassword=" + password + "\n\n", nil
 }
 
 func (s *gitCredentialService) Close(ctx context.Context) error {
@@ -137,11 +165,8 @@ func (s *gitCredentialService) Close(ctx context.Context) error {
 		if _, err := os.Stat(filepath.Join(directory, ".git")); os.IsNotExist(err) {
 			continue
 		}
-		for key, value := range map[string]string{
-			"credential.https://" + s.host + ".helper":      s.helper(),
-			"credential.https://" + s.host + ".useHttpPath": "true",
-		} {
-			cmd := exec.CommandContext(cleanup, s.runner.Git, "config", "--local", "--fixed-value", "--unset-all", key, value)
+		for _, setting := range s.settings() {
+			cmd := exec.CommandContext(cleanup, s.runner.Git, "config", "--local", "--fixed-value", "--unset-all", setting[0], setting[1])
 			cmd.Dir, cmd.Env = directory, processEnv(nil)
 			if err := cmd.Run(); err != nil {
 				var exit *exec.ExitError
@@ -152,6 +177,17 @@ func (s *gitCredentialService) Close(ctx context.Context) error {
 		}
 	}
 	return errors.Join(append(errs, s.server.Close())...)
+}
+
+func (s *gitCredentialService) settings() [][2]string {
+	settings := [][2]string{
+		{"credential.https://" + s.host + ".useHttpPath", "true"},
+	}
+	for _, suffix := range []string{"", ".git"} {
+		key := "credential.https://" + s.host + "/" + s.repository + suffix + ".helper"
+		settings = append(settings, [2]string{key, ""}, [2]string{key, s.helper()})
+	}
+	return settings
 }
 
 // RunGitCredentialHelper implements Git's get/store/erase protocol. It has no
@@ -178,7 +214,7 @@ func RunGitCredentialHelper(args []string, input io.Reader, output, stderr io.Wr
 		return 1
 	}
 	body, _ := json.Marshal(fields)
-	ctx, cancel := context.WithTimeout(context.Background(), workflowTokenBudget+5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(os.Getenv("RUNNER_TEMP"), gitCredentialSocket))

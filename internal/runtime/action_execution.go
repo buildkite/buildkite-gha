@@ -94,15 +94,15 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		jobResult.Conclusion = "skipped"
 		return jobResult, nil
 	}
-	if job.HasCapability("provider-token-read") {
-		usesCheckout, err := validateJobCheckoutAdapters(job)
-		if err != nil {
-			return JobResult{}, fmt.Errorf("provider-token-read checkout preflight: %w", err)
-		}
-		if !usesCheckout {
-			return JobResult{}, fmt.Errorf("provider-token-read capability is restricted to the verified checkout adapter")
-		}
-		if r.RepositoryCredentials != nil {
+	usesCheckout, err := validateJobCheckoutAdapters(job)
+	if err != nil {
+		return JobResult{}, fmt.Errorf("checkout preflight: %w", err)
+	}
+	if job.HasCapability("provider-token-read") && !usesCheckout {
+		return JobResult{}, fmt.Errorf("provider-token-read capability is restricted to the verified checkout adapter")
+	}
+	if usesCheckout {
+		if job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil {
 			credentials, err := resolveAgentRepositoryCredentialsBeforeWorkflow(r.RepositoryCredentials)
 			if err != nil {
 				return JobResult{}, err
@@ -120,7 +120,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			r.GitLFS = ""
 		}
 	}
-	providerTokenRequired := job.HasCapability("provider-token-write") && (!job.GitHubToken.CheckoutOnly || r.RepositoryCredentials != nil)
+	providerTokenRequired := job.HasCapability("provider-token-write")
 	if providerTokenRequired && r.WorkflowToken == nil {
 		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")
 	}
@@ -268,7 +268,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		}
 		secrets = projected
 	}
-	if job.GitHubToken != nil && !job.GitHubToken.CheckoutOnly {
+	if job.GitHubToken != nil {
 		if secrets == nil {
 			secrets = map[string]string{}
 		}
@@ -416,12 +416,12 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		}
 	}
 	r.runnerTemp = runnerTemp
-	if job.HasCapability("provider-token-read") {
+	if usesCheckout {
 		r.checkoutAuth, err = snapshotCheckoutAuthentication(runCtx, r.Git, runnerTemp)
 		if err != nil {
 			return jobResult, err
 		}
-		if job.Event.Provider == "github" && r.RepositoryCredentials != nil {
+		if job.HasCapability("provider-token-read") && job.Event.Provider == "github" && r.RepositoryCredentials != nil {
 			r.gitCredentials, err = startGitCredentialService(context.WithoutCancel(runCtx), runnerTemp, r.Runner, job, processor)
 			if err != nil {
 				return jobResult, err
