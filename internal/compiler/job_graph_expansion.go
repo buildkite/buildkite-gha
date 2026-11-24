@@ -987,6 +987,7 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 		RepositoryRoot: sourced.root, Source: job.Span,
 		secretAuthority: sourced.secretAuthority, tokenPolicyNarrowed: sourced.tokenPolicyNarrowed,
 		jobPermissionsIgnored: sourced.jobPermissionsIgnored, reusableCall: sourced.reusableCall,
+		checkoutContentsAccess: sourced.checkoutContentsAccess,
 	}
 	for _, guard := range sourced.callGuards {
 		candidate.CallGuards = append(candidate.CallGuards, CallGuard{Condition: guard.condition, Inputs: cloneAnyMap(guard.inputs.values)})

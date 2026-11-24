@@ -48,6 +48,15 @@ conservative without granting credentials to known-unreachable paths:
 - Workflow-authored `toJSON(github)` and direct `github.token` access retain
   distinct provenance from action-authored access.
 
+A reachable native GitHub checkout retains `provider-token-read` only when
+effective job permissions allow contents read or write. Preserve that permission
+through reusable calls, bounded by each caller, separately from the root-only
+workflow-token issuance policy. It uses the existing
+read-only Agent checkout issuer, not workflow-token authority or expression
+contexts. Ordinary token references retain their existing issuance and masking
+path; see the
+[credential contract](compatibility-contract.md#credentials-and-cache-tools).
+
 ## Design
 
 The architecture separates source parsing, expression policy, normalized

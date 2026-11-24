@@ -589,7 +589,8 @@ reproduction on v0.123.0 accepted the branch and push cases, but rejected the
 fallback pull ref, not the expression syntax. Both original checkout declarations
 also failed with the archived synthetic `buildkite/posthog` event selecting
 `refs/pull/2688/head`; both compile with pull-ref support and unchanged
-`network` and `provider-token-read` capabilities, without a workflow token.
+ref selection. Checkout credential authority follows the
+[credential contract](#credentials-and-cache-tools).
 
 Admit explicit `refs/pull/<positive-number>/head` and `/merge` in the event
 repository. Fetch the selected ref into `refs/remotes/pull/` at every supported
@@ -601,8 +602,8 @@ The pinned checkout [input handling](https://github.com/actions/checkout/blob/de
 and [ref handling](https://github.com/actions/checkout/blob/de0fac2e4500dabe0009e67214ff5f5447ce83dd/src/ref-helper.ts)
 distinguish explicit mutable refs from omitted-ref commit pinning. This is source
 evidence, not a new native or hosted run. The
-[compiler regression](../internal/compiler/actions_test.go) checks selection and
-unchanged authority; the [local Git regression](../internal/runtime/checkout_test.go)
+[compiler regression](../internal/compiler/actions_test.go) checks selection;
+the [local Git regression](../internal/runtime/checkout_test.go)
 uses different event, branch, pull-head, and pull-merge revisions to check fetches,
 history, and outputs. Neither establishes complete PostHog workflow success.
 
@@ -656,6 +657,36 @@ Keep repository checkout credentials, action-source credentials, workflow
 An implementation convenience must not expand their recipients or lifetimes.
 The [security model](https://buildkite.com/docs/pipelines/migration/run-github-actions-workflows/security)
 owns the user-facing boundaries.
+
+For managed GitHub checkout, reuse the Agent's fixed read-only checkout issuer,
+not the workflow-token API. Retain its existing repository authorization and
+agent eligibility. Effective job permissions must allow contents read or write;
+neither persistence nor a write declaration grants managed write access.
+Omitted modern checkout
+`persist-credentials` and explicit `true` retain a repository-local helper
+through later steps and post actions. Explicit `false` uses it only during
+checkout; legacy v1 does not retain it. Persistence changes availability, not
+permissions. Without contents access, private checkout needs separately
+configured authentication. Preserve that self-hosted authentication and the
+existing native submodule reads authorized by the Agent issuer.
+
+The runtime delegates credential requests to the existing Agent helper through
+a per-job socket, without a second bearer cache.
+Workflow processes receive a narrow HTTPS credential-protocol client, not Agent
+credentials. Match the event host and repository before issuance. Never write
+Buildkite-issued GitHub tokens to Git config, remote URLs, or helper arguments.
+Remove the helper and stop the service after post actions, including failure and
+cancellation. Cleanup prevents new lookups; an already issued bearer retains
+its provider expiry. Do not claim immediate token revocation.
+
+This intentionally differs from the token-derived header stored by
+[checkout v5](https://github.com/actions/checkout/blob/fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09/src/git-auth-helper.ts)
+and the runner-temp credential file used by
+[checkout v6](https://github.com/actions/checkout/blob/d23441a48e516b6c34aea4fa41551a30e30af803/src/git-auth-helper.ts).
+[Local HTTPS Git tests](../internal/runtime/git_credentials_test.go) cover later
+fetches, authorized and denied tag pushes, linked worktrees, opt-out, external
+credentials, repeated lookups, cleanup, and host/repository restrictions. They do not
+establish native GitHub execution or deployed backend availability.
 
 Workflow subprocesses default to `GIT_TERMINAL_PROMPT=0`, matching the
 [agent's noninteractive Git setup](https://github.com/buildkite/agent/blob/286b70ebfe0850f845bf95e1a6e32f989ba049ac/internal/job/executor.go#L916-L917).

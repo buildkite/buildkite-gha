@@ -3713,24 +3713,6 @@ func liveContainerJob(t *testing.T, docker string, steps []runtimeTestStep) JobR
 	return r
 }
 
-func buildLiveContainerRuntime(t *testing.T) string {
-	t.Helper()
-	if explicit := os.Getenv("BUILDKITE_GHA_TEST_RUNTIME"); explicit != "" {
-		if err := validateDockerMountFile(explicit); err != nil {
-			t.Fatalf("BUILDKITE_GHA_TEST_RUNTIME is not a mount-safe executable: %v", err)
-		}
-		return explicit
-	}
-	root := filepath.Dir(fixturePath(t))
-	binary := filepath.Join(t.TempDir(), "buildkite-gha")
-	command := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", binary, "./cmd/buildkite-gha")
-	command.Dir = root
-	command.Env = append(os.Environ(), "CGO_ENABLED=0")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("build static container runtime: %v: %s", err, output)
-	}
-	return binary
-}
 func TestLiveJobContainerPersistsAcrossShellSteps(t *testing.T) {
 	d := requireDocker(t)
 	liveContainerJob(t, d, []runtimeTestStep{{ID: "a", Kind: "run", Shell: "sh", Command: "touch persisted"}, {ID: "b", Kind: "run", Shell: "sh", Command: "test -f persisted"}})

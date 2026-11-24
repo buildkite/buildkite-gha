@@ -2059,7 +2059,7 @@ jobs:
     steps:
       - uses: actions/checkout@`+actionintegration.CheckoutV7Commit+`
         with:
-          persist-credentials: true
+          persist-credentials: unsupported
 `)
 	compile := func(enabled bool) (Bundle, error) {
 		t.Helper()
@@ -2845,6 +2845,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 
 	accepted := []string{
 		"",
+		"        with:\n          persist-credentials: true\n",
 		"        with:\n          repository: buildkite/buildkite-gha\n          ref: 1111111111111111111111111111111111111111\n          fetch-depth: '1'\n          persist-credentials: false\n          clean: true\n          set-safe-directory: true\n",
 		"        with:\n          fetch-depth: '0'\n",
 		"        with:\n          fetch-depth: '100'\n",
@@ -2873,7 +2874,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		"submodules":  "          submodules: yes\n",
 		"path":        "          path: nested/.git/path\n",
 		"fetch-depth": "          fetch-depth: '-1'\n",
-		"credentials": "          persist-credentials: true\n",
+		"credentials": "          persist-credentials: yes\n",
 	}
 	for name, input := range rejected {
 		t.Run(name, func(t *testing.T) {
@@ -3359,33 +3360,66 @@ func TestCompileBundleUnknownDownloadArtifactWarningIsDeduplicated(t *testing.T)
 	}
 }
 
-func TestNativeCheckoutIgnoresUpstreamTokenDefaultForOrigin(t *testing.T) {
+func TestNativeCheckoutUsesWorkflowPermissionAuthority(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n")
-	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
-		t.Fatal(err)
-	}
 	writeAction(t, remote, "", "name: checkout\ninputs:\n  token:\n    default: ${{ github.token }}\nruns:\n  using: node24\n  main: index.js\n")
-	event := bytes.Replace(pushEvent(t), []byte(`"provider": "github"`), []byte(`"provider": "cursor-origin"`), 1)
-	bundle, err := CompileBundleWithOptions(workflowPath, workflow, event, "0.0.0-test", testDistributionDigest, "importer", Options{
-		EventTrust: EventUntrusted,
-		Runners: RunnerPolicy{
-			Labels:          map[string]string{"ubuntu-latest": "hosted"},
-			UntrustedQueues: []string{"hosted"},
-		},
-		ResolveActions: true,
-		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Event.Provider != "cursor-origin" || bundle.Plans[0].Job.GitHubToken != nil ||
-		!reflect.DeepEqual(bundle.Plans[0].Job.RequiredCapabilities, []string{"network", "provider-token-read"}) {
-		t.Fatalf("Origin checkout plan = %#v", bundle.Plans)
+	for _, test := range []struct{ name, provider, permissions, contents, jobPermissions, calleePermissions, nestedPermissions string }{
+		{name: "Origin ignores upstream token default", provider: "cursor-origin"},
+		{name: "GitHub default read", provider: "github", contents: "read"},
+		{name: "GitHub explicit write", provider: "github", permissions: "permissions: {contents: write}\n", contents: "write"},
+		{name: "GitHub no contents", provider: "github", permissions: "permissions: {contents: none}\n"},
+		{name: "GitHub unspecified contents", provider: "github", permissions: "permissions: {issues: write}\n"},
+		{name: "GitHub empty permissions", provider: "github", permissions: "permissions: {}\n"},
+		{name: "GitHub job denies contents", provider: "github", permissions: "permissions: {contents: write}\n", jobPermissions: "    permissions: {contents: none}\n"},
+		{name: "GitHub job omits contents", provider: "github", permissions: "permissions: {contents: read}\n", jobPermissions: "    permissions: {issues: read}\n"},
+		{name: "GitHub job grants read", provider: "github", permissions: "permissions: {}\n", jobPermissions: "    permissions: {contents: read}\n", contents: "read"},
+		{name: "reusable caller grants read", provider: "github", permissions: "permissions: {}\n", jobPermissions: "    permissions: {contents: read}\n", calleePermissions: "\n", contents: "read"},
+		{name: "reusable callee denies read", provider: "github", calleePermissions: "permissions: {}\n"},
+		{name: "reusable callee cannot grant read", provider: "github", permissions: "permissions: {}\n", calleePermissions: "permissions: {contents: read}\n"},
+		{name: "reusable caller explicitly denies read", provider: "github", permissions: "permissions: {contents: none}\n", calleePermissions: "permissions: {contents: read}\n"},
+		{name: "nested reusable caller grants read", provider: "github", permissions: "permissions: {}\n", jobPermissions: "    permissions: {contents: read}\n", calleePermissions: "\n", nestedPermissions: "\n", contents: "read"},
+		{name: "nested reusable cannot restore denied read", provider: "github", calleePermissions: "permissions: {}\n", nestedPermissions: "permissions: {contents: read}\n"},
+		{name: "nested reusable cannot restore explicit none", provider: "github", calleePermissions: "permissions: {contents: none}\n", nestedPermissions: "permissions: {contents: write}\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			checkoutJob := "    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+			rootJob := "    runs-on: ubuntu-latest\n" + test.jobPermissions + "    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+			if test.calleePermissions != "" {
+				rootJob = test.jobPermissions + "    uses: ./.github/workflows/callee.yml\n"
+				calleeJob := checkoutJob
+				if test.nestedPermissions != "" {
+					calleeJob = "    uses: ./.github/workflows/nested.yml\n"
+					writeWorkflow(t, workspace, "nested.yml", "on: workflow_call\n"+test.nestedPermissions+"jobs:\n  checkout:\n"+checkoutJob)
+				}
+				writeWorkflow(t, workspace, "callee.yml", "on: workflow_call\n"+test.calleePermissions+"jobs:\n  checkout:\n"+calleeJob)
+			}
+			workflow := []byte("on: push\n" + test.permissions + "jobs:\n  checkout:\n" + rootJob)
+			if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			event := bytes.Replace(pushEvent(t), []byte(`"provider": "github"`), []byte(`"provider": "`+test.provider+`"`), 1)
+			bundle, err := CompileBundleWithOptions(workflowPath, workflow, event, "0.0.0-test", testDistributionDigest, "importer", Options{
+				EventTrust: EventUntrusted,
+				Runners: RunnerPolicy{
+					Labels:          map[string]string{"ubuntu-latest": "hosted"},
+					UntrustedQueues: []string{"hosted"},
+				},
+				ResolveActions: true,
+				ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+			})
+			if err != nil || len(bundle.Plans) != 1 {
+				t.Fatalf("checkout plans = %#v, %v", bundle.Plans, err)
+			}
+			job := bundle.Plans[0].Job
+			wantRead := test.provider != "github" || test.contents != ""
+			if job.Event.Provider != test.provider || job.HasCapability("provider-token-read") != wantRead || job.GitHubToken != nil || job.HasCapability("provider-token-write") {
+				t.Fatalf("checkout authority = %#v", job)
+			}
+		})
 	}
 }
 

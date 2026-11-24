@@ -94,15 +94,15 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		jobResult.Conclusion = "skipped"
 		return jobResult, nil
 	}
-	if job.HasCapability("provider-token-read") {
-		usesCheckout, err := validateJobCheckoutAdapters(job)
-		if err != nil {
-			return JobResult{}, fmt.Errorf("provider-token-read checkout preflight: %w", err)
-		}
-		if !usesCheckout {
-			return JobResult{}, fmt.Errorf("provider-token-read capability is restricted to the verified checkout adapter")
-		}
-		if r.RepositoryCredentials != nil {
+	usesCheckout, err := validateJobCheckoutAdapters(job)
+	if err != nil {
+		return JobResult{}, fmt.Errorf("checkout preflight: %w", err)
+	}
+	if job.HasCapability("provider-token-read") && !usesCheckout {
+		return JobResult{}, fmt.Errorf("provider-token-read capability is restricted to the verified checkout adapter")
+	}
+	if usesCheckout {
+		if job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil {
 			credentials, err := resolveAgentRepositoryCredentialsBeforeWorkflow(r.RepositoryCredentials)
 			if err != nil {
 				return JobResult{}, err
@@ -120,13 +120,13 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			r.GitLFS = ""
 		}
 	}
-	if job.HasCapability("provider-token-write") && r.WorkflowToken == nil {
+	providerTokenRequired := job.HasCapability("provider-token-write")
+	if providerTokenRequired && r.WorkflowToken == nil {
 		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")
 	}
 	if job.IDTokenPermission == "write" && r.OIDCToken == nil {
 		return JobResult{}, fmt.Errorf("id-token write permission requires the OIDC token provider")
 	}
-	providerTokenRequired := job.HasCapability("provider-token-write")
 	oidcTokenRequired := job.IDTokenPermission == "write"
 	secretsRequired := job.HasCapability("secrets")
 	if secretsRequired {
@@ -415,8 +415,23 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			return jobResult, fmt.Errorf("configured runner tool cache is not a directory")
 		}
 	}
-	if job.HasCapability("docker") {
-		r.runnerTemp = runnerTemp
+	r.runnerTemp = runnerTemp
+	if usesCheckout {
+		r.checkoutAuth, err = snapshotCheckoutAuthentication(runCtx, r.Git, runnerTemp)
+		if err != nil {
+			return jobResult, err
+		}
+		if job.HasCapability("provider-token-read") && job.Event.Provider == "github" && r.RepositoryCredentials != nil {
+			r.gitCredentials, err = startGitCredentialService(context.WithoutCancel(runCtx), runnerTemp, r.Runner, job, processor)
+			if err != nil {
+				return jobResult, err
+			}
+		}
+		defer func() {
+			if r.gitCredentials != nil {
+				runJobErr = errors.Join(runJobErr, r.gitCredentials.Close(runCtx))
+			}
+		}()
 	}
 	actions := newActionLockResolver(job, workspace, r.Actions)
 	prebuiltDocker, err := r.preparePrebuiltDockerActions(runCtx, processor, actions)
@@ -2130,7 +2145,7 @@ func (r *jobRun) runActionStep(jobCtx, ctx context.Context, processor *commandOu
 			if err := validateCheckoutRefProvenance(step.Invocation.With, inputs, job.Event.SHA); err != nil {
 				return result, err
 			}
-			return r.runCheckout(ctx, processor, workspace, job, actionLock.Commit, inputs)
+			return r.runCheckoutWithAuthentication(ctx, processor, workspace, job, actionLock.Commit, inputs, r.checkoutAuth, r.gitCredentials)
 		case actionintegration.AdapterUploadArtifactBuildkite:
 			return r.runUploadArtifactCommit(ctx, processor, workspace, actionLock.Commit, inputs)
 		case actionintegration.AdapterDownloadArtifactBuildkite:
