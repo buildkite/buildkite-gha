@@ -2,10 +2,12 @@ package runtime
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -64,27 +66,29 @@ func NewAgentActionSources(config agentapi.Config, planDigest string) (*AgentAct
 	return &AgentActionSources{agent: agent, planDigest: planDigest}, nil
 }
 
-func (c *AgentActionSources) resolve(ctx context.Context, ref source.Reference) (source.Resolved, error) {
+func (c *AgentActionSources) resolve(ctx context.Context, version int, selectors []actionSourceSelector) (map[[2]string]source.Resolved, error) {
 	ctx, cancel := context.WithTimeout(ctx, actionSourceBudget)
 	defer cancel()
-	selector := actionSourceSelector{Repository: ref.Owner + "/" + ref.Repository, Ref: ref.Ref, Path: &ref.Path}
-	payload, err := json.Marshal(actionSourceRequest{Version: 1, PlanDigest: c.planDigest, Selectors: []actionSourceSelector{selector}})
+	payload, err := json.Marshal(actionSourceRequest{Version: version, PlanDigest: c.planDigest, Selectors: selectors})
 	if err != nil {
-		return source.Resolved{}, err
+		return nil, err
+	}
+	if version == 2 && len(payload) > 8<<10 {
+		return nil, fmt.Errorf("version 2 action source request exceeds 8 KiB")
 	}
 	for attempt := 1; ; attempt++ {
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.agent.URL("github-actions/action-sources"), bytes.NewReader(payload))
 		if err != nil {
-			return source.Resolved{}, err
+			return nil, err
 		}
 		request.Header.Set("Content-Type", "application/json")
 		response, err := c.agent.Do(request)
 		if err != nil {
-			return source.Resolved{}, fmt.Errorf("request action source: %w", err)
+			return nil, fmt.Errorf("request action source: %w", err)
 		}
 		if response.StatusCode == http.StatusOK {
 			defer func() { _ = response.Body.Close() }()
-			return decodeActionSource(response.Body, selector)
+			return decodeActionSources(response.Body, version, selectors)
 		}
 		status := response.StatusCode
 		statusErr := fmt.Errorf("action source resolver returned HTTP %d", status)
@@ -95,13 +99,13 @@ func (c *AgentActionSources) resolve(ctx context.Context, ref source.Reference) 
 				Code string `json:"code"`
 			}
 			if err == nil && len(data) <= actionSourceResponseLimit && json.Unmarshal(data, &rejected) == nil && rejected.Code == "client_upgrade_required" {
-				return source.Resolved{}, fmt.Errorf("%w: upgrade buildkite-gha to a supported version and retry the job", statusErr)
+				return nil, fmt.Errorf("%w: upgrade buildkite-gha to a supported version and retry the job", statusErr)
 			}
-			return source.Resolved{}, statusErr
+			return nil, statusErr
 		}
 		_ = response.Body.Close()
 		if attempt == 3 || status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable {
-			return source.Resolved{}, statusErr
+			return nil, statusErr
 		}
 		delay, valid := boundedRetryAfter(response.Header.Get("Retry-After"), time.Now(), actionSourceBudget)
 		if !valid {
@@ -109,98 +113,158 @@ func (c *AgentActionSources) resolve(ctx context.Context, ref source.Reference) 
 		}
 		deadline, _ := ctx.Deadline()
 		if delay >= time.Until(deadline) {
-			return source.Resolved{}, statusErr
+			return nil, statusErr
 		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
-			return source.Resolved{}, ctx.Err()
+			return nil, ctx.Err()
 		}
 	}
 }
 
-func decodeActionSource(body io.Reader, selector actionSourceSelector) (source.Resolved, error) {
-	data, err := io.ReadAll(io.LimitReader(body, actionSourceResponseLimit+1))
-	if err != nil || len(data) > actionSourceResponseLimit {
-		return source.Resolved{}, fmt.Errorf("could not read bounded action source response")
+func decodeActionSources(body io.Reader, version int, selectors []actionSourceSelector) (map[[2]string]source.Resolved, error) {
+	limit := actionSourceResponseLimit
+	if version == 2 {
+		limit = 32 << 10
+	}
+	data, err := io.ReadAll(io.LimitReader(body, int64(limit)+1))
+	if err != nil || len(data) > limit {
+		return nil, fmt.Errorf("could not read bounded action source response")
 	}
 	var decoded actionSourceResponse
-	if json.Unmarshal(data, &decoded) != nil || decoded.Version != 1 || len(decoded.Sources) != 1 {
-		return source.Resolved{}, fmt.Errorf("invalid version 1 action source response")
+	if json.Unmarshal(data, &decoded) != nil || decoded.Version != version || len(decoded.Sources) != len(selectors) {
+		return nil, fmt.Errorf("invalid version %d action source response", version)
 	}
-	resolved := decoded.Sources[0]
-	if resolved.Selector.Repository != selector.Repository || resolved.Selector.Ref != selector.Ref ||
-		resolved.Selector.Path == nil || *resolved.Selector.Path != *selector.Path ||
-		!strings.EqualFold(resolved.Repository, selector.Repository) || resolved.Commit != selector.Ref ||
-		resolved.OwnerID == 0 || resolved.RepositoryID == 0 {
-		return source.Resolved{}, fmt.Errorf("action source identity does not match the requested selector")
+	missing := make(map[[2]string]struct{}, len(selectors))
+	for _, selector := range selectors {
+		missing[[2]string{selector.Repository, selector.Ref}] = struct{}{}
 	}
-	ref, err := source.Parse(resolved.Repository + "@" + resolved.Commit)
-	if err != nil || resolved.Download.Format != "tar.gz" ||
-		resolved.Download.URL != "https://codeload.github.com/"+resolved.Repository+"/tar.gz/"+resolved.Commit {
-		return source.Resolved{}, fmt.Errorf("action source requires the exact GitHub codeload tar.gz descriptor")
+	results := make(map[[2]string]source.Resolved, len(selectors))
+	for _, resolved := range decoded.Sources {
+		selector := resolved.Selector
+		key := [2]string{selector.Repository, selector.Ref}
+		if _, ok := missing[key]; !ok || selector.Path == nil || *selector.Path != "" ||
+			!strings.EqualFold(resolved.Repository, selector.Repository) || resolved.Commit != selector.Ref ||
+			resolved.OwnerID == 0 || resolved.RepositoryID == 0 {
+			return nil, fmt.Errorf("action source identity does not match the requested selector")
+		}
+		delete(missing, key)
+		ref, err := source.Parse(resolved.Repository + "@" + resolved.Commit)
+		if err != nil || resolved.Download.Format != "tar.gz" ||
+			resolved.Download.URL != "https://codeload.github.com/"+resolved.Repository+"/tar.gz/"+resolved.Commit {
+			return nil, fmt.Errorf("action source requires the exact GitHub codeload tar.gz descriptor")
+		}
+		// The store constructs this exact URL and downloads without credentials.
+		results[key] = source.Resolved{Reference: ref, Commit: resolved.Commit}
 	}
-	// The store constructs this exact URL itself and downloads without credentials,
-	// rather than accepting an arbitrary URL from the response.
-	return source.Resolved{Reference: ref, Commit: resolved.Commit}, nil
+	return results, nil
 }
 
 func (r *jobRun) prepareRuntimePublicAction(ctx context.Context, job plan.Job) (plan.Job, error) {
 	if r.ActionSources == nil || r.Actions == nil {
-		return job, fmt.Errorf("runtime-public-v1 requires the Agent action source resolver and archive store")
+		return job, fmt.Errorf("runtime public actions require the Agent action source resolver and archive store")
 	}
-	index := slices.IndexFunc(job.Program.Job.Steps, func(step program.Step) bool { return step.Invocation != nil })
-	invocation := *job.Program.Job.Steps[index].Invocation
-	ref, err := source.Parse(invocation.Uses.Source)
+	version := 1
+	if job.ActionResolution == plan.RuntimePublicActionsV2 {
+		version = 2
+	}
+	var selectors []actionSourceSelector
+	steps := make(map[int][2]string)
+	locks := make(map[[2]string]string)
+	for i, step := range job.Program.Job.Steps {
+		if step.Invocation == nil || step.Invocation.Lock != "" {
+			continue
+		}
+		ref, err := source.Parse(step.Invocation.Uses.Source)
+		if err != nil {
+			return job, err
+		}
+		repository := ref.Owner + "/" + ref.Repository
+		if _, ok := integration.Lookup(integration.Identity{Source: "github", Repository: strings.ToLower(repository)}); ok {
+			return job, fmt.Errorf("runtime public actions do not support resolving native adapters or managed services")
+		}
+		key := [2]string{repository, ref.Ref}
+		steps[i] = key
+		if _, ok := locks[key]; !ok {
+			selectors = append(selectors, actionSourceSelector{Repository: repository, Ref: ref.Ref, Path: &ref.Path})
+			locks[key] = ""
+		}
+	}
+	resolved, err := r.ActionSources.resolve(ctx, version, selectors)
 	if err != nil {
 		return job, err
 	}
-	repository := strings.ToLower(ref.Owner + "/" + ref.Repository)
-	if _, ok := integration.Lookup(integration.Identity{Source: "github", Repository: repository}); ok {
-		return job, fmt.Errorf("runtime-public-v1 does not support actions with native adapters or managed services")
+	prepared := *job.Program
+	prepared.Job.Steps = slices.Clone(job.Program.Job.Steps)
+	prepared.Actions = make(map[string]program.Action, len(job.Program.Actions)+len(selectors))
+	maps.Copy(prepared.Actions, job.Program.Actions)
+	job.Actions = slices.Clone(job.Actions)
+	nextID := 1
+	for _, selector := range selectors {
+		key := [2]string{selector.Repository, selector.Ref}
+		lockID := fmt.Sprintf("a-%016x", nextID)
+		for slices.ContainsFunc(job.Actions, func(lock plan.ActionLock) bool { return lock.ID == lockID }) {
+			nextID++
+			lockID = fmt.Sprintf("a-%016x", nextID)
+		}
+		nextID++
+		lock, action, err := r.preparePublicActionSource(ctx, version, lockID, resolved[key])
+		if err != nil {
+			return job, fmt.Errorf("prepare %s@%s: %w", selector.Repository, selector.Ref, err)
+		}
+		job.Actions = append(job.Actions, lock)
+		prepared.Actions[lockID] = action
+		locks[key] = lockID
 	}
-	resolved, err := r.ActionSources.resolve(ctx, ref)
-	if err != nil {
-		return job, err
+	for i, step := range prepared.Job.Steps {
+		key, ok := steps[i]
+		if !ok {
+			continue
+		}
+		invocation := *step.Invocation
+		invocation.Lock = locks[key]
+		prepared.Job.Steps[i].Invocation = &invocation
+		authority, err := program.InventoryActionAuthority(prepared.Actions, invocation.Lock, invocation.With, program.ActionAuthorityOptions{ServerURL: "https://github.com"})
+		if err != nil {
+			return job, err
+		}
+		if authority.GitHubToken || len(authority.Secrets) != 0 || authority.EventPayload && job.Event.Payload == nil {
+			return job, fmt.Errorf("action metadata requires authority outside the admitted job envelope")
+		}
 	}
+	job.ActionResolution = ""
+	job.Program = &prepared
+	slices.SortFunc(job.Actions, func(a, b plan.ActionLock) int { return cmp.Compare(a.ID, b.ID) })
+	return job, job.Validate()
+}
+
+func (r *jobRun) preparePublicActionSource(ctx context.Context, version int, lockID string, resolved source.Resolved) (plan.ActionLock, program.Action, error) {
 	material, err := r.Actions.Materialize(ctx, resolved)
 	if err != nil {
-		return job, fmt.Errorf("materialize action source: %w", err)
+		return plan.ActionLock{}, program.Action{}, fmt.Errorf("materialize action source: %w", err)
 	}
 	defer material.Release()
 	m, err := metadata.Load(material.RepositoryRoot, "")
 	if err != nil {
-		return job, fmt.Errorf("load action metadata: %w", err)
+		return plan.ActionLock{}, program.Action{}, fmt.Errorf("load action metadata: %w", err)
 	}
-	if m.Runs.Using != string(metadata.RuntimeNode24) || m.Runs.Pre != "" || m.Runs.PreIf != "" || m.Runs.Post != "" || m.Runs.PostIf != "" {
-		return job, fmt.Errorf("runtime-public-v1 requires a Node 24 action with main only")
+	if version == 1 && (m.Runs.Using != string(metadata.RuntimeNode24) || m.Runs.Pre != "" || m.Runs.PreIf != "" || m.Runs.Post != "" || m.Runs.PostIf != "") {
+		return plan.ActionLock{}, program.Action{}, fmt.Errorf("runtime-public-v1 requires a Node 24 action with main only")
 	}
-	if err := m.ValidateEntrypoints(metadata.RuntimeNode24); err != nil {
-		return job, err
-	}
-
-	// This ID is local to the prepared program. It never enters the plan bytes
-	// or the producer digest, and there is only one action in this mode.
-	const lockID = "a-0000000000000001"
-	prepared := *job.Program
-	prepared.Job.Steps = slices.Clone(job.Program.Job.Steps)
-	invocation.Lock = lockID
-	prepared.Job.Steps[index].Invocation = &invocation
-	prepared.Actions = map[string]program.Action{lockID: program.ActionFromMetadata(m, string(metadata.RuntimeNode24), nil)}
-	job.ActionResolution = ""
-	job.Program = &prepared
-	job.Actions = []plan.ActionLock{{ID: lockID, Source: "github", Repository: repository, Commit: resolved.Commit, RequestedRef: ref.Ref, SourceDigest: material.SourceDigest}}
-	if err := job.Validate(); err != nil {
-		return job, err
-	}
-	authority, err := program.InventoryActionAuthority(prepared.Actions, lockID, invocation.With, program.ActionAuthorityOptions{ServerURL: "https://github.com"})
+	runtime, err := m.Runtime()
 	if err != nil {
-		return job, err
+		return plan.ActionLock{}, program.Action{}, err
 	}
-	if authority.GitHubToken || len(authority.Secrets) != 0 || authority.EventPayload && job.Event.Payload == nil {
-		return job, fmt.Errorf("action metadata requires authority outside the admitted job envelope")
+	if _, ok := actionNodeMajor(runtime); !ok {
+		return plan.ActionLock{}, program.Action{}, fmt.Errorf("runtime public actions require JavaScript metadata, got %q", runtime)
 	}
-	return job, nil
+	if err := m.ValidateEntrypoints(runtime); err != nil {
+		return plan.ActionLock{}, program.Action{}, err
+	}
+	repository := strings.ToLower(resolved.Reference.Owner + "/" + resolved.Reference.Repository)
+	return plan.ActionLock{ID: lockID, Source: "github", Repository: repository, Commit: resolved.Commit, RequestedRef: resolved.Commit, SourceDigest: material.SourceDigest},
+		program.ActionFromMetadata(m, string(runtime), nil), nil
 }

@@ -26,6 +26,8 @@ import (
 const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json"
 
 const RuntimePublicActionsV1 = "runtime-public-v1"
+const RuntimePublicActionsV2 = "runtime-public-v2"
+const MaxRuntimePublicActionSelectors = 32
 
 const MaxNeedProducers = 1024
 const MaxNeedOutputs = 64
@@ -1036,7 +1038,7 @@ func (job Job) Validate() error {
 		return fmt.Errorf("job plan dependencies and prerequisite producers differ")
 	}
 	if job.ActionResolution != "" {
-		if job.ActionResolution != RuntimePublicActionsV1 {
+		if job.ActionResolution != RuntimePublicActionsV1 && job.ActionResolution != RuntimePublicActionsV2 {
 			return fmt.Errorf("unsupported action resolution mode %q", job.ActionResolution)
 		}
 		return job.validateRuntimePublicActions()
@@ -1668,6 +1670,9 @@ func validateActionLocks(job Job) error {
 				return fmt.Errorf("non-action step %q has an action selector", step.ID)
 			}
 			continue
+		}
+		if job.ActionResolution == RuntimePublicActionsV2 && step.Invocation != nil && step.Invocation.Lock == "" {
+			continue // Validated as a runtime-resolved selector before checking existing locks.
 		}
 		if step.Invocation == nil || step.Invocation.Lock == "" {
 			return fmt.Errorf("action step %q has no action selector", step.ID)

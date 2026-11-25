@@ -66,7 +66,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if err := ValidateHost(job, goruntime.GOOS, goruntime.GOARCH); err != nil {
 		return JobResult{}, err
 	}
-	runtimePublicAction := job.ActionResolution == plan.RuntimePublicActionsV1
+	runtimePublicAction := job.ActionResolution != ""
 	executionJob := job.ExecutionJob()
 	runnerContext, err := canonicalRunnerContext(goruntime.GOOS, goruntime.GOARCH)
 	if err != nil {
@@ -267,8 +267,18 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		}
 	}
 	if runtimePublicAction {
-		if _, err := r.discoverNode(runCtx, 24, r.explicitNode(24)); err != nil {
-			return jobResult, fmt.Errorf("prepare runtime-resolved Node 24 action: %w", err)
+		requiredNode := map[int]bool{}
+		for _, action := range job.Program.Actions {
+			if major, ok := actionNodeMajor(metadata.Runtime(action.Runtime)); ok {
+				requiredNode[major] = true
+			}
+		}
+		for _, major := range []int{16, 24} {
+			if requiredNode[major] {
+				if _, err := r.discoverNode(runCtx, major, r.explicitNode(major)); err != nil {
+					return jobResult, fmt.Errorf("prepare runtime-resolved Node %d action: %w", major, err)
+				}
+			}
 		}
 	}
 
@@ -1616,8 +1626,8 @@ func ValidateHost(job plan.Job, goos, goarch string) error {
 	if _, err := canonicalRunnerContext(goos, goarch); err != nil {
 		return err
 	}
-	if job.ActionResolution == plan.RuntimePublicActionsV1 && (goos != "linux" || goarch != "amd64") {
-		return errUnsupportedf("runtime-public-v1 requires Linux amd64")
+	if job.ActionResolution != "" && (goos != "linux" || goarch != "amd64") {
+		return errUnsupportedf("runtime public actions require Linux amd64")
 	}
 	if goos != "linux" {
 		platform := goos

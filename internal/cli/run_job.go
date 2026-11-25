@@ -144,7 +144,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	}
 	var actionSources *gharuntime.AgentActionSources
 	sourceOptions := []actionsource.Option{actionsource.WithUserAgentVersion(clientVersion)}
-	if job.ActionResolution == plan.RuntimePublicActionsV1 {
+	if job.ActionResolution != "" {
 		actionSources, err = gharuntime.NewAgentActionSources(agentapi.Config{
 			Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
 			JobID:         os.Getenv("BUILDKITE_JOB_ID"),

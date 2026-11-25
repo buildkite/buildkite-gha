@@ -130,6 +130,17 @@ main entrypoint and that its discovered requirements fit the fixed plan
 authority. This mode grants no workflow token, secret, or OIDC access. Prepared
 metadata never changes result identity or the plan digest.
 
+`runtime-public-v2` uses explicit wire version 2 and resolves 1–32 distinct
+root/full-SHA selectors in one job-scoped request (8 KiB maximum request,
+32 KiB maximum response). The reader matches the exact selector set regardless
+of response order and rejects missing, extra, or repeated entries before
+downloading. Repeated step invocations share a source, not inputs or lifecycle.
+Version 2 retains the same archive and authority checks. It supports static
+prerequisites, the separately locked first-step native checkout adapter, and
+Node 16, 20, and 24 metadata with pre and post hooks. As with pre-resolved
+actions, Node 20 metadata runs on Node 24. It does not resolve composite or
+Docker actions, mutable refs, subpaths, or private action sources.
+
 The [pinned GitHub runner](https://github.com/actions/runner/blob/7e211dc69c347b78fc398e630e74facb11a13235/src/Runner.Worker/ActionManager.cs#L1024-L1073)
 supports job-scoped source resolution and
 [runtime metadata discovery](https://github.com/actions/runner/blob/7e211dc69c347b78fc398e630e74facb11a13235/src/Runner.Worker/ActionManager.cs#L230-L351).

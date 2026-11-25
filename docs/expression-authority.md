@@ -303,11 +303,14 @@ verification.
 
 ### Runtime-resolved public actions
 
-The opt-in `runtime-public-v1` plan retains authored `uses` and literal `with`
-values instead of an action lock and program. The runtime resolves and
-materializes the source before workflow steps and lowers its metadata with the
-same program code as the compiler. It checks discovered authority against the
-existing envelope. The prepared action lock and program exist only in memory.
+Runtime-resolved public actions retain authored `uses` and literal `with`
+values instead of action locks and programs. The runtime resolves and
+materializes the sources before workflow steps and lowers their metadata with
+the same program code as the compiler. It checks discovered authority for each
+invocation against the existing envelope, even when invocations share a source.
+The prepared locks and programs exist only in memory. A v2 job can also use the
+existing separately locked native checkout adapter; this does not give public
+actions access to its provider credentials.
 See the [source contract](compatibility-contract.md#runtime-resolved-public-actions).
 
 ### Composite tokens

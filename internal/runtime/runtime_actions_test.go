@@ -4,15 +4,20 @@ package runtime
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/agentapi"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -167,6 +172,146 @@ fs.appendFileSync('order', 'action:' + process.env.INPUT_MESSAGE + '\n');`
 			order, readErr := os.ReadFile(workspace + "/order")
 			if err != nil || result.Conclusion != "success" || readErr != nil || string(order) != "before\naction:vivid-73\nafter\n" {
 				t.Fatalf("want ordered execution, got %q, %v; result=%s, %v\n%s", order, readErr, result.Conclusion, err, &logs)
+			}
+		})
+	}
+}
+
+func TestRuntimePublicActionBatch(t *testing.T) {
+	const first = "Example/alpha@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const second = "Example/bravo@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	for _, tc := range []struct{ name, reject string }{
+		{name: "reordered batch with repeated invocation"},
+		{name: "duplicate response selector", reject: "identity does not match"},
+		{name: "missing response selector", reject: "invalid version 2 action source response"},
+		{name: "unsupported second source", reject: `require JavaScript metadata, got "composite"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			const checkoutID = "a-0000000000000002"
+			const workflow = "name: batch fixture\n"
+			orderFile := t.TempDir() + "/order"
+			writeFixtureFile(t, workspace, "workflow.yml", workflow)
+			job := runtimePlan(t, workspace, "workflow.yml", []runtimeTestStep{
+				{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &plan.ActionSelector{Lock: checkoutID}},
+				{ID: "shell", Kind: "run", Shell: "bash", Command: "echo shell >> " + shellTestQuote(orderFile)},
+				{ID: "a1", Kind: "uses", Uses: first, With: map[string]string{"label": "one"}},
+				{ID: "b", Kind: "uses", Uses: second},
+				{ID: "a2", Kind: "uses", Uses: first, With: map[string]string{"label": "two"}},
+			})
+			if err := os.Remove(workspace + "/workflow.yml"); err != nil {
+				t.Fatal(err)
+			}
+			job.ActionResolution = plan.RuntimePublicActionsV2
+			job.Event.PayloadSource, job.Event.Repository, job.Event.SHA, job.Event.Ref = "buildkite-webhook", "example/workflows", strings.Repeat("c", 40), "refs/heads/main"
+			job.RequiredCapabilities = []string{"network", "provider-token-read"}
+			checkout := t.TempDir()
+			writeFixtureFile(t, checkout, "action.yml", "name: checkout\nruns:\n  using: node24\n  main: main.js\n")
+			writeFixtureFile(t, checkout, "main.js", "throw new Error('the native adapter must not run JavaScript')\n")
+			checkoutDigest := digestTree(t, checkout)
+			job.Actions = []plan.ActionLock{{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: integration.CheckoutV7Commit, SourceDigest: checkoutDigest}}
+			job.Dependencies = []string{"gha-producer"}
+			job.NeedSources = map[string][]plan.NeedSource{"producer": {{StepKey: "gha-producer", PlanDigest: "sha256:" + strings.Repeat("2", 64)}}}
+			encoded, err := plan.Encode(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job, err = plan.Decode(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job.Needs = map[string]plan.Need{"producer": {Result: "success"}}
+			planDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(encoded))
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				requests.Add(1)
+				var body actionSourceRequest
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Version != 2 || body.PlanDigest != planDigest || len(body.Selectors) != 2 {
+					t.Errorf("unexpected batch: %#v, %v", body, err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				for i, uses := range []string{first, second} {
+					sel := body.Selectors[i]
+					if sel.Path == nil || *sel.Path != "" || sel.Repository+"@"+sel.Ref != uses {
+						t.Errorf("unexpected selector: %#v", sel)
+					}
+				}
+				slices.Reverse(body.Selectors)
+				if tc.name == "duplicate response selector" {
+					body.Selectors[1] = body.Selectors[0]
+				}
+				if tc.name == "missing response selector" {
+					body.Selectors = body.Selectors[:1]
+				}
+				var rows []string
+				for _, sel := range body.Selectors {
+					repo := strings.ToLower(sel.Repository)
+					rows = append(rows, fmt.Sprintf(`{"selector":{"repository":%q,"ref":%q,"path":""},"repository":%q,"repository_id":2,"owner_id":1,"commit":%q,"download":{"format":"tar.gz","url":%q}}`, sel.Repository, sel.Ref, repo, sel.Ref, "https://codeload.github.com/"+repo+"/tar.gz/"+sel.Ref))
+				}
+				_, _ = fmt.Fprintf(w, `{"version":2,"sources":[%s]}`, strings.Join(rows, ","))
+			}))
+			defer server.Close()
+			resolver, err := NewAgentActionSources(agentapi.Config{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-token"}, planDigest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			byRepository := map[string]source.Materialized{"checkout": {RepositoryRoot: checkout, ActionRoot: checkout, SourceDigest: checkoutDigest}}
+			materializer := &fakeActionMaterializer{materialize: func(_ context.Context, resolved source.Resolved) (source.Materialized, error) {
+				material, ok := byRepository[resolved.Reference.Repository]
+				if !ok {
+					return source.Materialized{}, fmt.Errorf("unexpected archive: %v", resolved)
+				}
+				return material, nil
+			}}
+			for _, repo := range []string{"alpha", "bravo"} {
+				root := t.TempDir()
+				meta := "name: fixture\nruns:\n  using: node24\n  main: main.js\n"
+				if repo == "alpha" {
+					meta = "name: alpha\ninputs:\n  label:\n    description: label\nruns:\n  using: node20\n  pre: pre.js\n  main: main.js\n  post: post.js\n  post-if: success()\n"
+				} else if tc.name == "unsupported second source" {
+					meta = "name: child\nruns:\n  using: composite\n  steps:\n    - uses: example/other@v1\n"
+				}
+				writeFixtureFile(t, root, "action.yml", meta)
+				for _, phase := range []string{"pre", "main", "post"} {
+					writeFixtureFile(t, root, phase+".js", fmt.Sprintf(`require('node:fs').appendFileSync(%q, %q + (process.env.INPUT_LABEL || '') + '\n')`, orderFile, repo+":"+phase+":"))
+				}
+				byRepository[repo] = source.Materialized{RepositoryRoot: root, ActionRoot: root, SourceDigest: digestTree(t, root)}
+			}
+			git := t.TempDir() + "/git"
+			if err := os.WriteFile(git, []byte(`#!/bin/sh
+set -eu
+for arg in "$@"; do
+  case "$arg" in
+    init) mkdir -p .git; exit 0 ;;
+    checkout)
+      printf '%s\n' '`+job.Event.SHA+`' > .git/HEAD
+      printf '%s' `+shellTestQuote(workflow)+` > workflow.yml
+      echo checkout >> `+shellTestQuote(orderFile)+`
+      exit 0 ;;
+  esac
+done
+`), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			runner := Runner{Actions: materializer, ActionSources: resolver, Git: git}
+			if tc.reject == "" {
+				runner.Node24 = requireNode24(t)
+			}
+			result, err := runner.RunJob(t.Context(), job, workspace)
+			if requests.Load() != 1 {
+				t.Fatalf("requests=%d, err=%v", requests.Load(), err)
+			}
+			order, readErr := os.ReadFile(orderFile)
+			if tc.reject != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.reject) || result.Conclusion != "failure" || !os.IsNotExist(readErr) {
+					t.Fatalf("want pre-execution failure %q, got %v (%s), order=%q (%v)", tc.reject, err, result.Conclusion, order, readErr)
+				}
+				return
+			}
+			want := "alpha:pre:one\nalpha:pre:two\ncheckout\nshell\nalpha:main:one\nbravo:main:\nalpha:main:two\nalpha:post:two\nalpha:post:one\n"
+			if err != nil || result.Conclusion != "success" || readErr != nil || string(order) != want {
+				t.Fatalf("want ordered lifecycle %q, got %q (%v); result=%s, %v", want, order, readErr, result.Conclusion, err)
 			}
 		})
 	}
