@@ -32,6 +32,7 @@
     "call_guards": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/callGuard"}},
     "program": {"$ref": "#/$defs/program"},
     "actions": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/actionLock"}},
+    "action_resolution": {"const": "runtime-public-v1"},
     "requires_mise": {"type": "boolean"}
   },
   "allOf": [

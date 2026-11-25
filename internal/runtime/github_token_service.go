@@ -199,7 +199,7 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, serverURL, reposi
 		}
 		// A status alone does not authorize retrying a failed response-body read.
 		if purpose == "workflow" && readErr == nil {
-			after, valid := workflowTokenRetryAfter(response.Header.Get("Retry-After"), time.Now())
+			after, valid := boundedRetryAfter(response.Header.Get("Retry-After"), time.Now(), workflowTokenBudget)
 			if response.StatusCode == http.StatusServiceUnavailable || response.StatusCode == http.StatusTooManyRequests && valid {
 				return "", &workflowTokenRetryError{err: statusErr, after: after}
 			}
@@ -327,18 +327,18 @@ func (e *workflowTokenRetryError) Error() string { return e.err.Error() }
 func (e *workflowTokenRetryError) Unwrap() error { return e.err }
 
 // Cap valid delays at the acquisition budget: they cannot fit, and must never
-// overflow into a short wait. Invalid headers do not authorize a 429 retry.
-func workflowTokenRetryAfter(value string, now time.Time) (time.Duration, bool) {
+// overflow into a short wait.
+func boundedRetryAfter(value string, now time.Time, budget time.Duration) (time.Duration, bool) {
 	value = strings.TrimSpace(value)
 	if value != "" && strings.Trim(value, "0123456789") == "" {
 		seconds, err := strconv.ParseUint(value, 10, 64)
-		if err != nil || seconds >= uint64(workflowTokenBudget/time.Second) {
-			return workflowTokenBudget, true
+		if err != nil || seconds >= uint64(budget/time.Second) {
+			return budget, true
 		}
 		return time.Duration(seconds) * time.Second, true
 	}
 	if date, err := http.ParseTime(value); err == nil {
-		return min(workflowTokenBudget, max(0, date.Sub(now))), true
+		return min(budget, max(0, date.Sub(now))), true
 	}
 	return 0, false
 }

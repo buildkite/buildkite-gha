@@ -289,8 +289,8 @@ The following boundaries are deliberate:
   expressions.
 - Source digest and entrypoint verification remain independent of normalized
   expression semantics.
-- The normalized program and its action graph remain covered by the job-plan
-  digest.
+- The normalized program and any compiler-lowered action graph remain covered
+  by the job-plan digest.
 - A matrix taken from a job output does not add an expression position.
   The deferred step turns the verified output into ordinary `matrix` values
   and runs the same compiler, so authority analysis, admission, and plan
@@ -300,6 +300,15 @@ The following boundaries are deliberate:
 This architecture does not broaden expression syntax, allow dynamic secret
 access, make private actions available, or weaken immutable source
 verification.
+
+### Runtime-resolved public actions
+
+The opt-in `runtime-public-v1` plan retains authored `uses` and literal `with`
+values instead of an action lock and program. The runtime resolves and
+materializes the source before workflow steps and lowers its metadata with the
+same program code as the compiler. It checks discovered authority against the
+existing envelope. The prepared action lock and program exist only in memory.
+See the [source contract](compatibility-contract.md#runtime-resolved-public-actions).
 
 ### Composite tokens
 
@@ -338,6 +347,7 @@ The rebuild delivered:
   and event-dependent authority effects
 
 Production code has no legacy expression or metadata-reconstruction fallback.
+Runtime metadata lowering requires the explicit plan mode above.
 Test-only entry points remain comparison oracles and fixture adapters.
 
 ## Further design work

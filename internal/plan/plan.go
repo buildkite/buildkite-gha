@@ -25,6 +25,8 @@ import (
 
 const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json"
 
+const RuntimePublicActionsV1 = "runtime-public-v1"
+
 const MaxNeedProducers = 1024
 const MaxNeedOutputs = 64
 const MaxCallGuards = 4
@@ -421,6 +423,7 @@ type Job struct {
 	DefaultWorkingDirectory string            `json:"-"`
 	Outputs                 map[string]string `json:"-"`
 	Actions                 []ActionLock      `json:"actions,omitempty"`
+	ActionResolution        string            `json:"action_resolution,omitempty"`
 	// RequiresMise is the compiler's explicit action-runtime decision.
 	RequiresMise       *bool                       `json:"requires_mise,omitempty"`
 	Container          *Container                  `json:"-"`
@@ -1031,6 +1034,12 @@ func (job Job) Validate() error {
 	}
 	if len(sourcedDependencies) != len(dependencies) {
 		return fmt.Errorf("job plan dependencies and prerequisite producers differ")
+	}
+	if job.ActionResolution != "" {
+		if job.ActionResolution != RuntimePublicActionsV1 {
+			return fmt.Errorf("unsupported action resolution mode %q", job.ActionResolution)
+		}
+		return job.validateRuntimePublicActions()
 	}
 	if len(job.Actions) != 0 || hasStepActions(executionJob.Steps) {
 		for _, lock := range job.Actions {
