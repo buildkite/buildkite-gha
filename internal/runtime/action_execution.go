@@ -63,10 +63,11 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if err := job.Validate(); err != nil {
 		return jobResult, err
 	}
-	executionJob := job.ExecutionJob()
 	if err := ValidateHost(job, goruntime.GOOS, goruntime.GOARCH); err != nil {
 		return JobResult{}, err
 	}
+	runtimePublicAction := job.ActionResolution != ""
+	executionJob := job.ExecutionJob()
 	runnerContext, err := canonicalRunnerContext(goruntime.GOOS, goruntime.GOARCH)
 	if err != nil {
 		return JobResult{}, err
@@ -238,6 +239,15 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		runCtx, cancelJob = context.WithTimeoutCause(ctx, durationMinutes(job.TimeoutMinutes), errWorkflowDeadline)
 	}
 	defer cancelJob()
+	if runtimePublicAction {
+		prepared, err := r.prepareRuntimePublicAction(runCtx, job)
+		if err != nil {
+			return jobResult, fmt.Errorf("prepare runtime-resolved action: %w", err)
+		}
+		job = prepared
+		r.job = prepared
+		executionJob = prepared.ExecutionJob()
+	}
 	if oidcTokenRequired {
 		// Post actions run on a bounded cleanup context after job cancellation.
 		// Keep their ID-token requests alive for the same lifecycle.
@@ -254,6 +264,21 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		r.Mise, err = r.ResolveMise(runCtx)
 		if err != nil {
 			return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, err)
+		}
+	}
+	if runtimePublicAction {
+		requiredNode := map[int]bool{}
+		for _, action := range job.Program.Actions {
+			if major, ok := actionNodeMajor(metadata.Runtime(action.Runtime)); ok {
+				requiredNode[major] = true
+			}
+		}
+		for _, major := range []int{16, 24} {
+			if requiredNode[major] {
+				if _, err := r.discoverNode(runCtx, major, r.explicitNode(major)); err != nil {
+					return jobResult, fmt.Errorf("prepare runtime-resolved Node %d action: %w", major, err)
+				}
+			}
 		}
 	}
 
@@ -1600,6 +1625,9 @@ func canonicalRunnerContext(goos, goarch string) (map[string]string, error) {
 func ValidateHost(job plan.Job, goos, goarch string) error {
 	if _, err := canonicalRunnerContext(goos, goarch); err != nil {
 		return err
+	}
+	if job.ActionResolution != "" && (goos != "linux" || goarch != "amd64") {
+		return errUnsupportedf("runtime public actions require Linux amd64")
 	}
 	if goos != "linux" {
 		platform := goos

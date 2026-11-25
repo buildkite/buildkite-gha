@@ -205,6 +205,7 @@ type config struct {
 	mutableRefs                         *mutableRefCache
 	resolutionSnapshot                  *actionResolutionSnapshot
 	cacheMaxBytes                       int64
+	noArchiveRedirects                  bool
 	userAgent                           string
 	now                                 func() time.Time
 	maxCompressed, maxExpanded, maxFile int64
@@ -233,6 +234,14 @@ func (c config) forServer(serverURL string) config {
 // Option configures trusted process-level limits or test endpoints. Options must
 // never be populated from workflow input.
 type Option func(*config) error
+
+// WithoutArchiveRedirects limits delivery to the initially selected archive URL.
+func WithoutArchiveRedirects() Option {
+	return func(c *config) error {
+		c.noArchiveRedirects = true
+		return nil
+	}
+}
 
 // WithUserAgentVersion identifies the buildkite-gha client making requests.
 func WithUserAgentVersion(version string) Option {
@@ -1380,6 +1389,9 @@ func (s *Store) downloadArchive(ctx context.Context, cfg config, u *url.URL, dst
 	c := *s.client
 	c.Jar = nil
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if cfg.noArchiveRedirects {
+			return fmt.Errorf("archive redirect denied")
+		}
 		if len(via) > 3 {
 			return fmt.Errorf("too many redirects")
 		}

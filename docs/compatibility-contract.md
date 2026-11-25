@@ -101,6 +101,54 @@ artifact delivery; build-environment fallback and continuations retain their
 existing semantics. Namespace setup comes from the worker's `NSC_INSTANCE_ID`,
 not runner routing. Hosted tool-cache setup is explicit user intent.
 
+### Runtime-resolved public actions
+
+The explicit `action_resolution: runtime-public-v1` mode in `job-plan-v2`
+carries one root repository action at a full lowercase SHA with literal
+inputs, no action lock or metadata, and only the `network` capability. It
+requires a GitHub.com push and Linux amd64. Old readers must reject the mode;
+existing plans retain their original execution path.
+
+The runtime POSTs explicit version 1, the original plan digest and the authored
+repository, ref and root path to the same-job Agent endpoint. The User-Agent
+identifies the executable version; it does not authorize access. The backend
+owns the source grant and lock policy. The bounded response must explicitly
+declare version 1, echo the selector, and identify the canonical repository and
+exact commit. Readers ignore unknown fields; numeric IDs are server-reported
+metadata, not client identity pins. Version 1 requires the exact GitHub codeload
+`tar.gz` descriptor and fetches without credentials, redirects or fallback.
+The local tree digest checks the materialized source; it is not an independent
+upstream attestation.
+
+Only HTTP 429 and 503 can retry. Retries are bounded and cannot run earlier than
+a valid `Retry-After` allows. HTTP 400 with code `client_upgrade_required` gives
+upgrade guidance and stops before any workflow step, without resolver retry or
+fallback.
+
+Before any workflow step, verify that the action uses Node 24 with only a
+main entrypoint and that its discovered requirements fit the fixed plan
+authority. This mode grants no workflow token, secret, or OIDC access. Prepared
+metadata never changes result identity or the plan digest.
+
+`runtime-public-v2` uses explicit wire version 2 and resolves 1–32 distinct
+root/full-SHA selectors in one job-scoped request (8 KiB maximum request,
+32 KiB maximum response). The reader matches the exact selector set regardless
+of response order and rejects missing, extra, or repeated entries before
+downloading. Repeated step invocations share a source, not inputs or lifecycle.
+Version 2 retains the same archive and authority checks. It supports static
+prerequisites, the separately locked first-step native checkout adapter, and
+Node 16, 20, and 24 metadata with pre and post hooks. As with pre-resolved
+actions, Node 20 metadata runs on Node 24. It does not resolve composite or
+Docker actions, mutable refs, subpaths, or private action sources.
+
+The [pinned GitHub runner](https://github.com/actions/runner/blob/7e211dc69c347b78fc398e630e74facb11a13235/src/Runner.Worker/ActionManager.cs#L1024-L1073)
+supports job-scoped source resolution and
+[runtime metadata discovery](https://github.com/actions/runner/blob/7e211dc69c347b78fc398e630e74facb11a13235/src/Runner.Worker/ActionManager.cs#L230-L351).
+This does not establish GitHub server retry or cache behavior. The
+[shared wire fixture](../internal/runtime/testdata/github_action_source_v1.json)
+and [runtime regression](../internal/runtime/runtime_actions_test.go) cover
+the Buildkite reader contract, not production availability.
+
 ### Missing host PowerShell
 
 Named host `pwsh` shells use an executable from the effective step PATH when

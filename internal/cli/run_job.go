@@ -16,6 +16,7 @@ import (
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
@@ -141,15 +142,30 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 		defer func() { _ = os.RemoveAll(artifactRoot) }()
 	}
+	var actionSources *gharuntime.AgentActionSources
+	sourceOptions := []actionsource.Option{actionsource.WithUserAgentVersion(clientVersion)}
+	if job.ActionResolution != "" {
+		actionSources, err = gharuntime.NewAgentActionSources(agentapi.Config{
+			Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+			JobID:         os.Getenv("BUILDKITE_JOB_ID"),
+			JobToken:      os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+			ClientVersion: clientVersion,
+		}, planDigest)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+			return 1
+		}
+		sourceOptions = append(sourceOptions, actionsource.WithoutArchiveRedirects())
+	}
 	var actionMaterializer gharuntime.ActionMaterializer
-	if hasGitHubActionLocks(job.Actions) {
+	if actionSources != nil || hasGitHubActionLocks(job.Actions) {
 		actionCache, err := os.MkdirTemp("", "buildkite-gha-actions-")
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create action cache: %v\n", err)
 			return 1
 		}
 		defer func() { _ = os.RemoveAll(actionCache) }()
-		store, err := actionsource.NewStoreContext(ctx, actionCache, nil, actionsource.WithUserAgentVersion(clientVersion))
+		store, err := actionsource.NewStoreContext(ctx, actionCache, nil, sourceOptions...)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure action cache: %v\n", err)
 			return 1
@@ -251,6 +267,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		},
 		Redactor:              gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 		Actions:               actionMaterializer,
+		ActionSources:         actionSources,
 		Artifacts:             agent,
 		Cache:                 cacheCredentials,
 		RepositoryCredentials: repositoryCredentials,

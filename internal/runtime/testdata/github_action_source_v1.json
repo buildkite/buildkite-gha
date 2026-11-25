@@ -1,0 +1,33 @@
+{
+  "request": {
+    "version": 1,
+    "plan_digest": "sha256:2345678923456789234567892345678923456789234567892345678923456789",
+    "selectors": [
+      {
+        "repository": "Actions/hello-world-javascript-action",
+        "ref": "79ac0da13ee392da3fdd151813d5ce4658cb7e27",
+        "path": ""
+      }
+    ]
+  },
+  "response": {
+    "version": 1,
+    "sources": [
+      {
+        "selector": {
+          "repository": "Actions/hello-world-javascript-action",
+          "ref": "79ac0da13ee392da3fdd151813d5ce4658cb7e27",
+          "path": ""
+        },
+        "repository": "actions/hello-world-javascript-action",
+        "repository_id": 200423311,
+        "owner_id": 44036562,
+        "commit": "79ac0da13ee392da3fdd151813d5ce4658cb7e27",
+        "download": {
+          "url": "https://codeload.github.com/actions/hello-world-javascript-action/tar.gz/79ac0da13ee392da3fdd151813d5ce4658cb7e27",
+          "format": "tar.gz"
+        }
+      }
+    ]
+  }
+}

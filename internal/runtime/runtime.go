@@ -60,6 +60,7 @@ type Runner struct {
 	Secrets               SecretResolver
 	Redactor              Redactor
 	Actions               ActionMaterializer
+	ActionSources         *AgentActionSources
 	Artifacts             ArtifactStore
 	Cache                 CacheCredentialProvider
 	RepositoryCredentials *AgentRepositoryCredentials
