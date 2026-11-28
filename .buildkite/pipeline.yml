@@ -98,7 +98,7 @@ steps:
               mise-version: "2026.10.17"
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
               version: "2026.10.17"
-          - tests#v1.1.0:
+          - tests#v1.3.0:
               client-version: "3.0.0"
               test-runner: "gotest"
               test-cmd: "go test -count=1 -json {{packages}}"

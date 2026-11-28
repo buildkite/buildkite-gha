@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.27.4
 
 require (
-	github.com/bmatcuk/doublestar/v4 v4.10.4
+	github.com/bmatcuk/doublestar/v4 v4.10.7
 	github.com/bugsnag/bugsnag-go/v2 v2.6.4
 	github.com/pkg/errors v0.9.1
 	github.com/rhysd/actionlint v1.7.12
